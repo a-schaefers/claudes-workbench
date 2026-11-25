@@ -26,18 +26,20 @@ const KEEP_ON_COMPACT =
   'delegated (names, repos, branches, what each is for), which are open and what each needs ' +
   'next, and what was accepted, merged or discarded. Drop the diffs, reports and transcripts of ' +
   'finished tasks; `wb status` and `wb report <name>` bring back any detail.'
-// The weekly model check: once a week, in a quiet moment of a session the person is using,
-// Claude is asked to look at this machine, what is installed and how it has done, and what is
-// newest, and to recommend what to add or retire. /workbench-models asks for it now.
+// The weekly model check: once a week, in a quiet moment of a session the person is using, one
+// toast says it is due; /workbench-models asks Claude to look at this machine, what is installed
+// and how it has done, and what is newest, and to recommend what to add or retire. It was
+// submitted as a turn of its own, about 650 tokens, raised again daily until done (#1322).
 const SCOUT_EVERY_MS = 7 * 24 * 3600 * 1000
-const SCOUT_RETRY_MS = 24 * 3600 * 1000 // raised but never finished: ask again a day later
 const MODELS = 'workbench-models'
+const SCOUT_DUE = `workbench: the weekly model check is due: /${MODELS}`
+// what `wb scout` flags (the skill library, the media engines' licences) it says how to act on itself
 const SCOUT_NOTE =
   '[workbench] The weekly model check is due. As the driver, keep the agents on the best ' +
   'models for each role, GPU and API alike:\n' +
   '1. `wb scout`: this machine\'s hardware, what is installed, and how each model has done ' +
   '(real tasks), and its watch list: models set aside and what each needs ' +
-  'before it is tried again.\n' +
+  'before it is tried again. Act on what it flags.\n' +
   '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
   'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
   'recent releases of the model server this machine runs (whichever it is: `wb scout` lists ' +
@@ -49,21 +51,9 @@ const SCOUT_NOTE =
   '3. Recommend in a few lines: keep, add (the model and quantization, why it should beat what ' +
   'is installed, its size and how it fits), retire (what it replaces, the disk it frees). ' +
   'Aim for the best results first, then efficiency. For each watch-list item, say whether ' +
-  'its conditions are met yet; `wb scout --unwatch N` once one is settled.\n' +
-  '4. Ask before downloading or deleting. With a yes: on Ollama `wb model add <provider/model> ' +
-  '--pull` in the background, on another server its own download then `wb model add`; ' +
-  '`wb model sizes <id> …` if it should only take some task sizes, and ' +
-  '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
-  'registered may belong to other tools: ask first. API roles: recommend in chat only; never ' +
-  'run `wb route` or pass `--model` for an API model unasked (a role changes on the user\'s ' +
-  'words, through the dialog, or in the web app\'s Settings).\n' +
-  '5. The audio and image engines `wb scout` lists, if any (speech, sound effects, music, the ' +
-  'listener; images): check each model\'s licence today against its licence text, not its tag ' +
-  '(licences change: one audio model went non-commercial mid-2026), and whether a newer local ' +
-  'model of that kind fits this machine better. Recommend keep / add / retire as for the coding ' +
-  'models; keep each engine\'s `notes` (its licence) true.\n' +
-  '6. The skill library: rewrite or retire (`wb skill retire`) what `wb scout` flags.\n' +
-  '7. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
+  'its conditions are met yet; `wb scout --unwatch N` once one is settled. Ask before ' +
+  'downloading or deleting (the skill\'s models reference says how).\n' +
+  '4. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
   'Keep it short; if nothing is worth changing, say so in one line.'
 // Workbench mode: /workbench turns it on for the rest of the session and opens the pane, its sign.
 // The user then asks for things in plain words, and Claude hands the coding to OpenCode agents as
@@ -196,17 +186,31 @@ async function away($: any, st: WbChat): Promise<boolean> {
   return webOn(st) && awayNow(await webAt($), await $.clock.now(), await read($, tasks), mine)
 }
 async function back($: any) {
+  mem.awayNoted = false
   if (await webAt($)) await $.fs.write(awayFile(), JSON.stringify({ at: 0 })).catch(() => {})
 }
-// Said in the context blocks while away, and in each wake while away (#540): those blocks come once
+// Said in the context blocks while away, and in a wake while away (#540): those blocks come once
 // per conversation, so a user who went to the web chat later was never told of, and a task's
-// news reached only the terminal they had left.
+// news reached only the terminal they had left. In full once an away stretch (the block or the
+// first wake), then a line: every wake carried the whole paragraph (#1322). `mem.awayNoted`
+// ends with the stretch (awayEnded).
 const AWAY_NOTE =
   'The user is away from the terminal: they last used the web chat. Tell them ' +
   'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
   '`wb chat log` shows the thread. Typing in the terminal, or answering a prompt there, ends this.'
+const AWAY_TAIL = '(User away: answer with `wb chat reply`.)'
 async function awayToo($: any, text: string): Promise<string> {
-  return (await away($, await read($, chat))) ? `${text}\n\n${AWAY_NOTE}` : text
+  if (!(await away($, await read($, chat)))) {
+    mem.awayNoted = false
+    return text
+  }
+  const said = mem.awayNoted
+  mem.awayNoted = true
+  return `${text}\n\n${said ? AWAY_TAIL : AWAY_NOTE}`
+}
+// The stretch ended (the user back, here or in another session): the next one says it in full
+async function awayEnded($: any) {
+  if (mem.awayNoted && !(await away($, await read($, chat)))) mem.awayNoted = false
 }
 const WEB = '[web chat]'
 // Only for a delivery into a running turn, which the engine frames as another session's message:
@@ -458,13 +462,16 @@ const HEADLINE: Record<string, string> = {
   failed: 'failed',
   checkin: 'check-in (still running)',
 }
-const NEXT: Record<string, (n: string, id?: string) => string> = {
+// A question's notice opens `Q: ` or `PERMISSION to ` (ask_mcp.notice: an API); only a permission
+// request gets the `wb allow` paragraph, which every question once carried (#1322)
+const PERMISSION = 'PERMISSION to '
+const NEXT: Record<string, (n: string, id?: string, text?: string) => string> = {
   review: n => `Review it as /workbench says, from the diff above (\`wb diff ${n}\` when it was too ` +
     `big to include), then \`wb accept ${n} -m "…"\` or \`wb feedback ${n} --message <file>\`.`,
-  question: (n, id) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then. A ` +
-    `PERMISSION request (a refused command or directory): the \`wb allow ${n}\` it names ` +
-    `(\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
-    `with it; else answer with another way.`,
+  question: (n, id, text) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then.` +
+    (text?.startsWith(PERMISSION) ? ` A PERMISSION request (a refused command or directory): the \`wb allow ${n}\` it ` +
+      `names (\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
+      `with it; else answer with another way.` : ''),
   stuck: n => `Steer it with \`wb feedback ${n} --message <file>\`, or \`wb discard ${n}\`.`,
   failed: n => `Look at \`wb log ${n}\`; then \`wb feedback ${n} --message <file>\` or ` +
     `\`wb discard ${n}\`.`,
@@ -504,36 +511,36 @@ const AGENTS_NEXT = (n: string) =>
 // outage held 10 minutes, a quota or a refused key) isn't the agent's, yet it woke as "was stopped:
 // it got stuck" ending "Steer it with wb feedback …, or wb discard": a feedback round a quota or
 // key stop fails again at once, or work that is fine thrown away, next to the notice's own remedy
-// (#1124, 2026-11-23). The headline is the toast's too.
+// (#1124, 2026-11-23). The headline is the toast's too; its next step is OUTSIDE_NEXT.
 const PROVIDER_HEADLINE = 'was stopped by its API provider'
-const PROVIDER_NEXT = (n: string) => 'Tell the user it is the provider\'s stop and its remedy, as the ' +
-  `notice says; once they say it is fixed (or the rate limit has passed), \`wb feedback ${n} --text ` +
-  '"carry on"`. Never discard it for this, nor change its model or role yourself.'
 // A stop because the task's repo was marked local-only after it started (cause `local_only`:
 // runner._local_only_stop, #1215) isn't the agent's either, yet it woke as "was stopped: it got
 // stuck" ending "Steer it with wb feedback …", which wb refuses (exit 3) while the repo stays
-// local-only: the task's API model is fixed per task (the bar loop, #1232, 2026-11-24)
+// local-only: the task's API model is fixed per task (the bar loop, #1232, 2026-11-24). Its next
+// step is OUTSIDE_NEXT: the notice names takeover or discard.
 const LOCAL_ONLY_HEADLINE = 'was stopped: its repo became local-only'
-const LOCAL_ONLY_NEXT = (n: string) => 'Tell the user its repo is local-only now, so its API model can\'t ' +
-  `go on (only they lift that, never you); then \`wb takeover ${n}\` to finish it yourself or \`wb discard ${n}\`, ` +
-  'as they choose. `wb feedback` and `wb resume` are refused while the repo stays local-only.'
 // Every other stop outside the step (a `cause` not in results.THE_STEP, the allowlist of the
 // agent's own: a model that left OpenCode's catalog, a repo that moved, a setup, checkout, load,
 // full disk, model server or reaped runner) has its remedy in the notice itself, from wb, which
 // knows it: the wake ended with the failed or stuck one's "wb feedback …", which wb refused
 // (exit 3) for a model gone from the catalog, and for a moved repo ran a runner that failed at
 // once, next to the notice's own takeover or relocate (the bar loop, #1247, 2026-11-24; #1232's
-// shape). One rule for them all, so a new such stop needs only its cause.
+// shape). One rule for them all, so a new such stop needs only its cause. The provider's and the
+// local-only stop had next steps of their own, restating the notice and that Claude never changes
+// a role or lifts local-only (#1322): wb's notice says each remedy.
 const THE_STEP = new Set(['guard', 'agent'])
 const outsideTheStep = (row: Row) => typeof row.cause === 'string' && !THE_STEP.has(row.cause)
 const OUTSIDE_HEADLINE: Record<string, string> = {
   stuck: 'was stopped (not its agent\'s doing)',
   failed: 'failed (not its agent\'s doing)',
 }
-const OUTSIDE_NEXT = (n: string) => 'It stopped on something outside its agent\'s work, so its ' +
-  'remedy is the notice\'s own, above: do what it names (telling the user when it needs them). ' +
-  `Not \`wb feedback ${n}\` unless the notice names it: wb refuses it or runs into the same stop. ` +
-  `A notice that names no step: \`wb feedback ${n} --text "carry on"\` once that cause is gone.`
+// Some name no step (a model failure once the round reached the agent: `can't run: <e>`, no remedy
+// line): those go on with "carry on" once the cause is gone, and never discard work that is fine
+// (#1322's first cut dropped the clause). A local-only stop always names takeover or discard, and
+// wb refuses its feedback: OUTSIDE_REMEDY alone.
+const OUTSIDE_REMEDY = 'Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.'
+const OUTSIDE_NEXT = (n: string) => `${OUTSIDE_REMEDY} A notice that names no step: ` +
+  `\`wb feedback ${n} --text "carry on"\` once that cause is gone; never discard it for this.`
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -564,10 +571,8 @@ const MODE_NOTE = (skill: string) =>
 
 // What Claude learned about how this user wants delegation run (`wb notes`), in any project:
 // Claude Code's own memory is per project, so these come back wherever workbench mode is on.
-const NOTES_NOTE = (notes: string) =>
-  'How this user wants delegation run, learned across their projects (`wb notes`; ' +
-  '`wb notes add "…"` when they tell you something that holds in any repo, `wb notes drop N` ' +
-  `when one no longer does):\n${notes}`
+// The add and drop housekeeping is the skill's (#1322: it was said in every conversation).
+const NOTES_NOTE = (notes: string) => `The user's delegation notes (\`wb notes\`):\n${notes}`
 
 // Every slash command is /workbench or starts with it, so typing /workbench lists them all.
 // /workbench is the skill; once the mode is on, running it again brings the pane back
@@ -580,12 +585,10 @@ const HAND_BACK = 'workbench-quit-and-hand-back-claude'
 // Claude coding (#92), the user's choice (`wb coding`): when Claude may write code for a delegated
 // task. "decide" (no saved choice) adds nothing, so Claude works as before there was a choice.
 const CODING_RULES: Record<string, string> = {
-  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it). The agent ' +
-    'gets the first shot; review and advise as always. Before you write any of a task\'s code (an ' +
-    'edit in its worktree, `wb takeover`), help the agent first (feedback, a smaller step). If it ' +
-    'still falls short, ask the user for one specific edit, naming the task and the exact change, ' +
-    'and wait: only their yes allows it. Record it with `wb coding allow <task> --edit "…" --said ' +
-    '"<their words>"`; it lasts until you hand the task back. Unanswered, the work stays with the agent.',
+  // the mod's dialog asks at the edit (codingRefusal): Claude once had to ask in chat, wait, and
+  // record the yes itself with --edit and --said (#1322)
+  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it): your edits in a ' +
+    'task\'s worktree ask the user first.',
   only: 'Claude coding is "Only when I say" (the user\'s choice; `wb coding` shows it). Never write ' +
     'a task\'s code yourself, not a one-line fix in review nor `wb takeover`: guide the agent, ' +
     'and when it stays stuck, report the blocker to the user and keep the work with the agent. ' +
@@ -600,7 +603,7 @@ const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workfl
   'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
   'acceptance command), name its tasks with one shared prefix and pass it as `--group <prefix>` on each `wb start` ' +
   '(the pane draws them under one header), and say the plan in one line before you start them. ' +
-  'The GPU lease and the provider slots decide what runs together (`--queue` the rest). Review each result on its ' +
+  'The GPU lease and the provider slots decide what runs together (the rest queue). Review each result on its ' +
   'own merits; merge logic first, then tests, then UI or docs.'
 const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
   'at a time again, as the /workbench skill says.'
@@ -805,7 +808,11 @@ export function delegates(command: string): boolean {
 // `bash -c '…'` and `eval` are read inside; text a shell or an interpreter runs from a heredoc,
 // a here-string, a pipe or -c is caught by its words (OUTWARD_TEXT): `bash <<EOF … git push` once
 // went through (the review of #1005).
-const UPSTREAM = 'a-schaefers/claudes-workbench' // the GitHub home; patches.json's upstream when it has one (Couplings)
+const UPSTREAM = 'a-schaefers/workbench' // the GitHub home; patches.json's upstream when it has one (Couplings)
+// Its names before: the repo was renamed from claudes-workbench (the owner, 2026-11-24) and GitHub
+// redirects the old name, so a send naming it, or a clone whose origin and patches.json still say
+// it, still lands upstream and still asks first
+const FORMER_UPSTREAM = ['a-schaefers/claudes-workbench']
 const GH_WRITES: Record<string, Set<string>> = {
   pr: new Set(['create', 'comment', 'edit', 'merge', 'review', 'close', 'reopen', 'ready', 'update-branch', 'lock', 'unlock']),
   issue: new Set(['create', 'comment', 'edit', 'close', 'reopen', 'delete', 'lock', 'unlock', 'transfer', 'pin', 'unpin', 'develop']),
@@ -828,8 +835,6 @@ const SEND_ASK = 'Send it'
 // dialog of its own pleading for the yes the user had just refused (the review of #1005)
 const NOT_SENT = 'workbench: not sent: the user did not approve it in the dialog. Tell them it was not ' +
   'sent; try again only if they ask for it.'
-const NOT_SENT_AWAY = 'workbench: not sent: the user is away: it waits until they are at the terminal. ' +
-  'Tell them in the web chat what it would send; they approve it in the dialog once back.'
 const NOT_SHOWN = (why: string) => `workbench: not sent: the dialog can't show what it sends (${why}). Run ` +
   'wb patch send as a command of its own, its --title written out and --body-file naming the file, so the ' +
   'user sees both.'
@@ -895,6 +900,7 @@ function sendsOut(words: string[]): { kind: '' | 'send' | 'out'; dirs: string[] 
   }
   const wb = wbArgs(cmd, args)
   if (wb && wb[0] === 'patch' && wb[1] === 'send') return { kind: 'send', dirs: [] }
+  // wb patch zip only writes a file the user may email themselves: nothing outward (#1291)
   return { kind: '', dirs: [] }
 }
 
@@ -917,10 +923,12 @@ export function mentions(text: string, dir: string, home: string, root = ''): bo
 }
 
 // A git remote's URL is the upstream's (https, ssh or scp form, with or without .git)
-export function originIs(url: string, slug: string): boolean {
+export function originIs(url: string, slug: string | string[]): boolean {
   const u = url.trim().toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
-  const s = slug.toLowerCase()
-  return u === s || u.endsWith(`/${s}`) || u.endsWith(`:${s}`)
+  return (Array.isArray(slug) ? slug : [slug]).some(one => {
+    const s = one.toLowerCase()
+    return u === s || u.endsWith(`/${s}`) || u.endsWith(`:${s}`)
+  })
 }
 
 // why: 'send' (wb patch send), 'dir' (it names, or runs in, a gated directory), 'plugin' (it runs
@@ -945,7 +953,7 @@ export type Aim = { why: '' | 'send' | 'dir' | 'plugin' | 'slug'; at: string; wo
 // in the whole line, whenever any command in it is outward: `export GH_REPO=<slug> && gh issue
 // create` or `gh repo set-default <slug> && …` named it outside the outward command and went
 // through (the review of #1005). `cd`, `cd --` and pushd are followed from `cwd`.
-export function upstreamAim(command: string, cwd: string, home: string, slug: string, dirs: string[], root = '',
+export function upstreamAim(command: string, cwd: string, home: string, slug: string | string[], dirs: string[], root = '',
   plugins: string[] = []): Aim {
   let here = cwd
   const lines = (src: string): string[][] => simpleCommands(src).flatMap(words => {
@@ -957,7 +965,7 @@ export function upstreamAim(command: string, cwd: string, home: string, slug: st
     return [words]
   })
   const textNames = dirs.some(d => mentions(command, d, home, root))
-  const named = command.toLowerCase().includes(slug.toLowerCase())
+  const named = (Array.isArray(slug) ? slug : [slug]).some(s => command.toLowerCase().includes(s.toLowerCase()))
   const outAt: string[] = []
   const inPlugins = (ps: string[]) => ps.find(p => plugins.some(d => inside(p, d)))
   let found: Aim | null = null
@@ -1032,6 +1040,21 @@ export function shownCommand(command: string, aim: Aim): string {
 
 type Sending = { question: string; approval?: Row } | { deny: string }
 
+// A commit's `Scope: me` trailer, said in the question: wb patch send refused it unless --anyway,
+// a second yes after this dialog's (#1322). The branch's commits no remote-tracking ref has: those
+// over upstream, as wb patch send counts them.
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/
+const PERSONAL = 'A personal patch: a commit\'s Scope trailer is me.'
+async function personal($: any, wt: string): Promise<boolean> {
+  try {
+    const r = await $.process.run(['git', '-C', wt, 'log', '--format=%(trailers:key=Scope,valueonly,separator=%x2C)',
+      'HEAD', '--not', '--remotes', '--'], { timeoutMs: 5000 })
+    return r.exitCode === 0 && String(r.stdout ?? '').split(/[\n,]/).some(x => x.trim().toLowerCase() === 'me')
+  } catch {
+    return false
+  }
+}
+
 // The question: what goes public, word for word. For wb patch send its title and the body's
 // start too, which the command line only names, and what the gate tells wb it approved; one
 // whose title or body it can't read is refused, never asked about (#1005)
@@ -1049,8 +1072,9 @@ async function sendQuestion($: any, command: string, slug: string, aim: Aim, hom
   if (text === undefined) return { deny: NOT_SHOWN(`can't read ${path}`) }
   const lines = text.split('\n')
   const body = lines.slice(0, BODY_LINES).join('\n') + (lines.length > BODY_LINES ? '\n…' : '')
+  const mine = SLUG_RE.test(args.slug) && await personal($, `${mem.root}/upstream/${args.slug}`)
   return {
-    question: `${head}\n\nTitle: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
+    question: `${head}\n\n${mine ? `${PERSONAL}\n\n` : ''}Title: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
     approval: { slug: args.slug, title: args.title, body_file: path, body: text, draft: args.draft, anyway: args.anyway },
   }
 }
@@ -1068,13 +1092,13 @@ async function originOf($: any, dir: string): Promise<string> {
 // Claude Code's plugins directory: the marketplace install's own clone has that origin too, and
 // was exempted as a developer's (the review of #1005's blocker). Asked of git only once all
 // else matched.
-async function developerClone($: any, dir: string, slug: string, notIn: string[]): Promise<boolean> {
+async function developerClone($: any, dir: string, slug: string | string[], notIn: string[]): Promise<boolean> {
   if (notIn.some(d => inside(dir, d))) return false
   return originIs(await originOf($, dir), slug)
 }
 
 // What the gate reads each time: patches.json's clone and upstream, the gated directories
-type Gate = { home: string; cwd: string; slug: string; dirs: string[]; plugins: string[] }
+type Gate = { home: string; cwd: string; slug: string; slugs: string[]; dirs: string[]; plugins: string[] }
 async function gateConf($: any): Promise<Gate> {
   const conf = await readJson($, `${mem.root}/patches.json`)
   const home = (await $.env.get('HOME').catch(() => '')) || mem.home
@@ -1089,15 +1113,28 @@ async function gateConf($: any): Promise<Gate> {
   const cache = await $.env.get('CLAUDE_CODE_PLUGIN_CACHE_DIR').catch(() => '')
   const plugins = [`${absolutePath(cc, home, cwd)}/plugins`, ...(cache ? [absolutePath(cache, home, cwd)] : [])]
   const dirs = [source, `${mem.root}/upstream`, ...plugins.flatMap(p => [`${p}/marketplaces/workbench`, `${p}/cache/workbench`])]
-  return { home, cwd, slug, dirs, plugins }
+  // every name upstream answers to: the one in use and its former ones (FORMER_UPSTREAM)
+  const slugs = [...new Set([slug, UPSTREAM, ...FORMER_UPSTREAM].map(x => x.toLowerCase()))]
+  return { home, cwd, slug, slugs, dirs, plugins }
 }
 
 // The dialog, or its refusal: '' lets the call through on exactly 'Send it'
 async function askToSend($: any, question: string): Promise<string> {
-  // the dialog would wait at an empty terminal
-  if (await away($, await read($, chat))) return NOT_SENT_AWAY
-  const said = await $.ui.ask(question, [SEND_ASK, "Don't send"]).catch(() => '')
-  return said === SEND_ASK ? '' : NOT_SENT
+  return (await consent($, question, SEND_ASK, "Don't send")) ? '' : NOT_SENT
+}
+
+// A consent dialog (a send upstream, a role change, an edit of a task's code): the user's own
+// click, in the terminal's dialog. The owner's rule (#1340, 2026-11-24): consent is answered in the
+// terminal, locally or over ssh and tmux, never relayed to the web chat for answering; while the
+// user is away on it the chat says in one line that Claude waits there (CONSENT_WAITING). #1322's
+// first cut asked on the chat page: it cut a long question at the chat's 2000 characters unmarked,
+// and a user back at the terminal had no dialog for up to 30 minutes; the refusal while away before
+// it ("they approve it in the dialog once back") was a round trip for nothing. A dismissed dialog
+// (an interrupt) rejects: no.
+const CONSENT_WAITING = 'Claude is waiting on a workbench dialog in the terminal: answer it there.'
+async function consent($: any, question: string, yes: string, no: string): Promise<boolean> {
+  if (await away($, await read($, chat))) await runWb($, ['chat', 'reply', `--text=${CONSENT_WAITING}`, '--to=user'], 15_000)
+  return (await $.ui.ask(question, [yes, no]).catch(() => '')) === yes
 }
 
 const realPath = async ($: any, p: string): Promise<string> =>
@@ -1107,7 +1144,7 @@ const realPath = async ($: any, p: string): Promise<string> =>
 async function upstreamRefusal($: any, command: string): Promise<string> {
   if (!/\b(?:gh|git|wb|workbench)\b/i.test(command)) return '' // most calls: no parse
   const g = await gateConf($)
-  let aim = upstreamAim(command, g.cwd, g.home, g.slug, g.dirs, mem.root, g.plugins)
+  let aim = upstreamAim(command, g.cwd, g.home, g.slugs, g.dirs, mem.root, g.plugins)
   if (!aim.why && aim.outAt.length) { // a symlinked spelling of a gated directory: by real path
     const dirs = await Promise.all(g.dirs.map(d => realPath($, d)))
     for (const p of aim.outAt) {
@@ -1116,8 +1153,8 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
     }
   }
   if (!aim.why) return ''
-  if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slug)) return ''
-  if (aim.why === 'slug' && await developerClone($, aim.at, g.slug, [...g.dirs, ...g.plugins])) return ''
+  if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slugs)) return ''
+  if (aim.why === 'slug' && await developerClone($, aim.at, g.slugs, [...g.dirs, ...g.plugins])) return ''
   const q = await sendQuestion($, command, g.slug, aim, g.home)
   if ('deny' in q) return q.deny
   const no = await askToSend($, q.question)
@@ -1131,19 +1168,21 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
 // repository of its name (a fork's), asks the same; Bash was the only gate, and patching.md
 // offers that plugin (the review of #1005)
 const GITHUB_MCP = /^mcp__.*github.*__(.+)$/i
-export function mcpAimsUpstream(tool: string, input: Row, slug: string): boolean {
+export function mcpAimsUpstream(tool: string, input: Row, slug: string | string[]): boolean {
   const m = GITHUB_MCP.exec(tool)
   if (!m || /^(?:get|list|search)_/i.test(m[1]!)) return false
-  const s = slug.toLowerCase()
-  const name = s.split('/')[1] ?? s
   const repo = String(input.repo ?? input.repository ?? '').toLowerCase()
-  return repo === s || repo === name || repo.endsWith(`/${name}`) || JSON.stringify(input).toLowerCase().includes(s)
+  return (Array.isArray(slug) ? slug : [slug]).some(one => {
+    const s = one.toLowerCase()
+    const name = s.split('/')[1] ?? s
+    return repo === s || repo === name || repo.endsWith(`/${name}`) || JSON.stringify(input).toLowerCase().includes(s)
+  })
 }
 
 async function mcpRefusal($: any, tool: string, input: Row): Promise<string> {
   const g = await gateConf($)
-  if (!mcpAimsUpstream(tool, input, g.slug)) return ''
-  if (await developerClone($, g.cwd, g.slug, [...g.dirs, ...g.plugins])) return ''
+  if (!mcpAimsUpstream(tool, input, g.slugs)) return ''
+  if (await developerClone($, g.cwd, g.slugs, [...g.dirs, ...g.plugins])) return ''
   const text = JSON.stringify(input, null, 1)
   const shown = text.length > MCP_CHARS ? `${text.slice(0, MCP_CHARS)}… (${text.length - MCP_CHARS} more characters not shown)` : text
   return askToSend($, `Claude wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shown} — Send it?`)
@@ -1172,8 +1211,6 @@ const ROUTE_ALLOW = 'Allow'
 const ROLES = ['significant', 'trivial', 'writing'] as const
 const NOT_CHANGED = 'workbench: not changed: the user did not approve it in the dialog. Tell them it was not ' +
   'changed; ask again only if they ask for it.'
-const NOT_CHANGED_AWAY = 'workbench: not changed: the user is away: say in the web chat what you\'d change; ' +
-  'they approve it in the dialog once back.'
 const ROUTE_OWN = 'workbench: not changed: run wb route (or wb start --model) as a command of its own, one ' +
   'to a call, so the dialog shows exactly what changes.'
 const ROUTE_OK_OWN = `workbench: not run: ${ROUTE_OK} is the mod's dialog's to write, on the user's yes; ` +
@@ -1182,6 +1219,8 @@ const ROUTES_EDIT = 'workbench: not edited: the roles change only through wb rou
   'mod\'s dialog (wb route shows them).'
 // text a shell or an interpreter runs, not parsed as commands: a route change hidden in it is refused
 const ROUTE_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+(?:route\b|settings\s+set\b|start\b[^\n]*\s--m)/i
+// Said with the roles. Roles are settings, and Claude never changes one unasked (the owner's locked
+// rule, 2026-11-24): #1322 tried "Run it when it is the right call", and it went back
 const ROUTES_RULE = 'Never pass --model for an API model or change a role without the user\'s yes (the mod ' +
   'asks them in a dialog); recommend only.'
 
@@ -1391,9 +1430,7 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   if (!gated.length) return '' // a GPU model pin, nothing, or wb refuses it itself
   if (live.length > 1) return ROUTE_OWN // a gated change beside another call: the dialog shows one
   const q = gated[0]!
-  if (await away($, await read($, chat))) return NOT_CHANGED_AWAY // the dialog would wait at an empty terminal
-  const said = await $.ui.ask(q.change, [ROUTE_ALLOW, "Don't"]).catch(() => '')
-  if (said !== ROUTE_ALLOW) return NOT_CHANGED
+  if (!(await consent($, q.change, ROUTE_ALLOW, "Don't"))) return NOT_CHANGED
   await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, at: (await $.clock.now()) / 1000 })).catch(() => {})
   return ''
 }
@@ -1530,17 +1567,31 @@ async function callRows($: any, e: Row): Promise<{ tasks: string[]; row: Row }> 
   return { tasks: found, row }
 }
 
-// The row callRows made, with when the call began (`at`, ms) and now that it is over, written
-// one file a call: a row in a shared file would be lost to a parallel call's write
-async function noteCall($: any, tasks: string[], row: Row, at: number, id: string) {
-  const end = await $.clock.now()
-  const name = `${Math.round(at)}-${id.replace(/[^A-Za-z0-9_-]/g, '') || Math.random().toString(36).slice(2)}.json`
-  const text = JSON.stringify({ ...row, at: at / 1000, end: end / 1000 })
+// The file of a call's row: one file a call, as a row in a shared file would be lost to a
+// parallel call's write
+function callFile(at: number, id: string): string {
+  return `${Math.round(at)}-${id.replace(/[^A-Za-z0-9_-]/g, '') || Math.random().toString(36).slice(2)}.json`
+}
+
+// The row callRows made, with when the call began (`at`, ms) and when it ended: written as it
+// begins with `end` null (running), then again once it is over, with `end`, or `denied` if it
+// never ran. A build and `wb accept` in one Bash call, as the skill says, had no row while accept
+// read them, and the build's dist/ was refused as files written by hand (#1272, 2026-11-24)
+async function noteCall($: any, tasks: string[], row: Row, at: number, name: string,
+                        how: 'begun' | 'over' | 'denied') {
+  const end = how === 'begun' ? null : (await $.clock.now()) / 1000
+  const text = JSON.stringify({ ...row, at: at / 1000, end, ...(how === 'denied' ? { denied: true } : {}) })
   for (const t of tasks) await $.fs.write(`${mem.root}/rules/${t}/claude-calls/${name}`, text).catch(() => {})
 }
 
 // Why Claude may not make this edit now, or '': outside a task's worktree, under "decide", or
-// with the user's yes recorded for that task and not yet handed back (`wb coding allow`).
+// with the user's yes recorded for that task and not yet handed back (`wb coding allow`). Under
+// "Ask me first" the first such edit asks the user in a dialog (consent), and Allow records the
+// allowance, as the roles' dialog writes route-ok.json (#1322).
+const CODING_ALLOW = 'Allow'
+const CODING_SAID = 'Allow, in the workbench dialog'
+const NOT_EDITED = (task: string) => `workbench: not edited: the user said no to editing ${task}'s code. ` +
+  'Keep the work with the agent; ask again only if they ask for it.'
 async function codingRefusal($: any, path: string): Promise<string> {
   const task = taskOfPath(path, mem.root)
   if (!task) return ''
@@ -1558,6 +1609,11 @@ async function codingRefusal($: any, path: string): Promise<string> {
       open.started = (await $.clock.now()) / 1000
       await $.fs.write(file, JSON.stringify({ allowed })).catch(() => {})
     }
+    return ''
+  }
+  if (mode === 'ask') {
+    if (!(await consent($, `Let Claude edit ${task}'s code now?`, CODING_ALLOW, "Don't"))) return NOT_EDITED(task)
+    await runWb($, ['coding', 'allow', task, `--said=${CODING_SAID}`], 15_000)
     return ''
   }
   return `workbench: not edited: ${task} is the agent's. ${CODING_RULES[mode]}`
@@ -1671,6 +1727,7 @@ const mem = {
   wb: 'wb',
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
+  awayNoted: false, // AWAY_NOTE said in full this away stretch (awayToo)
   roles: null as null | PaneRoles, // the roles as wb last said them, for the day-cap line (rolesNow, #1023)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
@@ -2061,14 +2118,16 @@ export function allowedLine(rows: unknown): string {
   return x.when ? `Claude may, once, if ${x.when}: ${x.edit}` : `Claude may: ${x.edit}`
 }
 
+// At most one toast while the check is due: raised since it fell due (by any session, or by
+// /workbench-models), not again until it is done and due once more
 async function scoutIfDue($: any, now: number): Promise<void> {
   const path = `${mem.root}/scout.json`
   const st = await readJson($, path)
   const done = Number(st.done_at ?? 0) * 1000
   const offered = Number(st.offered_at ?? 0) * 1000
-  if (now - done < SCOUT_EVERY_MS || now - offered < SCOUT_RETRY_MS) return
+  if (now - done < SCOUT_EVERY_MS || offered >= done + SCOUT_EVERY_MS) return
   await scoutOffered($, now)
-  void $.prompt.submit({ text: SCOUT_NOTE })
+  $.ui.toast(SCOUT_DUE)
 }
 
 // The model check is raised: not again in this load, nor by any session for a day. Also when
@@ -2094,11 +2153,7 @@ async function compactAtBoundary($: any): Promise<void> {
   const limit = b?.isAutoCompactEnabled && b.autoCompactThreshold ? b.autoCompactThreshold : context.window
   if (!context.tokens || context.tokens < at * limit) return
   try {
-    const r = await $.session.compact({ instructions: KEEP_ON_COMPACT })
-    if (!r.skip) {
-      $.ui.toast(`workbench: a task closed; compacted Claude's context ` +
-        `(${Math.round(context.tokens / 1000)}K tokens) to make room`)
-    }
+    await $.session.compact({ instructions: KEEP_ON_COMPACT }) // no toast: Claude Code shows it (#1322)
   } catch {
     // a turn began meanwhile: the next boundary tries again
   }
@@ -2270,14 +2325,11 @@ async function ears($: any) {
 // it buried the question Claude had just asked the person (the 2026-11-16 audit).
 const SCOUT_QUIET_MS = 60_000
 
-// API dollars (#1022): OpenCode's unit, so a `$`; a cent's fraction to two figures, written out
-// ($0.00004), a free model's $0: savings.usd's rule, so the CLI and the pane agree (toPrecision
-// gave $0.000040 and $0.010)
+// API dollars (#1022): OpenCode's unit, so a `$`: meter.usd's rule, so the CLI and the pane agree:
+// $0.42, `<$0.01` under a cent, a free model's $0 (#1322: one rule, where two said one cap two ways)
 export function usd(x: number): string {
   if (x === 0) return '$0'
-  if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
-  const r = Number(x.toPrecision(2))
-  return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
+  return Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
 }
 
 // API dollars are estimates at the catalog's prices unless the user set the model's (wb model price,
@@ -2385,6 +2437,7 @@ async function poll($: any) {
     await listen($, now)
     await readSwitch($)
     await settingsTurns($, now)
+    await awayEnded($)
   } finally {
     mem.polling = false
   }
@@ -2639,7 +2692,7 @@ async function checkUpdate($: any) {
 // limit) goes back on the queue and is tried again in a minute: the hand-back's turn was lost
 // after its agents were already stopped (the 2026-11-16 audit).
 async function sendQueued($: any, text: string) {
-  if (text === OWED_NOTE && !owedNudged()) return // answered, or the user came back, since it was queued (#837)
+  if (isOwedNote(text) && !owedNudged(text)) return // answered, or the user came back, since it was queued (#837)
   mem.submitted = true
   const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
@@ -2955,19 +3008,19 @@ async function listen($: any, now: number) {
       // the away user went to the agent alone, pushed to no phone (#1212, 2026-11-24).
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', agentOf(m) ? 'into' : 'now'])
       else void sendWeb($, id, text, 'queued', st.key, agentOf(m) ? 'into' : 'now')
-      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false }) // queued: maybe the next turn's
+      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false, agent: agentOf(m) }) // queued: maybe the next turn's
     } else {
       // behind a prompt submitted this poll (a wake, a queued turn, another web message) whose
       // turn hasn't started yet, it enters only the turn after: that turn's end, Claude not yet
       // having seen it, sent the follow-up for a message Claude then answered (#837). An agent's
       // is `now` only with nothing ahead: behind a wake, the wake's report went to it (#1212).
-      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false })
+      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false, agent: agentOf(m) })
       void sendWeb($, id, text, agentOf(m) && mem.submitted ? 'into' : 'now', st.key)
     }
     mem.chatTurn.set(id, mem.chatOwed.get(id)?.grace ?? 0) // its turn's end goes to turns.jsonl (#1042)
     if (agentOf(m)) { mem.agentTurn.set(id, agentOf(m)); $.ui.toast(`workbench: a message from agent ${agentOf(m)}`); continue } // never the user away
+    // no toast for the user's own message: they just sent it (#1322)
     await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
-    $.ui.toast('workbench: a message from the web chat')
   }
 }
 
@@ -3024,38 +3077,56 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
 // goes to the chat, so the phone always hears something. A reply is a `wb chat reply` (or
 // `listen`, or `wb shot --chat`) in Bash, or a row of Claude's in messages.jsonl since; a prompt
 // typed in the terminal ends it (the user is back).
-type Owed = { at: number; grace: number; nudged: boolean }
+// An agent's message (`agent`, its name) is owed its own reply, `--to` it (#1273, 2026-11-24): the
+// follow-up said the user wrote and named a plain `wb chat reply`, which went to the user's phone,
+// and the agent's wait heard nothing; any reply to the user settled the agent's debt too, so not
+// even OWED_POSTED reached it. Only a reply to it settles it: a `--to` naming it, or a row whose
+// `re` holds its id or whose `to` its name.
+type Owed = { at: number; grace: number; nudged: boolean; agent: string }
 const OWED_NOTE =
   '[workbench] The user wrote from the web chat and hasn\'t heard back: answer there with ' +
   '`wb chat reply --text "…"` (the web thread is all they see), briefly. Nothing else to do.'
+const AGENT_OWED = '[workbench] Agent '
+const AGENT_OWED_NOTE = (agent: string, id: string) =>
+  `${AGENT_OWED}${agent}'s message ${id} has no answer: reply with \`wb chat reply --to ${id} --text "…"\` ` +
+  '(a plain reply goes to the user, not the agent), briefly. Nothing else to do.'
+const owedNote = (id: string, o: Owed) => o.agent ? AGENT_OWED_NOTE(o.agent, id) : OWED_NOTE
+const isOwedNote = (text: string) => text === OWED_NOTE || text.startsWith(AGENT_OWED)
 const OWED_POSTED = 'Claude answered in the terminal; nothing was sent here.'
 const REPLIES = /\bwb\b[^\n|;&]*\bchat\s+(reply|listen)\b|\bwb\b[^\n|;&]*\bshot\b[^\n]*--chat\b/
 // The follow-up is owed while a message it was queued for is still unanswered: a reply or the
 // user's return before it went left it in mem.queued, and it went anyway (#837)
-const owedNudged = () => [...mem.chatOwed.values()].some(o => o.nudged)
+const owedNudged = (text: string) => [...mem.chatOwed].some(([id, o]) => o.nudged && owedNote(id, o) === text)
 function owedSettled() {
-  if (owedNudged()) return
-  for (let i = mem.queued.indexOf(OWED_NOTE); i >= 0; i = mem.queued.indexOf(OWED_NOTE)) mem.queued.splice(i, 1)
+  for (let i = mem.queued.length - 1; i >= 0; i--)
+    if (isOwedNote(mem.queued[i]) && !owedNudged(mem.queued[i])) mem.queued.splice(i, 1)
+}
+// The user's debts only: a plain reply, or the user back at the terminal, answers the user, never an agent (#1273)
+function userOwedClear() {
+  for (const [id, o] of [...mem.chatOwed]) if (!o.agent) mem.chatOwed.delete(id)
+  owedSettled()
 }
 async function owedAtTurnEnd($: any) {
   if (!mem.chatOwed.size) return owedSettled()
   const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
-  // a reply settles it when it answers the message (`re`) or this Claude Code wrote it (`claude_pid`,
-  // unknown: yes): another session's report, posted meanwhile, read as the answer (#1129)
+  // a reply settles it when it answers the message (`re`) or this Claude Code wrote it to the
+  // message's sender (`claude_pid`, unknown: yes; `to`, none: the user's): another session's
+  // report, posted meanwhile, read as the answer (#1129); a reply to the user, as an agent's (#1273)
   const mine = (m: any) => !mem.claudePid || !Number(m.claude_pid ?? 0) || Number(m.claude_pid) === mem.claudePid
+  const toWhom = (m: any, o: Owed) => (Array.isArray(m.to) && m.to.length ? m.to : ['user']).includes(o.agent || 'user')
   const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude')
-  let nudge = false
+  const nudge: string[] = []
   for (const [id, o] of [...mem.chatOwed]) {
-    if (replied.some(m => Number(m.ts ?? 0) * 1000 >= o.at && (mine(m) || (Array.isArray(m.re) && m.re.includes(id))))) {
+    if (replied.some(m => Number(m.ts ?? 0) * 1000 >= o.at && ((mine(m) && toWhom(m, o)) || (Array.isArray(m.re) && m.re.includes(id))))) {
       mem.chatOwed.delete(id)
       continue
     }
     if (o.grace > 0) { o.grace--; continue }
-    if (!o.nudged) { o.nudged = true; nudge = true; continue }
+    if (!o.nudged) { o.nudged = true; nudge.push(owedNote(id, o)); continue }
     mem.chatOwed.delete(id)
     await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`, `--to=${id}`], 15_000)
   }
-  if (nudge && !mem.queued.includes(OWED_NOTE)) mem.queued.push(OWED_NOTE)
+  for (const note of nudge) if (!mem.queued.includes(note)) mem.queued.push(note)
   owedSettled()
 }
 
@@ -3174,10 +3245,9 @@ async function deliver($: any, now: number) {
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
       const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
-        : row.cause === 'provider' ? PROVIDER_NEXT(name)
-        : row.cause === 'local_only' ? LOCAL_ONLY_NEXT(name)
-        : outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind] ? OUTSIDE_NEXT(name)
-        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+        : row.cause === 'local_only' ? OUTSIDE_REMEDY
+        : row.cause === 'provider' || (outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind]) ? OUTSIDE_NEXT(name)
+        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined, String(row.text ?? ''))
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
       const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
@@ -3617,15 +3687,17 @@ export const register: Register = (on, options) => {
     // the dialog (#1014, routeRefusal): anyone's call alike
     const routing = await routeRefusal($, e as Row)
     if (routing) return { deny: routing }
-    // Claude's own call in a task's worktree is kept for wb once it is over, unless refused
-    // (callRows, #1211): anyone's alike, a subagent's or another plugin's
+    // Claude's own call in a task's worktree is kept for wb as it begins and once it is over,
+    // marked if refused (callRows, #1211, noteCall, #1272): anyone's alike, a subagent's or
+    // another plugin's
     const kept = await callRows($, e as Row)
     const at = kept.tasks.length ? await $.clock.now() : 0
-    const id = String((e as Row).tool_use_id ?? '')
+    const name = kept.tasks.length ? callFile(at, String((e as Row).tool_use_id ?? '')) : ''
+    if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, 'begun').catch(() => {})
     if (next.origin.plugin !== 'engine') {
       if (!kept.tasks.length) return next(e)
       const r = await next(e)
-      if (!(r as Row)?.deny) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
+      await noteCall($, kept.tasks, kept.row, at, name, (r as Row)?.deny ? 'denied' : 'over').catch(() => {})
       return r
     }
     // The engine's call settles its permission check, a dialog included, before it resolves: one
@@ -3637,7 +3709,7 @@ export const register: Register = (on, options) => {
       denied = !!(r as Row)?.deny
       return r
     } finally {
-      if (kept.tasks.length && !denied) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
+      if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, denied ? 'denied' : 'over').catch(() => {})
       const agent = e.agentId ?? ''
       const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
       if (d) await termDialogDone($, d)
@@ -3672,8 +3744,11 @@ export const register: Register = (on, options) => {
     if (delegates(String(e.command ?? ''))) {
       await workbenchMode($, true)
     }
+    // answered in the chat (#767): a plain reply the user, `--to` the messages it names (#1273)
     if (REPLIES.test(String(e.command ?? ''))) {
-      mem.chatOwed.clear() // answered in the chat (#767)
+      const to = [...String(e.command).matchAll(/--to[= ]+['"]?([^\s'"]+)/g)].map(x => x[1])
+      if (!to.length || to.includes('user')) userOwedClear()
+      for (const id of to) mem.chatOwed.delete(id)
       owedSettled()
     }
     return next(e)
@@ -3706,8 +3781,7 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith(AGENT) && !e.text.startsWith('[workbench]')) {
       await back($)
-      mem.chatOwed.clear() // back at the terminal: an answer there reaches them (#767)
-      owedSettled()
+      userOwedClear() // back at the terminal: an answer there reaches them (#767), never an agent (#1273)
     }
     return next(e)
   })
@@ -3718,8 +3792,7 @@ export const register: Register = (on, options) => {
     // waiting tasks too, as they stand: a review left at the quit stayed "awaiting review" and in
     // every new conversation's pick-up block (#698)
     const { ok, out } = await runWb($, ['stop', '--all', '--park-waiting', ...(await scope($))])
-    $.ui.toast(ok ? 'workbench: this session\'s delegated agents are stopped'
-      : `workbench: wb stop --all failed: ${brief(out)}`)
+    if (!ok) $.ui.toast(`workbench: wb stop --all failed: ${brief(out)}`) // success: the reply says it (#1322)
     return { text: ok ? `Delegation stopped. ${out}` : `Delegation not stopped: ${out}`, context: [QUIT_NOTE(out, ok)] }
   })
 
@@ -3783,7 +3856,10 @@ export const register: Register = (on, options) => {
     if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
     if (want.workflows === 'on' && had?.workflows !== 'on') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
-    if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+    if (isAway) {
+      blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+      mem.awayNoted = true
+    }
     if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
     if (want.routes && had?.routes !== want.routes) { // read while delegating or with a task open, as `wanted` does
       const routes = await readRoutes($) // once any role has an API model (#1014)

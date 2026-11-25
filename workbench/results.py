@@ -2,24 +2,25 @@
 from collections import defaultdict
 from statistics import median
 
-from . import context, gitops, meter, skills, spend, stats, store
+from . import context, gitops, meter, skills, spend, store
 
 
-def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict:
+def step(task: store.Task, landed: bool, gaps=None) -> dict:
     """The step closing now (committed by wb next or accept, or dropped): its size and how it
     went. A session compacted (now, or before a fresh one took over) or filled by reading alone,
     an agent stuck, or review rounds the agent caused (`reviews` less the `spec_rounds` Claude
     marked as the spec's) say it was too much; Claude taking over says nothing of its size; a
     handover to a fresh session is the runner's normal way through a big step, counted, not held
-    against it. The router learns each model's slice from these (router.slice). ``since``: where
-    the step began (HEAD~1 once its commit has landed: a retried wb next). ``gaps``: the
+    against it. The router learns each model's slice from these (router.slice). Its size is
+    measured from where the step began (gitops.step_base), whatever commits it holds: wb next's,
+    an interrupted one's or accept's (#1302, #879). ``gaps``: the
     --spec-gap the closing command is about to record (cli._spec_gaps), counted for this round:
     wb next and wb accept measure the step first, and a gap given there was held against the
     agent's slice as its own review round (#904)."""
     st = task.status
     first = st.get("step_round") or 1
     try:
-        size = gitops.footprint(task.worktree, since)  # the step's work is uncommitted until now
+        size = gitops.footprint(task.worktree, gitops.step_base(task))
     except (gitops.GitError, OSError):
         size = {}
     # A `fresh` event at a later step's first round replaced the session the step before left
@@ -53,7 +54,7 @@ def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict
 # cli.reap: killed, out of memory, a reboot), a model server gone again after the round's one
 # revive (`server`, #657), an API provider's rate limit, outage, quota or refused key (`provider`,
 # runner.PROVIDER_GUARDS, #1020), the day's API spend cap (`spend`, runner.SPEND, #1019: the user's
-# budget, not the model's), workbench updated under the task (`updated`, runner._updated), and the
+# budget, not the model's), workbench updated under the task (`updated`, a runner's before #1322), and the
 # failures whose text names their own remedy (`checkout`, `setup`, `repo`, `catalog`, `model`,
 # `disk`: #1247, so the mod's wake names that remedy and not wb feedback). Counted
 # as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit of
@@ -104,7 +105,11 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0),
            "ran": (went := ran(task)),
            **({"failed_before": st["failed_before"]} if not went and st.get("failed_before") else {}),
-           "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
+           # what an agent was told (runner.skills_note), not every skill ever handed: one
+           # handed after the last run reached no agent (#1348); skills_told for a task begun
+           # before skills_shown was kept
+           "skills_offered": st["skills_shown"] if "skills_shown" in st else st.get("skills_told") or [],
+           "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": steps,
            **({"landed_steps": landed} if landed else {}),
@@ -268,7 +273,7 @@ def live_basis(st: dict) -> str:
     else the catalog's (#1135)."""
     v = st.get("api")
     b = v.get("prices") if isinstance(v, dict) else None
-    return b if b in meter.NOTE else meter.CATALOG
+    return b if b in meter.BASES else meter.CATALOG
 
 
 def live_spend(model_id: str, st: dict, total: float) -> float | None:
@@ -345,7 +350,7 @@ def row_basis(row: dict) -> str:
     #1135 is the catalog's."""
     for key in ("api", "paid"):
         v = row.get(key)
-        if isinstance(v, dict) and v.get("prices") in meter.NOTE:
+        if isinstance(v, dict) and v.get("prices") in meter.BASES:
             return v["prices"]
     return meter.CATALOG
 
@@ -473,9 +478,8 @@ def paid_cell(rows: list[dict]) -> str:
     known = [(c, r) for r in priced if (c := task_cost(r)) is not None]
     if not known:
         return "?"
-    from .savings import usd
     est = meter.basis(row_basis(r) for _, r in known) == meter.CATALOG  # #1135: ≈, an estimate
-    return ("~" if len(known) < len(priced) else "≈" if est else "") + usd(sum(c for c, _ in known) / len(known))
+    return ("~" if len(known) < len(priced) else "≈" if est else "") + meter.usd(sum(c for c, _ in known) / len(known))
 
 
 def _apart(steps: list[dict], key: str, fields: tuple) -> dict:
@@ -485,12 +489,11 @@ def _apart(steps: list[dict], key: str, fields: tuple) -> dict:
 
 
 def for_stats(task: store.Task) -> dict:
-    """What only the Stats tab reads (#404), with stats recording on: when the task began, its
-    load and setup time, the runner's nudges, the questions it asked, the guards that stopped
-    its rounds, its own median speeds and time to first token, and the GPU's mean and peak watts
-    while it ran. A value never measured is left out, not written as zero."""
-    if not stats.recording():
-        return {}
+    """What only the Stats tab reads (#404): when the task began, its load and setup time, the
+    runner's nudges, the questions it asked, the guards that stopped its rounds, its own median
+    speeds and time to first token, and the GPU's mean and peak watts while it ran. Always
+    recorded: it costs nothing, so a switch to stop it guarded nothing (#1322). A value never
+    measured is left out, not written as zero."""
     spec, st = task.spec, task.status
     speeds = {k: round(median(v), 2) for k, v in (st.get("speeds") or {}).items() if v}
     keep = {"started_at": spec.get("created_at"), "load_secs": st.get("load_secs"),
@@ -516,22 +519,6 @@ def _asks(asks: dict, answered: list | None = None) -> dict:
     return out
 
 
-SPEC_GAP_WINDOW = 10
-
-
-def spec_gap_line() -> str | None:
-    """Claude's own record as a spec writer, shown as it hands the next task off: how many of
-    the latest tasks needed a round for a gap in the spec (wb feedback|accept --spec-gap)."""
-    rows = [r for r in store.results() if "spec_gaps" in r][-SPEC_GAP_WINDOW:]
-    if not rows:
-        return None
-    hit = [r for r in rows if r["spec_gaps"]]
-    if not hit:
-        return f"your specs: no gaps in the last {len(rows)} task(s)"
-    return (f"your specs: {len(hit)} of the last {len(rows)} task(s) needed a round for a spec "
-            f"gap; last: {hit[-1]['spec_gaps'][-1][:160]} (the checklist: /workbench, Before wb start)")
-
-
 def table(only: set | None = None) -> str:
     """`wb stats`' table; ``only``: these models' rows alone (the ones the Stats tab shows)."""
     from .tuning import judged, stopped_outside  # tuning reads results' rows
@@ -545,11 +532,10 @@ def table(only: set | None = None) -> str:
                   and r.get("ran", True))  # one that never ran is counted as that (#1245)
     never = len(shown) - len(rows) - gaps - stopped
     trials = len(store.results(trials=True)) - len(every)
-    left_out = (f"\n({trials} trial run{'s' if trials > 1 else ''} left out)" if trials else "") + \
-        (f"\n({gaps} discard{'s' if gaps > 1 else ''} put down to the spec left out)" if gaps else "") + \
-        (f"\n({stopped} discard{'s' if stopped > 1 else ''} after a stop that wasn't the agent's "
-         "left out)" if stopped else "") + \
-        (f"\n({never} task{'s' if never > 1 else ''} whose agent never ran left out)" if never else "")
+    # one line, the nonzero counts only (#1322, 2026-11-24): up to six footnote lines before
+    said = [f"{n} {what}" for n, what in ((trials, "trials"), (gaps, "spec gaps"),
+                                          (stopped, "outside stops"), (never, "never ran")) if n]
+    left_out = "\nleft out: " + ", ".join(said) if said else ""
     if not rows:
         return "no finished tasks yet" + left_out
     by = defaultdict(list)
@@ -578,14 +564,6 @@ def table(only: set | None = None) -> str:
                    f"{avg('auto_fixes'):>7.1f} {avg('reviews'):>7.1f} {avg('minutes'):>6.1f} "
                    + (f"{tok:>9} {paid_cell(rs):>7}" if api else f"{tok:>10}")
                    + (f" {_claude_avg(rs):>9}" if claude else ""))
-    if api and any(api_row(r) and row_cost(r) and row_basis(r) == meter.CATALOG for r in rows):
-        left_out = "\npaid: ≈ is at catalog prices, an estimate" + left_out  # #1135
-    if claude:
-        unknown = sum("claude" not in r for r in rows)
-        left_out = ("\nclaude: what a task cost Claude, its calls in the session that ran it, in "
-                    "input-equivalent tokens; averaged over the tasks that recorded it"
-                    + (f" ({unknown} had no session or transcript)" if unknown else "")
-                    + left_out)
     return "\n".join(out) + left_out
 
 

@@ -43,16 +43,6 @@
 .st-rows dd { margin: 2px 0 0; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 .st-rows dd .st-spark { height: 22px; max-width: 160px; margin: 4px 0 0; }
 .view-in .card p.st-note { margin-bottom: 10px; color: var(--warn); }
-.st-days-box { margin: 4px 0 4px; }
-.st-days { display: block; width: 100%; height: 64px; }
-.st-axis { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
-.st-day-hit { fill: transparent; }
-.st-day-all { fill: var(--line); }
-.st-day-landed { fill: var(--accent); }
-.st-day:hover .st-day-all { fill: var(--faint); }
-.st-days-ends { display: flex; justify-content: space-between; margin-top: 2px; color: var(--faint);
-  font: 11px var(--mono); font-variant-numeric: tabular-nums; }
-@media (prefers-color-scheme: dark) { .st-day-all { fill: var(--faint); opacity: .55; } }
 @media (min-width: 601px) {
   .st-row { display: grid; grid-template-columns: minmax(9em, 13em) minmax(0, 1fr); gap: 14px; align-items: start; }
   .st-rows dd { margin: 0; }

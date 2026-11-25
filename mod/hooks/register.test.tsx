@@ -1224,7 +1224,9 @@ test('#1124: a stop by the task\'s API provider wakes Claude to pass on its reme
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Task `a` was stopped by its API provider.')
-  expect(woken[0]).toContain('once they say it is fixed (or the rate limit has passed), `wb feedback a --text "carry on"`')
+  expect(woken[0]).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')     // the notice says the remedy (#1322)
+  expect(woken[0]).toContain('never discard it for this')       // work that is fine
+  expect(woken[0]).not.toContain('nor change its model or role yourself')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('got stuck')
   expect(woken[0]).not.toContain('wb discard')
@@ -1250,7 +1252,9 @@ test('#1232: a stop for a repo marked local-only wakes Claude to takeover or dis
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Task `a` was stopped: its repo became local-only.')
-  expect(woken[0]).toContain('then `wb takeover a` to finish it yourself or `wb discard a`')
+  expect(woken[0]).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')     // the notice names takeover or discard (#1322)
+  expect(woken[0]).not.toContain('names no step')                // its notice always names one
+  expect(woken[0]).not.toContain('never you')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('got stuck')
   expect(woken[0]).not.toContain('wb feedback a')
@@ -1285,7 +1289,7 @@ test('#1247: a stop outside the step wakes Claude to do as its notice says, neve
   const [a, b, c] = ['a', 'b', 'c'].map(n => woken.find(w => w.includes(`Task \`${n}\``)) ?? '')
   for (const [w, n] of [[a, 'a'], [b, 'b']]) {
     expect(w).toContain(`[workbench] Task \`${n}\` failed (not its agent's doing).`)
-    expect(w).toContain('its remedy is the notice\'s own, above: do what it names')
+    expect(w).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')
     expect(w).not.toContain(`then \`wb feedback ${n} --message <file>\``)
   }
   expect(a).toContain('wb takeover a to finish it, or wb discard a')
@@ -1294,6 +1298,25 @@ test('#1247: a stop outside the step wakes Claude to do as its notice says, neve
   expect(c).toContain('[workbench] Task `c` failed.')
   expect(c).toContain('then `wb feedback c --message <file>` or `wb discard c`')
   expect(toasts.join('\n')).toContain('workbench: a failed (not its agent\'s doing)')
+})
+
+test('#1322: a stop outside the step whose notice names no step still wakes with carry on once the cause is gone', async ($, on) => {
+  // runner's model failure once the round reached the agent says only `can't run: <e>`; the first
+  // cut of OUTSIDE_NEXT pointed at a remedy "above" that wasn't there
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'failed')
+  notice(files, { ts: ts0, task: 'a', kind: 'failed', round: 2, cause: 'model',
+    text: 'task a: deepseek/deepseek-flash can\'t run: connection refused' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('A notice that names no step: `wb feedback a --text "carry on"` once that cause is gone; ' +
+    'never discard it for this.')
 })
 
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
@@ -1325,7 +1348,7 @@ test('two wakes due in one turn both arrive, the second after the first one\'s t
   expect(woken.join('\n')).not.toContain('no notice reached Claude')
 })
 
-test('two questions asked at once both reach Claude, each with its own id', async ($, on) => {
+test('two questions asked at once both reach Claude, each with its own id, and a plain question gets no wb allow paragraph', async ($, on) => {
   // the 2026-11-16 audit: the newest alone was delivered, and the first stayed blocked
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -1343,6 +1366,7 @@ test('two questions asked at once both reach Claude, each with its own id', asyn
   await clock.advance(3000)
   expect(woken.filter(t => t.includes('Q: q1?') && t.includes('wb answer fix-it --id q1'))).toHaveLength(1)
   expect(woken.filter(t => t.includes('Q: q2?') && t.includes('wb answer fix-it --id q2'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('PERMISSION request')   // only a PERMISSION notice's (#1322)
 })
 
 test('a question whose task no longer asks is acknowledged without a wake', async ($, on) => {
@@ -1932,11 +1956,14 @@ test('one very long transcript line is cut, and the lines before it still show',
   await ui.unmount()
 })
 
-test('the weekly model check comes once, in a quiet moment of a session in use; /workbench-models asks now', async ($, on) => {
+test('the weekly model check is one toast, in a quiet moment of a session in use; /workbench-models asks now', async ($, on) => {
+  // #1322: it was a turn of its own, about 650 tokens, raised again every day until done
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [], false)
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  const due = () => toasts.filter(t => t === 'workbench: the weekly model check is due: /workbench-models')
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => {
@@ -1951,25 +1978,26 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   await $.turn.start({ text: 'hi', turnId: 't1' })
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(2000)
-  expect(asked.length).toBe(0)                       // not at once: Claude may have just asked something
+  expect(due()).toEqual([])                          // not at once: Claude may have just asked something
   await clock.advance(90_000)                        // a quiet minute later
-  expect(asked.length).toBe(1)
-  expect(asked[0]).toContain('The weekly model check is due')
-  expect(asked[0]).toContain('`wb scout`')
-  // the audio engines too, licences first: they change (#398)
-  expect(asked[0]).toContain('audio and image engines')
-  expect(asked[0]).toContain('licence today against its licence text')
-  expect(JSON.parse(files['/wb/scout.json']).offered_at).toBeGreaterThan(1_800_000_000)  // raised: not again today
+  expect(due()).toHaveLength(1)
+  expect(asked).toEqual([])                          // no turn of its own
+  expect(JSON.parse(files['/wb/scout.json']).offered_at).toBeGreaterThan(1_800_000_000)  // raised
 
-  await clock.advance(10_000)
-  expect(asked.length).toBe(1)
+  await $.turn.start({ text: 'hi', turnId: 't2' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(120_000)                       // still due, a quiet minute after another turn: no second toast
+  expect(due()).toHaveLength(1)
 
-  // done this week: nothing more, until the user asks for it
+  // the user asks for it: Claude's turn, the steps without what wb scout says itself
   files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_010 })
   await $.command.run({ command: 'workbench-models', args: '' })
   await clock.advance(2000)
-  expect(asked.length).toBe(2)
-  expect(asked[1]).toContain('The weekly model check is due')
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('The weekly model check is due')
+  expect(asked[0]).toContain('`wb scout`')
+  expect(asked[0]).toContain('`wb scout --done --notes')
+  expect(asked[0]).not.toContain('licence')          // wb scout says it beside the engines it lists
 })
 
 for (const [what, options, mode] of [['a session that never used workbench', {}, false],
@@ -2011,7 +2039,7 @@ test('/workbench-models when the weekly check is due raises it once, not twice',
   expect(asked.filter(t => t.includes('The weekly model check is due'))).toHaveLength(1)
 })
 
-test('#1024: the weekly model check covers GPU and API alike, recommends only for API roles and names no model', async ($, on) => {
+test('#1024: the weekly model check covers GPU and API alike and names no model', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -2027,7 +2055,7 @@ test('#1024: the weekly model check covers GPU and API alike, recommends only fo
   expect(note).toContain('the best models for each role, GPU and API alike')
   expect(note).not.toContain('local agents')
   expect(note).toContain('`wb scout`\'s API section: each role\'s model, its record and spend')
-  expect(note).toContain('API roles: recommend in chat only; never run `wb route` or pass `--model` for an API model unasked')
+  expect(note).not.toContain('recommend in chat only')                  // the roles' dialog is the yes (#1322)
   // the convention: no model is named in code (only placeholders such as <provider/model>)
   expect(note).not.toMatch(/\b(deepseek|claude|haiku|sonnet|opus|gpt|grok|gemini|qwen|mimo|llama|mistral|kimi|glm)\b/i)
   expect(note.replace(/<[^>]*>/g, '')).not.toMatch(/\b[\w.-]+\/[\w.:-]+\b/)          // no provider/model id
@@ -2683,7 +2711,7 @@ test('a dialog wb chat ask refuses is announced on the phone, and a long plan or
   expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=--version')
 })
 
-test('a task\'s wake while the user is away on the web chat tells Claude to answer them there, and stops once they type in the terminal (#540)', async ($, on) => {
+test('a task\'s wake while the user is away on the web chat tells Claude to answer them there, in full once a stretch, and stops once they type in the terminal (#540)', async ($, on) => {
   // the web-chat block comes once per conversation: a user who went to the web chat after the
   // first message was never said to be away, and a task's news reached only the terminal
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -2712,13 +2740,20 @@ test('a task\'s wake while the user is away on the web chat tells Claude to answ
   expect(wakes()[0]).toContain('REPORT-1')
   expect(wakes()[0]).toContain('they last used the web chat')
   expect(wakes()[0]).toContain('wb chat reply')
+  notice(files, { ts: ts0 + 8, task: 'fix-it', kind: 'review', text: 'REPORT-1b' })
+  await clock.advance(31_000)
+  expect(wakes()).toHaveLength(2)                               // still away: one line, not the paragraph (#1322)
+  expect(wakes()[1]).toContain('REPORT-1b')
+  expect(wakes()[1]).toContain('(User away: answer with `wb chat reply`.)')
+  expect(wakes()[1]).not.toContain('they last used the web chat')
 
   await $.prompt.submit({ text: 'back now' } as any)            // typed in the terminal: back
   notice(files, { ts: ts0 + 12, task: 'fix-it', kind: 'review', text: 'REPORT-2' })
   await clock.advance(31_000)                                   // nothing runs: the safety poll reads it
-  expect(wakes()).toHaveLength(2)
-  expect(wakes()[1]).toContain('REPORT-2')
-  expect(wakes()[1]).not.toContain('web chat')
+  expect(wakes()).toHaveLength(3)
+  expect(wakes()[2]).toContain('REPORT-2')
+  expect(wakes()[2]).not.toContain('web chat')
+  expect(wakes()[2]).not.toContain('User away')
 })
 
 test('running wb counts as workbench mode, and a web message reaches a running turn', async ($, on) => {
@@ -3267,6 +3302,82 @@ test('another session\'s report in the chat leaves a web message owed, and this 
   expect(posted.filter(a => a.some(x => x.includes('answered in the terminal')))).toHaveLength(0)
 })
 
+test('#1273: an agent\'s unanswered message gets its own follow-up naming --to, and a reply to the user never settles it', async ($, on) => {
+  // #1273, 2026-11-24: the follow-up said the user wrote and named a plain `wb chat reply`, which
+  // went to the user's phone; that reply settled the agent's debt, so its wait heard nothing at all
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
+  const userFollowUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const agentFollowUps = () => asked.filter(a => a.startsWith("[workbench] Agent hermes's message a1 has no answer"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string, row?: Record<string, any>) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    if (row) files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_900, ...row }) + '\n'
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.filter(a => a.startsWith('[agent hermes] please refactor foo'))).toHaveLength(1)
+  await turn('t1', 'wb chat reply --text "Done."', { id: 'r1', text: 'Done.', re: [], to: ['user'] })  // the user's, not the agent's
+  expect(userFollowUps()).toHaveLength(0)
+  expect(agentFollowUps()).toHaveLength(1)
+  expect(agentFollowUps()[0]).toContain('wb chat reply --to a1 --text')
+  await $.prompt.submit({ text: 'and the tests?' } as any)       // the user back at the terminal answers no agent
+  await turn('t2')                                               // the follow-up's turn: no reply to it either
+  expect(posted()).toEqual([['wb', 'chat', 'reply', '--text=Claude answered in the terminal; nothing was sent here.', '--to=a1']])
+})
+
+test('#1273: a reply to an agent settles its message only, and the user\'s message is still owed its follow-up', async ($, on) => {
+  // #1273, 2026-11-24: any reply this Claude Code wrote settled every message owed, whoever it went to
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
+  const userFollowUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const agentFollowUps = () => asked.filter(a => a.startsWith('[workbench] Agent '))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string, row?: Record<string, any>) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    if (row) files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_900, ...row }) + '\n'
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n'
+  await clock.advance(31_000)
+  await turn('t1', 'wb chat reply --to a1 --text "Refactored."', { id: 'r1', text: 'Refactored.', re: ['a1'], to: ['hermes'] })
+  expect(agentFollowUps()).toHaveLength(0)                       // answered: no follow-up
+  files['/wb/chat/messages.jsonl'] += JSON.stringify({ id: 'u1', ts: 1_800_000_100, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
+  await turn('t2', 'wb chat reply --to a1 --text "Also: tests pass."', { id: 'r2', text: 'Also: tests pass.', re: ['a1'], to: ['hermes'] })
+  expect(userFollowUps()).toHaveLength(1)                        // the agent's reply isn't the user's answer
+  expect(agentFollowUps()).toHaveLength(0)
+  expect(posted()).toEqual([])
+})
+
 test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
   // #835: any prompt that wasn't isMeta counted as the user back at the terminal, so a /loop
   // firing ended away for every session and cancelled the #767 follow-up
@@ -3479,7 +3590,7 @@ test('/workbench alone turns workbench mode on for the session: the pane opens, 
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('user-notes')
   files['/wb/notes.md'] = '- Review strictly: reject any diff without tests\n'
   const notes = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'user-notes')
-  expect(notes?.text).toContain('reject any diff without tests')
+  expect(notes?.text).toBe("The user's delegation notes (`wb notes`):\n- Review strictly: reject any diff without tests")
 
   await $.command.run({ command: 'workbench-quit', args: '' })
   await clock.advance(2000)
@@ -3724,16 +3835,30 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
     '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'review', round: 1, updated_at: ts }),
   }
   fakeTasks(on, files)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
-  on('tool.call', () => ({ result: {}, text: '' }))                // the engine's own tool
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  let answer = "Don't"
+  on('tool.call', (_: any, e: any) => {
+    if (e.tool !== 'AskUserQuestion') return { result: {}, text: '' }   // the engine's own tool
+    const q = e.questions[0]
+    asked.push(q.question)
+    return { result: { questions: e.questions, answers: { [q.question]: answer } }, text: '' }
+  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   const edit = (path = '/wb/tasks/fix-it/worktree/power.py') =>
     $.tool.call({ tool: 'Edit', file_path: path, old_string: 'w', new_string: 'w / 1000' } as any) as Promise<any>
   expect((await edit()).deny).toBeUndefined()                      // no saved choice: as before
   files['/wb/coding.json'] = JSON.stringify({ mode: 'ask' })
-  expect((await edit()).deny).toContain('"Ask me first"')
+  // #1322: "Ask me first" asks at the edit, in a dialog; a no refuses it
+  expect((await edit()).deny).toContain("the user said no to editing fix-it's code")
+  expect(asked).toEqual(["Let Claude edit fix-it's code now?"])
+  answer = 'Allow'                                                 // their yes: recorded, and the edit goes
+  expect((await edit()).deny).toBeUndefined()
+  expect(runs.filter(r => r[1] === 'coding')).toEqual([['wb', 'coding', 'allow', 'fix-it', '--said=Allow, in the workbench dialog']])
   expect((await edit('/home/u/project/power.py')).deny).toBeUndefined()   // not a task's: Claude's own
+  expect(asked.length).toBe(2)
   files['/wb/tasks/fix-it/coding.json'] = JSON.stringify({ allowed: [{ edit: 'w / 1000', used: null }] })
   expect((await edit()).deny).toBeUndefined()                      // the user said yes
   files['/wb/tasks/fix-it/coding.json'] = JSON.stringify({ allowed: [{ edit: 'w / 1000', used: ts }] })
@@ -3765,7 +3890,7 @@ test('the tasks a shell command of Claude\'s runs in or names, by any spelling o
   expect(taskOfPath('/home/u/project/a.py', '/wb')).toBe('')
 })
 
-test('Claude\'s own calls in a task\'s worktree are kept for wb, each with when it ran (#1211)', async ($, on) => {
+test('Claude\'s own calls in a task\'s worktree are kept for wb as they begin, each with when it ran (#1211, #1272)', async ($, on) => {
   // #1211 (2026-11-24): `mvn test` that Claude ran beside a --test of grep wrote reports that wb
   // accept refused as files written by hand; wb tells them apart by these rows
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -3777,7 +3902,10 @@ test('Claude\'s own calls in a task\'s worktree are kept for wb, each with when 
   fakeTasks(on, files)
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
-  on('tool.call', async () => { await clock.sleep(3000); return { result: {}, text: '' } })  // the engine's, 3 s
+  on('tool.call', async (_: any, e: any) => {                                                // the engine's, 3 s
+    await clock.sleep(3000)
+    return String(e.command).includes('rm -rf') ? { deny: 'the user said no' } : { result: {}, text: '' }
+  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   const rows = () => Object.keys(files).filter(p => p.startsWith('/wb/rules/fix-it/claude-calls/'))
@@ -3788,12 +3916,23 @@ test('Claude\'s own calls in a task\'s worktree are kept for wb, each with when 
     return done
   }
   const began = clock.now() / 1000
-  await call({ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test', tool_use_id: 'toolu_1' })
+  // kept as it begins, running (end null): a build and `wb accept` in one call read no row of
+  // the build's while it ran (#1272, 2026-11-24)
+  const running = $.tool.call({ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test', tool_use_id: 'toolu_1' } as any)
+  await clock.advance(1000)
+  expect(rows()).toEqual([{ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test',
+    cwd: '/home/u/project', at: began, end: null }])
+  await clock.advance(2000)
+  await running
   expect(rows()).toEqual([{ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test',
     cwd: '/home/u/project', at: began, end: began + 3 }])
+  // one the user refused at its dialog never ran: marked so (#1272)
+  await call({ tool: 'Bash', command: 'rm -rf /wb/tasks/fix-it/worktree/dist', tool_use_id: 'toolu_2' })
+  expect(rows().find(r => r.command?.startsWith('rm -rf'))).toMatchObject({ denied: true })
+  expect(rows().filter(r => !r.denied).length).toBe(1)
   await call({ tool: 'Bash', command: 'mvn -q test' })                         // the user's project: none
   await call({ tool: 'Bash', command: 'cat /wb/tasks/gone/worktree/a' })       // no such task: none, no directory
-  expect(rows().length).toBe(1)
+  expect(rows().length).toBe(2)
   expect(Object.keys(files).some(p => p.startsWith('/wb/rules/gone'))).toBe(false)
   await call({ tool: 'Write', file_path: '/wb/tasks/fix-it/worktree/lib/a.py', content: 'x = 1\n' })
   expect(rows().map(r => r.path ?? r.command)).toContain('/wb/tasks/fix-it/worktree/lib/a.py')
@@ -3806,11 +3945,14 @@ test('Claude\'s own calls in a task\'s worktree are kept for wb, each with when 
 
 // The upstream gate's world (#1005): the patch clone, the user's project, a developer's own clone
 // of upstream, each with its origin; a dialog answered with `answer` (null: dismissed, or -p)
-const SLUG = 'a-schaefers/claudes-workbench'
+const SLUG = 'a-schaefers/workbench'
 const SOURCE = '/home/u/.local/share/workbench/source'
 const MARKET = '/home/u/.claude/plugins/marketplaces/workbench'
+const GIT_LOG = '/test/git-log'  // what upstreamWorld's `git -C <dir> log` prints
+
 function upstreamWorld(on: any, files: Record<string, string>) {
-  const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[] }
+  const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[],
+    chats: [] as string[][] }   // wb chat's calls: the line for an away user
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
   const origins: Record<string, string> = {
     [SOURCE]: `https://github.com/${SLUG}.git`,
@@ -3823,11 +3965,14 @@ function upstreamWorld(on: any, files: Record<string, string>) {
   on('session.cwd', () => ({ value: w.cwd }))
   on('ui.toast', () => ({ value: undefined }))
   on('process.run', (_: any, e: any) => {
+    // the Scope trailers of a send's branch (#1322): a test sets them, else none
+    if (e.argv[0] === 'git' && e.argv[3] === 'log') return { value: { exitCode: 0, stdout: files[GIT_LOG] ?? '', stderr: '' } }
     if (e.argv[0] === 'git' && e.argv[3] === 'remote') {
       w.gits.push(e.argv[2])
       const url = origins[e.argv[2]]
       return { value: { exitCode: url ? 0 : 2, stdout: url ? `${url}\n` : '', stderr: url ? '' : 'error: No such remote' } }
     }
+    if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   on('tool.call', (_: any, e: any) => {
@@ -3939,14 +4084,39 @@ test('#1005: every command that would send to workbench upstream waits for the u
   await clock.advance(1000)                                      // the poll the calls started ends here
 })
 
-test('#1005: with the user away on the web chat a send to upstream is refused without a dialog', async ($, on) => {
-  // 2026-11-22: the dialog would wait at an empty terminal; Claude is told it waits for them
+test('#1291: wb patch zip sends nothing, so the gate never asks about it, even in the patch clone', async ($, on) => {
+  // 2026-11-24: a zip for a user without GitHub to email upstream themselves; only a send asks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  w.answer = "Don't send"
+  await $.session.start({ cwd: SOURCE, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  for (const command of [
+    'wb patch zip', 'wb patch zip 1a2b3c4 5d6e7f8 --name fix-push', `python3 ${SOURCE}/bin/wb patch zip`,
+    `cd ${SOURCE} && wb patch zip`, 'bash -lc "wb patch zip"', 'bash <<EOF\nwb patch zip\nEOF',
+  ]) {
+    const r = await $.tool.call({ tool: 'Bash', command } as any) as any
+    expect([command, r.deny]).toEqual([command, undefined])
+  }
+  expect(w.asked).toEqual([])
+  // a send still asks
+  expect(((await $.tool.call({ tool: 'Bash', command: 'git push' } as any)) as any).deny).toContain('not sent')
+  expect(w.asked.length).toBe(1)
+  await clock.advance(1000)                                      // the poll the calls started ends here
+})
+
+test('#1005: with the user away on the web chat a send to upstream asks in the terminal, and the chat says it waits there', async ($, on) => {
+  // 2026-11-22: it was refused while they were away, a round trip for nothing; #1322's first cut
+  // asked on the chat page, which cut a long question at 2000 characters and left a user back at
+  // the terminal with no dialog. The owner's rule (#1340): consent is answered in the terminal.
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   chatOn(files)
   const w = upstreamWorld(on, files)
-  w.answer = 'Send it'
+  w.answer = "Don't send"
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
@@ -3955,10 +4125,15 @@ test('#1005: with the user away on the web chat a send to upstream is refused wi
   files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
   w.cwd = SOURCE
   const r = await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any
-  expect(r.deny).toContain('the user is away: it waits until they are at the terminal')
-  expect(w.asked).toEqual([])
-  w.cwd = '/home/u/project'
-  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()  // their own
+  expect(r.deny).toContain('not sent: the user did not approve it')    // their no, in the terminal
+  expect(w.asked.length).toBe(1)
+  expect(w.asked[0]).toContain(`Claude wants to send this to GitHub (${SLUG})`)
+  expect(w.chats.filter(a => a[1] === 'reply')).toEqual([['chat', 'reply', '--text=Claude is waiting on a workbench dialog in the terminal: answer it there.', '--to=user']])
+  expect(w.chats.some(a => a[1] === 'ask')).toBe(false)                // never asked on the page
+  w.answer = 'Send it'
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()   // their yes
+  w.answer = null                                                      // dismissed (an interrupt): no
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toContain('not sent')
   await clock.advance(1000)                                      // the poll the calls started ends here
 })
 
@@ -4079,6 +4254,19 @@ test('#1005: "Send it" on wb patch send tells wb what was approved, and nothing 
   await clock.advance(1000)
 })
 
+test('#1322: a Scope: me commit on the branch wb patch send sends is said in its one dialog', async ($, on) => {
+  // wb patch send refused it unless --anyway, a second yes after the dialog's: now the dialog says it
+  const { clock, bash, files } = await gateProbe($, on)
+  files['/home/u/pr.md'] = 'the body\n'
+  files[GIT_LOG] = 'everybody\nme\n'
+  const send = 'wb patch send fix-push --title "Fix the push" --body-file ../pr.md'
+  const mine = await bash(send)
+  expect([mine.asked, mine.question]).toEqual([1, expect.stringContaining("A personal patch: a commit's Scope trailer is me.\n\nTitle: Fix the push")])
+  files[GIT_LOG] = 'everybody\n\n'
+  expect((await bash(send)).question).not.toContain('personal patch')
+  await clock.advance(1000)
+})
+
 test('#1005: Monitor\'s command and the GitHub MCP tools pass the same gate', async ($, on) => {
   // the review of #1005, 2026-11-22: only Bash was gated; Monitor runs its script in the same
   // shell, and the github plugin patching.md offers can open issues and pull requests itself
@@ -4087,20 +4275,24 @@ test('#1005: Monitor\'s command and the GitHub MCP tools pass the same gate', as
   expect((await call({ tool: 'Monitor', command: 'git push', description: 'x', timeout_ms: 1000 })).deny).toContain('not sent')
   w.cwd = '/home/u/project'
   const mcp = 'mcp__plugin_github_github__'
-  const issue = await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T', body: 'B' })
+  const issue = await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T', body: 'B' })
   expect([issue.asked, issue.deny]).toEqual([1, expect.stringContaining('not sent')])
   expect(issue.question).toContain(`Claude wants to send this to GitHub (${SLUG}), publicly: ${mcp}create_issue`)
   expect(issue.question).toContain('"title": "T"')
-  expect((await call({ tool: `${mcp}push_files`, owner: 'someone', repo: 'claudes-workbench', branch: 'x', files: [] })).asked).toBe(1)
+  expect((await call({ tool: `${mcp}push_files`, owner: 'someone', repo: 'workbench', branch: 'x', files: [] })).asked).toBe(1)
+  // the repo's former name (renamed from claudes-workbench, 2026-11-24): GitHub redirects it, so a
+  // send naming it lands upstream and asks first, by MCP or by gh
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(1)
+  expect((await call({ tool: 'Bash', command: 'gh issue create -R a-schaefers/claudes-workbench --title T --body B' })).asked).toBe(1)
   expect((await call({ tool: `${mcp}add_issue_comment`, url: `https://github.com/${SLUG}/issues/3`, body: 'x' })).asked).toBe(1)
   for (const input of [
-    { tool: `${mcp}get_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', issue_number: 3 },   // a read
+    { tool: `${mcp}get_issue`, owner: 'a-schaefers', repo: 'workbench', issue_number: 3 },   // a read
     { tool: `${mcp}create_issue`, owner: 'u', repo: 'project', title: 'T' },                       // the user's own
   ]) expect(await call(input)).toEqual({ deny: undefined, asked: 0, question: '' })
   w.cwd = MARKET                                         // Claude Code's clone, upstream its origin: no developer's
-  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(1)
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T' })).asked).toBe(1)
   w.cwd = '/home/u/repos/workbench'                                                            // a developer's clone
-  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(0)
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T' })).asked).toBe(0)
   await clock.advance(1000)
 })
 
@@ -4602,6 +4794,7 @@ function routeWorld(on: any, files: Record<string, string>) {
     asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], dryAt: [] as string[], code: 0,
     reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
     replyFor: {} as Record<string, Record<string, unknown>>,  // one dry run's own reply, by its argv joined with spaces
+    chats: [] as string[][],   // wb chat's calls: the line for an away user
   }
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('ui.toast', () => ({ value: undefined }))
@@ -4614,6 +4807,7 @@ function routeWorld(on: any, files: Record<string, string>) {
       const reply = w.replyFor[e.argv.slice(1).join(' ')] ?? w.reply
       return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
     }
+    if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
   })
   on('tool.call', (_: any, e: any) => {
@@ -4807,15 +5001,20 @@ test('#1287: two Settings rows nothing gates pass in one line; a gated one besid
   await clock.advance(1000)
 })
 
-test('#1014: away on the web chat a role change is refused without a dialog', async ($, on) => {
+test('#1014: away on the web chat a role change asks in the terminal, and the chat says it waits there', async ($, on) => {
+  // #1322: it was refused until they were back; the owner's rule (#1340): consent is the terminal's
   const files: Record<string, string> = chatOn({})
-  const { clock, bash } = await routeProbe($, on, files)
+  const { clock, bash, w } = await routeProbe($, on, files)
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
   await clock.advance(3000)                                     // a web message: the user is away
   const r = await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')
-  expect([r.asked, r.deny]).toEqual([0, expect.stringContaining('the user is away: say in the web chat what you\'d change')])
+  expect([r.asked, r.deny]).toEqual([1, expect.stringContaining('not changed: the user did not approve it')])
+  expect(w.chats.filter(a => a[1] === 'reply')).toEqual([['chat', 'reply', '--text=Claude is waiting on a workbench dialog in the terminal: answer it there.', '--to=user']])
   expect('/wb/route-ok.json' in files).toBe(false)
+  w.answer = 'Allow'
+  expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toBeUndefined()
+  expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv: ROUTE_ARGV, change: ROUTE_LINE, at: expect.any(Number) })
   await clock.advance(1000)
 })
 
@@ -5062,6 +5261,11 @@ test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a cha
   files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { significant: { via: 'api', api: 'openrouter/x/y', order: 'together' } } })
   await clock.advance(31_000)
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')  // as wb refuses it
+})
+
+test('API dollars follow meter.usd\'s rule: cents, `<$0.01` under one, a free model\'s $0 (#1322)', () => {
+  // one rule, where two said one cap two ways; never 4e-05
+  expect([usd(4e-5), usd(0.009999), usd(0.01), usd(0.42), usd(0), usd(5)]).toEqual(['<$0.01', '<$0.01', '$0.01', '$0.42', '$0', '$5.00'])
 })
 
 test('#1016: the Agents switch: its change line is the dialog\'s text, and the roles\' summary says it', async ($, on) => {

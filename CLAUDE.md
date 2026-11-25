@@ -40,6 +40,11 @@ PR and arms auto-merge as you, so run it only when the user has said to ship, in
 (it waits for the merge: ARCHITECTURE.md, *Shipping to main*). Never push, open a PR or an issue,
 or comment without the user's yes for it.
 - The docs match the change; the tests the change adds or edits, alone; CI runs the rest.
+- Educated guesses are fine (the owner, 2026-11-24). Workbench adapts and improves itself
+  across its users (tuning, the router, skill records), and any user can patch locally and PR
+  upstream (`wb patch`), so a sound default ships without exhaustive local testing or long local
+  GPU benches. Measure when the answer is unclear and cheap to get; otherwise decide, ship and let
+  real use correct it.
 - Versions are cut by hand: the last number runs .1, .2, .3 at most, then the next minor (1.91,
   1.91.1, 1.91.2, 1.91.3, then 1.92, never 1.91.4); 2.0 only for a change big enough.
 - `chat.py`, `webpush.py`, `chat_static/`: CI's `chat.yml` runs the browser test (Playwright isn't a dependency).
@@ -68,9 +73,10 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   commits on branch `local` of a clone they own, rebased by `wb update` in a scratch worktree,
   never the live tree; a marketplace clone's changes saved before Claude Code's re-clone wipes
   them; `wb patch send`, the one fork, push and pull request (through `gh`, never a token
-  printed; under Claude Code only on the mod's dialog's yes). Its git calls run without hooks or a terminal, and it imports everything up front:
+  printed; under Claude Code only on the mod's dialog's yes); `wb patch zip`, the way without
+  GitHub (a .zip to email to `UPSTREAM_CONTACT`; local, no dialog). Its git calls run without hooks or a terminal, and it imports everything up front:
   `wb patch init` deletes the copy wb runs from.
-- `privacy.py`: where an API task's code goes (`where`, `PRIVACY_PAGES`, the first-task note),
+- `privacy.py`: an API task's standing copy that holds a credential (`copy_holds_credential`, `standing_refusal`),
   `local_only`, OpenRouter's routing, `holds_credential` (which token files an API lane hides) (ARCHITECTURE.md, *Privacy for API roles*).
 - `results.py`: results.jsonl rows (`kind`, `role`, `provider`; an API task's money, `api_usage`); read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
@@ -104,13 +110,14 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
 1. `wb start` resolves the role (`--role`, else from `--size`; unset: GPU): GPU through the router, API to the
    role's model, never the other side (exit 3). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
-   provider slot of `API_PARALLEL`: exit 4 unless `--queue`),
+   provider slot of `API_PARALLEL`: else it queues),
    writes round 1's prompt (spec plus `PROTOCOL`), spawns the runner and returns at once:
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
 2. The runner holds the GPU (`GpuLease`) and loads the model before every round, or for an API
    model holds a provider slot (`NoLease`, never in gpu.json) and starts the keyhole (the key stays
    there, outside the lane); it runs
-   `opencode run … -- <prompt>` in the worktree through `lane.wrap`, with the layer
+   `opencode run --agent wb-code … -- <prompt>` (wb's agent, never the user's `default_agent`:
+   #1290) in the worktree through `lane.wrap`, with the layer
    `rules/<task>/opencode.json`. Guards stop a stuck agent (an API task at the day cap too:
    `spend`, in the round and before each next one); an API provider's rate limit,
    outage or queue pauses their clocks, and held 10 minutes stops the round as `rate_limited`

@@ -5,7 +5,7 @@ this file.
 A row is a JSON-safe dict: `key` (the pane's name), `group` (GROUPS), `label`, `kind` (KINDS), and
 by kind: a `choice` its `value`, `choices` [{value, label, says}] and `says` (the sentence for the
 current value), with `other: true` where any model id goes (the role command checks it); a
-`number` its `value` (a float, or None for off) and `unit` (`usd` or `per_kwh`); an `info` its
+`number` its `value` (a float, or None for off) and `unit` (`usd`); an `info` its
 `text`; an `action` its `text` and its `choices`, which are buttons; a `note` one line for the group
 (NO_PROVIDER, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows. A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
@@ -39,7 +39,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import chat, cli, context, progress, routes, savings, stats, store
+from . import chat, cli, context, progress, routes, savings, store
 
 GROUPS = ("shared", "gpu", "api", "terminal", "experimental")  # display order
 KINDS = ("choice", "number", "info", "action", "note")
@@ -72,13 +72,6 @@ CODING = [("only", "Only when I say", "You tell Claude when to write code."),
            "fix itself.")]
 WORKFLOWS = [("off", "Off (default)", "Claude runs one task at a time."),
              ("on", "On", "Claude may split a request into tasks that run at once, each on its own role's model.")]
-RECORD = [("on", "On (default)", "Each task keeps how it went for the Stats tab: speeds, watts, what stopped "
-           "it. Nothing leaves this machine."),
-          ("off", "Off", "Tasks keep only what workbench itself learns from.")]
-LIVE = [("on", "On (default)", "The Stats tab shows this machine now (wb top), and only while it is on screen."),
-        ("off", "Off", "The Stats tab shows the history only.")]
-_EVERY_SAYS = "How often the live view samples the GPU, the tasks and the models."
-EVERY = [("1", "1 s", _EVERY_SAYS), ("2", "2 s (default)", _EVERY_SAYS), ("5", "5 s", _EVERY_SAYS)]
 PROGRESS_OFF = ("off", "Off (default)", "No progress checks: each one wakes Claude, which spends its tokens.")
 THINK = [("off", "Off (default)", "Faster and cheaper; for tasks started after this."),
          ("on", "On", "Better on hard steps, slower and costs more; for tasks started after this.")]
@@ -256,9 +249,8 @@ def _spend_line(r: dict) -> str:
     by = [f"{(names.get(p) or {}).get('name') or p} {savings.usd(v)}"
           for p, v in (s.get("by_provider") or {}).items() if isinstance(v, (int, float)) and v > 0]
     basis = s.get("prices") or "catalog"
-    note = {"catalog": "catalog prices", "yours": "your prices"}.get(basis, "") if total else ""
-    inside = "; ".join(x for x in (" · ".join(by), note) if x)
-    each = f" ({inside})" if inside else ""
+    # the `≈` alone says the basis: a "(catalog prices)" note after it said it twice (#1322)
+    each = f" ({' · '.join(by)})" if by else ""
     spent = savings.money(total, basis)
     cap = r.get("day_usd")
     return f"Spend today: {spent}" + (f" of {routes.money(cap)}{each}" if cap is not None else f"{each} · no day cap")
@@ -356,18 +348,13 @@ def _build() -> dict:
         out.append(_number("cap", "shared", "API day cap", float(cap) if cap is not None else None, "usd",
                            "Needed before an API role; $5 suggested." if cap is None else
                            f"API tasks stop for the day at {routes.money(cap)} of spend."))
-    st = stats.settings()
-    out.append(_choice("record", "shared", "Stats recording", RECORD, "on" if st["recording"] else "off"))
-    out.append(_choice("live", "shared", "Live view", LIVE, "on" if st["live"] else "off"))
-    out.append(_choice("every", "shared", "Live refresh", EVERY, str(st["every"])))
+    # Stats recording, Live view, Live refresh and the electricity price had rows here, as the
+    # pane's Settings tab did until #1322 dropped them (recording always on; wb stats set and wb
+    # savings --price keep the rest): a `recording` row read a key stats.settings() no longer has
     prog = progress.settings()
     after = prog.get("after") if isinstance(prog.get("after"), (int, float)) and not isinstance(prog.get("after"), bool) else 0
     out.append(_choice("progress", "shared", "Progress checks", _progress_stops(after),
                        "on" if prog.get("on") is True else "off"))
-    price = savings.price()
-    out.append(_number("price", "shared", "Electricity price per kWh", price, "per_kwh",
-                       "Energy shows in Wh until a price is set." if price is None else
-                       "Energy is costed at this price, in what you pay in."))
 
     # gpu
     if r is None:
@@ -470,9 +457,9 @@ def _argv(row: dict, value) -> list[str]:
     if kind == "number":
         v = _number_value(value)
         amount = "off" if v is None else f"{v:g}"
-        return ["route", "cap", amount] if key == "cap" else ["savings", "--price", amount, "--json"]
+        return ["route", "cap", amount]
     if isinstance(value, int) and not isinstance(value, bool):
-        value = str(value)  # Live refresh's 1, 2 or 5 posted as a number
+        value = str(value)  # a choice posted as a number
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{key} takes one of its choices")
     value = value.strip()
@@ -485,8 +472,6 @@ def _argv(row: dict, value) -> list[str]:
         return ["route", "all" if key == "agents" else "busy", value]
     if key in ("coding", "workflows", "progress", "splash"):
         return [key, value]
-    if key in ("record", "live", "every"):
-        return ["stats", "set", "recording" if key == "record" else key, value]
     if key == "probe":
         return ["experiment", "probe", value]
     if key == "optimize":
@@ -508,12 +493,6 @@ def _argv(row: dict, value) -> list[str]:
 
 def _said(argv: list[str], ok: bool, out: str, err: str) -> str:
     said = _last(out) if ok else (_last(err) or _last(out))
-    if ok and argv[0] == "savings":  # --json: the price, not the week's whole document
-        try:
-            p = json.loads(out).get("price")
-        except (ValueError, AttributeError):
-            p = None
-        said = f"electricity price: {p:g} per kWh" if isinstance(p, (int, float)) else "electricity price: not set"
     return said or ("done" if ok else "wb refused, and said nothing")
 
 

@@ -26,7 +26,6 @@
   const gib = n => (n / 2 ** 30).toFixed(1)
   const secs = s => (s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`
     : `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`)
-  const kilo = x => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
   // lspci's long name cut to the card's own, as `wb top` draws it (top.short)
   function cardName(name) {
@@ -34,21 +33,18 @@
     if (n.endsWith(']')) { const all = [...n.matchAll(/\[([^\]]+)\]/g)]; return all.length ? all[all.length - 1][1] : n }
     return n.slice(n.lastIndexOf(']') + 1).trim() || n
   }
-  // API dollars, savings.usd's rule: a cent's fraction to two figures, written out; a free model's $0
+  // API dollars, meter.usd's rule (#1322): $0.42, `<$0.01` under a cent, a free model's $0
   function usd(x) {
     if (x === 0) return '$0'
-    if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
-    const r = Number(x.toPrecision(2))
-    return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
+    return Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
   }
+  // the `≈` alone says a figure is at the catalog's prices: a "(catalog prices)" note said it twice (#1322)
   const isEst = prices => prices !== 'yours' && prices !== 'provider'
   const estUsd = (x, prices) => (x && isEst(prices) ? '≈' : '') + usd(x)
-  const PRICES = { catalog: 'catalog prices', yours: 'your prices' }
-  const pricesNote = prices => PRICES[typeof prices === 'string' ? prices : 'catalog'] ?? ''
   function apiMoney(a) {
     if (!a || !a.tasks) return ''
     const known = a.tasks - (a.unknown ?? 0) - (a.plan ?? 0)
-    return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no price'
+    return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no known cost'
   }
   // The words one model or provider goes by (the pane's Names): a GPU model by its label, an API
   // model as `API <provider's name> <the id's last part>`, a provider by its name; an id nothing
@@ -64,8 +60,8 @@
     if (!money) return ''
     const provs = Object.entries(a.by_provider ?? {}).filter(([, v]) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
       .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${providerWord(p, n)} ${estUsd(v.cost, v.prices)}`)
-    const inside = [provs.join(' · '), a.cost ? pricesNote(a.prices) : ''].filter(Boolean).join('; ')
-    return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
+    const inside = provs.join(' · ')
+    return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no known cost' ? ` + ${a.unknown} with no known cost` : ''}`
   }
   function apiParts(r) {
     if (r.via !== 'api') return []
@@ -73,8 +69,10 @@
   }
 
   // ---- the history: statsLines, label for label; a row may carry a chart's numbers too ----
-  // A model line's write trend (`trend`) and Last 30 days (`days`) are drawn, not spelled in
-  // block characters; every other row is its text.
+  // A model line's write trend (`trend`) is drawn, not spelled in block characters; every other
+  // row is its text. The score, the savings estimate, spec-gap discards, the energy and its cost,
+  // the streak, the work absorbed, the questions, Claude's tokens a task, the 30 days, the bests and
+  // the milestones were here too, as on the pane: precision nobody acted on, gone from the feed (#1322).
   function statsRows(f, why, n) {
     if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
     if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)`, stale: true }, ...statsRows(f, '', n)]
@@ -84,36 +82,15 @@
     const period = (name, label) => {
       const p = f.periods?.[name]
       if (!p) return
-      const s = p.score
-      const saved = p.savings?.saved ?? 0
       const parts = [
-        s ? `score ${s.score}/100` : '',
-        p.savings ? (saved >= 0 ? `saved ~${kilo(saved)} Claude tokens (estimate)` : `cost ~${kilo(-saved)} more Claude tokens (estimate)`) : '',
         plural(p.tasks, 'task'),
         `${p.landed} landed${p.accepted_pct !== undefined ? ` (${p.accepted_pct}%)` : ''}`,
-        p.spec_gaps ? `and ${p.spec_gaps} discard${p.spec_gaps === 1 ? '' : 's'} put down to the spec` : '',
-        p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
-          (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
         apiPeriod(p.api, n),
       ]
       out.push({ label, text: parts.filter(Boolean).join(' · ') })
     }
     period('week', 'This week')
     period('all', 'All time')
-    if (f.streak) out.push({ label: 'Streak', text: f.streak.current
-      ? `${plural(f.streak.current, 'day')} in a row with a task landed · best ${f.streak.best}`
-      : `best: ${plural(f.streak.best, 'day')} in a row with a task landed` })
-    const ab = f.absorbed
-    if (ab) {
-      const parts = [
-        ab.auto_fixes ? `${ab.auto_fixes} test failure${ab.auto_fixes === 1 ? '' : 's'} sent back to the agent` +
-          (ab.auto_fixed_tasks ? ` (${plural(ab.auto_fixed_tasks, 'task')} then green)` : '') : '',
-        ab.handovers_landed ? `${ab.handovers_landed} landed after a handover to a fresh session` : '',
-      ].filter(Boolean)
-      if (parts.length) out.push({ label: 'Without waking Claude', text: parts.join(' · ') })
-    }
-    const q = f.questions
-    if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` + (q.answered ? ` · ${q.answered} answered` : '') })
     const all = f.model_lines
       ? (f.model_lines.lines ?? []).map(m => [String(m.model), m])
       : Object.entries(f.models ?? {})
@@ -130,7 +107,7 @@
       out.push({ label: word(model) + windows, trend: trend.length > 1 && Math.max(...trend) > 0 ? trend : null,
         text: `${plural(m.tasks, 'task')} · ${m.accepted_pct}% landed` +
           (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
-          speed + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
+          speed + change })
     }
     const older = f.model_lines?.older
     const moreModels = (f.model_lines?.more?.models ?? 0) + past.length
@@ -148,16 +125,6 @@
       ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
     const sized = Object.entries(f.sizes ?? {})
     if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${ROLE_WORDS[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
-    if (f.days?.length && f.days.some(d => d.tasks > 0)) out.push({ label: 'Last 30 days', text: 'tasks per day', days: f.days })
-    const bests = [
-      f.bests?.largest_first_try ? `largest landed first try: ${f.bests.largest_first_try.lines} lines (${f.bests.largest_first_try.task})` : '',
-      f.bests?.fastest ? `fastest landing: ${f.bests.fastest.minutes} min (${f.bests.fastest.task})` : '',
-    ].filter(Boolean)
-    if (bests.length) out.push({ label: 'Bests', text: bests.join(' · ') })
-    const last = (f.milestones ?? [])[(f.milestones ?? []).length - 1]
-    if (last) out.push({ label: 'Milestone', text: last.kind === 'landed'
-      ? `${plural(last.n, 'task')} landed${last.day ? ` (${last.day})` : ''}`
-      : `~${kilo(last.n)} Claude tokens saved (estimate${last.day ? `, ${last.day}` : ''})` })
     const guards = Object.entries(f.guards ?? {})
     if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
       .map(([g, k]) => `${GUARD_WORDS[g] ?? g} ${k}`).join(' · ') })
@@ -190,7 +157,6 @@
     for (const k of kids) if (k) e.append(k)
     return e
   }
-  const tip = text => { const t = document.createElementNS(SVG, 'title'); t.textContent = text; return t }
   // A line of values against a fixed top (busy %: 100) or their own highest: the pane's `spark`
   function sparkline(values, top, label) {
     const W = 120, H = 28, hi = top || Math.max(1e-9, ...values)
@@ -199,24 +165,6 @@
     return svg('svg', { class: 'st-spark', viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': label },
       svg('polyline', { points: [`0,${H}`, ...pts, `${((values.length - 1) * step).toFixed(1)},${H}`].join(' '), class: 'st-spark-fill' }),
       svg('polyline', { points: pts.join(' '), class: 'st-spark-line' }))
-  }
-  // Last 30 days: a bar a day, its tasks, the landed part of it in the accent
-  function dayBars(days) {
-    const W = 10, H = 56, top = Math.max(1, ...days.map(d => d.tasks || 0))
-    const bars = days.map((d, i) => {
-      const t = d.tasks || 0, l = Math.min(t, d.landed || 0)
-      const ht = t ? Math.max(2, (t / top) * H) : 0, hl = l ? Math.max(2, (l / top) * H) : 0
-      return svg('g', { class: 'st-day' }, tip(`${d.day}: ${plural(t, 'task')}, ${l} landed`),
-        svg('rect', { x: i * W + 1, y: 0, width: W - 2, height: H, class: 'st-day-hit' }),
-        t ? svg('rect', { x: i * W + 1, y: H - ht, width: W - 2, height: ht, rx: 1.5, class: 'st-day-all' }) : null,
-        l ? svg('rect', { x: i * W + 1, y: H - hl, width: W - 2, height: hl, rx: 1.5, class: 'st-day-landed' }) : null)
-    })
-    const total = days.reduce((s, d) => s + (d.tasks || 0), 0), landed = days.reduce((s, d) => s + (d.landed || 0), 0)
-    const chart = svg('svg', { class: 'st-days', viewBox: `0 0 ${days.length * W} ${H}`, preserveAspectRatio: 'none', role: 'img',
-      'aria-label': `Tasks per day over the last ${days.length} days: ${total}, ${landed} landed` },
-    svg('line', { x1: 0, y1: H - 0.5, x2: days.length * W, y2: H - 0.5, class: 'st-axis' }), ...bars)
-    const ends = el('div', 'st-days-ends', el('span', '', days[0].day), el('span', '', days[days.length - 1].day))
-    return el('div', 'st-days-box', chart, ends)
   }
   // A fill bar (memory, busy), its tone by how full: the pane's thresholds
   function meter(label, frac, said, tone) {
@@ -247,7 +195,6 @@
       } else if (g.total) body.push(el('p', 'small', `${gib(g.total)} GiB${g.unified ? ' unified' : ''}`))
       const facts = [
         typeof g.limit === 'number' && g.limit ? `GPU may wire ${gib(g.limit)} GiB` : '',
-        g.stale ? 'no reading' : '',
         typeof g.watts === 'number' ? `${Math.round(g.watts)} W` : '',
       ].filter(Boolean)
       if (typeof g.busy === 'number') body.push(meter('Busy', g.busy / 100, `${g.busy}%`, g.busy > 80 ? 'warn' : 'ok'))
@@ -272,13 +219,13 @@
       const where = m.state === 'cpu' && typeof m.cpu_bytes === 'number' ? ` ${gib(m.cpu_bytes)} GiB in RAM`
         : typeof m.gpu_bytes === 'number' ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
       const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}${NB}tok/s` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}${NB}tok/s` : '',
-        m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
+        m.load_s ? `loads ~${secs(m.load_s)}` : '', m.why ?? ''].filter(Boolean)
       const tone = RACK_TONE[m.state] || 'dim'
       return el('li', 'st-model', el('span', `st-mark ${tone}`, RACK_MARK[m.state] ?? '•'), el('span', '', `${m.label || m.model} `),
         el('span', tone, `${m.state}${where}`), facts.length ? el('span', 'st-dim', ` · ${facts.join(' · ')}`) : null,
         (m.tasks ?? []).length ? el('span', 'claude', ` ← ${m.tasks.join(', ')}`) : null)
     })
-    if (fold) rows.push(el('li', 'st-model st-fold st-dim', `+${fold} more models idle, can't run or remote (wb top)`))
+    if (fold) rows.push(el('li', 'st-model st-fold st-dim', `+${fold} more (wb top)`))
     if (rows.length) out.push(card('st-rack', 'Models', el('ul', 'st-list', ...rows)))
     const queue = t.queue ?? []
     if (queue.length) out.push(card('st-queue', 'Queue', el('ul', 'st-list', ...queue.map(q => el('li', 'st-wait',
@@ -295,11 +242,8 @@
     for (const r of rows) {
       if (!r.label) { head.push(el('p', `small${r.stale ? ' st-note' : ''}${r.empty ? ' st-empty' : ''}`, r.text)); continue }
       const dd = el('dd', '')
-      if (r.days) dd.append(dayBars(r.days), el('span', 'small', r.text))
-      else {
-        dd.append(r.text)
-        if (r.trend) dd.append(sparkline(r.trend, 0, `${r.label}: its writing speed over its last tasks`))
-      }
+      dd.append(r.text)
+      if (r.trend) dd.append(sparkline(r.trend, 0, `${r.label}: its writing speed over its last tasks`))
       dl.append(el('div', 'st-row', el('dt', '', r.label), dd))
     }
     return [card('st-history', '', ...head, dl.childElementCount ? dl : null)]
@@ -361,7 +305,7 @@
     if (!shown) return
     draw()
     syncTop()
-    // again every REFETCH_MS, and once the feed's day ends (its streak and periods count from today)
+    // again every REFETCH_MS, and once the feed's day ends (its periods count from today)
     const left = feed && typeof feed.until === 'number' ? feed.until * 1000 - Date.now() + 1000 : REFETCH_MS
     statsTimer = setTimeout(loadStats, Math.max(1000, Math.min(REFETCH_MS, left)))
   }

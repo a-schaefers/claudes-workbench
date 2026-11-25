@@ -410,6 +410,15 @@ def _start_epoch(start) -> float | None:
 _BOOT: list = []
 
 
+def mac_tool(name: str) -> str:
+    """A macOS system tool by its absolute path (/usr/sbin's ioreg and sysctl), by name elsewhere.
+    Every process on one Mac must read the same machine and boot: the launchd agent's PATH had no
+    /usr/sbin, so `wb chat serve` took the host name for the machine while the mod's `wb events`
+    found ioreg and sent the hardware UUID, and the server read each session's listener.json as
+    another machine's claim, a closed session as listening (#1305, 2026-11-24)."""
+    return f"/usr/sbin/{name}" if sys.platform == "darwin" else name
+
+
 def boot_id() -> str | None:
     """This boot of the machine: Linux's (and WSL2's VM's) random boot_id, macOS's boot time; None
     where neither is known. The runner records it (status `boot`): a runner recorded under another
@@ -421,7 +430,7 @@ def boot_id() -> str | None:
         except OSError:
             import subprocess
             try:  # "{ sec = 1732000000, usec = 123456 } Wed Nov 20 …"
-                out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True,
+                out = subprocess.run([mac_tool("sysctl"), "-n", "kern.boottime"], capture_output=True,
                                      text=True, timeout=5).stdout
                 boot = (m := re.search(r"sec = (\d+)", out)) and m.group(1)
             except (OSError, subprocess.SubprocessError):
@@ -475,7 +484,7 @@ def machine() -> str:
         if not mid and sys.platform == "darwin":
             import subprocess
             try:
-                out = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                out = subprocess.run([mac_tool("ioreg"), "-rd1", "-c", "IOPlatformExpertDevice"],
                                      capture_output=True, text=True, timeout=5).stdout
                 mid = (m := re.search(r'"IOPlatformUUID" = "([^"]+)"', out)) and m.group(1)
             except (OSError, subprocess.SubprocessError):

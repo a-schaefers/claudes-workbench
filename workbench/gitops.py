@@ -736,6 +736,27 @@ def submodules(repo: Path, commit: str) -> list[str]:
     return [rec.split("\n", 1)[1] for rec in out.split("\0") if "\n" in rec]
 
 
+def submodule_sources(repo: Path, commit: str) -> list[Path]:
+    """The user's checkouts fill_submodules fills a worktree of ``commit`` from, nested ones too
+    (each at the commit the one around it records), as _fill finds them: what a task's worktree
+    holds beyond the repo's own files. privacy.local_only reads their marks: a submodule marked
+    local-only went to the API model with every task of the repo around it (#1267, the bar loop,
+    2026-11-24)."""
+    out = []
+    for path in submodules(repo, commit):
+        row = git(repo, "ls-tree", commit, "--", path, check=False).split()
+        src = Path(repo) / path
+        if len(row) >= 3 and row[1] == "commit" and (src / ".git").exists():
+            out += [src, *submodule_sources(src, row[2])]
+    return out
+
+
+def superproject(path) -> Path | None:
+    """The working tree of the repo whose submodule ``path``'s repo is, or None."""
+    out = git(path, "rev-parse", "--show-superproject-working-tree", check=False).strip()
+    return Path(out) if out else None
+
+
 SUBMODULES = "submodules.json"  # rules/<task>/: the submodules filled in its worktree (#419)
 
 
@@ -1446,6 +1467,26 @@ def name_status(repo: Path, base: str, rev: str, *opts: str) -> list[tuple[str, 
     such a test or asked git for the quoted name (#942, the v1.90.24 review). wb verify's too."""
     raw = git(repo, "diff", "--name-status", "--no-renames", "-z", *opts, base, rev).split("\0")
     return [(st, p) for st, p in zip(raw[0::2], raw[1::2]) if p]
+
+
+def step_base(task: store.Task) -> str:
+    """Where the task's step under review began: the base for step one, else the last approved
+    step's commit, which wb next records (status `step_base`). A step with no changes has no
+    commit of its own: from before the record, the newest earlier step that has one, else the
+    base (#652: the step after a clean one died on "cannot find the last approved step's
+    commit"). wb verify and wb shot compare the step with it, and wb next, accept and discard
+    measure it from it (results.step): measured from HEAD, a step whose commit an interrupted
+    wb next (or accept, #879) had made read as 0 files and 0 lines, and the savings card priced
+    the task at nothing (#1302, 2026-11-24)."""
+    step = task.status.get("steps", 1)
+    if step == 1:
+        return task.spec["base"]
+    if at := task.status.get("step_base"):
+        return at
+    for earlier in range(step - 1, 0, -1):
+        if found := step_commit(task, earlier, step):
+            return found
+    return task.spec["base"]
 
 
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:

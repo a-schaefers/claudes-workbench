@@ -14,8 +14,8 @@ import { writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 // The history's labels in statsLines' order: a row's place is checked against this
-const ORDER = ['This week', 'All time', 'Streak', 'Without waking Claude', 'Questions', '*', 'Other models', 'By size',
-  'Last 30 days', 'Bests', 'Milestone', 'What stopped agents', 'What helps', 'Bench', 'Optimized']
+// (#1322 took the streak, the work absorbed, the questions, the 30 days, the bests and the milestone)
+const ORDER = ['This week', 'All time', '*', 'Other models', 'By size', 'What stopped agents', 'What helps', 'Bench', 'Optimized']
 const rank = label => { const i = ORDER.indexOf(label.replace(/ \(.*$/, '')); return i < 0 ? ORDER.indexOf('*') : i }
 
 const GiB = 2 ** 30
@@ -74,7 +74,7 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
   const top = () => page.evaluate(() => ({ opened: window.e2eTop.opened, closed: window.e2eTop.closed }))
   const again = async () => { await goTo('chat'); await goTo('stats') }   // shown afresh: fetched afresh
   const rows = () => page.evaluate(() => [...document.querySelectorAll('#stats-body .st-row')]
-    .map(r => ({ label: r.querySelector('dt').textContent, text: r.querySelector('dd').textContent, chart: r.querySelectorAll('dd .st-day').length })))
+    .map(r => ({ label: r.querySelector('dt').textContent, text: r.querySelector('dd').textContent })))
   const history = () => page.evaluate(() => (document.querySelector('#stats-body .st-hist-box') || {}).textContent || '')
   try {
     const now = Date.now() / 1000
@@ -93,8 +93,8 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
       if (of('By size') !== 'complex 1 (100%) · trivial 2 (50%)') throw new Error(say())
       if (of('What stopped agents') !== 'the API day cap 1') throw new Error(say())
       for (let i = 1; i < got.length; i++) if (rank(got[i].label) < rank(got[i - 1].label)) throw new Error('out of order: ' + say())
-      const days = got.find(r => r.label === 'Last 30 days')
-      if (!days || days.chart !== 30 || !days.text.includes('tasks per day')) throw new Error('the 30 days as bars: ' + say())
+      // #1322: no score, saving, streak or 30 days (the feed has none of them)
+      if (got.some(r => /^(Streak|Last 30 days|Bests|Milestone|Questions)$/.test(r.label)) || /score|estimate/.test(say())) throw new Error(say())
     })
 
     await check('Stats: the live stream opens when Stats is shown with Live view on, and closes on leaving it', async () => {
@@ -146,7 +146,7 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
       if (!s.text.includes('211 W')) throw new Error(say())
       if (!s.running[0].includes('fix-nav fake-coder 30B · running · round 2 · 3m10s · 61 tok/s · context 34%')) throw new Error(say())
       if (!s.running[1].includes('fix-api API deepinfra Fast-Coder-1 · running · round 1 · 12s · ≈$0.12')) throw new Error(say())
-      if (s.rack.length !== 2 || !s.rack[0].includes('← fix-nav') || !s.rack[1].includes('+3 more models idle, can\'t run or remote (wb top)')) throw new Error(say())
+      if (s.rack.length !== 2 || !s.rack[0].includes('← fix-nav') || !s.rack[1].includes('+3 more (wb top)')) throw new Error(say())
       if (s.queue.join() !== '◌fix-later waits for the GPU (1m15s)') throw new Error(say())
     })
 

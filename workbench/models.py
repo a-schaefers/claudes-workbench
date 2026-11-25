@@ -1010,6 +1010,10 @@ RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider read
 # (#1068, 2026-11-23). Past this the next start asks once (a 402 isn't billed) and the keyhole
 # records it again if it still holds.
 CREDIT_RECHECK_SECS = 900
+# A round's stop for its provider's rate limit or outage (runner.HELD, #1020), and the marks the
+# keyhole writes meanwhile: what NoLease.load waits behind once Claude was told of one (#1277)
+HELD_STOPS = ("rate_limited", "outage")
+HELD_MARKS = ("rate_limited", "unreachable")
 _HOSTED: dict = {}       # the last hosted.json read in this process: {"at": (mtime_ns, size), "doc"}
 _AUTH_FRESH: dict = {}   # state dir -> (monotonic, auth rows): status's no-key check, briefly kept
 AUTH_FRESH_SECS = 5
@@ -1437,12 +1441,21 @@ def _count(v) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
 
+def api_window(cfg: dict) -> int:
+    """The window an API model's entry is capped at (api_limits): API_WINDOW_LIFT, or the first
+    context tier of its price (meter.first_tier) when that is smaller, never under API_WINDOW. Past
+    a tier every request is priced at its rate: Haiku's rises 5x past 100K, so it keeps the 128K
+    it had before the lift (#1134's E19, 2026-11-24)."""
+    from . import meter  # meter imports this module
+    return max(API_WINDOW, min(API_WINDOW_LIFT, meter.first_tier(cfg) or API_WINDOW_LIFT))
+
+
 def api_limits(cfg: dict) -> dict:
     """An API model's entry with its window and output capped (#1017): `limit.context` at most
-    API_WINDOW, `limit.input` at most that, and `limit.output` and `options.max_tokens` both the
-    smallest of the entry's own two and API_OUTPUT (API_OUTPUT when it gives neither), and at
-    most _api_output_fit of the window (#1073). Written
-    once here, so the layer's pins (runner.model_pins), OpenCode's compaction
+    api_window (256K, or 128K for a price tier under that), `limit.input` at most that, and
+    `limit.output` and `options.max_tokens` both the smallest of the entry's own two and
+    API_OUTPUT (API_OUTPUT when it gives neither), and at most _api_output_fit of the window
+    (#1073). Written once here, so the layer's pins (runner.model_pins), OpenCode's compaction
     (runner.compaction_buffer), the slice, status `window`, the steps and the tuning keys all read
     one window. A catalog's 1M window let a session that only reads carry up to 1M tokens a
     request, and its 384K output put the compaction point below zero. The user's own entries (a
@@ -1453,7 +1466,7 @@ def api_limits(cfg: dict) -> dict:
     if not (context := _count(lim.get("context"))):
         return cfg
     opts = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
-    context = min(context, API_WINDOW)
+    context = min(context, api_window(cfg))
     cap = min(v for v in (_count(lim.get("output")), _count(opts.get("max_tokens")), API_OUTPUT) if v)
     # and at most what keeps the latest handover at or past the earliest fresh_at: a 32K window
     # with a 32K output put OpenCode's compaction below zero, and the note told the user to
@@ -1738,6 +1751,14 @@ def credit_recheck(pid: str, task: str = "") -> tuple[dict | None, bool]:
     if (row := api_health(pid)) is not None:
         return waits(row), False
     path = api_health_path()
+    # only an expired no_credit mark is taken under the lock: opening the lock file (a+) for any
+    # other closed it written, which woke every waiter's watch on $WB_HOME, so a waiter behind an
+    # expired outage's mark looked 30 times a second, not every API_WAIT's 2 s (the review of
+    # #1277, 2026-11-24). A read leaves the watch asleep
+    peek = store.read_json(path, {})
+    peek = peek.get(pid) if isinstance(peek, dict) else None
+    if not isinstance(peek, dict) or peek.get("state") != "no_credit":
+        return None, False
     with store.locked(path.with_name(path.name + ".lock")):
         doc = store.read_json(path, {})
         row = doc.get(pid) if isinstance(doc, dict) else None
@@ -1765,6 +1786,39 @@ def credit_ask(pid: str, task: str) -> bool:
         doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
         store.write_json(path, doc)
     return True
+
+
+def held_mark(pid: str) -> dict | None:
+    """The provider's `rate_limited` or `unreachable` mark, past its `until` too: only a 2xx's
+    `ok` says it answers again (#1277). A mark lasts DOWN_SECS past the keyhole's last 5xx, and a
+    round and its revive take far longer, so the next task started past every expired one."""
+    doc = store.read_json(api_health_path(), {})
+    row = doc.get(pid) if isinstance(doc, dict) else None
+    return row if isinstance(row, dict) and row.get("state") in HELD_MARKS else None
+
+
+def held_told(pid: str, task: str = "", guards: tuple = HELD_STOPS) -> str:
+    """Another task whose stop for ``pid``'s rate limit or outage has told Claude, still standing,
+    else '': phase `stuck`, status `infra` `provider` and `guard` one of ``guards`` (HELD_STOPS;
+    drive's told-stop claim asks ("quota",) for a 402, #1344), its provider
+    ``pid`` (task.json `provider`, else its model's prefix: runner.provider_of) and a `noticed`."""
+    with contextlib.suppress(OSError):
+        for d in sorted(store.tasks_dir().iterdir()):
+            if d.name == task or not (d / "task.json").is_file():
+                continue
+            try:  # one task's damaged files hold no other back
+                t = store.Task(d.name)
+                st = t.status
+                if st.get("phase") != "stuck" or st.get("infra") != "provider" or st.get("guard") not in guards:
+                    continue
+                spec = t.spec
+                if str(spec.get("provider") or str(spec.get("model") or "").partition("/")[0]) != pid:
+                    continue
+                if float((d / "noticed").read_text() or 0) > 0:
+                    return d.name
+            except Exception:
+                continue
+    return ""
 
 
 def _fresh_key(m: Model) -> tuple[str, str]:
@@ -3867,7 +3921,11 @@ class NoLease:
         self.pool = None
         self.aside = False
         self.loaded = True
-        self.recheck = False  # this load waited, then was the one to ask again past a 402's mark (#1216)
+        # this load waited, then was the one to ask again past a 402's mark: "quota" (#1216), or past
+        # a told rate limit's or outage's: "held" (#1277); its round meeting that same stop waits again
+        self.recheck = ""
+        self.behind = ""  # the told stop of its provider's rate limit or outage this lease waits behind (#1277)
+        self.probe: int | None = None  # the provider's turn to ask again past that mark (#1277)
         self.fd: int | None = None
         self.path: Path | None = None
 
@@ -3917,15 +3975,18 @@ class NoLease:
         (#1178, 2026-11-24). A top-up's 2xx (`ok`) or the mark's end lets it go on. It lets go
         of its slot for the wait and takes one again after: held, a backlog of API_PARALLEL
         waiters left the task whose turn it was (the user's resume) waiting for a slot, and each
-        of them for its 2xx, until the mark's 900 s ran out (the review of #1178, 2026-11-24)."""
+        of them for its 2xx, until the mark's 900 s ran out (the review of #1178, 2026-11-24).
+        A rate limit or outage is waited behind the same way once another task's stop for it has
+        told Claude (_held_turn, #1277)."""
         pid = self.m.provider or api_provider(self.m)
-        self.recheck = False
+        self.recheck = ""
+        self._unprobe()  # its last round's turn to ask is over: that round has its answer
         try:
             # a turn handed here, with no wait first, is no recheck: a new start (or a next round)
             # past an expired mark is the first to meet the 402 since, and its stop is the one
             # notice Claude gets; counted as one, it waited forever untold (the review of #1216,
             # 2026-11-24). Only the turn handed after a wait below is a recheck
-            row = credit_recheck(pid, self.task)[0]
+            row = self._turn(pid, waited=False)
         except Exception:  # an unreadable file: the round's keyhole answers instead
             return 0.0
         if row is None:
@@ -3937,23 +3998,94 @@ class NoLease:
         with Watcher(api_health_path().parent) as w:  # ok's and the keyhole's writes wake it
             while row is not None:
                 until = row.get("until") if isinstance(row.get("until"), (int, float)) else time.time()
-                msg = (f"waiting: {pid} is out of credit or quota ({row.get('why') or 'no detail'}): "
-                       f"top it up, or wait for the plan's reset; wb asks it again at "
-                       f"{datetime.fromtimestamp(until).strftime('%H:%M')} (wb stop gives up)")
+                at = datetime.fromtimestamp(max(until, time.time())).strftime('%H:%M')
+                why = row.get('why') or 'no detail'
+                if row["state"] == "no_credit":
+                    msg = (f"waiting: {pid} is out of credit or quota ({why}): top it up, or wait for "
+                           f"the plan's reset; wb asks it again at {at} (wb stop gives up)")
+                else:
+                    msg = (f"waiting: {pid} " + ("rate-limits its requests" if row["state"] == "rate_limited"
+                                                  else "isn't answering")
+                           + f" ({why}), as {self.behind}'s stop told the user: wb asks it again at "
+                           f"{at}, or goes on once it answers another task (wb stop gives up)")
                 if msg != said:
                     if task is not None and task.exists:
                         task.set_status(phase="queued", last=msg)
                     else:
                         self.say(msg)
                     said = msg
-                w.wait(min(max(until - time.time(), 0.1), API_WAIT[1]))
+                left = until - time.time()
+                # past a held mark's `until` while another runner asks: a look every API_WAIT's 2 s
+                w.wait(min(left, API_WAIT[1]) if left > 0 else API_WAIT[0])
                 try:
-                    row, self.recheck = credit_recheck(pid, self.task)
+                    row = self._turn(pid, waited=True)
                 except Exception:
-                    row, self.recheck = None, False
+                    row, self.recheck = None, ""
         if held:  # not on a stop (wb stop's signal): that runner sends nothing more
             self.__enter__()
         return 0.0
+
+    def _turn(self, pid: str, waited: bool) -> dict | None:
+        """The mark this load waits on, else None, `recheck` set: credit_recheck's, then
+        _held_turn's."""
+        row, recheck = credit_recheck(pid, self.task)
+        if row is not None or recheck:
+            self.recheck = "quota" if recheck and waited else ""
+            return row
+        return self._held_turn(pid)
+
+    def _held_turn(self, pid: str) -> dict | None:
+        """The provider's rate limit or outage (held_mark), waited behind as the 402 is once
+        another task's stop for it has told Claude (held_told): a backlog queued behind an outage
+        each took its slot, ran round 1 into it, revived it and woke Claude with a stop of its
+        own, the same one, though api-health.json had it (#1277, 2026-11-24). It waits until the
+        mark's `until` (a 429's Retry-After, hours on too) or an `ok`; past `until` one runner at
+        a time asks again (the provider's probe flock, held until its next load) and the others
+        wait for its answer. That turn is a recheck: its round meeting the same stop waits again
+        in drive, with no stop of its own. A lease once behind a told stop stays behind it until
+        the `ok` (the stop resumed meanwhile, its waiters went on at once, each to its own stop).
+        With no told stop the round goes on (a brief 503 or 429 never holds a start, #1088), and
+        its own stop is the notice Claude gets."""
+        mark = held_mark(pid)
+        if mark is None:
+            self.behind = ""
+            return None
+        self.behind = self.behind or held_told(pid, self.task)
+        if not self.behind:
+            self._probe(pid)  # it goes into the mark: the waiters behind it wait for its answer
+            return None
+        until = mark.get("until")
+        if isinstance(until, (int, float)) and until > time.time():
+            return mark
+        if self._probe(pid):
+            self.recheck = "held"
+            return None
+        return mark
+
+    def _probe(self, pid: str) -> bool:
+        """The provider's turn to ask again past a held mark (api/<provider>.probe.lock, flocked
+        while held; a dead runner's frees itself): True when this lease has it."""
+        if self.probe is not None:
+            return True
+        path = api_dir() / f"{_slot_name(pid)}.probe.lock"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # read-only: a close after a write wakes every slot waiter's watch (__enter__)
+            fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        self.probe = fd
+        return True
+
+    def _unprobe(self) -> None:
+        if self.probe is not None:
+            os.close(self.probe)
+            self.probe = None
 
     def step_aside(self, unload: bool = False) -> None:
         pass
@@ -3962,6 +4094,7 @@ class NoLease:
         pass
 
     def __exit__(self, *exc):
+        self._unprobe()  # never held through load's wait: only the round after it holds it
         if self.fd is None:
             return
         try:
@@ -4839,7 +4972,15 @@ def is_api(model_id: str) -> bool:
     return bool(m and m.kind == "api")
 
 
-API_WINDOW = 131072   # the effective window an API task plans to (#1017; decision 10)
+# An API model's window is capped at API_WINDOW_LIFT (api_window): at 128K (API_WINDOW, #1017's
+# decision 10) every DeepSeek size-* and mid-xl-scout run on record compacted at 72% of it, one
+# large read jumping past fresh_at straight to OpenCode's own summary; at 256K, with the output
+# still API_OUTPUT, the buffer stays 36864 and OpenCode compacts at 86% (225K tokens). Measured on
+# DeepInfra's DeepSeek V4.1 Flash, 12 runs over 5 cells: 0-1 compactions a run instead of 4-13, at
+# about the same cost and with no new stop (#1134's E19, 2026-11-24). API_WINDOW stays the floor:
+# a price tier under 256K (Haiku's 100K) keeps the window it had.
+API_WINDOW = 131072
+API_WINDOW_LIFT = 262144
 API_OUTPUT = 32768    # output pinned for API tasks (#1017)
 
 

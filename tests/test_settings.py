@@ -19,11 +19,10 @@ def expected(key: str, value) -> list[str]:
     """The pane's wb call for each row, written out apart from settings._argv."""
     head, _, rest = key.partition("-")
     fixed = {"agents": ["route", "all", value], "busy": ["route", "busy", value], "coding": ["coding", value],
-             "workflows": ["workflows", value], "record": ["stats", "set", "recording", value],
-             "live": ["stats", "set", "live", value], "every": ["stats", "set", "every", value],
+             "workflows": ["workflows", value],
              "progress": ["progress", value], "splash": ["splash", value],
              "probe": ["experiment", "probe", value], "optimize": ["optimize", "start"],
-             "cap": ["route", "cap", value], "price": ["savings", "--price", value, "--json"]}
+             "cap": ["route", "cap", value]}
     if key in fixed:
         return fixed[key]
     return {"role": ["route", rest, value], "gpu": ["route", rest, "--gpu", value],
@@ -76,16 +75,17 @@ class Settings(Rows):
         keys = [r["key"] for r in rows]
         self.assertEqual(len(keys), len(set(keys)))
         json.dumps(rows)  # JSON-safe
-        for want in ("agents", "busy", "role-significant", "coding", "workflows", "cap", "record", "live", "every",
-                     "progress", "price", "gpu-trivial", "optimize", "api-connected", "api-writing",
+        for want in ("agents", "busy", "role-significant", "coding", "workflows", "cap",
+                     "progress", "gpu-trivial", "optimize", "api-connected", "api-writing",
                      "think-trivial", "api-spend", "splash", "probe"):
             self.assertIn(want, keys)
         self.assertNotIn("chat", keys)   # the web app is always on now
         self.assertNotIn("wake", keys)   # a plugin option, set with /plugin
+        for gone in ("record", "live", "every", "price"):  # the pane's Settings dropped them (#1322)
+            self.assertNotIn(gone, keys)
         self.assertTrue(any(k.startswith("size-") for k in keys))
         by = {r["key"]: r for r in rows}
         self.assertEqual((by["cap"]["kind"], by["cap"]["value"], by["cap"]["unit"]), ("number", 5.0, "usd"))
-        self.assertEqual((by["price"]["value"], by["price"]["unit"]), (None, "per_kwh"))
         self.assertTrue(by["api-trivial"]["other"])
         self.assertEqual(by["api-trivial"]["value"], "deepseek/deepseek-flash")
         self.assertEqual(by["role-trivial"]["says"], "Trivial coding runs on this machine's GPU.")
@@ -140,7 +140,7 @@ class Settings(Rows):
         log = self.fake_wb()
         with self.assertRaises(KeyError):
             settings.apply("no-such-setting", "on")
-        for key, value in (("busy", "sometimes"), ("splash", FREE_ID), ("every", 3), ("cap", -1), ("cap", "lots"),
+        for key, value in (("busy", "sometimes"), ("splash", FREE_ID), ("workflows", 3), ("cap", -1), ("cap", "lots"),
                            ("api-spend", "x"), ("api-trivial", "--day-usd=0"), ("api-trivial", "a b"), ("probe", True)):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 settings.apply(key, value)

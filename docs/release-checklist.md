@@ -104,6 +104,6 @@ rest of this section: a skip is recorded with its reason, never a gate.
 | A remote Ollama (`wb remote`) | | |
 | A server with an API key and several models (`wb model add --url`) | | |
 
-- [ ] More tasks than fit, queued (`--queue`), each run in turn.
+- [ ] More tasks than fit, queued, each run in turn.
 - [ ] A model load interrupted (`wb stop` while it loads), and the next task runs.
 - [ ] The web chat in two tabs, with reconnects and a long history.

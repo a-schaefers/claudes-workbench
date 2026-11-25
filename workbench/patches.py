@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
@@ -42,6 +43,9 @@ DIFF_PLAIN = ("-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-
 REBASE_PLAIN = ("-c", "rebase.updateRefs=false", "-c", "rebase.autoSquash=false",
                 "-c", "rebase.autoStash=false")
 NET_SECS = 600  # a full clone of workbench over a slow line
+# workbench's contact, for a patch sent without GitHub (wb patch zip, #1291): the owner's own
+# address, already in the git log; README.md, CONTRIBUTING.md and ARCHITECTURE.md say the same
+UPSTREAM_CONTACT = "adam.schaefers@icloud.com"
 
 
 class PatchError(RuntimeError):
@@ -202,17 +206,21 @@ def rescue(root, found: Changes) -> Path:
     return d
 
 
-def marketplace_refusal(root) -> str | None:
-    """wb update on a marketplace install with local changes: they are saved first, and the
-    refusal says where. Claude Code's update re-clones, and `wb update` once printed "updated
-    marketplace <patched>..<upstream>", exit 0, having wiped the patch (#1005, 2026-11-22)."""
+def marketplace_refusal(root, runs_from=None) -> str | None:
+    """wb update with local changes in Claude Code's marketplace clone ``root``: they are saved
+    first, and the refusal says where. Claude Code's update re-clones, and `wb update` once printed
+    "updated marketplace <patched>..<upstream>", exit 0, having wiped the patch (#1005, 2026-11-22).
+    ``runs_from``: the developer clone wb runs from, when ``root`` is another copy (#1326)."""
     found = local_changes(root)
     if not found:
         return None
     saved = rescue(root, found)
+    fix = ("wb patch init moves workbench to a clone of your own that keeps them as patches and still "
+           "updates" if runs_from is None else
+           f"git am takes its patches into {runs_from}, and claude plugin marketplace add {runs_from} "
+           "makes that clone the marketplace, which Claude Code never re-clones")
     return (f"the marketplace clone {root} has {found.say()}: Claude Code's update re-clones it and "
-            f"would wipe them, so nothing was updated. Saved in {saved}; wb patch init moves workbench "
-            "to a clone of your own that keeps them as patches and still updates")
+            f"would wipe them, so nothing was updated. Saved in {saved}; {fix}")
 
 
 CHECK_LINE = ("local changes in the marketplace clone: wb update would refuse (Claude Code re-clones "
@@ -405,7 +413,7 @@ def _on_patch_branch(root):
     b = branch(root)
     if b != PATCH_BRANCH:
         raise PatchError(f"{root} is on {b or 'a detached HEAD'}, not {PATCH_BRANCH}: patches are commits "
-                         f"on {PATCH_BRANCH} (git -C {root} switch {PATCH_BRANCH}, or switch -c {PATCH_BRANCH})")
+                         f"on {PATCH_BRANCH} (git -C {root} switch {PATCH_BRANCH}, or switch -c {PATCH_BRANCH} --track origin/main)")
 
 
 def _patches(root) -> list:
@@ -414,13 +422,38 @@ def _patches(root) -> list:
     return [tuple(r.split("\0")) for r in rows.splitlines() if r]
 
 
+def track_upstream(root) -> str | None:
+    """Make PATCH_BRANCH track origin's default branch when it tracks nothing; the line to print,
+    else None. One made with a plain `git switch -c local`, as the texts said, had no upstream:
+    wb update died "fatal: no upstream configured", wb doctor skipped its patches, and a reused
+    `local` stayed so (#1327, 2026-11-24). Only a branch that exists, with that ref fetched."""
+    ref = f"refs/heads/{PATCH_BRANCH}"
+    if (not _out(root, "rev-parse", "-q", "--verify", ref, check=False)
+            or _out(root, "config", f"branch.{PATCH_BRANCH}.merge", check=False)):
+        return None
+    head = _out(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD", check=False)
+    up = head or "origin/main"
+    if not _out(root, "rev-parse", "-q", "--verify", f"refs/remotes/{up}", check=False):
+        return None
+    _git(root, "branch", "-q", f"--set-upstream-to={up}", PATCH_BRANCH)
+    return f"branch {PATCH_BRANCH} tracked no upstream: it tracks {up} now"
+
+
+def no_upstream(root) -> str | None:
+    """None when HEAD's branch tracks one, else what to run, for a refusal or wb doctor (#1327)."""
+    b = branch(root)
+    if not b or _out(root, "config", f"branch.{b}.merge", check=False):
+        return None
+    return f"branch {b} tracks no upstream: git -C {root} branch -u origin/main {b}"
+
+
 def clone_note(root) -> str:
     b = branch(root) or "a detached HEAD"
     if b == PATCH_BRANCH:
         return (f"workbench already runs from a clone you own ({root}), on branch {b}: patches are its "
                 "commits (wb patch list)")
     return (f"workbench already runs from a clone you own ({root}), on branch {b}: patches are commits on "
-            f"branch {PATCH_BRANCH} (git -C {root} switch -c {PATCH_BRANCH} to start)")
+            f"branch {PATCH_BRANCH} (git -C {root} switch -c {PATCH_BRANCH} --track origin/main to start)")
 
 
 def list_patches(root, kind) -> None:
@@ -903,17 +936,16 @@ def upstream(root, kind, commit, slug) -> None:
     url = _out(root, "config", "--get", f"remote.{remote}.url", check=False)
     repo = _owner_repo(url)  # gh takes owner/repo, never a URL (gh repo fork <url> was printed)
     scope = _out(root, "log", "-1", "--format=%(trailers:key=Scope,valueonly,separator=%x2C)", sha).lower()
+    tag = " (Scope: me)" if scope == "me" else ""  # a fact; the dialog says it at the send (#1322)
     if picked.returncode:
-        print(f"{pr} from {remote}'s {up[:7]} in {wt}: {what} conflicts there. Resolve it in that "
+        print(f"{pr} from {remote}'s {up[:7]} in {wt}: {what}{tag} conflicts there. Resolve it in that "
               "worktree, then git cherry-pick --continue, and go on below")
         mod = True
     else:
-        print(f"{pr} from {remote}'s {up[:7]} in {wt}, with {what}")
+        print(f"{pr} from {remote}'s {up[:7]} in {wt}, with {what}{tag}")
         mod = _git(wt, "diff", "--quiet", up, "HEAD", "--", "mod", check=False).returncode != 0
     if not has_test(root, sha):
         print(NO_TEST_SEND)
-    if scope == "me":
-        print("its Scope trailer is me: a personal patch. Offer it upstream only if it helps everybody")
     note_install(root)
     with _noting() as noted:  # the local commit wb update later drops when its pull request merges
         _table(noted, "prepared")[slug] = _ident(root, sha)
@@ -931,9 +963,101 @@ def upstream(root, kind, commit, slug) -> None:
         print(f"  fill in {body} (" + ("a copy of .github/pull_request_template.md" if template.is_file()
                                        else "the pull request's body") + ")")
         print(f"  wb patch send {slug} --title {_quote(what.split(' ', 1)[-1])} --body-file {body}")
-        print(gh_line(gh_state(root)))
-        print("wb patch send forks, pushes and opens the pull request: the user's yes for it first")
+        print(gh_line(gh_state(root)))  # the user's yes is the mod's dialog (#1322: no line for it)
     print(f"once it merges, the next wb update drops the local patch ({what.split()[0]})")
+
+
+ZIP_HINT = ("no GitHub account, or rather not? wb patch zip makes a .zip of the patch to email upstream "
+            "yourself (it sends nothing)")
+ZIP_README = """A patch to workbench, made by wb patch zip on {when} (UTC).
+
+{count} commit(s), oldest first, a .patch file each:
+{rows}
+
+They apply to upstream's commit {base}.
+To apply them, in a clone of workbench:
+  git switch -c patch-{name} {base}
+  git am <this folder>/*.patch
+
+To send it upstream: email this .zip to {contact}, workbench's contact,
+or send it any way you like. wb sent nothing.
+
+The .patch files name each commit's author as git had them, in their From: lines
+({authors}): edit them before sending if you'd rather not.
+"""
+
+
+def zip_out() -> Path:
+    """Where wb patch zip writes: ~/Downloads when it exists, else $WB_HOME/patches/out/."""
+    downloads = Path.home() / "Downloads"
+    return downloads if downloads.is_dir() else store.home() / "patches" / "out"
+
+
+def zip_patches(root, kind, commits=(), name=None) -> Path:
+    """wb patch zip (#1291): ``commits`` (else every commit on PATCH_BRANCH its upstream lacks,
+    what wb patch upstream would send) as one format-patch file each in a .zip, with README.txt
+    (the subjects, the upstream commit they apply to, git am, UPSTREAM_CONTACT), for a user with
+    no GitHub account to email upstream themselves. The owner, 2026-11-24: "a lot of people dont
+    have a github account and dont want to bother". Local only: no fetch, no gh, nothing sent,
+    so the mod's consent gate doesn't ask about it."""
+    _need_clone(kind)
+    if name is not None and not SLUG.fullmatch(name):
+        raise PatchError(f"--name {name!r}: lowercase letters, digits and hyphens")
+    ref = f"refs/heads/{PATCH_BRANCH}"
+    if not _out(root, "rev-parse", "-q", "--verify", ref, check=False):
+        raise PatchError(f"{root} has no branch {PATCH_BRANCH}: patches are commits on it "
+                         f"(git -C {root} switch -c {PATCH_BRANCH} --track origin/main)")
+    if line := track_upstream(root):
+        print(line)
+    up = _upstream(root, PATCH_BRANCH)
+    if not up:
+        raise PatchError(f"{PATCH_BRANCH} tracks no upstream: git -C {root} branch -u origin/main {PATCH_BRANCH}")
+    mine = _commits(root, f"{up}..{ref}")  # no fetch: the upstream wb update last fetched
+    if not mine:
+        raise PatchError(f"no patches on {PATCH_BRANCH}: it is upstream's (wb patch list)")
+    if commits:
+        order = {sha: i for i, (sha, _) in enumerate(mine)}
+        picked = set()
+        for c in commits:
+            sha = _out(root, "rev-parse", "-q", "--verify", f"{c}^{{commit}}", check=False)
+            if not sha:
+                raise PatchError(f"{c}: no such commit")
+            if sha not in order:
+                raise PatchError(f"{c} isn't one of {PATCH_BRANCH}'s patches (wb patch list)")
+            picked.add(sha)
+        mine = [row for row in mine if row[0] in picked]  # in local's order, as git am applies them
+    base = _out(root, "merge-base", ref, up)
+    authors = list(dict.fromkeys(_out(root, "log", "-1", "--format=%an <%ae>", sha) for sha, _ in mine))
+    stamp = time.gmtime()
+    stem = f"workbench-patch-{name or mine[-1][0][:7]}-{time.strftime('%Y%m%d', stamp)}"
+    out = zip_out()
+    out.mkdir(parents=True, exist_ok=True)
+    readme = ZIP_README.format(
+        when=time.strftime("%Y-%m-%d %H:%M", stamp), count=len(mine), base=base, name=name or mine[-1][0][:7],
+        rows="\n".join(f"  {sha[:7]} {subject}" for sha, subject in mine), contact=UPSTREAM_CONTACT,
+        authors=", ".join(authors))
+    with tempfile.TemporaryDirectory() as made:
+        for i, (sha, _) in enumerate(mine, 1):
+            _git(root, *DIFF_PLAIN, "format-patch", "-q", "--no-signature", "-1", f"--start-number={i}",
+                 "-o", made, sha)
+        fd, part = tempfile.mkstemp(prefix=".wb-patch-", suffix=".part", dir=out)
+        try:
+            with os.fdopen(fd, "wb") as f, zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr(f"{stem}/README.txt", readme)
+                for patch in sorted(Path(made).iterdir()):
+                    z.write(patch, f"{stem}/{patch.name}")
+            n, dest = 1, out / f"{stem}.zip"
+            while dest.exists():  # a second zip the same day keeps the first
+                n += 1
+                dest = out / f"{stem}-{n}.zip"
+            os.replace(part, dest)
+        finally:
+            Path(part).unlink(missing_ok=True)
+    print(f"wrote {dest}: {len(mine)} patch(es) on upstream's {base[:7]}")
+    print(f"email it to {UPSTREAM_CONTACT}, or send it any way you like; nothing was sent")
+    print(f"the patch files name the commit author ({', '.join(authors)}); edit them before sending if "
+          "you'd rather not")
+    return dest
 
 
 def body_path(slug) -> Path:
@@ -945,8 +1069,9 @@ def _quote(text) -> str:
     return f'"{text}"' if not re.search(r'["$`\\!]', text) else shlex.quote(text)
 
 
-def _refuse_send(root, wt, pr, base, body_file, anyway) -> None:
-    """Every refusal of wb patch send that needs no network, before any is asked (#1005)."""
+def _refuse_send(root, wt, pr, base, body_file) -> None:
+    """Every refusal of wb patch send that needs no network, before any is asked (#1005). A
+    `Scope: me` commit is none: the mod's dialog says it, one yes (#1322: --anyway was a second)."""
     if not (_out(root, "rev-parse", "-q", "--verify", f"refs/heads/{pr}", check=False) and wt.is_dir()
             and branch(wt) == pr):
         raise PatchError(f"no {pr} in {wt}: wb patch upstream <commit> --name {pr.removeprefix('pr/')} "
@@ -956,9 +1081,7 @@ def _refuse_send(root, wt, pr, base, body_file, anyway) -> None:
     if dirty := _out(wt, "status", "--porcelain", "--untracked-files=normal").splitlines():
         raise PatchError(f"{wt} has uncommitted changes ({', '.join(d.strip() for d in dirty[:5])}): "
                          "commit them on the branch, or remove them")
-    rows = [r.split("\0") for r in _out(wt, "log", "--format=%h%x00%s%x00%(trailers:key=Scope,valueonly,"
-                                        "separator=%x2C)", f"{base}..HEAD", "--").splitlines() if r]
-    if not rows:
+    if not _out(wt, "log", "--format=%h", f"{base}..HEAD", "--"):
         raise PatchError(f"{pr} has no commits over {base.removeprefix('refs/remotes/')}: nothing to send")
     body = Path(body_file)
     try:
@@ -970,10 +1093,6 @@ def _refuse_send(root, wt, pr, base, body_file, anyway) -> None:
         raise PatchError(f"--body-file {body} is empty: fill it in from {template}")
     if template.is_file() and text == template.read_bytes():
         raise PatchError(f"--body-file {body} is the template as it came: fill in every section first")
-    mine = [f"{sha} {subject}" for sha, subject, scope in rows if scope.strip().lower() == "me"]
-    if mine and not anyway:
-        raise PatchError(f"{', '.join(mine)}: its Scope trailer is me, a personal preference, not a fix for "
-                         "everybody: keep it local, or --anyway sends it")
 
 
 SEND_OK = "send-ok.json"  # $WB_HOME/send-ok.json: the mod's dialog approved this one send
@@ -1046,14 +1165,16 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
     pr, wt = f"pr/{slug}", store.home() / "upstream" / slug
     remote, target = _tracked(root)
     base = f"refs/remotes/{remote}/{target}"
-    _refuse_send(root, wt, pr, base, body_file, anyway)
+    _refuse_send(root, wt, pr, base, body_file)
     url = _out(root, "config", "--get", f"remote.{remote}.url", check=False)
     repo = _owner_repo(url)
     if not repo:
         raise PatchError(f"{remote} ({_shown_url(url)}) isn't on GitHub: wb patch send sends only there")
     st = gh_state(root)
     if st["state"] != "ready":
-        raise PatchError("gh can't send it yet, nothing was sent:\n" + gh_line(st))
+        # no gh, or no login: the zip is the way without GitHub (#1291)
+        raise PatchError("gh can't send it yet, nothing was sent:\n" + gh_line(st)
+                         + (f"\n{ZIP_HINT}" if st["state"] in ("missing", "logged-out") else ""))
     login, protocol = st["login"], st["protocol"]
     workflows = _out(wt, "diff", "--name-only", f"{base}...HEAD", "--", ".github/workflows/")
     if workflows and protocol == "https" and "workflow" not in st["scopes"]:
@@ -1296,6 +1417,8 @@ def doctor_lines(root, kind) -> list[str]:
         lines = [f"ok  install: your own clone at {root}, branch {b} (wb patch init)" if own
                  else f"ok  install: developer clone at {root}, branch {b}"]
         rows = _patches(root) if b == PATCH_BRANCH and _upstream(root) else []
+        if b == PATCH_BRANCH and (fix := no_upstream(root)):  # its patches unseen, wb update failing (#1327)
+            lines.append(f"--  local patches: {fix} (wb update sets it)")
         if rows:
             lines.append(f"--  local patches: {len(rows)} ("
                          + ", ".join(scope or "no Scope" for _, _, scope in rows) + ")")
@@ -1436,6 +1559,8 @@ def init(root: Path, dest: Path) -> None:
             if branch(dest) != PATCH_BRANCH:
                 _git(dest, "switch", "-q", PATCH_BRANCH)  # git refuses it over changes of the user's
             print(f"{dest} already has branch {PATCH_BRANCH}: kept as it is, nothing carried over{keep}")
+            if line := track_upstream(dest):
+                print(line)
         else:
             if reuse and _out(dest, "status", "--porcelain", "--untracked-files=all"):
                 raise PatchError(f"{dest} has uncommitted changes: commit or stash them, then wb patch init")

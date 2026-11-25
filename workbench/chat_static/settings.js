@@ -10,7 +10,7 @@
     ['experimental', 'Experimental']]
   const SEG_MAX = 4                     // a segmented control up to this many choices, a <select> past it
   const OTHER = '\u0000other'           // the select's "Other model…" (never a model id: a NUL)
-  const UNITS = { usd: ['$', '/day'], per_kwh: ['', 'per kWh'] }
+  const UNITS = { usd: ['$', '/day'] }
   const HELP_SAID = 'Claude will offer to set it up.'  // the pane's toast, when a choice needs Claude's help
 
   let root = null

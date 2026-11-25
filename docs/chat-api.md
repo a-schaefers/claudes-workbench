@@ -42,13 +42,16 @@ does the whole flow below with the standard library alone.
       `/api/upload/<id>` and `/api/file/<id>`; `PUT /api/upload/<id>`; `POST /api/send`. Every
       other path and method is `403 {"error": "agent tokens can't …"}`: `use <path>` for most,
       the older wording where there was one (`answer Claude Code's dialogs` for `/api/answer`,
-      `change the user's settings` for `/api/prefs`, `read Claude Code's dialogs` for
-      `/api/ask/<id>`, and so on). An endpoint added later is the user's alone unless this list
-      names it.
-    - It works only from this machine: a request with an agent token from any other address
-      (a tailnet or LAN peer, when the chat is bound there for the user's phone) is `403
-      {"error": "agent tokens work only from this machine (localhost)"}`. The user's token is
-      unaffected.
+      `change the user's settings` for `/api/prefs`, `change notifications` for `/api/push`,
+      `mark the user away` for `/api/active`, `mark what the user has seen` for `/api/seen`,
+      `read Claude Code's dialogs` for `/api/ask/<id>`, `read the user's notifications` for
+      `/api/latest`, `read screenshots` for `/api/shot`, `read audio takes` for `/api/audio`). An
+      endpoint added later is the user's alone unless this list names it.
+    - It works only from this machine: a request with an agent token from any other machine
+      (a tailnet or LAN peer, when the chat is bound there for the user's phone) is ``403
+      {"error": "agent tokens work only from this machine, at the address `wb chat url`
+      prints"}``. On a chat bound only to the tailnet or a LAN IP, an agent here uses that address
+      (localhost isn't served). The user's token is unaffected.
     - Its sends are limited to `AGENT_SENDS_PER_MIN` (30) a minute, then `429 {"error",
       "retry_after": <seconds>}`.
     - `wb chat token list` names the agents; `wb chat token revoke <name>` ends one at once
@@ -111,7 +114,7 @@ curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout
   message waits in the queue, and is read once a session in workbench mode with the chat on
   listens. A message unread for 6 hours (`expire` in the state) is never passed on.
 - **What `done` means:** the Claude turn that took the message (or that wrote the newest reply
-  returned) has ended. Claude may still report later, after work it handed off: its reply says
+  returned) has ended; another Claude Code session's turn never counts. Claude may still report later, after work it handed off: its reply says
   so, and `until=reply` waits for that report.
 - **`waiting_on_user: true`**: Claude is paused on the user (a permission, a plan, a question, or
   a consent it asked in words). While Claude works on your request, Claude Code's dialogs go to
@@ -186,8 +189,8 @@ A long poll for Claude's replies after the message `after` (a message's or a rep
 - Response: `{"replies": [...], "done": bool, "listener": {...}|null, "waiting_on_user": bool}`.
   - `replies`: Claude's rows after `after` that are for the caller: their `to` names the agent,
     or, for the user's token, `to` names `"user"` or is absent.
-  - `done`: a turn has ended since the newest reply returned, or, with none, since `after` (for a
-    message to Claude: the turn that took it).
+  - `done`: a turn has ended since the newest reply returned (one of the session that wrote it:
+    its `turn_by`), or, with none, since `after` (for a message to Claude: the turn that took it).
   - `waiting_on_user`: Claude is paused on the user: one of Claude Code's dialogs is open in the
     chat, or one in the terminal that the phone was told of. The work is waiting on the human,
     not stuck: keep waiting.
@@ -278,7 +281,7 @@ sent for it (to every device, or with `endpoint` to that one) → `{}`.
 The web app's Settings: `{"rows": [...], "ts": <seconds>}`. Each row is `{key, group, label, kind,
 …}`: `group` one of `shared`, `gpu`, `api`, `terminal`, `experimental` (in that order); `kind` one
 of `choice` (`value`, `choices: [{value, label, says}]`, `says`, `other`: any id is taken),
-`number` (`value`: a number or null for off, `unit`: `usd` or `per_kwh`, `says`), `info`
+`number` (`value`: a number or null for off, `unit`: `usd`, `says`), `info`
 (`text`), `action` (`text`, `choices` as buttons) or `note` (`text`, standing where its group's
 rows would be). A row may carry `help` (*POST /api/settings*). Read at most every 10 s; a write
 reads them again.
@@ -308,7 +311,7 @@ the Settings rows' cache (10 s), null when wb couldn't read them.
 The live view, as server-sent events (`text/event-stream`; send the bearer header, so `fetch`,
 not `EventSource`):
 - `event: top`, `data: <one wb top --json object, verbatim>`: the newest at once on connect, then
-  each tick (every 1, 2 or 5 s: Live refresh). Each event is followed by a blank line, as on
+  each tick (every 1, 2 or 5 s: stats.json's `every`, `wb stats set every`). Each event is followed by a blank line, as on
   `/api/stream`.
 - `event: down`, `data: {"why": str, "retry": <seconds>}`: the server's `wb top` ended; it is
   tried again after `retry` (30 s, doubling to 10 minutes), and `top` events come again once it
@@ -344,7 +347,8 @@ A **message** (`messages`, `replies`, `message`):
   user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `claude_pid?`
   (the Claude Code process that wrote it, on every Claude row: a reply, a screenshot, a listen),
   and on a `wb chat reply` from Claude Code `session?`, `claude_start?`, `claude_machine?` beside
-  it (the Claude Code session that wrote it, so the user's answer goes back to that session).
+  it (the Claude Code session that wrote it, so the user's answer goes back to that session),
+  `turn_by?` (on the listening session's reply: whose turn's end makes a wait on it `done`).
 
 An **ask** (`asks`, `/api/ask/<id>`): `{id: "ask-…", ts, tool, text, kind:
 "permission"|"plan"|"question", detail?, for?: [agent names], answer: null|"allow"|"deny"|"expired",
