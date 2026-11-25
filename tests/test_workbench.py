@@ -34,6 +34,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from unittest import mock
 import warnings
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -22704,6 +22705,98 @@ class LocalPatches(Base):
         with mock.patch.object(patches.shutil, "which", lambda n: None if n == "gh" else real(n)):
             self.assertIn("gh: missing: gh (GitHub's CLI) isn't installed", send(str(body), "--anyway"))
         self.assertEqual(self.gh_argv(), [])
+        self.assertFalse(self.sent())
+
+    def no_gh_home(self, downloads=True):
+        """#1291: a HOME of the test's own (never the user's ~/Downloads), with or without
+        Downloads, and a PATH that holds git and nothing else: no gh anywhere on it."""
+        tmp = Path(self.tmp.name)
+        home = tmp / "home"
+        (home / "Downloads" if downloads else home).mkdir(parents=True, exist_ok=True)
+        only = tmp / "only-git"
+        only.mkdir(exist_ok=True)
+        if not (only / "git").exists():
+            (only / "git").symlink_to(shutil.which("git"))
+        os.environ.update(HOME=str(home), PATH=str(only))
+        self.assertIsNone(shutil.which("gh"))
+        return home
+
+    def test_patch_zip_holds_each_local_patch_and_a_readme_and_they_apply_with_git_am_on_upstreams_base(self):
+        # #1291 (2026-11-24): a user with no GitHub account had no way to share a fix (wb patch
+        # send needs gh and a login); the zip is theirs to email upstream, and nothing is sent
+        self.as_clone()
+        one = self.commit(self.copy, "mine.txt", "mine\n", "fix the thing\n\nScope: everybody")
+        two = self.commit(self.copy, "also.txt", "also\n", "fix the other thing\n\nScope: everybody")
+        home = self.no_gh_home()
+        with mock.patch.object(socket.socket, "connect", side_effect=AssertionError("a network call")):
+            out = self.wb("patch", "zip")
+        path = Path(re.search(r"^wrote (\S+\.zip): 2 patch\(es\) on upstream's ", out, re.M).group(1))
+        day = time.strftime("%Y%m%d", time.gmtime())
+        self.assertEqual(path, home / "Downloads" / f"workbench-patch-{two[:7]}-{day}.zip")
+        self.assertIn("email it to adam.schaefers@icloud.com, or send it any way you like; nothing was sent", out)
+        self.assertIn("the patch files name the commit author (t <t@t>); edit them before sending if you'd "
+                      "rather not", out)
+        self.assertEqual(patches.UPSTREAM_CONTACT, "adam.schaefers@icloud.com")
+        self.assertFalse(self.gh_calls.exists())                          # gh never ran
+        got = Path(self.tmp.name) / "unzipped"
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            z.extractall(got)
+        folder = got / path.stem
+        self.assertEqual(sorted(n.split("/", 1)[1] for n in names),
+                         ["0001-fix-the-thing.patch", "0002-fix-the-other-thing.patch", "README.txt"])
+        readme = (folder / "README.txt").read_text()
+        for said in (self.base, "adam.schaefers@icloud.com", "git am", f"{one[:7]} fix the thing",
+                     f"{two[:7]} fix the other thing", "From: lines"):
+            self.assertIn(said, readme)
+        # upstream's side: the two apply cleanly with git am onto the base the README names
+        theirs = Path(self.tmp.name) / "theirs"
+        self.g(self.tmp.name, "clone", "-q", str(self.origin), str(theirs))
+        self.ident(theirs)
+        self.g(theirs, "switch", "-q", "-c", "patch", self.base)
+        self.g(theirs, "am", "-q", *map(str, sorted(folder.glob("*.patch"))))
+        self.assertEqual(self.g(theirs, "log", "--format=%s", f"{self.base}..HEAD").splitlines(),
+                         ["fix the other thing", "fix the thing"])
+        self.assertEqual((theirs / "also.txt").read_text(), "also\n")
+
+    def test_patch_zip_without_downloads_goes_under_the_state_and_takes_named_commits_in_locals_order(self):
+        # #1291: ~/Downloads only when it exists; named commits keep local's order (git am's),
+        # a second zip the same day keeps the first, and what isn't a patch is refused
+        self.as_clone()
+        one = self.commit(self.copy, "mine.txt", "mine\n", "fix the thing")
+        two = self.commit(self.copy, "also.txt", "also\n", "fix the other thing")
+        self.no_gh_home(downloads=False)
+        out = self.wb("patch", "zip", two, one, "--name", "two-fixes")
+        path = Path(re.search(r"^wrote (\S+\.zip)", out, re.M).group(1))
+        self.assertEqual(path.parent, store.home() / "patches" / "out")
+        self.assertTrue(path.name.startswith("workbench-patch-two-fixes-"))
+        with zipfile.ZipFile(path) as z:
+            self.assertEqual(sorted(n.split("/", 1)[1] for n in z.namelist() if n.endswith(".patch")),
+                             ["0001-fix-the-thing.patch", "0002-fix-the-other-thing.patch"])
+        again = Path(re.search(r"^wrote (\S+\.zip)", self.wb("patch", "zip", one, "--name", "two-fixes"),
+                               re.M).group(1))
+        self.assertEqual(again.name, path.stem + "-2.zip")
+        self.assertTrue(path.exists())
+        self.assertIn(f"{self.base[:7]} isn't one of local's patches", self.wb("patch", "zip", self.base[:7]))
+        self.assertIn("nosuch: no such commit", self.wb("patch", "zip", "nosuch"))
+        self.assertIn("--name 'Bad Name'", self.wb("patch", "zip", "--name", "Bad Name"))
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), sorted([path.name, again.name]))
+        self.g(self.copy, "reset", "-q", "--hard", self.base)
+        self.assertIn("no patches on local", self.wb("patch", "zip"))
+
+    def test_patch_send_without_gh_or_its_login_names_wb_patch_zip(self):
+        # #1291: no gh, or no GitHub login, and the user may have no account at all: the refusal
+        # names the way without GitHub
+        wt, body = self.prepared()
+        send = lambda: self.wb("patch", "send", "fix-thing", "--title", "Fix it", "--body-file", str(body))  # noqa: E731
+        self.gh_auth(hosts=False)
+        out = send()
+        self.assertIn("gh can't send it yet, nothing was sent", out)
+        self.assertIn("wb patch zip makes a .zip of the patch to email upstream yourself", out)
+        self.no_gh_home()
+        out = send()
+        self.assertIn("gh: missing", out)
+        self.assertIn("wb patch zip", out)
         self.assertFalse(self.sent())
 
     def test_patch_send_refuses_a_workflow_change_over_https_without_the_workflow_scope(self):

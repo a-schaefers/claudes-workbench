@@ -1411,6 +1411,7 @@ function sendsOut(words: string[]): { kind: '' | 'send' | 'out'; dirs: string[] 
   }
   const wb = wbArgs(cmd, args)
   if (wb && wb[0] === 'patch' && wb[1] === 'send') return { kind: 'send', dirs: [] }
+  // wb patch zip only writes a file the user may email themselves: nothing outward (#1291)
   return { kind: '', dirs: [] }
 }
 

@@ -639,7 +639,9 @@ printed, as a command of its own, `--title` and `--body-file` written out. The m
 to approve that send in a dialog, and wb refuses one it didn't approve: never route around it, and
 nothing goes upstream any other way (not a GitHub MCP tool, not a script). A "Don't send" is a
 no: say it wasn't sent, and ask again only if they bring it up. gh missing or logged out: say wb's hint; installing it is
-the user's yes, and the login is theirs (`! gh auth login`). Read `reference/patching.md` beside
+the user's yes, and the login is theirs (`! gh auth login`). When they say no to GitHub (no gh, no account, or they'd
+rather not), offer "want a .zip of the patch to email upstream yourself?"; on a yes, `wb patch zip` (it sends
+nothing), then tell them the path and the address it prints. Read `reference/patching.md` beside
 this file first; you write the patch yourself.
 
 ## Report to the user

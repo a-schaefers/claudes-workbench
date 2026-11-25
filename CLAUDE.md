@@ -68,7 +68,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   commits on branch `local` of a clone they own, rebased by `wb update` in a scratch worktree,
   never the live tree; a marketplace clone's changes saved before Claude Code's re-clone wipes
   them; `wb patch send`, the one fork, push and pull request (through `gh`, never a token
-  printed; under Claude Code only on the mod's dialog's yes). Its git calls run without hooks or a terminal, and it imports everything up front:
+  printed; under Claude Code only on the mod's dialog's yes); `wb patch zip`, the way without
+  GitHub (a .zip to email to `UPSTREAM_CONTACT`; local, no dialog). Its git calls run without hooks or a terminal, and it imports everything up front:
   `wb patch init` deletes the copy wb runs from.
 - `privacy.py`: where an API task's code goes (`where`, `PRIVACY_PAGES`, the first-task note),
   `local_only`, OpenRouter's routing, `holds_credential` (which token files an API lane hides) (ARCHITECTURE.md, *Privacy for API roles*).

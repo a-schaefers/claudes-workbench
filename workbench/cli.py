@@ -7156,6 +7156,8 @@ def cmd_patch(a):
         patches.send(PKG_ROOT, kind, a.slug, a.title, a.body_file, draft=a.draft, anyway=a.anyway)
     elif a.action == "check":
         patches.check(PKG_ROOT, kind, a.commit)
+    elif a.action == "zip":  # local: it sends nothing, so no dialog asks (#1291)
+        patches.zip_patches(PKG_ROOT, kind, a.commit, a.name)
     else:
         patches.upstream(PKG_ROOT, kind, a.commit, a.name)
 
@@ -8250,7 +8252,7 @@ def parser() -> argparse.ArgumentParser:
                    "session is told to wb resume it")
     s.set_defaults(f=cmd_update)
     s = sub.add_parser("patch", help="your own fixes to workbench, kept across wb update: init, list, "
-                       "drop, upstream, send, check")
+                       "drop, upstream, send, check, zip")
     ss = s.add_subparsers(dest="action", required=True)
     x = ss.add_parser("init", help="move a marketplace install to a clone of your own, its changes "
                       "carried over as patches")
@@ -8276,6 +8278,10 @@ def parser() -> argparse.ArgumentParser:
     x = ss.add_parser("check", help="run one patch's own tests on plain upstream: has upstream fixed it "
                       "another way? (drops nothing)", allow_abbrev=False)
     x.add_argument("commit", help="one of branch local's patches")
+    x = ss.add_parser("zip", help="a .zip of patches to email upstream yourself, without GitHub "
+                      "(sends nothing)", allow_abbrev=False)
+    x.add_argument("commit", nargs="*", help="branch local's patches (default: every one upstream lacks)")
+    x.add_argument("--name", help="the zip's slug (default: the newest commit's short sha)")
     s.set_defaults(f=cmd_patch)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
     return ap

@@ -111,6 +111,18 @@ dialog: tell them there what it would send; it waits until they are back at the 
    instead, `wb update` says so once and keeps the patch: then *Has upstream fixed it another
    way?* above.
 
+## Without GitHub ("want a .zip of the patch to email upstream yourself?")
+Many users have no GitHub account and don't want one. Whenever a patch is for everybody and the
+user says no to GitHub (no gh, no account, a "don't want to", or they decline the install or the
+login), offer the zip instead: "want a .zip of the patch to email upstream yourself?". `wb patch
+send` refusing over a missing gh or login says so too. On a yes: `wb patch zip` (every patch on
+`local` upstream lacks) or `wb patch zip <commit>…` (just those), `--name <slug>` for the file's
+name. It is local: no fetch, no gh, nothing sent, so no dialog asks; it needs no `wb patch upstream`
+first. Tell the user the path it printed (`~/Downloads`, else `$WB_HOME/patches/out/`) and the
+address, adam.schaefers@icloud.com, and pass on its one line that the patch files name the commit
+author (their git name and email): they may edit those first. Sending it is theirs; never email it
+yourself.
+
 ## gh, GitHub's CLI
 `wb patch upstream`, `wb patch send` and `wb doctor` say gh's state (`gh: ready as <login> over
 <protocol>`, else the state and what to do).
