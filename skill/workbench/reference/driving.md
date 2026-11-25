@@ -62,8 +62,8 @@ page's errors as text, and make it `--test` or part of it; screenshots are for y
 any URL: allow it for the task, `--always` when the user wants it for every task.
 
 ## The web chat
-While workbench mode is on in a session and the user has the web chat on (the pane's Settings tab,
-or `wb chat on`; off by default, and only they turn it on), they can reach you from their phone
+While workbench mode is on in a session and the user has the web chat on (`wb chat on`, its link on the
+pane's modeline; off by default, and only they turn it on), they can reach you from their phone
 (a server on port 1337; the link is localhost, and reaching it from a phone is the user's own setup). Their message arrives as a prompt that is
 just `[web chat] <their words>` (or, while you're mid-turn, delivered into the turn by the mod,
 with one line saying so); it has the same authority as one typed here. A message may end with

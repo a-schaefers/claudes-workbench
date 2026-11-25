@@ -1,12 +1,14 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { thinkStops, absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
+import { absolutePath, agentOf, isAbort, linkOf, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, delegates, pageShape, quietForJobs, routeCalls, routesSummary, sameCall, settingSaid, splashTarget, taskOfPath, tasksNamed, usd, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
-import { activity, loopLength, tickerCells } from './modeline.js'
+import { modeline } from './modeline.js'
 import type { WbTask } from '../types'
 
 // the no-break space the pane holds a unit whole with (`GPU 2+3`, `per M`, `61 tok/s`; #1048's review)
 const NB = '\u00a0'
+// the web app's link as `wb chat url --json` gives it: 72 characters (chat.url, a 43-character token)
+const LINK = 'http://localhost:1337/#token=' + 'Tk0'.repeat(14) + 'x'
 
 const PANE = {
   plugin: 'workbench',
@@ -187,6 +189,12 @@ test('a copy updated from /delegate gets its /workbench link from wb setup', asy
 function chatOn(files: Record<string, string>) {
   files['/wb/chat/switch.json'] = JSON.stringify({ on: true })
   return files
+}
+// `wb chat url --json` as chat.ensure answers it from the switch: off after `wb chat off`, else up
+function chatUrl(files: Record<string, string>) {
+  let on = true
+  try { on = JSON.parse(files['/wb/chat/switch.json'] ?? '{}').on !== false } catch { /* on */ }
+  return { value: { exitCode: 0, stdout: JSON.stringify(on ? { state: 'up', url: LINK } : { state: 'off' }), stderr: '' } }
 }
 
 // The Claude Code fakeTasks plays: the one the mod is tested on, unless a test says otherwise
@@ -552,7 +560,7 @@ test('after a reload in workbench mode, a /clear\'s new session id is kept in th
   on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
   on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
   // the chat atom as the earlier load left it, in the mode: it outlives the reload, mem doesn't
-  let held: any = { shape: 'chat-4', value: { key: 'k1', delegating: true, url: '', web: false } }
+  let held: any = { shape: 'chat-5', value: { key: 'k1', delegating: true, link: { state: 'checking' } } }
   let version = 1
   const isChat = (e: any) => e.key === 'chat' && e.plugin === 'workbench'
   on('state.get', (_: any, e: any, next: any) => isChat(e) ? { value: { value: held, version } } : next(e))
@@ -1192,7 +1200,7 @@ test('#1213: a stop for Agents on GPU wakes Claude to ask for the switch back, n
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
-  expect(woken[0]).toContain('Ask the user: Agents back to Both or API (the workbench pane, or `wb route all both` ' +
+  expect(woken[0]).toContain('Ask the user: Agents back to Both or API (the web app\'s Settings, or `wb route all both` ' +
     'on their yes), then `wb resume a`; or `wb takeover a` or `wb discard a`.')
   expect(woken[0]).not.toContain('higher cap')
   expect(woken[0]).not.toContain('wb feedback')
@@ -1665,44 +1673,6 @@ test('a running task writing its status on every tool call is re-read at most ev
   const n = watches()
   await clock.advance(1600)
   expect(watches()).toBe(n + 1)                                 // done: read at once
-})
-
-test('a running task\'s transcript is not read while the pane shows the Stats or Settings tab (#838)', async ($, on) => {
-  // #838: refreshLive checked only that the pane was shown, so a round was exported every five
-  // seconds on tabs that never draw it
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
-  const pane = fakeTasks(on, files, ['fix-it'], true, [], false)
-  const runs: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    return { value: { exitCode: 0, stdout: e.argv[1] === 'watch' ? JSON.stringify({ s: 'claude', t: 'x' }) : '', stderr: '' } }
-  })
-  on('process.spawn', async function* () {                       // wb events, and wb top for the Stats tab
-    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
-    await new Promise(() => {})
-    return { code: 0, signal: null }
-  })
-  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  await clock.advance(1000)
-  const watches = () => runs.filter(r => r[1] === 'watch').length
-  expect(watches()).toBe(1)                                      // the Tasks tab: read
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  for (const tab of ['tab-stats', 'tab-settings']) {
-    await ui.press({ key: tab })
-    const n = watches()
-    for (let i = 1; i <= 10; i++) {
-      files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'running', round: 1, updated_at: ts0 + i + (tab === 'tab-stats' ? 0 : 20) })
-      await clock.advance(2000)
-    }
-    expect(watches()).toBe(n)                                    // 20 s running: never read there
-  }
-  await ui.press({ key: 'tab-tasks' })
-  await clock.advance(1600)
-  expect(watches()).toBeGreaterThan(1)                           // back on Tasks: read again
-  await ui.unmount()
 })
 
 test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
@@ -2495,6 +2465,7 @@ test('the user is away once the chat page is used after their last terminal inpu
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
     const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'url') return chatUrl(files)
     if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-2-cd allow\n', stderr: '' } } // their setting
     if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: `1800000000000-abc12${++nid}\n`, stderr: '' } }
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
@@ -2577,6 +2548,7 @@ test('a dialog answered in the terminal after the phone was picked up for its no
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
     const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'url') return chatUrl(files)
     if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-2-cd allow\n', stderr: '' } } // their setting
     if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: '1800000000000-abc123\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
@@ -3660,25 +3632,6 @@ test('/workbench as the first message says its rules once, in the context blocks
   expect(rows).toEqual([])
 })
 
-test("the Stats tab's live rows wrap at spaces instead of losing their end to the pane's edge", () => {
-  // 2026-11-21: "GPU 0 Radeon RX 9070/9070 XT/9070 GRE █░░… 1.3/15.9 GiB · busy …": the busy bar,
-  // the watts and the sparkline were cut off in a 70-column pane
-  const gpu = [{ bold: true, text: 'GPU 0 ' }, { dim: true, text: 'Radeon RX 9070/9070 XT/9070 GRE ' },
-    { color: 'success', text: '█░░░░░░░░░░░' }, { text: ' 1.3/15.9 GiB ' }, { dim: true, text: '· busy ' },
-    { color: 'success', text: '░░░░░░░░' }, { text: ' 3% ' }, { text: '· 21 W ' }, { dim: true, text: '▁▁▂▁▁▁' }]
-  const lines = wrapParts(gpu, 70)
-  expect(lines.length).toBe(2)
-  for (const l of lines) expect(l.map(p => p.text).join('').length).toBeLessThanOrEqual(70)
-  const flat = (ls: typeof lines) => ls.map(l => l.map(p => p.text).join('')).join(' ').replace(/\s+/g, ' ')
-  expect(flat(lines)).toBe(gpu.map(p => p.text).join('').replace(/\s+/g, ' ').trim())  // nothing lost
-  expect(lines[1][0].text).toBe('  ')                                   // the rest indented under it
-  expect(lines[1].find(p => p.text.includes('░░░░░░░░'))?.color).toBe('success')  // colours kept
-  expect(wrapParts([{ text: 'Nothing running.' }], 70)).toEqual([[{ text: 'Nothing running.' }]])
-  const model = [{ text: '○ ' }, { text: 'Qwen3.8 27B UD-Q3_K_XL (Ollama) (40K) ' }, { dim: true, text: 'idle' },
-    { dim: true, text: ` · writes ~35${NB}tok/s · reads ~602${NB}tok/s · loads ~12s` }]
-  expect(flat(wrapParts(model, 70))).toContain('loads ~12s')
-})
-
 test('the bubble wraps its words into lines that fit, never cutting a line short', () => {
   const said = 'read /home/me/.local/state/workbench/tasks/fix-parser/worktree/src/parser.c and then the tests'
   const lines = wrapWords(said, 30)
@@ -3686,40 +3639,6 @@ test('the bubble wraps its words into lines that fit, never cutting a line short
   expect(lines.join(' ').replace(/\s+/g, '')).toBe(said.replace(/\s+/g, ''))  // nothing lost
   expect(wrapWords('All caught up.', 30)).toEqual(['All caught up.'])
   expect(wrapWords('', 30)).toEqual([''])
-})
-
-test('the Tasks tab ends with the week\'s saving, read from wb savings; the web chat link is the Settings tab\'s', async ($, on) => {
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  fakeTasks(on, chatOn({}))
-  const week = { period: 'week', tasks: 3, claude: 160000, self_est: 1390000, saved: 1230000, wh: 900, cost: null }
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'savings') return { value: { exitCode: 0, stdout: JSON.stringify(week), stderr: '' } }
-    if (e.argv[1] === 'chat' && e.argv[2] === 'url')
-      return { value: { exitCode: 0, stdout: 'https://box.tail.ts.net/#token=abc\n', stderr: '' } }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(3000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  const at = texts.indexOf('this week: saved ~1.2M Claude tokens (88%, estimate) · 900 Wh')
-  expect(at).toBeGreaterThan(-1)
-  expect(texts.slice(at + 1)).toEqual(["[•_•] Claude's Workbench"])          // never under the tasks (the user, 2026-11-19): only the modeline
-  await ui.press({ key: 'tab-settings' })
-  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).slice(-4, -1)).toEqual(['web chat https://box.tail.ts.net/#token=abc',
-    'web chat ', 'https://box.tail.ts.net/#token=abc'])                      // then the tabs and the modeline
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('the saving reads in thousands or millions, says when it cost more, and is empty with nothing to show', () => {
-  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
-  expect(savedLine(t({}))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
-  expect(savedLine(t({ wh: 1500 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh')
-  expect(savedLine(t({ wh: 1500, cost: 0.45 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh, cost 0.45')
-  expect(savedLine(t({ saved: -4000 }))).toBe('this week: cost ~4K more Claude tokens (estimate)')
-  expect(savedLine(t({ tasks: 0 }))).toBe('')
-  expect(savedLine('usage: wb …')).toBe('')
 })
 
 test('a night\'s backlog keeps the user away past six hours; without one, away lapses', () => {
@@ -4212,811 +4131,6 @@ test('a WB_HOME given with ~, relative or with a trailing slash is read where wb
   }
 })
 
-test('the probe row says whether it works, and turned on without probe it asks Claude to offer the setup', async ($, on) => {
-  // the user, 2026-11-20: the row read "On" while wb said it changed nothing yet; say whether it
-  // works, and let Claude offer to set probe up
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
-  const toasts: string[] = []
-  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
-  const asked: string[] = []
-  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
-  let found = false
-  let checks = 0
-  const missing = (level: string) => `probe: ${level}, but not set up: no probe with \`symbols\` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from github.com/probelabs/probe/releases, not crates.io's probe-code 0.6.0)`
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] !== 'experiment') return { value: { exitCode: 0, stdout: '', stderr: '' } }
-    if (e.argv[3]) files['/wb/experiments.json'] = JSON.stringify({ probe: e.argv[3] })
-    else checks++
-    const state = JSON.parse(files['/wb/experiments.json'] ?? '{}').probe ?? 'off'
-    const said = state === 'off' ? 'probe: off (wb experiment probe on)'
-      : found ? `probe: ${state} and working (probe-code 0.6.0)` : missing(state)
-    return { value: { exitCode: 0, stdout: `${said}${e.argv[3] ? '; tasks already started keep theirs' : ''}\n`, stderr: '' } }
-  })
-  const row = async (ui: any) => (await ui.findAll({ type: 'Button' })).map((b: any) => b.props.label)
-    .find((l: string) => l.includes('Agent code navigation'))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
-  expect(checks).toBe(1)                                            // off: asked once (it runs no probe then)
-  await ui.press({ key: 'probe' })
-  await ui.press({ key: 'probe:on' })
-  expect(toasts.filter(t => t.includes('code navigation'))).toEqual([
-    "workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up."])
-  expect(await row(ui)).toBe('▸ Agent code navigation: On (large files only), not set up')
-  await clock.advance(5000)                                         // the next poll starts Claude's turn
-  expect(asked).toHaveLength(1)
-  expect(asked[0]).toContain('The user just turned on Agent code navigation')
-  expect(asked[0]).toContain(missing('on'))
-  expect(asked[0]).toContain('github.com/probelabs/probe/releases')
-  expect(asked[0]).toContain('install nothing without their yes')
-
-  found = true                                                      // Claude installed it
-  await clock.advance(31_000)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await row(ui)).toBe('▸ Agent code navigation: On (large files only), working')
-  await ui.press({ key: 'probe' })
-  expect(await ui.find({ type: 'Text', text: /with probe \(probe-code 0\.6\.0\), instead of reading it whole/ })).toBeDefined()  // its version (the review, 2026-11-21)
-  await ui.press({ key: 'probe:off' })
-  expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
-  await ui.press({ key: 'probe' })
-  await ui.press({ key: 'probe:on' })
-  expect(toasts.filter(t => t.includes('code navigation'))).toHaveLength(2)
-  expect(toasts.at(-1)).toBe('workbench: Agent code navigation is on and working (probe-code 0.6.0): tasks started from now use it.')
-  await clock.advance(5000)
-  expect(asked).toHaveLength(1)                                     // working: nothing for Claude
-  await ui.unmount()
-})
-
-test('the probe row is off and on, on reading large files only, an old level reads as on, and on is marked recommended only when wb says', async ($, on) => {
-  // the owner, 2026-11-22 (#857): off and on, on is large files only; its levels went, and one
-  // saved before reads as on. "recommended" waits for a measurement (context.PROBE_RECOMMENDED),
-  // so it is wb's word, not the pane's
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/experiments.json': JSON.stringify({ probe: 'adaptable' }) }  // an old level
-  fakeTasks(on, files, [])
-  const runs: string[][] = []
-  let recommended = false
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    if (e.argv[1] !== 'experiment') return { value: { exitCode: 0, stdout: '', stderr: '' } }
-    if (e.argv[3]) files['/wb/experiments.json'] = JSON.stringify({ probe: e.argv[3] })
-    const best = recommended ? '; on is recommended' : ''
-    return { value: { exitCode: 0, stdout: `probe: off (wb experiment probe on)${best}\n`, stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only)')  // the old level: on
-  await ui.press({ key: 'probe' })
-  const options = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => / {2}[❯ ] /.test(l))
-  expect(await options()).toEqual(['    Off (default)', '  ❯ On (large files only)'])
-  for (const value of ['off', 'on']) {                                // each through wb
-    runs.length = 0
-    await ui.press({ key: `probe:${value}` })
-    expect(runs.some(r => r.join(' ') === `wb experiment probe ${value}`)).toBe(true)
-    await ui.press({ key: 'probe' })
-    expect((await options()).find(l => l.startsWith('  ❯'))?.toLowerCase()).toContain(value)
-  }
-  expect(await ui.find({ type: 'Text', text: /one function of a file over 1,500 lines with probe/ })).toBeDefined()  // what on does
-  for (const old of ['moderate', 'aggressive']) {                     // the other old levels, and true
-    files['/wb/experiments.json'] = JSON.stringify({ probe: old })
-    await ui.press({ key: 'tab-tasks' })
-    await ui.press({ key: 'tab-settings' })
-    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only)')
-  }
-  files['/wb/experiments.json'] = JSON.stringify({ probe: true })
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only)')
-  recommended = true                                                // Claude set PROBE_RECOMMENDED
-  await clock.advance(31_000)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only) (recommended)')
-  await ui.unmount()
-})
-
-test('turning the web chat on from the pane says why wb couldn\'t, and pins no link (#690)', async ($, on) => {
-  // #690: setWeb ignored wb's failure; the row read On and the pane pinned a link that gave a 401
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
-  const toasts: string[] = []
-  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'chat' && e.argv[2] === 'on') {             // wb leaves the switch off
-      return { value: { exitCode: 1, stdout: '', stderr: 'wb: web chat left off: another account\'s chat answers on port 1337: wb chat on --port <free port>\n' } }
-    }
-    if (e.argv[1] === 'chat' && e.argv[2] === 'url') return { value: { exitCode: 0, stdout: 'http://localhost:1337/#token=abc\n', stderr: '' } }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-settings' })
-  await ui.press({ key: 'chat' })
-  await ui.press({ key: 'chat:on' })
-  expect(toasts.some(t => t.includes("another account's chat answers on port 1337"))).toBe(true)
-  expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')
-  expect(await ui.find({ type: 'Text', text: /token=abc/ })).toBeUndefined()
-  await ui.unmount()
-})
-
-test('the settings rows open to Buttons, pick through wb, and say the sentence of the option the ring is on', async ($, on) => {
-  // #93, and the user, 2026-11-19: a Select's sentence followed only the saved choice, and the options
-  // should take a click or the keys
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
-  const runs: string[][] = []
-  const ring: any[] = []
-  on('ui.focus', (_: any, e: any) => { ring.push(e); return { value: {} } })   // the engine, beneath: the ring moves
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    if (e.argv[1] === 'chat' && e.argv[2] === 'on') files['/wb/chat/switch.json'] = JSON.stringify({ on: true })
-    if (e.argv[1] === 'coding') files['/wb/coding.json'] = JSON.stringify({ mode: e.argv[2] })  // what wb writes
-    if (e.argv[1] === 'experiment' && e.argv[3]) files['/wb/experiments.json'] = JSON.stringify({ [e.argv[2]]: e.argv[3] })  // a set, not the row's ask
-    if (e.argv[1] === 'chat' && e.argv[2] === 'url')
-      return { value: { exitCode: 0, stdout: 'http://localhost:1337/#token=abc\n', stderr: '' } }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  for (const rows of [24, 8]) {                                      // the apprentice in pixels, then its face
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: rows } } })
-    expect(await ui.find({ key: 'coding' })).toBeUndefined()                                           // a tab of their own
-    expect((await ui.findAll({ type: 'Button' })).slice(-3).map(b => b.props.label)).toEqual(['Tasks', 'Stats', 'Settings'])  // last
-    expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("[•_•] Claude's Workbench")  // the modeline under them
-    await ui.press({ key: 'tab-settings' })
-    expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("Claude's Workbench")         // on every tab
-    await ui.press({ key: 'tab-stats' })
-    expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("Claude's Workbench")
-    await ui.press({ key: 'tab-settings' })
-    expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide (default)')  // no saved choice
-    expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')                      // off by default
-    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: Off (default)')  // opt-in
-    expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()                                       // one row each at rest
-    const labels = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
-    expect(labels.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // last, apart (the user, 2026-11-21)
-    expect(await ui.find({ type: 'Text', text: /^Experimental · may change or go away$/ })).toBeDefined()   // under their own heading
-    expect(await ui.find({ type: 'Text', text: /web chat / })).toBeUndefined()                         // and no link
-    await ui.press({ key: 'tab-tasks' })
-    await ui.unmount()
-  }
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-settings' })
-  await ui.press({ key: 'coding' })
-  expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label).filter((l: string) => / {2}[❯ ] /.test(l)))
-    .toEqual(['    Only when I say', '    Ask me first', '  ❯ Let Claude decide (default)'])
-  const says = async () => ((await ui.find({ key: 'coding-says' })) as any)?.children?.[0]?.children?.[0]?.children?.[0]?.trim()
-  expect(await says()).toBe('Claude uses its judgment to guide the agent or make a fix itself.')  // the chosen one's
-  await $.ui.focus({ component: 'Pane', requestId: 'workbench', element: 'coding:only', origin: { kind: 'person' } } as any)  // the person's Tab, as the engine raises it
-  expect(await says()).toBe('You tell Claude when to write code.')                                         // the ring's
-  await ui.press({ key: 'coding:ask' })
-  expect(runs.at(-1)).toEqual(['wb', 'coding', 'ask'])
-  expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Ask me first')
-  expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()
-  await ui.press({ key: 'chat' })
-  await ui.press({ key: 'chat:on' })
-  expect(runs.some(r => r.join(' ') === 'wb chat on')).toBe(true)
-  expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: On')
-  await ui.press({ key: 'probe' })
-  await ui.press({ key: 'probe:on' })
-  expect(runs.some(r => r.join(' ') === 'wb experiment probe on')).toBe(true)   // then the row asks how it came out
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only)')
-  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts.at(-2)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once (the modeline last)
-  await ui.press({ key: 'tab-tasks' })
-  expect(await ui.find({ type: 'Text', text: /token=abc/ })).toBeUndefined()                    // not under the tasks
-  await ui.press({ key: 'tab-settings' })
-  await ui.unmount()
-  const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })    // the same rows there
-  expect((await phone.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Ask me first')
-  await phone.unmount()
-})
-
-const FEED = {
-  ts: 1_800_000_000, tasks: 9, settings: { recording: true, live: true, every: 2 },
-  periods: {
-    week: { tasks: 4, landed: 3, accepted_pct: 75, savings: { saved: 1_230_000, wh: 600, cost: null }, score: { score: 62 },
-      energy: { wh: 900 } },
-    all: { tasks: 9, landed: 8, accepted_pct: 89 },
-  },
-  streak: { current: 0, best: 3, days: 5 },
-  absorbed: { auto_fixes: 7, auto_fixed_tasks: 3 },
-  questions: { asked: 2, answered: 1 },
-  models: { 'ollama/m': { tasks: 9, accepted_pct: 89, rounds: 1.4, minutes: 14, speed: { write: 38 },
-    write_trend: [[1, 30], [2, 40]], write_change_pct: 12 } },
-  days: [{ day: '2026-11-19', tasks: 0 }, { day: '2026-11-20', tasks: 2 }],
-  guards: { silence: 1, repeat: 2 },
-}
-
-test('the Stats tab draws the history, read from wb stats only while it is shown and again when a task closes', async ($, on) => {
-  // #406: no timer, and nothing at all while another tab, or no pane, is shown
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
-  const pane = fakeTasks(on, files, [])
-  const reads: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'stats' && e.argv[2] === '--json') {
-      reads.push(e.argv)
-      return { value: { exitCode: 0, stdout: JSON.stringify(FEED), stderr: '' } }
-    }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)                                                        // the pane open, on its Tasks tab
-  await clock.advance(31_000)
-  expect(reads.length).toBe(0)                                           // the Tasks tab: never read
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await clock.advance(10)
-  expect(reads.length).toBe(1)
-  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts).toContain('This week: score 62/100 · saved ~1.2M Claude tokens (estimate) · 4 tasks · 3 landed (75%) · 900 Wh')
-  expect(texts).toContain('Streak: best: 3 days in a row with a task landed')          // a run that ended isn't said
-  expect(texts.some(t => t.includes('the same call repeated 2 · silence 1'))).toBe(true)
-  expect(texts.some(t => t.includes(`writes ~38${NB}tok/s ▆█ (+12%)`))).toBe(true)
-  await clock.advance(31_000)
-  expect(reads.length).toBe(1)                                           // nothing changed: not read again
-  files['/wb/results.jsonl'] = '{}\n{}\n'                                // a task closed
-  await clock.advance(31_000)
-  expect(reads.length).toBe(2)
-  pane.show(false)                                                       // put away
-  files['/wb/results.jsonl'] = '{}\n{}\n{}\n'
-  await clock.advance(31_000)
-  expect(reads.length).toBe(2)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('the Stats tab names a spend stop in what stopped agents', async ($, on) => {
-  // #1019: the runner's `spend` guard (the day's API spend cap) read as a bare "spend"
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
-  const pane = fakeTasks(on, files, [])
-  on('process.run', (_: any, e: any) => e.argv[1] === 'stats' && e.argv[2] === '--json'
-    ? { value: { exitCode: 0, stdout: JSON.stringify({ ...FEED, guards: { spend: 2, silence: 1 } }), stderr: '' } }
-    : { value: { exitCode: 0, stdout: '', stderr: '' } })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await clock.advance(10)
-  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts.some(t => t.includes('the API day cap 2 · silence 1'))).toBe(true)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('the Stats tab reads the history again once its day has ended, with nothing on disk changed', async ($, on) => {
-  // #575: an ended streak, last week's "This week" and a 30-day chart ending days ago stayed until
-  // a task closed: the feed says when its day ends (until), and a load reads it once anyway
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
-  const pane = fakeTasks(on, files, [])
-  const reads: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'stats' && e.argv[2] === '--json') {
-      reads.push(e.argv)
-      return { value: { exitCode: 0, stdout: JSON.stringify({ ...FEED, until: clock.now() / 1000 + 60 }), stderr: '' } }
-    }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await clock.advance(10)
-  expect(reads.length).toBe(1)
-  await clock.advance(31_000)
-  expect(reads.length).toBe(1)                                           // the same day: not read again
-  await clock.advance(62_000)
-  expect(reads.length).toBe(2)                                           // past midnight: read again
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('a load reads the history once even when the feed an earlier load kept still matches the files', async ($, on) => {
-  // #575: the stats atom, key included, survives /reload-plugins, so a reload never re-read it
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
-  const pane = fakeTasks(on, files, [])
-  const kept = { key: `${files['/wb/results.jsonl'].length}@0 - - - - -`, feed: { ...FEED, until: 1_900_000_000 } }
-  on('state.get', (_: any, e: any, next: any) => e.key === 'stats' && e.plugin === 'workbench'
-    ? { value: { value: { shape: 'stats-1', value: kept }, version: 1 } } : next(e))
-  const reads: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
-    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify(FEED) : '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await clock.advance(10)
-  expect(reads.length).toBe(1)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('the Stats tab reads the history again after wb optimize, a bench run, a price, and on its press', async ($, on) => {
-  // #549: the key stamped results.jsonl and stats.json alone, so the tab kept a feed without the
-  // optimized windows, the bench result or the new price until a task closed, pressed or not
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
-  const pane = fakeTasks(on, files, [])
-  const reads: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
-    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ ...FEED, until: 1_900_000_000 }) : '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await clock.advance(10)
-  expect(reads.length).toBe(1)
-  await clock.advance(31_000)
-  expect(reads.length).toBe(1)                                           // nothing changed
-  const steps: [string, string][] = [['/wb/optimize.json', '{"models": {}}'], ['/wb/bench/runs.jsonl', '{}\n'],
-    ['/home/u/.config/workbench/savings.json', '{"kwh_price": 0.3}']]
-  for (const [i, [path, text]] of steps.entries()) {
-    files[path] = text
-    await clock.advance(31_000)
-    expect(reads.length).toBe(2 + i)
-  }
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-stats' })                                   // pressed: read, files unchanged
-  await clock.advance(10)
-  expect(reads.length).toBe(5)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('the Stats tab reads the history again after a machine of a network home measures (#894)', async ($, on) => {
-  // #894: on a network home each machine keeps optimize.json and speed.json in machines/<id>/,
-  // which the key never stamped: the tab kept a feed without the machine's new measurements
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
-  const pane = fakeTasks(on, files, ['m-a'])                     // fs.list: machines/m-a (no tasks/)
-  const reads: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
-    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ ...FEED, until: 1_900_000_000 }) : '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await clock.advance(10)
-  expect(reads.length).toBe(1)
-  await clock.advance(31_000)
-  expect(reads.length).toBe(1)                                           // nothing changed
-  for (const [i, f] of ['optimize.json', 'speed.json'].entries()) {
-    files[`/wb/machines/m-a/${f}`] = '{}'
-    await clock.advance(31_000)
-    expect(reads.length).toBe(2 + i)
-  }
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('the Stats tab\'s settings pick through wb, progress checks stay off by default, and the price is typed', async ($, on) => {
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
-  const runs: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    if (e.argv[1] === 'stats' && e.argv[2] === 'set')
-      files['/wb/stats.json'] = JSON.stringify({ [e.argv[3]]: e.argv[3] === 'every' ? Number(e.argv[4]) : e.argv[4] === 'on' })
-    if (e.argv[1] === 'savings' && e.argv[2] === '--price')
-      return { value: { exitCode: 0, stdout: JSON.stringify(e.argv[3] === 'off' ? { tasks: 0, price: null } :
-        { tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 1500, cost: 0.45, price: Number(e.argv[3]) }), stderr: '' } }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'record' }))?.props.label).toBe('▸ Stats recording: On (default)')
-  expect((await ui.find({ key: 'live' }))?.props.label).toBe('▸ Live view: On (default)')
-  expect((await ui.find({ key: 'every' }))?.props.label).toBe('▸ Live refresh: 2 s (default)')
-  expect((await ui.find({ key: 'progress' }))?.props.label).toBe('▸ Progress checks: Off (default)')
-  await ui.press({ key: 'record' })
-  await ui.press({ key: 'record:off' })
-  expect(runs.some(r => r.join(' ') === 'wb stats set recording off')).toBe(true)
-  expect((await ui.find({ key: 'record' }))?.props.label).toBe('▸ Stats recording: Off')
-  await ui.press({ key: 'every' })
-  await ui.press({ key: 'every:5' })
-  expect(runs.some(r => r.join(' ') === 'wb stats set every 5')).toBe(true)
-  await ui.press({ key: 'progress' })
-  await ui.press({ key: 'progress:on' })
-  expect(runs.some(r => r.join(' ') === 'wb progress on')).toBe(true)
-  await ui.input({ key: 'price', text: 'cheap' })                        // not a number: wb isn't asked
-  expect(runs.some(r => r[2] === '--price')).toBe(false)
-  await ui.input({ key: 'price', text: '$0.30' })
-  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
-  expect((await ui.find({ key: 'price' }))?.props.value).toBe('0.3')
-  runs.length = 0
-  await ui.input({ key: 'price', text: '0,30' })                         // #609: a decimal comma
-  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
-  await ui.press({ key: 'tab-tasks' })                                  // the footer shows the cost
-  expect((await ui.findAll({ type: 'Text' })).some(t => String(t.text).includes('1.5 kWh, cost 0.45'))).toBe(true)
-  await ui.press({ key: 'tab-settings' })
-  runs.length = 0
-  await ui.input({ key: 'price', text: '' })                             // an empty submit clears it
-  expect(runs.some(r => r.join(' ') === 'wb savings --price off --json')).toBe(true)
-  expect((await ui.find({ key: 'price' }))?.props.value).toBe('')
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('the Progress checks row names a set --after threshold, and picking the option already chosen runs nothing (#578)', async ($, on) => {
-  // #578: the row's On said "its typical length" while `wb progress on --after 30` held, and
-  // picking On again ran a bare `wb progress on`, which then dropped the threshold
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/progress.json': JSON.stringify({ on: true, after: 30.0, ts: 1_800_000_000 }) }
-  fakeTasks(on, files, [])
-  const runs: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    if (e.argv[1] === 'progress' && e.argv[2]) {
-      const was = JSON.parse(files['/wb/progress.json'] ?? '{}')
-      files['/wb/progress.json'] = JSON.stringify({ ...was, on: e.argv[2] === 'on' })   // wb keeps after
-    }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
-  const label = async (ui: any) => (await ui.find({ key: 'progress' }))?.props.label
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await label(ui)).toBe('▸ Progress checks: On, after 30 min')
-  await ui.press({ key: 'progress' })
-  expect((await ui.find({ key: 'progress:on' }))?.props.label).toBe('  ❯ On, after 30 min')
-  expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('A task past 30 min of active work gets a check')
-  await ui.press({ key: 'progress:on' })                               // the one already chosen
-  expect(runs.filter(r => r[1] === 'progress')).toEqual([])            // folds the row, runs nothing
-  expect(await label(ui)).toBe('▸ Progress checks: On, after 30 min')
-  await ui.press({ key: 'progress' })
-  await ui.press({ key: 'progress:off' })
-  expect(runs.filter(r => r[1] === 'progress').map(r => r.join(' '))).toEqual(['wb progress off'])
-  expect(await label(ui)).toBe('▸ Progress checks: Off (default)')
-
-  files['/wb/progress.json'] = JSON.stringify({ on: true, ts: 1_800_000_000 })  // --after 0 cleared it
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await label(ui)).toBe('▸ Progress checks: On')
-  await ui.unmount()
-})
-
-const TICK = {
-  ts: 1_800_000_000, every: 2,
-  gpus: [{ index: 0, name: 'Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070 XT]', used: 2 ** 33, total: 2 ** 34, busy: 40, watts: 120 }],
-  running: [{ task: 'fix-it', model: 'ollama/m', label: 'Model M', phase: 'running', round: 2, round_s: 75, tok_s: 41.2, tok_s_from: 'live', context_pct: 31 }],
-  rack: [{ model: 'ollama/m', label: 'Model M', state: 'resident', gpu_bytes: 2 ** 33, write_tok_s: 40, read_tok_s: 900, load_s: 9, tasks: ['fix-it'] },
-    { model: 'ollama/n', label: 'Model N', state: 'idle', write_tok_s: 20 }],
-  queue: [{ task: 'later', model: 'ollama/n', waited_s: 30 }],
-}
-
-test('the live view runs wb top only while the Stats tab is on screen with Live view on, and ends it when left', { timeoutMs: 20_000 }, async ($, on) => {
-  // the kit's 5 s default timed it out on a loaded machine (#546)
-  // #408: hidden, minimized, another tab or Live view off: no child at all
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '' }
-  const pane = fakeTasks(on, files, [], true, [], false)
-  let starts = 0, ends = 0
-  on('process.spawn', async function* (_: any, e: any) {
-    if (e.argv[1] !== 'top') {                                           // wb events, as fakeTasks's
-      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
-      await new Promise(() => {})
-    }
-    starts += 1
-    try {
-      for (;;) {
-        yield { stream: 'stdout', text: JSON.stringify(TICK) + '\n' }
-        await new Promise(r => setTimeout(r, 5))
-      }
-    } finally {
-      ends += 1
-    }
-  })
-  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  await clock.advance(31_000)
-  expect(starts).toBe(0)                                                 // the Tasks tab
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await new Promise(r => setTimeout(r, 30))
-  expect(starts).toBe(1)
-  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts.some(t => t.startsWith('GPU 0 Radeon RX 9070 XT ██████░░░░░░ 8.0/16.0 GiB · busy ███▎░░░░ 40% · 120 W'))).toBe(true)
-  expect(texts.some(t => t.includes('fix-it Model M · running · round 2 · 1m15s · 41 tok/s · context 31%'))).toBe(true)
-  expect(texts.some(t => t.includes(`● Model M resident 8.0 GiB on the GPU · writes ~40${NB}tok/s · reads ~900${NB}tok/s · loads ~9s ← fix-it`))).toBe(true)
-  expect(texts.some(t => t.includes('◌ later waits for the GPU (30s)'))).toBe(true)
-  await clock.advance(31_000)
-  expect(starts).toBe(1)                                                 // one child, not one a poll
-  await ui.press({ key: 'tab-tasks' })
-  await new Promise(r => setTimeout(r, 30))
-  expect(ends).toBe(1)                                                   // left: ended
-  files['/wb/stats.json'] = JSON.stringify({ live: false })
-  await ui.press({ key: 'tab-stats' })
-  await clock.advance(31_000)
-  await new Promise(r => setTimeout(r, 30))
-  expect(starts).toBe(1)                                                 // Live view off: never started
-  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Now')).toBe(false)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('a failing wb stats or wb top is tried again after a while, not at every poll, and says why', async ($, on) => {
-  // #553: a failed full-history read ran again at every 1.5 s poll while a task ran, and the tab
-  // said "Reading…" forever; a wb top that ended at once was restarted every 30 s, its stderr dropped
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
-  task(files, 'fix-it', 'running')                                        // polls every 1.5 s
-  const pane = fakeTasks(on, files, ['fix-it'], true, [], false)
-  let stats = 0, tops = 0
-  on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'stats' && e.argv[2] === '--json') {
-      stats += 1
-      return { value: { exitCode: 1, stdout: '', stderr: 'Traceback (most recent call last):\nValueError: a bad row\n' } }
-    }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
-  on('process.spawn', async function* (_: any, e: any) {
-    if (e.argv[1] !== 'top') {                                           // wb events, as fakeTasks's
-      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
-      await new Promise(() => {})
-    }
-    tops += 1
-    yield { stream: 'stderr', text: "wb: invalid choice: 'top'\n" }        // an older wb on PATH
-    return { value: { code: 2, signal: null } }
-  })
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await clock.advance(29_000)
-  expect(stats).toBe(1)                                                   // not twenty
-  let texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts).toContain('History unavailable: ValueError: a bad row (wb stats --json)')
-  expect(tops).toBe(1)
-  expect(texts.some(t => t.includes("can't be read"))).toBe(false)        // once may be a blip
-  await clock.advance(2_000)
-  expect(tops).toBe(2)
-  texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts).toContain("This machine can't be read: wb: invalid choice: 'top' (wb top --json)")
-  await clock.advance(30_000)                                             // 61 s in
-  expect(tops).toBe(2)                                                    // its wait doubled
-  expect(stats).toBe(2)                                                   // 60 s after the first
-  await clock.advance(117_000)
-  expect(stats).toBe(2)                                                   // and then 120 s
-  await clock.advance(3_000)
-  expect(stats).toBe(3)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.unmount()
-})
-
-test('the history keeps its last feed when a read fails, and says it is not updated', () => {
-  expect(statsLines(null, 'timed out')).toEqual([{ label: '', text: 'History unavailable: timed out (wb stats --json)' }])
-  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1 } } }, 'timed out'))
-    .toEqual([{ label: '', text: 'Not updated: timed out (wb stats --json)' }, { label: 'This week', text: '1 task · 1 landed' }])
-})
-
-test('a poll and tab presses at once start one wb top, and leaving ends every one started (#546)', { timeoutMs: 20_000 }, async ($, on) => {
-  // two syncTops at once both saw no child across the clock's await and both spawned; only the
-  // second was ended by a close, the first ran on beside the next one, and both fed the sparkline
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '' }
-  const pane = fakeTasks(on, files, [], true, [], false)
-  let starts = 0, ends = 0, most = 0
-  on('process.spawn', async function* (_: any, e: any) {
-    if (e.argv[1] !== 'top') {
-      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
-      await new Promise(() => {})
-    }
-    starts += 1
-    most = Math.max(most, starts - ends)
-    const stall = starts === 2                                           // the second is slow to print
-    try {
-      for (;;) {
-        yield { stream: 'stdout', text: JSON.stringify(TICK) + '\n' }
-        await new Promise(r => setTimeout(r, stall ? 60 : 5))
-      }
-    } finally {
-      ends += 1
-    }
-  })
-  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  pane.show(true)
-  await clock.advance(31_000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await Promise.all([ui.press({ key: 'tab-stats' }), ui.press({ key: 'tab-stats' }), clock.advance(31_000)])
-  await new Promise(r => setTimeout(r, 40))
-  expect(starts).toBe(1)
-  for (let i = 0; i < 3; i++) {                                          // away and back at once, over and over
-    await Promise.all([ui.press({ key: 'tab-tasks' }), ui.press({ key: 'tab-stats' })])
-    await Promise.all([ui.press({ key: 'tab-stats' }), clock.advance(31_000)])
-    await new Promise(r => setTimeout(r, 150))
-    expect(starts - ends).toBeLessThanOrEqual(1)                         // never one left running beside it
-  }
-  await ui.press({ key: 'tab-tasks' })
-  await new Promise(r => setTimeout(r, 150))
-  expect(starts - ends).toBe(0)                                          // each one started is ended
-  expect(most).toBeLessThanOrEqual(2)                                    // one ending as the next starts, no more
-  await ui.unmount()
-})
-
-test('a live view the engine put away starts again as soon as the pane is back, without its old tick (#552)', { timeoutMs: 20_000 }, async ($, on) => {
-  // its own loop's break was booked as a crash: no wb top for 30 s, and the last tick drawn as Now
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/results.jsonl': '' }
-  const pane = fakeTasks(on, files, [], true, [], false)
-  let starts = 0, ends = 0
-  on('process.spawn', async function* (_: any, e: any) {
-    if (e.argv[1] !== 'top') {
-      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
-      await new Promise(() => {})
-    }
-    starts += 1
-    const first = starts === 1
-    try {
-      if (!first) await new Promise(r => setTimeout(r, 100))           // later ones are slow to their first line
-      for (;;) {
-        yield { stream: 'stdout', text: JSON.stringify(first ? TICK : { ...TICK, running: [] }) + '\n' }
-        await new Promise(r => setTimeout(r, 5))
-      }
-    } finally {
-      ends += 1
-    }
-  })
-  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
-  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })  // workbench mode on
-  await clock.advance(31_000)
-  let ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-stats' })
-  await new Promise(r => setTimeout(r, 30))
-  expect(starts).toBe(1)
-  const said = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect((await said()).some(t => t.includes('fix-it Model M · running'))).toBe(true)
-  pane.show(false)                                                       // the engine puts it away
-  await new Promise(r => setTimeout(r, 30))
-  expect(ends).toBe(1)                                                   // ended within a tick
-  expect((await said()).some(t => t.includes('fix-it'))).toBe(false)      // and its tick forgotten
-  await ui.unmount()
-  await clock.advance(5_000)
-  pane.show(true)                                                        // and draws it again 5 s on
-  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await clock.settle()
-  expect(starts).toBe(2)                                                 // at once, not 30 s later
-  expect((await said()).some(t => t.includes('fix-it'))).toBe(false)      // the old tick isn't Now
-  expect((await said())).toContain('Reading this machine…')
-  pane.show(false)
-  await new Promise(r => setTimeout(r, 150))
-  expect(ends).toBe(2)
-  await ui.unmount()
-  // /workbench again while in workbench mode (no poll of its own) brings the pane back, and the
-  // live view with it
-  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
-  await clock.settle()
-  expect(starts).toBe(3)
-  await new Promise(r => setTimeout(r, 30))
-  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
-  await ui.press({ key: 'tab-tasks' })
-  await new Promise(r => setTimeout(r, 150))
-  expect(ends).toBe(3)
-  await ui.unmount()
-})
-
-test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {
-  const text = (gpus: any[]) => liveLines({ snap: { ts: 0, every: 2, gpus, running: [], rack: [], queue: [] }, busy: {} } as any)
-    .map(r => r.map(p => p.text).join(''))
-  expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 no reading ')
-})
-
-test('an idle Apple silicon Mac draws its RAM in use against all its RAM and names the GPU limit beside it (#701)', () => {
-  const lines = liveLines({ snap: { ts: 0, every: 2, running: [], rack: [], queue: [],
-    gpus: [{ name: 'Apple M2 (10-core GPU)', unified: true, total: 16 * 2 ** 30, used: 11.12 * 2 ** 30,
-      limit: 10.67 * 2 ** 30 }] }, busy: {} } as any)
-  const row = lines[0]
-  expect(row[2].color).toBe('success')  // under 80%: the GPU isn't full
-  expect(row.map(p => p.text).join('')).toContain(' 11.1/16.0 GiB · GPU may wire 10.7 GiB ')
-})
-
-test('a model all in RAM on a machine with no GPU memory is in RAM, not split (#551)', () => {
-  const lines = liveLines({ snap: { ts: 0, every: 2, gpus: [], running: [], queue: [],
-    rack: [{ model: 'ollama/m', label: 'M', state: 'cpu', cpu_bytes: 2 ** 33 }] }, busy: {} } as any)
-  const row = lines.find(r => r.some(p => p.text.startsWith('M ')))!
-  expect(row.map(p => p.text).join('')).toBe('● M cpu 8.0 GiB in RAM')
-  expect(row[0].color).toBe('success')
-})
-
-test('a card is named by its product, never the vendor tag, as wb top names it (#576)', () => {
-  const amd = 'Advanced Micro Devices, Inc. [AMD/ATI]'
-  expect(cardName(`${amd} Phoenix1 (rev c4)`)).toBe('Phoenix1')
-  expect(cardName(`${amd} Device 1586 (rev c1)`)).toBe('Device 1586')
-  expect(cardName(`${amd} Navi 48 [Radeon RX 9070 XT] (rev c0)`)).toBe('Radeon RX 9070 XT')
-  expect(cardName('NVIDIA GeForce RTX 4090')).toBe('NVIDIA GeForce RTX 4090')
-})
-
-test('the history says nothing it has no data for, and a new install how to begin', () => {
-  expect(statsLines(null)).toEqual([{ label: '', text: 'Reading the history…' }])
-  expect(statsLines({ tasks: 0 })[0].text).toMatch(/^No finished tasks yet/)
-  // #549: optimized and benched before the first judged task, the tab said only the placeholder
-  const early = statsLines({ ts: 1, until: 2, settings: {}, tasks: 0,
-    optimized: { 'ollama/x': { window: 32768, fits: true } }, bench: { 'ollama/x': { run: 'r1', day: '2026-11-20', passed: 3, of: 4 } } })
-  expect(early).toEqual([{ label: 'Bench', text: 'ollama/x 3/4 (2026-11-20)' },
-    { label: 'Optimized', text: 'ollama/x 32K all on the GPU' }])
-  // #609: the energy's cost labelled as the footer and `wb savings` label it, no bare "(0.27)"
-  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, energy: { wh: 900, cost: 0.27 } } } })[0].text)
-    .toContain('900 Wh, cost 0.27')
-  const lines = statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, accepted_pct: 100 } } })
-  expect(lines).toEqual([{ label: 'This week', text: '1 task · 1 landed (100%)' }])   // no savings, no zeros
-  expect(spark([0, 0])).toBe('')
-  expect(spark([1, 4, 8])).toBe('▂▅█')
-  expect(priceOf('{"price": 0.3}')).toBe(0.3)
-  // #609: a decimal comma and a currency sign or code before or after; empty clears; no hex
-  for (const typed of ['0,30', '€0.30', '0.30 EUR', '$0.3', ' 0.3 ', '0.30€', 'kr 0,3', '.3'])
-    expect(parsePrice(typed)).toBe(0.3)
-  expect(parsePrice('')).toBe('off')
-  for (const typed of ['0x10', '1e3', 'cheap', '0', '-0.3', '1,000.50', '0.3.1'])
-    expect(parsePrice(typed)).toBe(null)
-  expect(priceOf('{"price": null}')).toBe(null)
-  expect(priceOf('not json')).toBe(null)
-})
-
-test('the history claims no more fixed or answered than the feed confirms', () => {
-  // #562: two failed auto-fix rounds read "fixed by the agent", a timed-out question "answered"
-  const said = (f: any) => statsLines({ tasks: 1, ...f }).map(l => `${l.label}: ${l.text}`)
-  const lines = said({ absorbed: { auto_fixes: 2 }, questions: { asked: 1 } })
-  expect(lines).toContain('Without waking Claude: 2 test failures sent back to the agent')
-  expect(lines).toContain('Questions: 1 asked mid-task')
-  expect(lines.join('\n')).not.toMatch(/fixed|answered/)
-  expect(said({ absorbed: { auto_fixes: 3, auto_fixed_tasks: 1 }, questions: { asked: 3, answered: 1 } }))
-    .toEqual(['Without waking Claude: 3 test failures sent back to the agent (1 task then green)',
-      'Questions: 3 asked mid-task · 1 answered'])
-})
-
-test('a period says the spec-gap discards its saving counts beside its task count', () => {
-  // #569: "cost ~115K more Claude tokens · 0 tasks · 0 landed" for a period of one such discard
-  const lines = statsLines({ tasks: 0, periods: { week: { tasks: 0, landed: 0, spec_gaps: 1,
-    savings: { saved: -115_000, tasks: 1 } } } })
-  expect(lines[0]).toEqual({ label: 'This week',
-    text: 'cost ~115K more Claude tokens (estimate) · 0 tasks · 0 landed · and 1 discard put down to the spec' })
-})
-
-test('a period\'s energy is every task\'s, compared by the saving or not', () => {
-  // #568: three tasks used 287 Wh and the tab said 12, the one task the saving could compare
-  const week = (p: any) => statsLines({ tasks: 3, periods: { week: { tasks: 3, landed: 3, accepted_pct: 100, ...p } } })[0].text
-  expect(week({ savings: { saved: 5000, wh: 12, cost: 0 }, energy: { wh: 287, cost: 0.09 } }))
-    .toBe('saved ~5K Claude tokens (estimate) · 3 tasks · 3 landed (100%) · 287 Wh, cost 0.09')
-  expect(week({ energy: { wh: 1500 } })).toBe('3 tasks · 3 landed (100%) · 1.5 kWh')  // nothing compared
-})
-
-test('a bench run still going or cut short shows beside the last finished one, never in its place', () => {
-  // #570: the newest run's first graded case read "M 1/1" as the model's result
-  const bench = (b: any) => statsLines({ tasks: 1, bench: { M: b } }).find(l => l.label === 'Bench')?.text
-  expect(bench({ run: 'r1', day: '2026-11-18', passed: 8, of: 10,
-    partial: { run: 'r2', day: '2026-11-20', passed: 1, of: 1, planned: 10, running: true } }))
-    .toBe('M 8/10 (2026-11-18), newer run 1 of 10 so far, 1 passed')
-  expect(bench({ partial: { run: 'r2', day: '2026-11-20', passed: 0, of: 2, planned: 10, running: false } }))
-    .toBe('M newer run 2 of 10 before it stopped, 0 passed')
-  expect(bench({ run: 'r1', day: '2026-11-18', passed: 8, of: 10 })).toBe('M 8/10 (2026-11-18)')
-})
-
 test('a one-task exception shows beside its task and is under way from Claude\'s first edit', async ($, on) => {
   // #94: the next hand-back spends it once Claude has started on it
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -5068,110 +4182,6 @@ test("a web message's attachments reach Claude as one path each, with size and t
     .toBe('\n[attached: /s/chat/uploads/a/p.jpg (2.1 MB, image/jpeg)]\n[attached: /s/chat/uploads/b/n.txt (300 B, text/plain)]')
 })
 
-test('the stats tab folds a model with its window variants, newest first, and sums up the older ones', () => {
-  // #638: every model that ever ran a task, forever, each wb optimize window on its own line
-  const said = (f: any) => statsLines({ tasks: 40, ...f }).map(l => `${l.label}: ${l.text}`)
-  const lines = said({
-    models: { 'ollama/q': { tasks: 1, accepted_pct: 0 }, 'strata/strata': { tasks: 1, accepted_pct: 0 } },
-    model_lines: {
-      lines: [{ model: 'ollama/q', windows: [32768, 40960, 65536], tasks: 37, accepted_pct: 94 },
-        { model: 'ollama/small', windows: [32768], tasks: 2, accepted_pct: 50 }],
-      older: { models: 2, tasks: 4 },
-    },
-  })
-  expect(lines).toContain('ollama/q (32K, 40K, 64K): 37 tasks · 94% landed')
-  expect(lines).toContain('ollama/small: 2 tasks · 50% landed')
-  expect(lines).toContain('Other models: 2 older models: 4 tasks (wb stats --all)')
-  expect(lines.join('\n')).not.toMatch(/strata/)
-  expect(lines.indexOf('ollama/q (32K, 40K, 64K): 37 tasks · 94% landed'))
-    .toBeLessThan(lines.indexOf('ollama/small: 2 tasks · 50% landed'))
-  expect(said({ models: { 'ollama/old': { tasks: 3, accepted_pct: 67 } } }))  // an older wb's feed
-    .toContain('ollama/old: 3 tasks · 67% landed')
-})
-
-// The owner, 2026-11-21: "some people experiment a lot and have a ton of models on their boxes
-// ... they'd have to scroll a lot down to find the menu and get back to Tasks or Settings again.
-// I just really don't want this to be the first impression users face."
-const MANY = (n: number) => Array.from({ length: n }, (_, i) => `ollama/m${i}`)
-const tabFeed = (ids: string[], more?: any) => ({
-  ts: 1, until: 2, settings: {}, tasks: 400,
-  periods: { week: { tasks: 12, landed: 10, accepted_pct: 83 }, all: { tasks: 400, landed: 330, accepted_pct: 83 } },
-  streak: { current: 3, best: 9 }, absorbed: { auto_fixes: 4, auto_fixed_tasks: 2 }, questions: { asked: 2 },
-  models: Object.fromEntries(ids.map(m => [m, { tasks: 13, accepted_pct: 80 }])),
-  model_lines: { lines: ids.slice(0, 3).map((m, i) => ({ model: m, variants: [m], windows: [32768], last: 100 - i, tasks: 13, accepted_pct: 80 })),
-    ...(more ? { more } : {}) },
-  sizes: { trivial: { tasks: 300, accepted_pct: 90 }, small: { tasks: 100, accepted_pct: 60 } },
-  days: [{ day: '2026-11-20', tasks: 3, landed: 2 }, { day: '2026-11-21', tasks: 5, landed: 4 }],
-  bests: { fastest: { minutes: 2, task: 'quick' } }, milestones: [{ kind: 'landed', n: 300, day: '2026-11-19' }],
-  guards: { repeat: 3 },
-  helps: Object.fromEntries(ids.map(m => [m, { hint: [2, 3] }])),
-  bench: Object.fromEntries(ids.map(m => [m, { run: 'r1', day: '2026-11-20', passed: 7, of: 10 }])),
-  optimized: Object.fromEntries(ids.map(m => [m, { window: 32768, fits: true }])),
-})
-const tabTop = (ids: string[]) => ({ busy: {}, snap: { ts: 0, every: 2, queue: [],
-  gpus: [{ index: 0, name: 'GPU', used: 2 ** 33, total: 2 ** 34 }],
-  running: [{ task: 'fix-it', label: ids[0], phase: 'working', round: 1 }],
-  rack: ids.map((m, i) => ({ model: m, label: m, state: i === 0 ? 'resident' : ["idle", "can't run", 'remote'][i % 3],
-    ...(i === 0 ? { tasks: ['fix-it'] } : {}) })) } }) as any
-const text = (rows: any[][]) => rows.map(r => r.map(p => p.text).join(''))
-
-test('the stats tab stays under 25 rows with 30 models, the rest folded and counted (2026-11-21)', () => {
-  const ids = MANY(30)
-  const now = text(liveLines(tabTop(ids)))
-  const history = statsLines(tabFeed(ids, { models: 27, tasks: 351 })).map(l => `${l.label}: ${l.text}`)
-  expect(now.length + history.length).toBeLessThanOrEqual(25)
-  expect(now).toContain("+29 more models idle, can't run or remote (wb top)")
-  expect(now.some(r => r.includes('ollama/m0 resident') && r.includes('← fix-it'))).toBe(true)
-  expect(now.some(r => r.startsWith('○ ollama/m1 '))).toBe(false)
-  expect(history).toContain('Other models: 27 more models: 351 tasks (wb stats --all)')
-  expect(history.filter(l => /^ollama\/m\d+/.test(l))).toHaveLength(3)
-  expect(history.find(l => l.startsWith('Optimized:'))).toBe('Optimized: ' +
-    ['m0', 'm1', 'm2'].map(m => `ollama/${m} 32K all on the GPU`).join(' · ') + ' · 27 more (wb optimize report)')
-  expect(history.find(l => l.startsWith('Bench:'))).toMatch(/ollama\/m2 7\/10 \(2026-11-20\) · 27 more \(wb bench report\)$/)
-  // the rest of What helps on a row of its own, not on m2's
-  expect(history.filter(l => l.startsWith('What helps'))).toEqual([...['m0', 'm1', 'm2'].map(m =>
-    `What helps (ollama/${m}): a hint helped 2 of 3`), 'What helps: 27 more models (wb stats --json)'])
-  // none of the shown models has an entry: the others counted, with where to see them
-  const others = statsLines({ ...tabFeed(ids, { models: 27, tasks: 351 }), helps: { 'ollama/m9': { hint: [1, 2] } },
-    bench: { 'ollama/m9': { run: 'r1', day: '2026-11-20', passed: 1, of: 2 } }, optimized: { 'ollama/m9': { window: 32768 } } })
-    .map(l => `${l.label}: ${l.text}`)
-  expect(others).toContain('Bench: 1 model (wb bench report)')
-  expect(others).toContain('Optimized: 1 model (wb optimize report)')
-  expect(others.filter(l => l.startsWith('What helps'))).toEqual(['What helps: 1 model (wb stats --json)'])
-  // the recent and the older ones on one row, a part that is 0 left out
-  const both = statsLines({ tasks: 40, model_lines: { lines: [], more: { models: 2, tasks: 36 }, older: { models: 3, tasks: 4 } } })
-  expect(both).toContainEqual({ label: 'Other models', text: '2 more · 3 older models: 40 tasks (wb stats --all)' })
-})
-
-test("an older wb's feed of 30 model lines still draws 3 of them and counts the rest (2026-11-21)", () => {
-  // the mod tracks main's commits, wb runs from the user's clone: a wb from before the cap sends
-  // every line and no `more`, an older one only `models`
-  const ids = MANY(30)
-  const uncapped = { ...tabFeed(ids), model_lines: { lines: ids.map((m, i) =>
-    ({ model: m, variants: [m], windows: [32768], last: 100 - i, tasks: 13, accepted_pct: 80 })) } }
-  const { model_lines: _, ...bare } = tabFeed(ids)
-  for (const f of [uncapped, bare]) {
-    const history = statsLines(f).map(l => `${l.label}: ${l.text}`)
-    expect(history.filter(l => /^ollama\/m\d+/.test(l))).toHaveLength(3)
-    expect(history).toContain('Other models: 27 more models: 351 tasks (wb stats --all)')
-    expect(history.find(l => l.startsWith('Optimized:'))).toMatch(/ollama\/m2 32K all on the GPU · 27 more \(wb optimize report\)$/)
-    expect(history).toContain('What helps: 27 more models (wb stats --json)')
-    expect(history.length).toBeLessThanOrEqual(20)
-  }
-})
-
-test('a machine with two models draws the stats tab as before the fold (2026-11-21)', () => {
-  const ids = MANY(2)
-  const now = text(liveLines({ ...tabTop(ids), snap: { ...tabTop(ids).snap, running: [],
-    rack: ids.map(m => ({ model: m, label: m, state: 'idle' })) } }))
-  expect(now).toEqual(['GPU 0 GPU ██████░░░░░░ 8.0/16.0 GiB ', 'Nothing running.', '○ ollama/m0 idle', '○ ollama/m1 idle'])
-  const history = statsLines(tabFeed(ids)).map(l => `${l.label}: ${l.text}`)
-  expect(history.some(l => /more|older|wb (bench|optimize) report|wb top/.test(l))).toBe(false)
-  expect(history).toContain('Optimized: ollama/m0 32K all on the GPU · ollama/m1 32K all on the GPU')
-  expect(history).toContain('Bench: ollama/m0 7/10 (2026-11-20) · ollama/m1 7/10 (2026-11-20)')
-  expect(history.filter(l => l.startsWith('What helps'))).toHaveLength(2)
-})
-
 // ---------------------------------------------------------------- the opening animation (#963)
 // The owner, 2026-11-21: "it needs to end by pulling in the Tasks page like normal and have no
 // penalty beyond initial startup". The pane of forge's design: 60 columns, 26 rows and the
@@ -5195,7 +4205,7 @@ function seeded(on: any, atoms: Record<string, [string, unknown]>) {
 // A session with workbench's files in memory, wb answering, and the animation's frames counted:
 // each blit of its Raster, and each period of an 80 ms timer (its own: the pane's other timers
 // run at 450 ms and 1.5 s)
-function splashWorld(on: any, files: Record<string, string> = {}, dirs: string[] = [], ears = true) {
+function splashWorld(on: any, files: Record<string, string> = {}, dirs: string[] = [], ears = true, link?: Record<string, unknown>) {
   fakeTasks(on, files, dirs, true, [], ears)
   on('ui.toast', () => ({ value: undefined }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
@@ -5203,6 +4213,7 @@ function splashWorld(on: any, files: Record<string, string> = {}, dirs: string[]
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
     if (e.argv[1] === 'splash' && e.argv[2]) files['/wb/splash.json'] = JSON.stringify({ on: e.argv[2] === 'on' })  // what wb writes
+    if (link && e.argv[1] === 'chat' && e.argv[2] === 'url') return { value: { exitCode: 0, stdout: JSON.stringify(link), stderr: '' } }
     return { value: { exitCode: 0, stdout: e.argv[1] === 'status' ? 'no open tasks' : '', stderr: '' } }
   })
   const blits: string[] = []
@@ -5329,8 +4340,8 @@ test('a pane brought back from the strip, or opened by a task, opens on the page
   const files: Record<string, string> = {}
   task(files, 'fix-it', 'running', { repo: '/home/u/project', cwd: '/home/u/project' })
   const w = splashWorld(on, files, ['fix-it'])
-  seeded(on, { pane: ['pane-1', { tab: 'tasks', open: '', focus: '', minimized: true }],
-    chat: ['chat-4', { key: 'k1', delegating: true, url: '', web: false }] })
+  seeded(on, { pane: ['pane-2', { open: '', focus: '', minimized: true }],
+    chat: ['chat-5', { key: 'k1', delegating: true, link: { state: 'checking' } }] })
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)                                              // the task's poll
   const band = await $.ui.mount({ plugin: 'workbench', component: 'AbovePrompt', requestId: 'above-prompt',
@@ -5382,7 +4393,7 @@ test('a key in the pane skips the animation and still moves the ring', async ($,
   await $.ui.focus({ component: 'Pane', requestId: 'workbench', origin: { kind: 'person' } } as any)  // Tab
   expect(ring.length).toBe(1)                                            // it went on to the engine
   expect(await splashing(ui)).toBe(false)
-  expect(await ui.find({ key: 'tab-stats' })).toBeDefined()              // and the page's tabs are there to press
+  expect(await ui.find({ key: 'modeline' })).toBeDefined()               // and the page is there, to its modeline
   const n = ticks.n
   await clock.advance(2000)
   expect(ticks.n).toBe(n)
@@ -5415,29 +4426,6 @@ test('with the opening animation off in Settings it never plays', async ($, on) 
   expect(await splashing(ui)).toBe(false)
   await clock.advance(1000)
   expect([w.splashes(), ticks.n]).toEqual([0, 0])
-  await ui.unmount()
-})
-
-test('the Opening animation row of Settings cycles through wb and reads its choice back', async ($, on) => {
-  const { clock, ticks } = splashClock(on)
-  const files: Record<string, string> = {}
-  const w = splashWorld(on, files)
-  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'splash' }))?.props.label).toBe('▸ Opening animation: Enabled (default)')  // the owner's words
-  await ui.press({ key: 'splash' })
-  expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label).filter(l => /Enabled|Off$/.test(String(l))))
-    .toEqual(['▾ Opening animation: Enabled (default)', '  ❯ Enabled (default)', '    Off'])
-  await ui.press({ key: 'splash:off' })
-  expect(w.runs.filter(a => a[1] === 'splash')).toEqual([['wb', 'splash', 'off']])
-  expect(JSON.parse(files['/wb/splash.json']).on).toBe(false)            // kept by wb
-  expect((await ui.find({ key: 'splash' }))?.props.label).toBe('▸ Opening animation: Off')
-  await ui.press({ key: 'splash' })
-  await ui.press({ key: 'splash:on' })
-  expect((await ui.find({ key: 'splash' }))?.props.label).toBe('▸ Opening animation: Enabled (default)')
-  expect(w.runs.filter(a => a[1] === 'splash').map(a => a[2])).toEqual(['off', 'on'])
   await ui.unmount()
 })
 
@@ -5554,15 +4542,15 @@ test('a page that grows past measuring after the words fell puts the bar no high
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await workbench($)
   const ui = await $.ui.mount(splashPane())
-  await clock.advance(3900)                                              // the words are falling into row 10, the empty page's last
+  await clock.advance(3900)                                              // the words are falling into row 8, the empty page's last
   task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project' })
   files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0, last: '完成した' })
   dirs.push('fix-it')
   await clock.advance(1500)
   expect(await splashing(ui)).toBe(false)
   expect(w.splashes()).toBe(61)
-  // the page now: its task's row, its last line and its margin over the empty page's 11 rows, at least
-  expect(barRows(unpacked(w.frames[w.frames.length - 1]!), 60, 27)).toEqual([13])
+  // the page now: its task's row, its last line and its margin over the empty page's 9 rows, at least
+  expect(barRows(unpacked(w.frames[w.frames.length - 1]!), 60, 27)).toEqual([11])
   await ui.unmount()
 })
 
@@ -5571,107 +4559,39 @@ test('the words fall into the modeline\'s row: the page\'s last when it fits, th
     tests: null, last: 'it ended', createdAt: 0, updatedAt: 0, tokens: 0, recent: [], repo: '', cwd: '', subdir: '', session: '',
     claude_pid: 0, claude_start: '', backlog: '', parked: false, allowed: '', ...extra })
   const none = { task: '', lines: [] }
-  // the empty page: the stage's margin, the apprentice and a bubble of three lines, the tabs' margin, the tabs, the modeline
-  const empty = pageShape([], none, true, '', 0, 60)
-  expect(empty).toEqual({ rows: 11, atLeast: 11, stage: 1, tail: 10 })
-  expect(splashTarget(empty, 27)).toEqual({ stage: 1, bar: 10 })
+  const checking = { state: 'checking' as const }
+  // the empty page: the stage's margin, the apprentice and a bubble of three lines, the modeline
+  const empty = pageShape([], none, true, checking, 0, 60)
+  expect(empty).toEqual({ rows: 9, atLeast: 9, stage: 1, tail: 8, head: 1 })
+  expect(splashTarget(empty, 27)).toEqual({ stage: 1, bar: 8 })
+  // the link on two rows of its own under a 60-column modeline: the bar lands on the modeline's
+  // row, above them (#1283)
+  const linked = pageShape([], none, true, { state: 'up', url: LINK }, 0, 60)
+  expect(linked).toEqual({ rows: 11, atLeast: 11, stage: 1, tail: 10, head: 3 })
+  expect(splashTarget(linked, 27)).toEqual({ stage: 1, bar: 8 })
   // one closed task, out of the mode: its folded line (#1048), the list's margin, the stage's
-  // margin, a bubble of two lines beside the apprentice, the saving, the tabs' margin, the tabs,
-  // the modeline
-  const one = pageShape([t('fix-it', 'accepted')], none, false, 'this week: saved ~1.2M Claude tokens', 0, 60)
-  expect(one).toEqual({ rows: 2 + 1 + 6 + 1 + 3, atLeast: 13, stage: 3, tail: 10 })
-  expect(splashTarget(one, 27)).toEqual({ stage: 3, bar: 12 })
+  // margin, a bubble of two lines beside the apprentice, the modeline
+  const one = pageShape([t('fix-it', 'accepted')], none, false, checking, 0, 60)
+  expect(one).toEqual({ rows: 2 + 1 + 6 + 1, atLeast: 10, stage: 3, tail: 7, head: 1 })
+  expect(splashTarget(one, 27)).toEqual({ stage: 3, bar: 9 })
   // a review waiting with its last line: its two rows, none wrapping, so the page is still exact
-  const review = pageShape([t('fix-it', 'review', { last: 'auto-fix skipped: the base fails the same test' })], none, false, '', 0, 60)
-  expect([review.rows, review.stage]).toEqual([3 + 1 + 6 + 1 + 2, 4])
+  const review = pageShape([t('fix-it', 'review', { last: 'auto-fix skipped: the base fails the same test' })], none, false, checking, 0, 60)
+  expect([review.rows, review.stage]).toEqual([3 + 1 + 6 + 1, 4])
   // many: the page overflows, the pane follows its end, the modeline is its last row (closed
-  // tasks fold into one line, and so many open ones draw one row each: compactWanted)
-  const many = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, '', 0, 60)
+  // tasks fold into one line, and so many open ones draw one row each: compactWanted), or the
+  // link's rows are, under it
+  const many = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, checking, 0, 60)
   expect(splashTarget(many, 27)).toEqual({ stage: 27 - many.tail!, bar: 26 })
+  const manyLinked = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, { state: 'up', url: LINK }, 0, 60)
+  expect(splashTarget(manyLinked, 27).bar).toBe(24)
   // a line wider than the pane, or one of wide characters: its height isn't known, so no bar row
-  const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, '', 0, 60)
+  const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, checking, 0, 60)
   expect([wide.rows, splashTarget(wide, 27).bar]).toEqual([null, null])
-  const cjk = pageShape([t('fix-it', 'review', { last: '完成した' })], none, false, '', 0, 60)
+  const cjk = pageShape([t('fix-it', 'review', { last: '完成した' })], none, false, checking, 0, 60)
   expect([cjk.rows, splashTarget(cjk, 27).bar]).toEqual([null, null])
   // ...unless the page surely overflows anyway
-  const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, '', 0, 60)
+  const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, checking, 0, 60)
   expect(splashTarget(long, 27).bar).toBe(26)
-})
-
-// ---------------------------------------------------------------- the modeline's activity (#976)
-// The owner, 2026-11-21: "[roobot-guy] Claude's Workbench - [current thing we are doing one liner
-// here scrolls animated like a leaderboard ...]", from the tasks, never Claude's tokens.
-test('the activity line names each open task, its round and phase, oldest first, and leaves parked ones out', () => {
-  const t = (name: string, phase: string, createdAt: number, extra: any = {}) =>
-    ({ name, phase, round: 2, createdAt, parked: false, ...extra }) as any
-  expect(activity([])).toBe('')
-  expect(activity([t('b', 'testing', 2), t('a', 'running', 1)])).toBe('a: round 2, writing  ·  b: round 2, testing')
-  expect(activity([t('a', 'review', 1, { parked: true }), t('c', 'queued', 3, { round: 0 })])).toBe('c: queued')
-  expect(activity([t('d', 'accepted', 1)])).toBe('')
-})
-
-test('the ticker loops the line with a gap, a column a step, on the bar in black', () => {
-  const words = (b64: string) => { const u = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); return new Uint32Array(u.buffer) }
-  const at = (line: string, off: number, w: number) => {
-    const c = words(tickerCells(line, off, w)); let out = ''
-    for (let i = 0; i < w; i++) out += String.fromCodePoint(c[i * 3]!)
-    return out
-  }
-  expect(at('abcdef', 0, 4)).toBe('abcd')
-  expect(at('abcdef', 3, 6)).toBe('def   ')                              // into the gap
-  expect(at('abcdef', loopLength('abcdef') - 1, 3)).toBe(' ab')          // and round again
-  expect(at('a✻b', 0, 3)).toBe('a?b')                                     // a cell is one column, for sure
-  const c = words(tickerCells('x', 0, 1))
-  expect([c[1], c[2]]).toEqual([0x000000, BAR])
-})
-
-function modelineWorld(on: any, files: Record<string, string>, dirs: string[]) {
-  files['/wb/splash.json'] = '{"on": false}'
-  return splashWorld(on, files, dirs)
-}
-
-test('a short line stands after the name; a long one scrolls by blit alone, and stops when the tasks close', async ($, on) => {
-  const { clock, ticks } = splashClock(on)
-  const files: Record<string, string> = {}
-  const dirs = ['fix-it']
-  task(files, 'fix-it', 'running')
-  const w = modelineWorld(on, files, dirs)
-  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  await workbench($)
-  await clock.advance(2000)
-  let ui = await $.ui.mount(splashPane(80, 27))
-  expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("Claude's Workbench - ")
-  expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain('fix-it: round 1, writing')
-  expect(await ui.find({ type: 'Raster', key: 'ticker' })).toBeUndefined()
-  await clock.advance(1000)
-  expect(w.blits.filter(k => k === 'ticker')).toHaveLength(0)            // nothing moves
-  await ui.unmount()
-
-  task(files, 'add-the-settings-page-with-every-option', 'testing', { created_at: ts0 })
-  dirs.push('add-the-settings-page-with-every-option')
-  await clock.advance(2000)
-  ui = await $.ui.mount(splashPane(60, 27))
-  const ticker = await ui.find({ type: 'Raster', key: 'ticker' }) as any
-  expect(ticker).toBeDefined()
-  expect(ticker.props.rows).toBe(1)
-  expect(ticker.props.columns).toBe(60 - 2 - "[•_•] Claude's Workbench - ".length)
-  const before = w.blits.filter(k => k === 'ticker').length
-  await clock.advance(1000)
-  expect(w.blits.filter(k => k === 'ticker').length - before).toBe(5)    // a column every 200 ms
-
-  delete files['/wb/tasks/fix-it/status.json']; delete files['/wb/tasks/fix-it/task.json']
-  delete files['/wb/tasks/add-the-settings-page-with-every-option/status.json']
-  delete files['/wb/tasks/add-the-settings-page-with-every-option/task.json']
-  dirs.length = 0
-  await clock.advance(3000)
-  await ui.redraw()
-  expect(await ui.find({ type: 'Raster', key: 'ticker' })).toBeUndefined()
-  expect(JSON.stringify(await ui.find({ key: 'modeline' }))).not.toContain(' - ')
-  const [n, b] = [ticks.n, w.blits.filter(k => k === 'ticker').length]
-  await clock.advance(2000)
-  expect(w.blits.filter(k => k === 'ticker').length).toBe(b)              // no timer of it left
-  void n
-  await ui.unmount()
 })
 
 // The roles' consent gate (#1014): `wb route` and `wb start --model <API id>` under the mod
@@ -6098,47 +5018,6 @@ test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a cha
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')  // as wb refuses it
 })
 
-test('API dollars at the catalog\'s prices read as estimates and at the user\'s own say so (#1135)', () => {
-  // the catalog ran about 2x DeepInfra's bill (2026-11-23): a figure says which prices it is at
-  const mine = { tasks: 2, cost: 0.2, unknown: 0, plan: 0, prices: 'yours', by_provider: { deepinfra: { tasks: 2, cost: 0.2, unknown: 0, prices: 'yours' } } }
-  const t = (o: object) => JSON.stringify({ tasks: 0, claude: 0, self_est: 0, saved: 0, wh: 0, ...o })
-  expect(savedLine(t({ api: mine }))).toBe('this week: API $0.20 on 2 tasks (no GPU task to compare)')
-  expect(statsLines({ tasks: 2, periods: { week: { tasks: 2, landed: 2, api: mine } } })[0].text)
-    .toContain('API $0.20 (deepinfra $0.20; your prices)')
-  const routes = (prices?: string) => ({ v: 1, day_usd: 5, roles: {}, providers: {}, spend_today: { usd: 0.42, by_provider: { deepinfra: 0.42 }, ...(prices ? { prices } : {}) } }) as any
-  expect(spendLine(routes('yours'))).toBe('Spend today: $0.42 of $5 (deepinfra $0.42; your prices)')
-  expect(spendLine(routes())).toBe('Spend today: ≈$0.42 of $5 (deepinfra $0.42; catalog prices)')
-  expect(apiParts({ via: 'api', spend: 0.12 })).toEqual(['≈$0.12', ''])
-  expect(apiParts({ via: 'api', spend: 0.12, prices: 'yours' })).toEqual(['$0.12', ''])
-})
-
-test('an API task\'s dollars sit beside the saving, never in it, and an API-only week says there was no GPU task (#1022)', () => {
-  const api = { tasks: 6, cost: 1.27, unknown: 0, plan: 0, by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } }
-  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
-  expect(savedLine(t({ api }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · API ≈$1.27')
-  expect(savedLine(t({ tasks: 0, saved: 0, api }))).toBe('this week: API ≈$1.27 on 6 tasks (no GPU task to compare)')
-  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } })))
-    .toBe('this week: 1 API task, no price (no GPU task to compare)')                    // never $0 for no price
-  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 2, cost: 0, unknown: 0, plan: 2 } })))
-    .toBe('this week: 2 API tasks, plan usage (no GPU task to compare)')                 // a quota, not $0
-  // the feed's plan count (stats._api_period) keeps a plan-only week from reading API $0 (#1022's review)
-  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 0, plan: 1,
-    by_provider: { 'opencode-go': { tasks: 1, cost: 0, unknown: 0, plan: 1 } } } } } })[0].text).toContain('API plan usage')
-  // savings.usd's rule: a cent's fraction written out, never 4e-05 nor $0.010
-  expect([usd(4e-5), usd(4.1e-5), usd(0.0041), usd(0.009999), usd(0.42), usd(0)]).toEqual(['$0.00004', '$0.000041', '$0.0041', '$0.01', '$0.42', '$0'])
-  expect(savedLine(t({ api: { tasks: 0, cost: 0, unknown: 0, plan: 0 } }))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
-  const week = statsLines({ tasks: 6, periods: { week: { tasks: 6, landed: 6, api } } })[0].text
-  expect(week).toContain('API ≈$1.27 (deepseek ≈$0.84 · anthropic ≈$0.43; catalog prices)')
-  const model = statsLines({ tasks: 2, model_lines: { lines: [{ model: 'deepseek/deepseek-flash', tasks: 2, accepted_pct: 100,
-    kind: 'api', paid: 0.12, speed: { write: 80 } }] } }).find(l => l.label === 'API deepseek deepseek-flash')!
-  expect(model.text).toContain('paid ~$0.12/task')
-  expect(model.text).not.toContain('writes ~')
-  const row = liveLines({ snap: { ts: 0, every: 2, gpus: [], rack: [], queue: [], running: [{ task: 'fix-auth',
-    model: 'deepseek/deepseek-flash', label: 'deepseek-flash', phase: 'running', round: 2, round_s: 190,
-    via: 'api', provider: 'deepseek', spend: 0.12 }] }, busy: {} } as any)[0].map(p => p.text).join('')
-  expect(row).toBe('▶ fix-auth API deepseek deepseek-flash · running · round 2 · 3m10s · ≈$0.12')  // #1135
-})
-
 test('#1016: the Agents switch: its change line is the dialog\'s text, and the roles\' summary says it', async ($, on) => {
   // wb route all gpu|api|both sets routes.json `use`; the dialog shows wb's own line, as for a role
   const { clock, bash, files, w } = await routeProbe($, on)
@@ -6223,308 +5102,6 @@ test('#1016: an API task\'s row names API and its provider before the model, the
     'API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off'])
 })
 
-// The Settings tab's roles (#1023): Shared, GPU and API, read from `wb route --json` and `wb models
-// --json`; a press writes the one-shot approval for exactly that change and runs it
-const REFUSED = "wb: in Claude Code a role changes only through the workbench mod's dialog, and the user approved none for this change, so nothing changed"
-function settingsWorld(on: any, files: Record<string, string>) {
-  const w = {
-    routes: {
-      v: 1, use: 'both', busy: 'wait', day_usd: 5 as number | null,
-      roles: {
-        significant: { via: 'gpu', gpu: 'auto', thinking: 'off', label: 'Complex coding' },
-        trivial: { via: 'gpu', gpu: 'auto', api: 'deepseek/deepseek-flash', thinking: 'off', label: 'Trivial coding' },
-        writing: { via: 'gpu', gpu: 'auto', thinking: 'off', label: 'English writing' },
-      } as Record<string, any>,
-      spend_today: { usd: 0.42, by_provider: { deepseek: 0.42 } },
-      providers: {
-        deepseek: { name: 'DeepSeek', key: 'stored' },
-        xai: { name: 'xAI', key: 'env', why: "can't run: needs a key wb can hold outside the lane (key in XAI_API_KEY)" },
-      } as Record<string, any>,
-    },
-    models: {
-      gpu: [{ id: 'ollama/qwen-big', label: 'Qwen Big (Ollama)', window: 40960, sizes: [] as string[], cards: [2, 3] as number[] | null },
-        { id: 'ollama/mimo', label: 'MiMo (Ollama)', window: null as number | null, sizes: ['trivial'], cards: null as number[] | null }],
-      api: [{ id: 'deepseek/deepseek-flash', name: 'DeepSeek Flash', provider: 'deepseek', provider_name: 'DeepSeek', window: 131072, price: { input: 0.2, output: 0.6 }, free: false },
-        { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', provider_name: 'DeepSeek', window: 131072, price: { input: 1, output: 3 }, free: false }],
-      used: [] as string[], free_line: 'free: the provider may keep or train on your code',
-      optimize: { done_at: null as number | null, models: 0, running: false },
-      media: undefined as any,
-    },
-    runs: [] as string[][], toasts: [] as string[], asked: 0, refuse: '', routeCode: 0, routeOut: '',
-    approvals: [] as string[], unwritable: false,
-  }
-  on('ui.toast', (_: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
-  on('tool.call', (_: any, e: any) => {                                 // a dialog: none may come
-    if (e.tool === 'AskUserQuestion') w.asked++
-    return { result: { stdout: '' }, text: '' }
-  })
-  on('process.run', (_: any, e: any) => {
-    w.runs.push(e.argv)
-    const a: string[] = e.argv.slice(1)
-    const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '' } })
-    const no = (stderr: string) => ({ value: { exitCode: 3, stdout: '', stderr } })
-    if (a[0] === 'route' && a[1] === '--json') return w.routeCode ? { value: { exitCode: w.routeCode, stdout: '', stderr: w.routeOut } } : ok(JSON.stringify(w.routes))
-    if (a[0] === 'models' && a[1] === '--json') return ok(JSON.stringify(w.models))
-    if (a[0] === 'route' && a[1] === '--dry-run') {
-      const args = a.slice(3), change = `CHANGE ${args.join(' ')}`
-      const gate = !args.includes('--gpu')                            // a GPU pin takes no yes
-      return ok(JSON.stringify({ change, gate, ...(gate ? { approval: { argv: ['route', ...args], change } } : {}) }))
-    }
-    if (a[0] === 'route') {
-      const args = a.slice(1)
-      if (!args.includes('--gpu')) {                                  // CLAUDECODE=1: the approval or nothing
-        if (w.unwritable) delete files['/wb/route-ok.json']            // as if its write had failed
-        const ok_ = files['/wb/route-ok.json']
-        if (ok_) w.approvals.push(ok_)
-        delete files['/wb/route-ok.json']
-        if (!ok_ || JSON.stringify(JSON.parse(ok_).argv) !== JSON.stringify(['route', ...args])) return no(REFUSED)
-      }
-      if (w.refuse) return no(w.refuse)
-      const [what, x, y] = args, r = w.routes
-      if (what === 'all') r.use = x!
-      else if (what === 'busy') r.busy = x!
-      else if (what === 'cap') r.day_usd = x === 'off' ? null : Number(x)
-      else if (x === '--gpu') r.roles[what!].gpu = y
-      else if (x === '--api') r.roles[what!].api = y
-      else if (x === '--thinking') r.roles[what!].thinking = y
-      else r.roles[what!].via = x
-      return ok(`changed: CHANGE ${args.join(' ')}`)
-    }
-    if (a[0] === 'model' && a[1] === 'sizes') {
-      const g = w.models.gpu.find(m => m.id === a[2])!
-      g.sizes = a.slice(3)
-      return ok('')
-    }
-    if ((a[0] === 'image' || a[0] === 'audio') && a[1] === '--default') {   // #1047: the engine's kind picks the key
-      if (w.refuse) return no(w.refuse)
-      const kind = Object.entries(w.models.media ?? {}).find(([, k]: [string, any]) => k.engines.some((e: any) => e.name === a[2]))!
-      ;(kind[1] as any).default = a[2]
-      return ok(`default ${kind[0]} engine: ${a[2]}`)
-    }
-    if (a[0] === 'workflows' && a[1]) files['/wb/workflows.json'] = JSON.stringify({ mode: a[1] })
-    if (a[0] === 'optimize') return ok('wb optimize started in the background (pid 9): it holds the GPU alone')
-    return ok('')
-  })
-  return w
-}
-
-async function settingsTab($: any, on: any, files: Record<string, string> = {}) {
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  fakeTasks(on, files, [])
-  const w = settingsWorld(on, files)
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 120 } })
-  await ui.press({ key: 'tab-settings' })
-  const label = async (key: string) => (await ui.find({ key }))?.props.label as string | undefined
-  const options = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => / {2}[❯ ] /.test(l))
-  const texts = async () => (await ui.findAll({ type: 'Text' })).map(t => String(t.text ?? ''))
-  const ran = (line: string) => w.runs.some(r => r.join(' ') === line)
-  return { clock, files, w, ui, label, options, texts, ran }
-}
-
-test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, the Agents switch first, the old rows as they were', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, texts, label } = await settingsTab($, on)
-  const heads = (await texts()).filter(t => ['Shared', 'GPU', 'API', 'Experimental'].includes(t))
-  expect(heads).toEqual(['Shared', 'GPU', 'API', 'Experimental'])
-  const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
-  expect(rows.slice(0, 7)).toEqual(['▸ Agents: Both (default)', '▸ When the GPU is busy: Wait (default)', '▸ Complex coding: GPU',
-    '▸ Trivial coding: GPU', '▸ English writing: GPU', '▸ Claude coding: Let Claude decide (default)', '▸ Dynamic workflows: Off (default)'])
-  for (const [key, was] of [['coding', '▸ Claude coding: Let Claude decide (default)'], ['record', '▸ Stats recording: On (default)'],
-    ['live', '▸ Live view: On (default)'], ['every', '▸ Live refresh: 2 s (default)'], ['progress', '▸ Progress checks: Off (default)'],
-    ['splash', '▸ Opening animation: Enabled (default)'], ['chat', '▸ Web chat: Off (default)'], ['probe', '▸ Agent code navigation: Off (default)']])
-    expect([key, await label(key)]).toEqual([key, was])
-  expect(rows.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // Experimental last
-  expect((await ui.find({ key: 'price' }))?.props.label).toBe('▸ Electricity price per kWh')
-  expect((await ui.find({ key: 'cap' }))?.props.value).toBe('5')
-  // wake: the plugin option's value, read-only
-  expect(await texts()).toContain('Wake Claude: on · change it in /plugin → workbench → options')
-  expect((await ui.findAll({ type: 'Button' })).some(b => /Wake/.test(String(b.props.label)))).toBe(false)
-  await ui.unmount()
-})
-
-test('#1023: a role\'s press writes the one-shot approval for exactly that change and runs it with no dialog; without it wb refuses and the toast says so', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, w, label, ran } = await settingsTab($, on)
-  await ui.press({ key: 'role-trivial' })
-  await ui.press({ key: 'role-trivial:api' })
-  expect(w.approvals.map(a => JSON.parse(a))).toEqual([{ argv: ['route', 'trivial', 'api'], change: 'CHANGE trivial api', by: 'pane', at: 1_800_000_001 }])
-  expect(ran('wb route trivial api')).toBe(true)
-  expect(w.asked).toBe(0)                                                // the press is the yes: no dialog
-  expect(w.toasts).toEqual(['workbench: CHANGE trivial api'])           // what it agreed to (#1263)
-  expect(await label('role-trivial')).toBe('▸ Trivial coding: API (DeepSeek Flash)')
-  w.unwritable = true                                                   // no approval reaches wb
-  await ui.press({ key: 'role-trivial' })
-  await ui.press({ key: 'role-trivial:gpu' })
-  expect(w.toasts.at(-1)).toContain("in Claude Code a role changes only through the workbench mod's dialog")
-  expect(await label('role-trivial')).toBe('▸ Trivial coding: API (DeepSeek Flash)')  // as it was
-  await ui.unmount()
-})
-
-test('#1023: the Agents switch, the busy row and Dynamic workflows pick through wb', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, label, ran, files } = await settingsTab($, on)
-  await ui.press({ key: 'agents' })
-  expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('Each role runs where its own row says.')
-  await ui.press({ key: 'agents:gpu' })
-  expect(ran('wb route all gpu')).toBe(true)
-  expect(await label('agents')).toBe('▸ Agents: GPU')
-  await ui.press({ key: 'agents' })
-  await ui.press({ key: 'agents:both' })
-  expect(ran('wb route all both')).toBe(true)
-  await ui.press({ key: 'busy' })
-  await ui.press({ key: 'busy:api' })
-  expect(ran('wb route busy api')).toBe(true)
-  expect(await label('busy')).toBe("▸ When the GPU is busy: Use the role's API model")
-  await ui.press({ key: 'workflows' })
-  await ui.press({ key: 'workflows:on' })
-  expect(ran('wb workflows on')).toBe(true)
-  expect(JSON.parse(files['/wb/workflows.json']!).mode).toBe('on')
-  expect(await label('workflows')).toBe('▸ Dynamic workflows: On')
-  await ui.unmount()
-})
-
-test('#1023: a role\'s API model is a dropdown of the models wb can run, with Other model… a typed id wb checks; an env key\'s provider is listed with why, never offered', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, w, label, options, texts, ran, clock } = await settingsTab($, on)
-  expect(await texts()).toContain("Connected: DeepSeek (key stored) · xAI (can't run: needs a key wb can hold outside the lane (key in XAI_API_KEY))")
-  expect(await label('api-trivial')).toBe(`▸ Trivial coding API model: DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per${NB}M`)
-  expect(await label('api-writing')).toBe('▸ English writing API model: (none)')
-  await ui.press({ key: 'api-trivial' })
-  expect(await options()).toEqual([`  ❯ DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per${NB}M`, `    DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per${NB}M`, '    Other model…'])
-  expect((await options()).some(o => /xAI/.test(o))).toBe(false)
-  await ui.press({ key: 'api-trivial:deepseek/deepseek-v4-pro' })
-  expect(ran('wb route trivial --api deepseek/deepseek-v4-pro')).toBe(true)
-  expect(await label('api-trivial')).toBe(`▸ Trivial coding API model: DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per${NB}M`)
-  await ui.press({ key: 'api-trivial' })
-  await ui.press({ key: 'api-trivial:other' })
-  w.refuse = "wb: acme/cod not in OpenCode's catalog: wb models lists the API models"
-  await ui.input({ key: 'api-trivial-other', text: 'acme/cod' })
-  expect(ran('wb route trivial --api acme/cod')).toBe(true)
-  expect(w.toasts.at(-1)).toBe("workbench: wb: acme/cod not in OpenCode's catalog: wb models lists the API models")
-  expect(await label('api-trivial')).toBe(`▸ Trivial coding API model: DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per${NB}M`)  // kept
-  expect(await ui.find({ key: 'api-trivial-other' })).toBeUndefined()
-  // a long catalog: only the models in use, then Other model…
-  w.refuse = ''
-  w.models.api = Array.from({ length: 40 }, (_, i) => ({ id: `openrouter/m-${i}`, name: `M ${i}`, provider: 'openrouter', provider_name: 'OpenRouter',
-    window: 131072, price: { input: 1, output: 2 }, free: i === 3 }))
-  w.models.used = ['openrouter/m-3']
-  w.routes.roles.trivial.api = 'openrouter/m-7'
-  await clock.advance(11_000)                                           // past the roles' cache
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  await ui.press({ key: 'api-significant' })
-  expect(await options()).toEqual(['  ❯ (none)', `    M 7 · OpenRouter (128K) · $1/$2 per${NB}M`,
-    `    M 3 · OpenRouter (128K) · $1/$2 per${NB}M · free: the provider may keep or train on your code`, '    Other model…'])
-  await ui.unmount()
-})
-
-test('#1263: a role\'s thinking row and the roles\' summary say what its API model does with thinking, not only the setting', { timeoutMs: 20_000 }, async ($, on) => {
-  // bar loop round 6 (2026-11-24): set from the pane, whose press is the yes, an adaptive model that
-  // can't turn thinking off read `Off (default)`, `Faster and cheaper`, and the summary Claude gets
-  // `thinking off`; tests.test_workbench.RoleResolution checks routes.summary and wb route the same way
-  const does = "thinking as the model's default (it lists no lower setting)"
-  const thinks = { api: 'anthropic/claude-x', off: does, on: 'thinking on (effort high)' }
-  const row = { via: 'api', api: 'anthropic/claude-x', thinking: 'off', thinks }
-  expect(routesSummary({ roles: { writing: row } })).toBe('significant GPU (the router picks); trivial GPU (the router picks); ' +
-    `writing API anthropic/claude-x, ${does}`)
-  expect(routesSummary({ roles: { writing: { ...row, thinking: 'on' } } })).toContain('writing API anthropic/claude-x, thinking on (effort high)')
-  expect(routesSummary({ roles: { writing: { ...row, api: 'anthropic/other' } } })).toContain(', thinking off')  // another model's record
-  const plain = [['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
-    ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.']]
-  expect(thinkStops({ thinking: 'off' })).toEqual(plain)
-  expect(thinkStops({ api: 'deepseek/x', thinks: { api: 'deepseek/x', off: 'thinking off', on: 'thinking on (effort high)' } })).toEqual(plain)
-  expect(thinkStops(row)[0]).toEqual(['off', `Off (default): ${does}`, 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'])
-  expect(thinkStops(row)[1]).toEqual(plain[1])
-  // #1263's review: a model that can't turn thinking off but runs at a lower effort is still cheaper off
-  const lowest = 'thinking at its lowest effort (it can\'t turn off)'
-  expect(thinkStops({ api: 'x/y', thinking: 'off', thinks: { api: 'x/y', off: lowest, on: 'thinking on (effort high)' } })[0])
-    .toEqual(['off', `Off (default): ${lowest}`, 'This model can\'t turn thinking off, but its lowest effort is still cheaper than On; for tasks started after this.'])
-  expect(thinkStops({ api: 'x/y', thinks: { api: 'x/y', off: 'thinking on (it can\'t turn off)', on: 'thinking on (it can\'t turn off)' } })[0]![2])
-    .toBe('This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.')
-  const not = 'thinking off (the model doesn\'t reason)'
-  expect(thinkStops({ api: 'x/y', thinks: { api: 'x/y', off: not, on: not } }).map(s => s[1])).toEqual(['Off (default)', `On: ${not}`])
-  const { ui, w, label, clock } = await settingsTab($, on)
-  expect(await label('think-writing')).toBe('▸ English writing thinking: Off (default)')
-  w.routes.roles.writing = { ...row, gpu: 'auto', label: 'English writing' }
-  await clock.advance(11_000)                                           // past the roles' cache
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await label('think-writing')).toBe(`▸ English writing thinking: Off (default): ${does}`)
-  await ui.unmount()
-})
-
-test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,00 and 5 USD as 5 and empty as off, and spend today reads from wb route --json', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, w, texts, ran } = await settingsTab($, on)
-  expect(await texts()).toContain('Spend today: ≈$0.42 of $5 (DeepSeek $0.42; catalog prices)')  // #1135
-  await ui.press({ key: 'think-writing' })
-  expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('for tasks started after this')
-  await ui.press({ key: 'think-writing:on' })
-  expect(ran('wb route writing --thinking on')).toBe(true)
-  for (const typed of ['$5', '5,00', '5 USD']) {
-    w.runs.length = 0
-    await ui.input({ key: 'cap', text: typed })
-    expect([typed, ran('wb route cap 5')]).toEqual([typed, true])
-  }
-  w.runs.length = 0
-  await ui.input({ key: 'cap', text: 'lots' })
-  expect(w.runs.some(r => r[1] === 'route' && r[2] === 'cap')).toBe(false)
-  expect(w.toasts.at(-1)).toContain('the API day cap is dollars')
-  await ui.input({ key: 'cap', text: '' })
-  expect(ran('wb route cap off')).toBe(true)
-  expect((await ui.find({ key: 'cap' }))?.props.value).toBe('')
-  expect(await texts()).toContain('Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap')
-  await ui.unmount()
-})
-
-test('#1023: the GPU group: each role picks Auto or a GPU model with its window and cards, sizes run wb model sizes, and drawing it runs no other wb', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, w, label, options, ran, texts, clock } = await settingsTab($, on)
-  const draws = w.runs.filter(r => !['coding', 'experiment', 'chat', 'savings', 'events', 'stats', 'progress', 'splash'].includes(r[1]!)).map(r => r.slice(1).join(' '))
-  expect([...new Set(draws)]).toEqual(['route --json', 'models --json'])    // no status, no probe
-  expect(await label('gpu-significant')).toBe('▸ Complex coding GPU model: Auto (the router picks)')
-  await ui.press({ key: 'gpu-significant' })
-  expect(await options()).toEqual(['  ❯ Auto (the router picks)', `    Qwen Big (Ollama) (40K) · GPU${NB}2+3`, '    MiMo (Ollama)'])
-  await ui.press({ key: 'gpu-significant:ollama/qwen-big' })
-  expect(ran('wb route significant --gpu ollama/qwen-big')).toBe(true)
-  expect(w.asked).toBe(0)
-  expect(await label('gpu-significant')).toBe(`▸ Complex coding GPU model: Qwen Big (Ollama) (40K) · GPU${NB}2+3`)
-  expect(await label('size-ollama/mimo')).toBe('▸ MiMo (Ollama) tasks: Trivial only')
-  await ui.press({ key: 'size-ollama/mimo' })
-  await ui.press({ key: 'size-ollama/mimo:significant' })
-  expect(ran('wb model sizes ollama/mimo significant')).toBe(true)
-  await ui.press({ key: 'size-ollama/mimo' })
-  await ui.press({ key: 'size-ollama/mimo:all' })
-  expect(ran('wb model sizes ollama/mimo')).toBe(true)
-  await ui.press({ key: 'optimize' })
-  expect(ran('wb optimize start')).toBe(true)
-  w.models.gpu = Array.from({ length: 9 }, (_, i) => ({ id: `ollama/m${i}`, label: `M${i}`, window: null, sizes: [], cards: null }))
-  await clock.advance(11_000)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  const sized = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => /^▸ M\d tasks: /.test(l))
-  expect(sized).toEqual(['▸ M0 tasks: Any size (default)', '▸ M1 tasks: Any size (default)', '▸ M2 tasks: Any size (default)',
-    '▸ M3 tasks: Any size (default)', '▸ M4 tasks: Any size (default)', '▸ M5 tasks: Any size (default)'])  // GPU_ROWS, then counted
-  expect(await texts()).toContain('+3 more (wb models)')
-  await ui.unmount()
-})
-
-test('#1023: with no provider connected and no API role the API group is one line; a wb without roles leaves them out with one line', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, w, texts, clock } = await settingsTab($, on)
-  w.routes.providers = {}
-  delete w.routes.roles.trivial.api
-  await clock.advance(11_000)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await texts()).toContain('No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
-  for (const key of ['api-trivial', 'think-trivial', 'api-connected']) expect(await ui.find({ key })).toBeUndefined()
-  w.routeCode = 2
-  w.routeOut = "wb: error: argument command: invalid choice: 'route'"
-  await clock.advance(11_000)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect((await texts()).filter(t => t === 'wb is older than the mod: wb update').length).toBeGreaterThan(0)
-  for (const key of ['agents', 'busy', 'role-trivial', 'api-trivial', 'cap']) expect(await ui.find({ key })).toBeUndefined()
-  expect(await ui.find({ key: 'coding' })).toBeDefined()                   // the rest as always
-  await ui.unmount()
-})
-
 // #1142 (2026-11-23): after /reload-plugins the tab showed "could not run wb route --json:
 // HooksError: workbench: $.process.run(wb) aborted" for ROLES_CACHE_MS: an aborted read was taken
 // for wb failing, and kept. The kit can't make $.process.run abort (a test hook that throws is
@@ -6555,85 +5132,10 @@ test('#1142: an aborted roles read leaves the last good roles drawn and keeps no
   }
 })
 
-test('#1142: a real wb failure still shows wb\'s own line, is never kept, and the next draw reads again', { timeoutMs: 20_000 }, async ($, on) => {
-  const failed = rolesRead(null, 1000, { ok: false, out: 'Traceback (most recent call last):\nwb: routes.json is not valid JSON: line 3' }, { ok: true, out: '{"gpu": []}' })
-  expect([failed.keep, failed.shown.why, failed.shown.routes]).toEqual([false, 'wb: routes.json is not valid JSON: line 3', null])
-  const { ui, w, texts, clock } = await settingsTab($, on)
-  w.routeCode = 1
-  w.routeOut = 'Traceback (most recent call last):\nwb: routes.json is not valid JSON: line 3'
-  await clock.advance(11_000)                                           // past the roles' cache
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await texts()).toContain('wb: routes.json is not valid JSON: line 3')
-  expect(await ui.find({ key: 'role-trivial' })).toBeUndefined()
-  w.routeCode = 0                                                       // fixed: read again at once, no cache held
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await ui.find({ key: 'role-trivial' })).toBeDefined()
-  expect(await texts()).not.toContain('wb: routes.json is not valid JSON: line 3')
-  await ui.unmount()
-})
-
-test('#1077: an Ollama cloud login alone counts as connected: its models are offered, never only /connect', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, w, texts, clock } = await settingsTab($, on)
-  w.routes.providers = { ollama: { name: 'Ollama Cloud', key: 'ollama', why: 'signed in through Ollama: its cloud models need no key here' } }
-  delete w.routes.roles.trivial.api
-  w.models.api = [{ id: 'ollama/glm-5:cloud', name: 'glm-5:cloud', provider: 'ollama', provider_name: 'Ollama Cloud', window: 131072, price: null as any, free: false }]
-  await clock.advance(11_000)
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  const all = await texts()
-  expect(all).not.toContain('No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
-  expect(all).toContain('Connected: Ollama Cloud (signed in through Ollama: its cloud models need no key here)')
-  expect(await ui.find({ key: 'api-trivial' })).toBeDefined()
-  await ui.unmount()
-})
-
 test('#1023: the busy opt-in is in the roles\' summary, so a change of it alone reaches the conversation', () => {
   expect(routesSummary({ busy: 'api' })).toBe('significant GPU (the router picks); trivial GPU (the router picks); ' +
     'writing GPU (the router picks); when the GPU is busy, a role with an API model runs on it')
   expect(routesSummary({ busy: 'wait' })).toBe(routesSummary({}))
-})
-
-// The GPU group's Images and Audio rows (#1047): one per media kind with a choice, from `wb models
-// --json`'s media; a pick runs `wb image|audio --default NAME`, with no dialog (no spend, nothing leaves)
-test('#1047: Images and each audio kind with two or more engines get a row after the GPU models, one off this GPU says so, and a pick runs wb image|audio --default', { timeoutMs: 20_000 }, async ($, on) => {
-  const { ui, w, label, options, ran, clock } = await settingsTab($, on)
-  const keys = ['media-image', 'media-speech', 'media-sfx', 'media-music']
-  for (const key of keys) expect(await ui.find({ key })).toBeUndefined()       // a wb without media: none
-  w.models.media = {
-    image: { default: 'flux', engines: [{ name: 'sd', gpu: true }, { name: 'flux', gpu: false }] },
-    speech: { default: 'kokoro', engines: [{ name: 'kokoro', gpu: true }] },   // no choice: no row
-    sfx: { default: 'fx1', engines: [{ name: 'fx1', gpu: true }, { name: 'fx2', gpu: true }] },
-    music: { default: null, engines: [] },
-  }
-  await clock.advance(11_000)                                                  // past the roles' cache
-  await ui.press({ key: 'tab-tasks' })
-  await ui.press({ key: 'tab-settings' })
-  expect(await label('media-image')).toBe('▸ Image engine: flux · off this GPU')
-  expect(await label('media-sfx')).toBe('▸ Sound effects engine: fx1')
-  for (const key of ['media-speech', 'media-music']) expect(await ui.find({ key })).toBeUndefined()
-  const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label))
-  const at = (start: string) => rows.findIndex(l => l.startsWith(start))
-  expect(at('▸ Image engine:')).toBeGreaterThan(at('▸ MiMo (Ollama) tasks:'))               // after the models
-  expect(at('▸ Sound effects engine:')).toBe(at('▸ Image engine:') + 1)
-  expect(at('▸ Sound effects engine:')).toBeLessThan(at('▸ Complex coding API model:')) // still in GPU
-  await ui.press({ key: 'media-image' })
-  expect(await options()).toEqual(['    sd', '  ❯ flux · off this GPU'])
-  await ui.press({ key: 'media-image:sd' })
-  expect(ran('wb image --default sd')).toBe(true)
-  expect(w.asked).toBe(0)
-  expect(await label('media-image')).toBe('▸ Image engine: sd')
-  await ui.press({ key: 'media-sfx' })
-  await ui.press({ key: 'media-sfx:fx2' })
-  expect(ran('wb audio --default fx2')).toBe(true)
-  expect(await label('media-sfx')).toBe('▸ Sound effects engine: fx2')
-  w.refuse = "wb: no audio engine 'fx1' (have: fx2 (sfx))"
-  await ui.press({ key: 'media-sfx' })
-  await ui.press({ key: 'media-sfx:fx1' })
-  expect(w.toasts.at(-1)).toBe("workbench: wb: no audio engine 'fx1' (have: fx2 (sfx))")
-  expect(await label('media-sfx')).toBe('▸ Sound effects engine: fx2')                 // as it was
-  await ui.unmount()
 })
 
 // ---------------------------------------------------------------- the Tasks view (#1048)
@@ -6806,98 +5308,316 @@ test('#1048: the API day cap shows on the Tasks tab only while an API task runs'
   await ui.unmount()
 })
 
-// #1048, part 2: one design review of Stats and Settings, seen live at 200, 160, 120 and 80 columns
-test('#1048: the Stats tab names models and providers as the Tasks view does, a size in the roles\' words, the cap as Settings says it', () => {
-  const names = { models: { 'ollama/qwen3-coder:30b': 'qwen3-coder 30B' }, providers: { deepseek: 'DeepSeek', anthropic: 'Anthropic' } }
-  const f = {
-    tasks: 30,
-    periods: { week: { tasks: 6, landed: 6, api: { tasks: 6, cost: 1.27, unknown: 0, plan: 0,
-      by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } } } },
-    model_lines: { lines: [{ model: 'ollama/qwen3-coder:30b', kind: 'gpu', tasks: 24, accepted_pct: 83, speed: { write: 61 } },
-      { model: 'deepseek/deepseek-v4.1-flash', kind: 'api', tasks: 4, accepted_pct: 100, paid: 0.21 }] },
-    sizes: { trivial: { tasks: 17, accepted_pct: 94 }, significant: { tasks: 24, accepted_pct: 71 } },
-    milestones: [{ kind: 'saved', n: 5_000_000, day: '2026-11-20' }],
-    guards: { spend: 1 },
-    helps: { 'ollama/qwen3-coder:30b': { hint: [3, 5] } },
-    bench: { 'ollama/qwen3-coder:30b': { run: 'r7', day: '2026-11-19', passed: 17, of: 20 } },
-    optimized: { 'ollama/qwen3-coder:30b': { window: 65536, spill: 0 } },
+// #1283 (the owner, 2026-11-24): the pane is Tasks only, Stats and Settings are the web app's, and
+// the modeline always shows the web app's link. `wb chat url --json` as chat.ensure answers it.
+function chatWb(files: Record<string, string>, link: () => Record<string, unknown> | null, runs: string[][] = []) {
+  return (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, sub, flag] = e.argv
+    if (cmd === 'chat' && sub === 'url' && flag === '--json') {
+      const l = link()
+      return { value: l ? { exitCode: 0, stdout: JSON.stringify(l), stderr: '' }
+        : { exitCode: 2, stdout: '', stderr: 'wb: error: unrecognized arguments: --json' } } // a wb before it
+    }
+    if (cmd === 'chat' && sub === 'url') return { value: { exitCode: 0, stdout: LINK, stderr: '' } }
+    return { value: { exitCode: 0, stdout: cmd === 'status' ? 'no open tasks' : '', stderr: '' } }
   }
-  const said = statsLines(f, '', names).map(l => `${l.label}: ${l.text}`)
-  expect(said[0]).toContain('API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic ≈$0.43; catalog prices)')  // names, not ids
-  expect(said).toContain(`qwen3-coder 30B: 24 tasks · 83% landed · writes ~61${NB}tok/s`)  // Now's label, not ollama/…
-  expect(said).toContain('API DeepSeek deepseek-v4.1-flash: 4 tasks · 100% landed · paid ~$0.21/task')  // the Tasks view's place and model
-  expect(said).toContain('By size: trivial 17 (94%) · complex 24 (71%)')             // "Complex coding", not significant
-  expect(said).toContain('Milestone: ~5.0M Claude tokens saved (estimate, 2026-11-20)')
-  expect(said).toContain('What stopped agents: the API day cap 1')                  // Settings' "API day cap"
-  expect(said).toContain('What helps (qwen3-coder 30B): a hint helped 3 of 5')
-  expect(said).toContain('Bench: qwen3-coder 30B 17/20 (2026-11-19)')
-  expect(said).toContain('Optimized: qwen3-coder 30B 64K all on the GPU')
-  // nothing named them yet: the id, and an API model still says API
-  const bare = statsLines(f).map(l => l.label)
-  expect(bare).toContain('ollama/qwen3-coder:30b')
-  expect(bare).toContain('API deepseek deepseek-v4.1-flash')
-  // Now's API row leads with its place and model, as the Tasks row; a rack speed has its unit
-  const top = { busy: {}, snap: { ts: 0, every: 2, gpus: [], queue: [], running: [{ task: 'fix-auth', model: 'deepseek/deepseek-flash',
-    label: 'deepseek/deepseek-flash', phase: 'running', round: 2, round_s: 190, via: 'api', provider: 'deepseek', spend: 0.12 }],
-    rack: [{ model: 'ollama/m', label: 'M', state: 'resident', gpu_bytes: 2 ** 33, write_tok_s: 61 }] } } as any
-  const rows = liveLines(top, '', names).map(r => r.map(p => p.text).join(''))
-  expect(rows[0]).toBe('▶ fix-auth API DeepSeek deepseek-flash · running · round 2 · 3m10s · ≈$0.12')
-  expect(rows[1]).toBe(`● M resident 8.0 GiB on the GPU · writes ~61${NB}tok/s`)
+}
+const modelineOf = async (ui: any) => (await ui.findAll({ type: 'Text' }))
+  .filter((t: any) => t.props?.color === 'inverseText').map((t: any) => String(t.text))
+
+test('#1283: the pane is the Tasks view alone, with no tab to press and no 1, 2 or 3 hotkey, and its modeline last', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', chatWb({}, () => ({ state: 'up', url: LINK })))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 140 } })
+  const buttons = await ui.findAll({ type: 'Button' })
+  expect(buttons.filter((b: any) => /^(tab|restore)-/.test(String(b.key ?? b.props?.key ?? '')))).toEqual([])
+  expect(buttons.filter((b: any) => b.props?.hotkey)).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /Stats|Settings|Experimental/ })).toBeUndefined()
+  expect(await modelineOf(ui)).toEqual([`[•_•] Claude's Workbench - ${LINK}`])
+  await ui.unmount()
 })
 
-test('#1048: a long Stats line goes on indented, as Now\'s rows, and a no-break space holds a unit whole', () => {
-  expect(hangWords('Label: one two three four', 12)).toEqual(['Label: one', '  two three', '  four'])
-  expect(hangWords('    a b c d', 7, 4)).toEqual(['    a b', '    c d'])                // its own lead kept on the first line
-  expect(hangWords('short', 12)).toEqual(['short'])
-  expect(wrapWords(`speed: writes ~61${NB}tok/s`, 12)).toEqual(['speed:', 'writes', `~61${NB}tok/s`])
-  expect(wrapParts([{ text: `GPU ~61${NB}tok/s` }], 10).map(l => l.map(p => p.text).join(''))).toEqual(['GPU', `  ~61${NB}tok/s`])
+test('#1283: the modeline reads the web app\'s state, at 140, 90 and 60 columns', () => {
+  const name = "[•_•] Claude's Workbench"
+  const why = 'another program answers on port 1337: wb chat on --port <free port>'
+  for (const state of ['up', 'started'] as const) {
+    expect(modeline({ state, url: LINK }, 140)).toEqual({ bar: `${name} - ${LINK}`, rows: [] })
+    expect(modeline({ state, url: LINK }, 90)).toEqual({ bar: `[•_•] ${LINK}`, rows: [] })        // the name gives way first
+    // narrower still: the name on the bar, the link on rows of its own, cut by characters
+    expect(modeline({ state, url: LINK }, 60)).toEqual({ bar: name, rows: [LINK.slice(0, 60), LINK.slice(60)] })
+    expect(modeline({ state, url: LINK }, 60).rows.join('')).toBe(LINK)
+  }
+  for (const cols of [140, 90, 60]) {
+    expect(modeline({ state: 'checking' }, cols).bar).toBe(`${name} - starting the web app…`)
+    expect(modeline({ state: 'off' }, cols).bar).toBe(`${name} - web app off (wb chat on)`)
+    expect(modeline({ state: 'off' }, cols).rows).toEqual([])
+  }
+  for (const state of ['blocked', 'failed'] as const) {
+    expect(modeline({ state, why }, 140)).toEqual({ bar: `${name} - web app down: ${why}`, rows: [] })
+    for (const cols of [90, 60]) {                                                                // why cut to the room
+      const cut = modeline({ state, why }, cols).bar
+      expect([[...cut].length, cut.startsWith(`${name} - web app down: another`), cut.endsWith('…')]).toEqual([cols - 2, true, true])
+    }
+  }
 })
 
-test('#1048: Settings in a narrow pane: headings as Stats\' Now, read-only lines and long rows go on under their words, one colon before a typed value', { timeoutMs: 20_000 }, async ($, on) => {
+test('#1283: the modeline follows wb chat url --json: a start, a recheck 3 s on, off, and a wb older than --json read as up', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
-  const w = settingsWorld(on, files)
-  w.models.optimize = { done_at: 1_799_740_800, models: 2, running: false }
-  w.models.media = { image: { default: 'flux', engines: [{ name: 'flux', gpu: true }, { name: 'sd', gpu: true }] } }
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  files['/wb/splash.json'] = JSON.stringify({ on: false })           // the pane at once, no animation
+  let link: Record<string, unknown> | null = { state: 'started', url: LINK }
+  const runs: string[][] = []
+  on('process.run', chatWb(files, () => link, runs))
+  const urls = () => runs.filter(r => r[1] === 'chat' && r[2] === 'url')
+  const asked = () => urls().length
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 52 } })
-  await ui.press({ key: 'tab-settings' })
-  const heads = (await ui.findAll({ type: 'Text' })).filter(t => ['Shared', 'GPU', 'API', 'Experimental'].includes(String(t.text)))
-  expect(heads.map(t => [t.text, t.props.bold, t.props.color])).toEqual([['Shared', true, 'claude'], ['GPU', true, 'claude'],
-    ['API', true, 'claude'], ['Experimental', true, 'claude']])
-  await ui.press({ key: 'tab-stats' })
-  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Now' && t.props.bold && t.props.color === 'claude')).toBe(true)
-  await ui.press({ key: 'tab-settings' })
-  // a row wider than the pane: its words in lines that fit, each after the first under the words
-  const row = (await ui.find({ key: 'api-trivial' })) as any
-  expect(row.props.label).toBe(`▸ Trivial coding API model: DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per${NB}M`)
-  const lines = String(row.text).split('\n')
-  expect(lines.length).toBe(2)
-  expect(lines.every(l => l.length <= 52)).toBe(true)
-  expect(lines[1]!.startsWith('  ') && !lines[1]!.startsWith('   ')).toBe(true)
-  expect(((await ui.find({ key: 'agents' })) as any).children ?? []).toEqual([])  // one that fits: the label alone
-  // a read-only line is in by the rows' mark, its wrapped lines too
-  const connected = (await ui.find({ key: 'api-connected' })) as any
-  expect([connected.type, connected.props.paddingLeft]).toEqual(['Box', 2])
-  expect(String(connected.text).startsWith('Connected: DeepSeek (key stored)')).toBe(true)
-  expect(((await ui.find({ key: 'wake' })) as any).props.paddingLeft).toBe(2)
-  // the engine draws the colon of a typed value: the label has none (`API day cap: : 5`)
-  expect(((await ui.find({ key: 'cap' })) as any).props.label).toBe('▸ API day cap')
-  // the date as the Stats tab writes one; the Measure now button drops under it rather than split it
-  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Optimize: measured 2 models on 2027-01-12 ·')).toBe(true)
-  expect(((await ui.find({ key: 'optimize-row' })) as any).props.flexWrap).toBe('wrap')
-  // a row says what it sets: the engine, the sizes a model takes
-  expect(((await ui.find({ key: 'media-image' })) as any).props.label).toBe('▸ Image engine: flux')
-  expect(((await ui.find({ key: 'size-ollama/qwen-big' })) as any).props.label).toBe('▸ Qwen Big (Ollama) tasks: Any size (default)')
-  await ui.press({ key: 'size-ollama/qwen-big' })
-  expect((await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => / {2}[❯ ] /.test(l)))
-    .toEqual(['  ❯ Any size (default)', '    Trivial only', '    Complex only'])
-  // an option's sentence in from the edge as the options, its wrapped lines too
-  const says = (await ui.find({ key: 'size-ollama/qwen-big-says' })) as any
-  expect(says.props.paddingLeft).toBe(4)
-  await ui.press({ key: 'chat' })
-  expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('No web server: Claude is reached in this terminal only.')
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  const pane = () => $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 140 } })
+  await clock.advance(1000)                                     // t = 1 s
+  let ui = await pane()
+  expect(await modelineOf(ui)).toEqual([`[•_•] Claude's Workbench - ${LINK}`])
   await ui.unmount()
+  expect(asked()).toBe(1)                                       // at session start
+  link = { state: 'up', url: LINK }
+  await clock.advance(3000)                                     // 4 s
+  expect(asked()).toBe(2)                                       // again 3 s after the start
+  await clock.advance(30_000)                                   // 34 s
+  expect(asked()).toBe(2)                                       // then each minute
+  await clock.advance(27_000)                                   // 61 s
+  expect(asked()).toBe(3)
+  // a url without its token, or anything that isn't one, is no link
+  link = { state: 'up', url: 'http://localhost:1337/' }
+  await clock.advance(60_000)                                   // 121 s
+  ui = await pane()
+  expect(await modelineOf(ui)).toEqual(["[•_•] Claude's Workbench"])
+  await ui.unmount()
+  // `wb chat off`: the switch's change is read at the next poll (an event's, in life), not the next minute's look
+  link = { state: 'off', url: LINK }
+  files['/wb/chat/switch.json'] = JSON.stringify({ on: false })
+  await clock.advance(31_000)                                   // 152 s
+  ui = await pane()
+  expect(await modelineOf(ui)).toEqual(["[•_•] Claude's Workbench - web app off (wb chat on)"])
+  await ui.unmount()
+  // a failure is said, and asked again 3 s on, once: one that stays down waits the minute
+  link = { state: 'failed', why: 'the server exited\nTraceback: port in use' }
+  await clock.advance(29_000)                                   // 181 s: the look at 180 s
+  const n = asked()
+  ui = await pane()
+  expect(await modelineOf(ui)).toEqual(["[•_•] Claude's Workbench - web app down: Traceback: port in use"])
+  await ui.unmount()
+  await clock.advance(3000)
+  expect(asked()).toBe(n + 1)
+  await clock.advance(3000)
+  expect(asked()).toBe(n + 1)
+  // a wb from before --json: plain `wb chat url`, its link read as up
+  link = null
+  await clock.advance(60_000)                                   // 247 s: the look at 240 s
+  expect(urls().at(-1)).toEqual(['wb', 'chat', 'url'])
+  ui = await pane()
+  expect(await modelineOf(ui)).toEqual([`[•_•] Claude's Workbench - ${LINK}`])
+  await ui.unmount()
+})
+
+test('#1283: what wb chat url --json says is read whole or not at all', () => {
+  const ok = (o: unknown): WbRun => ({ ok: true, out: JSON.stringify(o) })
+  expect(linkOf(ok({ state: 'up', url: LINK }))).toEqual({ state: 'up', url: LINK })
+  expect(linkOf(ok({ state: 'up', url: `${LINK} and more` }))).toEqual({ state: 'up' })
+  expect(linkOf(ok({ state: 'blocked', url: LINK, why: 'another program answers' }))).toEqual({ state: 'blocked', url: LINK, why: 'another program answers' })
+  expect(linkOf(ok({ state: 'off', url: LINK }))).toEqual({ state: 'off' })              // off shows no link
+  expect(linkOf(ok({ state: 'sideways' }))).toBeNull()
+  expect(linkOf({ ok: true, out: 'http://x' })).toBeNull()                               // not JSON: the plain call then
+  expect(linkOf({ ok: false, out: 'wb: error: unrecognized arguments: --json' })).toBeNull()
+  expect(linkOf({ ok: true, out: `${LINK}\n` }, true)).toEqual({ state: 'up', url: LINK })
+  expect(linkOf({ ok: false, out: 'could not run wb chat url: ENOENT' }, true)).toEqual({ state: 'failed', why: 'could not run wb chat url: ENOENT' })
+})
+
+test('#1283: no wb top, wb stats or wb savings ever runs, the pane shown, brought back and closed, and a task closing', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  fakeTasks(on, files, ['fix-it'], true, [], false)
+  files['/wb/splash.json'] = JSON.stringify({ on: false })
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  const runs: string[][] = []
+  on('process.run', chatWb(files, () => ({ state: 'up', url: LINK }), runs))
+  const spawned: string[][] = []
+  on('process.spawn', async function* (_: any, e: any) {       // `wb events`, and anything else spawned
+    spawned.push(e.argv)
+    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.advance(31_000)
+  await ui.unmount()
+  task(files, 'fix-it', 'accepted', { repo: '/home/u/a', cwd: '/home/u/a' }, ts0 + 60)
+  await clock.advance(11 * 60_000)
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })   // brought back
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.advance(31_000)
+  await ui.unmount()
+  await $.command.run({ command: 'workbench-quit', args: '' } as any)
+  await clock.advance(3000)
+  const all = [...runs, ...spawned].map(a => a.slice(1, 2).join(''))
+  expect(all.filter(c => ['top', 'stats', 'savings'].includes(c))).toEqual([])
+  expect([...new Set(spawned.map(a => a[1]))]).toEqual(['events'])           // only the watcher, never `wb top`
+})
+
+test('#1283: the pane atom is pane-2 and the chat atom chat-5, their defaults Tasks-only and checking', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  // wb answering everything but the link yet: it is still being looked up
+  on('process.run', (_: any, e: any) => e.argv[1] === 'chat' && e.argv[2] === 'url' ? new Promise(() => {})
+    : { value: { exitCode: 0, stdout: '', stderr: '' } })
+  const sets: Record<string, any> = {}
+  on('state.set', (_: any, e: any, next: any) => { if (e.plugin === 'workbench') sets[e.key] = e.value; return next(e) })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(sets.chat?.shape).toBe('chat-5')
+  expect(sets.chat?.value).toEqual({ key: expect.any(String), delegating: false, link: { state: 'checking' } })
+  const ui0 = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 140 } })
+  expect(await modelineOf(ui0)).toEqual(["[•_•] Claude's Workbench - starting the web app…"])
+  await ui0.unmount()
+  files['/wb/splash.json'] = JSON.stringify({ on: false })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await $.command.run({ command: 'workbench-quit', args: '' } as any)  // the quit sets the pane: no strip either
+  expect(sets.pane).toEqual({ shape: 'pane-2', value: { open: '', focus: '', minimized: false } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 140 } })
+  expect(await modelineOf(ui)).toEqual(["[•_•] Claude's Workbench - starting the web app…"])
+  await ui.unmount()
+  await clock.advance(10)
+})
+
+test('#1283: the opening animation\'s bar lands on the modeline\'s row, above the link\'s own rows in a narrow pane', async ($, on) => {
+  const { clock } = splashClock(on)
+  const w = splashWorld(on, {}, [], true, { state: 'up', url: LINK })
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await clock.advance(100)                                              // the link read
+  await workbench($)
+  const ui = await $.ui.mount(splashPane(60, 27))
+  await clock.advance(6000)
+  // the empty page at 60 columns: the stage's margin, the apprentice and its bubble (rows 0-8),
+  // the modeline on row 8 and the link's two rows under it
+  expect(barRows(unpacked(w.frames[w.frames.length - 1]!), 60, 27)).toEqual([8])
+  const texts = (await ui.findAll({ type: 'Text' })).map((t: any) => String(t.text))
+  expect(texts.slice(-3)).toEqual(["[•_•] Claude's Workbench", LINK.slice(0, 60), LINK.slice(60)])
+  await ui.unmount()
+})
+
+test('#1283: Agent code navigation turned on in the web app without probe makes Claude offer to set it up, once', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('process.run', chatWb(files, () => ({ state: 'up', url: LINK })))
+  const kept: Record<string, unknown> = {}
+  on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
+  on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  const help = "probe isn't installed, so nothing changes yet. Offer to set it up: the agents need probe's release " +
+    'binary with `symbols`; install nothing without their yes.'
+  const row = (ts: number, extra: Record<string, unknown> = {}) => JSON.stringify({ ts, key: 'probe', label: 'Agent code navigation',
+    from: 'off', to: 'on', said: 'probe: on, but not set up: no probe with symbols on PATH', help, by: 'web', ...extra }) + '\n'
+  files['/wb/settings-changes.jsonl'] = row(ts0 - 7200) // two hours old: no news now
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toEqual([])
+  files['/wb/settings-changes.jsonl'] += row(ts0 + 5)
+  mtimes['/wb/settings-changes.jsonl'] = 1
+  await clock.advance(31_000)
+  const offers = () => woken.filter(t => t.includes('Agent code navigation'))
+  expect(offers()).toEqual(['[workbench] The user changed Agent code navigation from off to on on the web app. ' +
+    `wb said: probe: on, but not set up: no probe with symbols on PATH\n${help}\n` +
+    'Offer to help with it, and install or change nothing without their yes.'])
+  expect(toasts).toContain('workbench: Agent code navigation changed on the web app: Claude will offer to set it up')
+  await clock.advance(31_000)
+  expect(offers()).toHaveLength(1)
+  expect(kept.settingsSeen).toBe(ts0 + 5)        // every session's mark: a reload or another session says it never again
+  // the same change from the terminal, or by Claude, is no web row: nothing comes
+  files['/wb/settings-changes.jsonl'] += row(ts0 + 90, { by: 'claude' })
+  mtimes['/wb/settings-changes.jsonl'] = 2
+  await clock.advance(31_000)
+  expect(offers()).toHaveLength(1)
+})
+
+test('#1283: a web change is the listening session\'s; a setting with no help is a row, a role\'s comes as the roles\' own', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  on('process.run', chatWb(files, () => ({ state: 'up', url: LINK })))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'another-key', ts: ts0 })   // another session listens
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.prompt.context({ blocks: [] })
+  const change = (ts: number, key: string, label: string, from: unknown, to: unknown) =>
+    JSON.stringify({ ts, key, label, from, to, said: `${label}: ${to}`, by: 'web' }) + '\n'
+  files['/wb/settings-changes.jsonl'] = change(ts0 + 1, 'every', 'Live refresh', 2, 5) +
+    change(ts0 + 2, 'role-trivial', 'Trivial coding', 'gpu', 'api') + change(ts0 + 3, 'price', 'Electricity price', null, 0.3)
+  await clock.advance(3000)
+  expect(rows.filter(r => r.includes('on the web app'))).toEqual([])   // the listener's to say
+  files['/wb/chat/listener.json'] = '{}'                               // it went: this one says it
+  await clock.advance(31_000)
+  expect(rows.filter(r => r.includes('on the web app'))).toEqual(['[workbench] The user changed Live refresh from 2 to 5 on the web app. ' +
+    'wb said: Live refresh: 5\nThe user changed Electricity price from off to 0.3 on the web app. wb said: Electricity price: 0.3'])
+  expect(woken.filter(t => t.includes('on the web app'))).toEqual([])  // no turn for them
+  await clock.advance(31_000)
+  expect(rows.filter(r => r.includes('on the web app'))).toHaveLength(1)
+  expect(settingSaid({ key: 'x', from: 'a\nb', to: 'c' })).toBe('The user changed x from a b to c on the web app.')
+})
+
+test('#1283: a role changed in the web app reaches the conversation once, saying it was the user\'s, on the web app', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const at = '/home/u/.config/workbench/routes.json'
+  const files: Record<string, string> = {
+    [at]: JSON.stringify({ v: 1, day_usd: 5, roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off', by: 'dialog', ts: ts0 - 600 } } }),
+  }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await $.prompt.context({ blocks: [] })
+  await clock.advance(31_000)
+  // the web app's Settings (settings.apply: wb route with WB_ACTOR=web, routes.json `by` web)
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { trivial: { via: 'gpu', api: 'deepseek/deepseek-flash', thinking: 'off', by: 'dialog',
+    ts: ts0 - 600 }, writing: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off', by: 'web', ts: ts0 + 10 } } })
+  await clock.advance(31_000)
+  await clock.advance(31_000)
+  expect(rows.filter(r => r.includes('The roles changed'))).toEqual(['[workbench] The roles changed: significant GPU (the router picks); ' +
+    'trivial GPU (the router picks), API kept: deepseek/deepseek-flash; writing API deepseek/deepseek-flash, thinking off. Day cap $5 ' +
+    '(the user, on the web app). Never pass --model for an API model or change a role without the user\'s yes (the mod asks them ' +
+    'in a dialog); recommend only.'])
+  // a change made elsewhere after it says nothing of the web app
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { writing: { via: 'gpu', api: 'deepseek/deepseek-flash', thinking: 'off', by: 'terminal', ts: ts0 + 40 } } })
+  await clock.advance(31_000)
+  expect(rows.filter(r => r.includes('The roles changed')).at(-1)).not.toContain('web app')
 })

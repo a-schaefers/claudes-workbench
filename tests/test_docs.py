@@ -100,15 +100,13 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn(f"{models.MIN_WINDOW // 1024}K at the least", readme)
         self.assertIn("32K context window recommended", readme)
 
-    def test_the_panes_probe_row_names_the_line_count_the_code_holds(self):
-        # the review of #857's off and on (2026-11-22): the pane's "On (large files only)" sentence
-        # copies context.PROBE_FILE_LINES, which it can't import, so a change to one is caught here
-        from workbench import context
-        said = f"one function of a file over {context.PROBE_FILE_LINES:,} lines with probe"
+    def test_the_pane_keeps_no_copy_of_a_setting_wb_owns(self):
+        # the review of #857's off and on (2026-11-22) caught the pane's probe sentence copying
+        # context.PROBE_FILE_LINES; since #1283 (the owner, 2026-11-24) the settings are the web
+        # app's and the pane is Tasks only, so it keeps no copy of a setting's words to fall behind
         pane = (ROOT / "mod/hooks/register.tsx").read_text()
-        stops = pane[pane.index("const PROBE_STOPS"):]
-        self.assertIn(said, stops[:stops.index("]\n")], "the pane's PROBE_STOPS on sentence")
-        self.assertIn(said, " ".join(ARCH.split()), "ARCHITECTURE.md's pane row")
+        for copy in ("const PROBE_STOPS", "const CODING_STOPS", "const SETTING_ROWS", "const TABS"):
+            self.assertNotIn(copy, pane)
 
     def test_wb_start_role_and_the_agents_switch_are_in_the_command_reference(self):
         # #1016: the role Claude picks per task, and the user's Agents switch
@@ -259,13 +257,10 @@ class DocsFor20(unittest.TestCase):
         # wb takeover's refusal does (cli._coding_gate)
         self.assertIn("Unanswered, the work stays with the agent.", said)
 
-    def test_wb_coding_and_the_pane_say_the_same_sentence_for_each_choice(self):
-        # *Couplings*: cli.CODING → the mod's CODING_STOPS (#1027 changed both in one word)
-        stops = (ROOT / "mod/hooks/register.tsx").read_text()
-        stops = stops[stops.index("const CODING_STOPS"):]
-        stops = stops[:stops.index("]\n")]
+    def test_no_wb_coding_sentence_calls_the_agent_local(self):
+        # #1027 changed cli.CODING and the pane's copy in one word; the copy went with the pane's
+        # Settings (#1283), and the sentences stay free of "local"
         for mode, (_, sentence) in cli.CODING.items():
-            self.assertIn(f"'{sentence}'", stops, mode)
             self.assertNotIn("local", sentence, mode)
 
     def test_architecture_md_defines_the_agent_as_a_gpu_or_an_api_model(self):

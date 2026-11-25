@@ -56,7 +56,7 @@ const SCOUT_NOTE =
   '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
   'registered may belong to other tools: ask first. API roles: recommend in chat only; never ' +
   'run `wb route` or pass `--model` for an API model unasked (a role changes on the user\'s ' +
-  'words, through the dialog, or in the pane).\n' +
+  'words, through the dialog, or in the web app\'s Settings).\n' +
   '5. The audio and image engines `wb scout` lists, if any (speech, sound effects, music, the ' +
   'listener; images): check each model\'s licence today against its licence text, not its tag ' +
   '(licences change: one audio model went non-commercial mid-2026), and whether a newer local ' +
@@ -77,13 +77,14 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbMedia, WbModels, WbPane, WbRoutes, WbSaid, WbStats, WbTask, WbTop } from '../types'
+import type { WbChat, WbLine, WbLive, WbModels, WbPane, WbRoutes, WbSaid, WbTask } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
-import { activity, loopLength, TICKER_MS, tickerCells } from './modeline'
-import { ago, apiWorking, bar, capRow, clip, compactWanted, ROLE_WORDS, taskLines } from './tasks'
+import { modeline } from './modeline'
+import type { Link } from './modeline'
+import { ago, apiWorking, capRow, clip, compactWanted, taskLines } from './tasks'
 import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
@@ -110,9 +111,6 @@ const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lin
   shape: 'live-1',
 })
 
-// The week's saving, the pane's last line (`wb savings --json`, read as the chat link is, and
-// again when a task closes): the user, 2026-11-18, nothing in the product showed it (#107).
-const savings = atom({ plugin: 'workbench', key: 'savings' } as const, '', { shape: 'savings-1' })
 const KEEP_LINES = 2000 // the pane scrolls back through this much history (`wb watch --last`)
 // One heredoc command or minified write is a single line of 100 KB or more, and alone it took the
 // whole HISTORY_CHARS budget, hiding everything before it (the 2026-11-16 audit): each line is
@@ -125,48 +123,33 @@ const LIVE_EVERY_MS = 5000 // a running task's transcript is re-read this often,
 // drawn is its newest lines within this budget, leaving the rest of the pane room.
 const HISTORY_CHARS = 60000
 
-// The web chat (`wb chat serve`): the user's side door while away from the terminal. A session
-// listens while workbench mode is on in it (`delegating`), from /workbench until a quit command;
-// with several, the first to claim chat/listener.json does, and the others stand by. A message is
-// submitted as a prompt (so the terminal shows it too) with a receipt the page shows at once.
-// The user turns it on or off (`wb chat on|off`, or the pane's row; chat/switch.json): off by
-// default, and then no session listens, sends it prompts or shows its link (the user, 2026-11-19).
+// The web chat (`wb chat serve`): the user's side door while away from the terminal, and since 2.0
+// the web app with its Stats and Settings (#1283): the terminal stays the primary way to work with
+// Claude, the web chat a second lane, and the web app's Settings are where the settings live. A
+// session listens while workbench mode is on in it (`delegating`), from /workbench until a quit
+// command; with several, the first to claim chat/listener.json does, and the others stand by. A
+// message is submitted as a prompt (so the terminal shows it too) with a receipt the page shows at
+// once. `link` is the web app as `wb chat url --json` says it (chatLink): on by default, and after
+// `wb chat off` (state `off`) no session listens or sends it prompts.
 const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
-  { key: '', delegating: false, url: '', web: false } as WbChat, { shape: 'chat-4' })
-// The pane's view: a Tasks tab and a Settings tab, as backseat-driver's (the user, 2026-11-19: the
-// settings belong on a page of their own). A settings row names its value, a press opens its
-// options under it as Buttons (a click or the ring's Enter picks), the option under the ring or the
-// pointer shows its sentence. A Select there opened on a click and could pick nothing (2026-10-05),
-// and its sentence followed only the saved choice (the user, 2026-11-19).
-// Closed by the user (its mark, Esc), the pane is minimized, as backseat-driver's is (the user,
-// 2026-11-19): a strip above the prompt stands in for it, a press there or /workbench brings it back.
+  { key: '', delegating: false, link: { state: 'checking' } } as WbChat, { shape: 'chat-5' })
+// Whether the web chat is on (the user's switch): wb says `off` only after `wb chat off`
+const webOn = (c: WbChat) => c.link.state !== 'off'
+// The pane is Tasks only (#1283: its Stats and Settings tabs went to the web app, the owner,
+// 2026-11-24). Closed by the user (its mark, Esc), the pane is minimized, as backseat-driver's is
+// (the user, 2026-11-19): a strip above the prompt stands in for it, a press there or /workbench
+// brings it back.
 const pane = atom({ plugin: 'workbench', key: 'pane' } as const,
-  { tab: 'tasks', open: '', focus: '', minimized: false } as WbPane, { shape: 'pane-1' })
+  { open: '', focus: '', minimized: false } as WbPane, { shape: 'pane-2' })
 // Whether this session's first /workbench has come (#963): the opening animation plays at that
 // one alone. An atom, so a module reload (which runs session.start again with `mem` empty) can't
 // play it again; /workbench again and a bring-back from the strip find it set.
 const splashed = atom({ plugin: 'workbench', key: 'splash' } as const, false, { shape: 'splash-1' })
 const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
-// Stats between them (#406): looked at more often than Settings
-const MODELINE = "Claude's Workbench" // the bar under the tabs
-const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['stats', 'Stats', '2'], ['settings', 'Settings', '3']]
-// The Stats tab's history (`wb stats --json`), read while the tab is shown: when it is first
-// shown in a load (`mem.statsLoaded`: the atom outlives a reload), on each press of the tab, again
-// when a file it is made from changes (refreshStats), and once the feed's `until` (the next local
-// midnight) has passed. No timer.
-const statsFeed = atom({ plugin: 'workbench', key: 'stats' } as const, { key: '', feed: null } as WbStats,
-  { shape: 'stats-1' })
-// The Stats tab's live view (#408): one `wb top --json` child, only while the tab is on screen
-// with the live view on, ended the moment it isn't; each line its newest tick
-const topNow = atom({ plugin: 'workbench', key: 'top' } as const, { snap: null, busy: {} } as WbTop,
-  { shape: 'top-1' })
-const BUSY_KEEP = 60 // busy % samples kept per GPU for the sparkline: two minutes at 2 s
-const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, failing) is tried again this long after, doubling
-// A `wb stats --json` that failed or timed out is tried again after STATS_RETRY_MS, doubling to
-// RETRY_MAX_MS; each poll ran it again, a full-history read a core kept busy on a slow host (#553)
-const STATS_RETRY_MS = 60_000
-const RETRY_MAX_MS = 10 * 60_000
-const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
+// The web app's link, looked up at session start and every CHAT_CHECK_MS (`wb chat url --json`,
+// which starts the app if it isn't up), and again CHAT_RECHECK_MS after a start or a failure
+const CHAT_CHECK_MS = 60_000
+const CHAT_RECHECK_MS = 3_000
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 // the user counts as away this long after they last used the web chat: a web message, or a page
 // in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
@@ -210,7 +193,7 @@ async function webAt($: any): Promise<number> {
   return Number((await readJson($, awayFile())).at ?? 0) * 1000 || 0
 }
 async function away($: any, st: WbChat): Promise<boolean> {
-  return st.web && awayNow(await webAt($), await $.clock.now(), await read($, tasks), mine)
+  return webOn(st) && awayNow(await webAt($), await $.clock.now(), await read($, tasks), mine)
 }
 async function back($: any) {
   if (await webAt($)) await $.fs.write(awayFile(), JSON.stringify({ at: 0 })).catch(() => {})
@@ -374,8 +357,8 @@ const NARROW = /^[\x20-\x7e -¬®-˿Ͱ-ԯ‐-‧‰- ⁰-⌙⌜-⌨⌫-⏨⏭
  * which can't be known here exactly, and `atLeast` counts each such line as one row. `stage` is
  * the row the apprentice's Raster starts on, `tail` the rows from there to the end.
  */
-export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, saved: string, now: number,
-  cols: number, bodyRows = 24): { rows: number | null; atLeast: number; stage: number; tail: number | null } {
+export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, link: Link, now: number,
+  cols: number, bodyRows = 24): { rows: number | null; atLeast: number; stage: number; tail: number | null; head: number } {
   const spin = SPIN[0] ?? '✻'
   const page = pageParts(list, watched, delegating, now, spin, cols, true, bodyRows, capOf(list))
   let exact = true
@@ -397,21 +380,22 @@ export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, 
   const said = wrapWords(page.say, page.room).length + (page.more ? wrapWords(page.more, page.room).length : 0) +
     (page.clock ? wrapWords(page.clock, page.room).length : 0)
   const stage = rows + 1 // the stage's marginTop
-  // the stage's height (the apprentice, the mouth, the bubble below its marginTop), the saving's
-  // line, the tabs' marginTop, the tabs, the modeline
-  const savedFits = !saved || (NARROW.test(saved) && saved.length <= cols)
-  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (page.capLine ? 1 : 0) + (saved ? 1 : 0) + 3
-  return { rows: exact && savedFits ? stage + tail : null, atLeast: stage + tail, stage, tail: savedFits ? tail : null }
+  // the stage's height (the apprentice, the mouth, the bubble below its marginTop), the cap's
+  // line, then the header: the modeline and, when the link doesn't fit on it, the link's rows (#1283)
+  const head = 1 + modeline(link, cols).rows.length
+  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (page.capLine ? 1 : 0) + head
+  return { rows: exact ? stage + tail : null, atLeast: stage + tail, stage, tail, head }
 }
 
-// Where the splash's last frame puts the apprentice and the modeline's bar, in a pane body of
+// Where the splash's last frame puts the apprentice and the modeline's bar (its first row: the
+// link's own rows, when it has them, come under it), in a pane body of
 // `body` rows: the page's own rows when it fits (a docked pane draws it from the top; an inline
 // one, sized to it, keeps its top where it was), else its end, which the pane follows. A page
 // that may wrap and doesn't surely overflow has no exact bar row: the words rise away instead.
 export function splashTarget(shape: ReturnType<typeof pageShape>, body: number): Target {
-  if (shape.rows !== null && shape.rows <= body) return { stage: shape.stage, bar: shape.rows - 1 }
-  // more than the pane surely: its end, the modeline the pane's last row (the stage as near as known)
-  if (shape.atLeast > body) return { stage: body - (shape.tail ?? shape.atLeast - shape.stage), bar: body - 1 }
+  if (shape.rows !== null && shape.rows <= body) return { stage: shape.stage, bar: shape.rows - shape.head }
+  // more than the pane surely: its end, the header the pane's last rows (the stage as near as known)
+  if (shape.atLeast > body) return { stage: body - (shape.tail ?? shape.atLeast - shape.stage), bar: body - shape.head }
   return { stage: shape.stage, bar: null }
 }
 
@@ -447,45 +431,6 @@ export const wrapWords = (text: string, n: number): string[] => {
   }
   if (line) lines.push(line)
   return lines.length ? lines : ['']
-}
-
-// A line of coloured parts broken into lines of at most n characters at spaces, each further
-// line indented: the Stats tab's live rows were cut at the pane's edge (truncate-end), so a GPU
-// with a long name lost its busy bar, watts and sparkline, and a model its load time, to "…"
-// (2026-11-21). A word longer than a line stays whole; the Text still cuts it at the edge.
-type Part = { color?: string; dim?: boolean; bold?: boolean; text: string }
-export const wrapParts = (parts: Part[], n: number, indent = 2): Part[][] => {
-  const lines: Part[][] = []
-  let line: Part[] = []
-  let width = 0
-  const add = (p: Part, text: string) => {
-    const last = line[line.length - 1]
-    if (last && last.color === p.color && last.dim === p.dim && last.bold === p.bold) last.text += text
-    else line.push({ ...p, text })
-    width += text.length
-  }
-  for (const p of parts) {
-    for (const tok of p.text.split(/([^\S\u00a0]+)/).filter(Boolean)) { // NB holds a unit whole
-      if (/^[^\S\u00a0]/.test(tok)) {
-        if (width > (lines.length ? indent : 0)) add(p, tok)
-        continue
-      }
-      if (width > (lines.length ? indent : 0) && width + tok.length > n) {
-        const end = line[line.length - 1]
-        if (end) end.text = end.text.trimEnd()
-        lines.push(line)
-        line = [{ text: ' '.repeat(indent) }]
-        width = indent
-      }
-      add(p, tok)
-    }
-  }
-  if (line.length) {
-    const end = line[line.length - 1]
-    end.text = end.text.trimEnd()
-    lines.push(line)
-  }
-  return lines.length ? lines : [[{ text: '' }]]
 }
 
 const eventLine = (r: Row): string | null => {
@@ -553,7 +498,7 @@ const SPEND_NEXT = (n: string, capped: boolean) => (capped
 // A stop for the Agents switch on GPU (cause `spend`, guard `agents`, #1213): no cap lets it go on, and
 // resume or feedback is refused until the user sets Agents back
 const AGENTS_NEXT = (n: string) =>
-  `Ask the user: Agents back to Both or API (the workbench pane, or \`wb route all both\` on their yes), ` +
+  `Ask the user: Agents back to Both or API (the web app's Settings, or \`wb route all both\` on their yes), ` +
   `then \`wb resume ${n}\`; or \`wb takeover ${n}\` or \`wb discard ${n}\`. Never retry it with feedback yourself.`
 // A stop by the task's API provider (cause `provider`: runner.PROVIDER_GUARDS, a rate limit or an
 // outage held 10 minutes, a quota or a refused key) isn't the agent's, yet it woke as "was stopped:
@@ -666,467 +611,6 @@ async function workflowsMode($: any): Promise<string> {
   } catch {
     return 'off'
   }
-}
-
-// The pane's Claude coding row (#93), in order; the choice is wb's (`wb coding`), the sentence is
-// what the pane shows for the option under the ring or the pointer. The default says so, to show
-// how it was at the start (the user, 2026-11-19)
-const CODING_STOPS: [string, string, string][] = [
-  ['only', 'Only when I say', 'You tell Claude when to write code.'],
-  ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
-  ['decide', 'Let Claude decide (default)', 'Claude uses its judgment to guide the agent or make a fix itself.'],
-]
-
-// The web chat's row: the choice is wb's (`wb chat on|off`, chat/switch.json), off by default
-const CHAT_STOPS: [string, string, string][] = [
-  ['off', 'Off (default)', 'No web server: Claude is reached in this terminal only.'],
-  ['on', 'On', 'A localhost web server to interact with Claude.'],
-]
-
-// The probe experiment's row (ARCHITECTURE.md, *Experiments*): wb's choice (`wb experiment probe
-// on|off`, experiments.json), off by default. A task keeps what it started with. Off and on, on
-// is large files only (the owner, 2026-11-22, #857: its levels adaptable, moderate and aggressive
-// went; on is what moderate did). On's sentence says "with probe", where a working probe's
-// version goes.
-const PROBE_STOPS: [string, string, string][] = [
-  ['off', 'Off (default)', 'The agent reads whole files, as without the experiment.'],
-  ['on', 'On (large files only)', 'The agent may extract one function of a file over 1,500 lines with probe, instead of reading it whole (github.com/probelabs/probe).'],
-]
-// probe's levels from before it was off and on, each read as on (context.OLD_LEVELS)
-const PROBE_OLD_LEVELS = ['adaptable', 'moderate', 'aggressive']
-
-// What wb says of it: off, on and working (with probe's version), or on but not set up
-// (no probe with `symbols` on PATH), and whether on is recommended (context.PROBE_RECOMMENDED,
-// set once a measurement says so). The row says which, since it read "On" whether or not anything
-// changed (the user, 2026-11-20). Asked of wb (`wb experiment probe`) only while the Settings tab
-// draws, at most every PROBE_RECHECK_MS, and again after each pick: a probe installed meanwhile
-// shows without a restart. Off too, since the recommendation is wb's to give; off, wb runs no probe.
-const PROBE_RECHECK_MS = 30_000
-type ProbeState = { state: 'off' | 'ready' | 'missing' | 'unknown'; version: string; recommended: boolean }
-function probeSaid(out: string): ProbeState {
-  const line = out.split('\n').find(l => l.startsWith('probe:')) ?? ''
-  const recommended = line.includes('on is recommended')
-  if (line.startsWith('probe: off')) return { state: 'off', version: '', recommended }
-  if (line.includes('not set up')) return { state: 'missing', version: '', recommended }
-  if (line.startsWith('probe: on'))
-    return { state: 'ready', version: /and working \(([^)]*)\)/.exec(line)?.[1] ?? '', recommended }
-  return { state: 'unknown', version: '', recommended }
-}
-
-async function probeStatus($: any): Promise<ProbeState> {
-  const now = await $.clock.now()
-  if (mem.probe && now - mem.probe.at < PROBE_RECHECK_MS) return mem.probe.said
-  const { ok, out, aborted } = await runWb($, ['experiment', 'probe'], 15_000)
-  const said = ok ? probeSaid(out) : { state: 'unknown' as const, version: '', recommended: false }
-  if (aborted) return mem.probe?.said ?? said // not kept: the next draw asks again (#1142)
-  mem.probe = { at: now, said }
-  return said
-}
-
-// The row's options: on marked recommended when wb says so, and, chosen, whether it works
-function probeStops(s: ProbeState, mode: string): [string, string, string][] {
-  return PROBE_STOPS.map(([v, label, said]): [string, string, string] => {
-    const named = v === 'on' && s.recommended ? `${label} (recommended)` : label
-    if (v !== mode || v === 'off') return [v, named, said]
-    if (s.state === 'ready') return [v, `${named}, working`, said.replace('with probe', `with probe${s.version ? ` (${s.version})` : ''}`)]
-    if (s.state === 'missing') return [v, `${named}, not set up`, "probe isn't installed, so nothing changes yet: Claude can set it up."]
-    return [v, named, said]
-  })
-}
-
-// Claude's turn when the user turns it on and probe isn't there: offer to set it up (the user,
-// 2026-11-20: "let Claude offer to help the user get it fully set up"), with wb's own line
-const PROBE_SETUP_NOTE = (said: string) =>
-  "[workbench] The user just turned on Agent code navigation (the probe experiment) in the " +
-  `pane's Settings, but it can't work yet. wb says: ${said}\n` +
-  'Offer to set it up, and install nothing without their yes. probe (github.com/probelabs/probe) ' +
-  'is a code-search command-line tool; the agents need its release binary, whose `probe --help` ' +
-  "lists `symbols` (crates.io's probe-code 0.6.0 doesn't, though it reports the same version). " +
-  'Pick the asset for this OS and CPU from github.com/probelabs/probe/releases, put `probe` in a ' +
-  'directory on the PATH you and wb run with (such as ~/.local/bin), then run `wb experiment ' +
-  'probe` until it says "and working". Tasks started from then use it; running ones keep ' +
-  'what they started with. If they would rather not, `wb experiment probe off`.'
-
-// Turns the probe experiment on or off through wb, then says how it came out: on and working, or
-// on but not set up, which also asks Claude to offer the setup (once while it's queued)
-async function setProbe($: any, value: string) {
-  const { ok, out } = await runWb($, ['experiment', 'probe', value])
-  mem.probe = null // the row asks wb again
-  if (!ok) { $.ui.toast(`workbench: ${brief(out)}`); return }
-  if (value === 'off') return
-  const s = probeSaid(out)
-  if (s.state === 'missing') {
-    $.ui.toast("workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up.")
-    const line = out.split('\n').find(l => l.startsWith('probe:')) ?? out
-    if (!mem.queued.some(q => q.startsWith(PROBE_SETUP_NOTE('').slice(0, 60)))) mem.queued.push(PROBE_SETUP_NOTE(line))
-  } else if (s.state === 'ready') {
-    $.ui.toast(`workbench: Agent code navigation is ${value} and working${s.version ? ` (${s.version})` : ''}: tasks started from now use it.`)
-  }
-}
-
-// experiments.json's probe setting as wb reads it (context.setting): "on", true or an old level
-// is on, anything else off
-async function probeMode($: any): Promise<string> {
-  try {
-    const v = JSON.parse(await $.fs.read(`${mem.root}/experiments.json`)).probe
-    return v === 'on' || v === true || PROBE_OLD_LEVELS.includes(v) ? 'on' : 'off'
-  } catch {
-    return 'off'
-  }
-}
-
-// The Stats tab's rows (#406): what wb records for it and its live view, on by default (the user,
-// 2026-11-20: a measurement that costs nothing is on, and every one can be turned off), then
-// progress checks, off by default since each one wakes Claude. Each is wb's choice: `wb stats set`
-// (stats.json), `wb progress` (progress.json).
-const RECORD_STOPS: [string, string, string][] = [
-  ['on', 'On (default)', 'Each task keeps how it went for the Stats tab: speeds, watts, what stopped it. Nothing leaves this machine.'],
-  ['off', 'Off', 'Tasks keep only what workbench itself learns from.'],
-]
-const LIVE_STOPS: [string, string, string][] = [
-  ['on', 'On (default)', 'The Stats tab shows this machine now (wb top), and only while it is on screen.'],
-  ['off', 'Off', 'The Stats tab shows the history only.'],
-]
-const EVERY_STOPS: [string, string, string][] = [
-  ['1', '1 s', 'How often the live view samples the GPU, the tasks and the models.'],
-  ['2', '2 s (default)', 'How often the live view samples the GPU, the tasks and the models.'],
-  ['5', '5 s', 'How often the live view samples the GPU, the tasks and the models.'],
-]
-const PROGRESS_OFF: [string, string, string] = ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.']
-const PROGRESS_STOPS: [string, string, string][] = [
-  PROGRESS_OFF,
-  // the defaults are progress.py's DEFAULT_MIN and TYPICAL_MIN (#724)
-  ['on', 'On', 'A task past its typical length (20 min trivial, 45 significant, until 3 of the size are timed on its model) gets a check, again at 2x and 4x, each with one recommendation, waking Claude.'],
-]
-// With a threshold set (`wb progress on --after N`, kept through the row's bare on/off) On says
-// it: the typical length it named instead was the wrong one (#578)
-function progressStops(after: number): [string, string, string][] {
-  if (!after) return PROGRESS_STOPS
-  return [PROGRESS_OFF, ['on', `On, after ${after} min`,
-    `A task past ${after} min of active work gets a check and one recommendation, waking Claude.`]]
-}
-const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash|agents|busy|workflows|(?:role|gpu|api|think|media)-[a-z]+|size-[^:]+):/ // the rows whose ring the pane follows
-
-// One settings row: a Button naming the choice, which opens its options under it, each a Button
-// (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
-// the ring is on, else the chosen one's; the pointer on an option lays its own over it (a hover
-// reveal: no hook runs on hover). A pick folds the row again, which redraws it; the option
-// already chosen only folds it, running nothing (#578: picking On again ran a bare
-// `wb progress on`, which then dropped a `--after` threshold).
-function settingRow(kit: Row, $: any, name: string, title: string, stops: [string, string, string][],
-  value: string, view: WbPane, pick: (value: string) => Promise<unknown>) {
-  const { Box, Text, Button } = kit
-  // a row longer than the pane goes on under its words, not under its mark (hangWords): wrapped by
-  // the pane, `▸ Complex coding API model: Claude Haiku 5.5 ·` went on with "Anthropic (195K) · …"
-  // at the left edge, read as a row of its own (#1048's review at 120 columns); the label stays the
-  // control's name
-  const row = (props: Row, label: string, indent: number) => mem.settingsCols && label.length > mem.settingsCols
-    ? <Button {...props} label={label} plain><Text>{hangWords(label, mem.settingsCols, indent).join('\n')}</Text></Button>
-    : <Button {...props} label={label} plain />
-  const chosen = stops.find(s => s[0] === value) ?? stops[stops.length - 1]
-  if (view.open !== name)
-    return row({ key: name, onPress: () => { void update($, pane, p => ({ ...p, open: name, focus: '' })) } }, `▸ ${title}: ${chosen[1]}`, 2)
-  const ringed = stops.find(s => `${name}:${s[0]}` === view.focus) ?? chosen
-  const width = Math.max(...stops.map(s => s[2].length))
-  return (
-    <Box flexDirection="column">
-      {row({ key: name, onPress: () => { void update($, pane, p => ({ ...p, open: '', focus: '' })) } }, `▾ ${title}: ${chosen[1]}`, 2)}
-      {stops.map(([v, label]) => row({ key: `${name}:${v}`, dimColor: v !== chosen[0], hover: { scope: `wb-${name}-${v}` },
-        onPress: () => { void (v === chosen?.[0] ? Promise.resolve() : pick(v)).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) } },
-        `  ${v === chosen[0] ? '❯' : ' '} ${label}`, 4))}
-      {/* in from the edge as the options, its wrapped lines too (#1048's review) */}
-      <Box key={`${name}-says`} paddingLeft={4}>
-        <Box>
-          <Text dimColor>{ringed[2].padEnd(width)}</Text>
-          {stops.map(([v, , said]) => (
-            <Box position="absolute" top={0} left={0} display="none" hover={{ display: 'flex', scope: `wb-${name}-${v}` }}>
-              <Text dimColor>{said.padEnd(width)}</Text>
-            </Box>
-          ))}
-        </Box>
-      </Box>
-    </Box>
-  )
-}
-
-// A read-only line among the settings rows: dim, in from the edge by the `▸ ` of the rows, its
-// wrapped lines too (a hanging indent: "  Connected: …" went on at the pane's left edge, under the
-// rows' marks, #1048's review at 120 columns)
-function infoLine(kit: Row, key: string, text: string) {
-  const { Box, Text } = kit
-  return <Box key={key} paddingLeft={2}><Text dimColor>{text}</Text></Box>
-}
-
-// A section's heading, on both tabs as Stats' Now: bold, in the theme's claude colour; `note` dim after it
-function heading(kit: Row, text: string, note = '') {
-  const { Text } = kit
-  return note ? <Text><Text bold color="claude">{text}</Text><Text dimColor>{note}</Text></Text> : <Text bold color="claude">{text}</Text>
-}
-
-// A line in lines of at most `n`, each after the first indented `indent`, as Now's rows (wrapParts)
-// wrap: the Stats history's `Label: text`, whose label then stands alone at the left edge, and a
-// long settings row (settingRow). The text's own leading spaces stay on its first line.
-export function hangWords(text: string, n: number, indent = 2): string[] {
-  const lead = /^ */.exec(text)![0]
-  const [first, ...rest] = wrapWords(text.slice(lead.length), n - lead.length)
-  const head = lead + first!
-  return rest.length ? [head, ...wrapWords(rest.join(' '), n - indent).map(l => ' '.repeat(indent) + l)] : [head]
-}
-
-// Turns the web chat on or off through wb, which keeps the choice (and starts a server for on),
-// then reads it back at once: the link shows (or goes) with the pick, not at the next poll
-// wb's reason is shown when it fails, as setProbe does: ignored, the row read On and the pane
-// pinned a link that gave a 401 or nothing on the phone (#690). wb leaves the switch off then,
-// so no link is pinned.
-async function setWeb($: any, value: string) {
-  const { ok, out } = await runWb($, ['chat', value], 15_000)
-  if (!ok) $.ui.toast(`workbench: ${brief(out)}`)
-  mem.chatUrlAt = 0
-  await readSwitch($)
-  await chatLink($)
-}
-
-// stats.json's settings as wb reads them (stats.py): each its default unless the file says
-// otherwise, a mistyped value ignored
-async function statsSettings($: any): Promise<{ recording: boolean; live: boolean; every: number }> {
-  let d: any = {}
-  try { d = JSON.parse(await $.fs.read(`${mem.root}/stats.json`)) } catch { /* the defaults */ }
-  const on = (v: unknown) => (typeof v === 'boolean' ? v : true)
-  return { recording: on(d?.recording), live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
-}
-
-// progress.json as wb reads it (progress.py): on only when it says so; a fixed threshold when
-// `after` is a number other than 0 (wb's falsy), else 0
-async function progressSettings($: any): Promise<{ on: boolean; after: number }> {
-  let d: any = {}
-  try { d = JSON.parse(await $.fs.read(`${mem.root}/progress.json`)) } catch { /* off */ }
-  const after = typeof d?.after === 'number' && Number.isFinite(d.after) ? d.after : 0
-  return { on: d?.on === true, after }
-}
-
-// The Stats tab's history: `wb stats --json`, only while the tab is shown, and only when what it
-// is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting;
-// optimize.json, bench/runs.jsonl, speed.json and the price's savings.json, which the feed reads
-// too and a stale tab kept for good, #549), the day it was counted from has ended (its `until`:
-// an ended streak and last week's numbers stayed for days, #575), or not yet in this load.
-// `force` on the tab's press and after a settings pick. A stat a file is all a poll costs while
-// the tab is shown; nothing at all while it isn't.
-async function refreshStats($: any, force = false) {
-  if (mem.statsReading || (await read($, pane)).tab !== 'stats') return
-  const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
-  if (!shown?.isShown) return
-  const stamp = async (f: string) => {
-    try { const s = await $.fs.stat(f.startsWith('/') ? f : `${mem.root}/${f}`); return `${s.size}@${s.mtimeMs}` } catch { return '-' }
-  }
-  // on a network home each machine keeps its optimize.json and speed.json in machines/<id>/
-  // (store.machine_dir, #894): every machine's, since which one is this is wb's to say
-  const machines = await $.fs.list(`${mem.root}/machines`).catch(() => []) as { name: string; kind: string }[]
-  const own = machines.filter(e => e.kind === 'dir').flatMap(e =>
-    ['optimize.json', 'speed.json'].map(f => `machines/${e.name}/${f}`))
-  const key = (await Promise.all(['results.jsonl', 'stats.json', 'optimize.json', 'bench/runs.jsonl',
-    'speed.json', ...own, mem.savingsFile || '-'].map(stamp))).join(' ')
-  const had = await read($, statsFeed)
-  const now = await $.clock.now()
-  const dayOver = typeof had.feed?.until === 'number' && now / 1000 >= had.feed.until
-  if (!force && had.feed && key === had.key && mem.statsLoaded && !dayOver) return
-  if (!force && now < mem.statsRetryAt) return // it failed: not at every poll (#553)
-  mem.statsReading = true
-  // wb missing, failing or slow: the last feed stays, the reason is said, and the next try waits
-  const failed = (why: string) => {
-    mem.statsBackoff = Math.min(mem.statsBackoff ? mem.statsBackoff * 2 : STATS_RETRY_MS, RETRY_MAX_MS)
-    mem.statsRetryAt = now + mem.statsBackoff
-    mem.statsWhy = why
-    $.ui.invalidate('ui.render')
-  }
-  try {
-    const r = await $.process.run([mem.wb, 'stats', '--json'], { timeoutMs: 30_000 })
-    if (r.exitCode !== 0) return failed(brief(r.stderr || r.stdout) || `exit ${r.exitCode}`)
-    const feed = JSON.parse(r.stdout)
-    if (!feed || typeof feed !== 'object') return failed('not a feed')
-    mem.statsWhy = ''
-    mem.statsBackoff = mem.statsRetryAt = 0
-    // the models' labels and the providers' names the tab says them by (namesNow), when not read
-    // in the last ROLES_CACHE_MS: a read of the feed only, never a poll's
-    await rolesNow($).catch(() => null)
-    await update($, statsFeed, () => ({ key, feed }))
-    mem.statsLoaded = true
-  } catch (err) {
-    if (!isAbort(err)) failed(brief(String(err))) // an abort isn't wb's failure: no line, no wait (#1142)
-  } finally {
-    mem.statsReading = false
-  }
-}
-
-// Whether the live view should run now: the Stats tab on screen (its tab, the pane shown and not
-// minimized) with the live view on. Anything else and `wb top` isn't running.
-async function topWanted($: any): Promise<boolean> {
-  const view = await read($, pane)
-  if (view.tab !== 'stats' || view.minimized) return false
-  const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
-  return !!shown?.isShown && (await statsSettings($)).live
-}
-
-// Starts or ends the live view's child to match topWanted: at each poll, on a tab's press, a
-// minimize and a Live view pick, and on each line it prints (so leaving the tab ends it within a
-// tick, whatever else happens). Every await comes first and the check and the spawn after them,
-// with none between: a poll and a tab press at once both saw no child across the clock's await,
-// both started one, and only the second was ever ended by a close (#546)
-async function syncTop($: any) {
-  const gen = mem.topGen
-  const now = await $.clock.now()
-  const want = await topWanted($)
-  if (gen !== mem.topGen) return // started or stopped meanwhile: that call's view is newer
-  if (want && !mem.top && now >= mem.topRetryAt) runTop($)
-  else if (!want && (mem.top || mem.topKids.size)) stopTop($)
-}
-
-// Ends every child started, and forgets the last tick: shown again, the tab said a finished task
-// was still "running · round 2" under Now until the next child's first line (#552)
-function stopTop($: any) {
-  mem.top = null
-  mem.topGen += 1
-  for (const child of mem.topKids)
-    try { void child?.return?.(undefined)?.catch?.(() => {}) } catch { /* already ended */ }
-  mem.topKids.clear()
-  void update($, topNow, () => ({ snap: null, busy: {} })).catch(() => {})
-}
-
-// Starts the child and claims it at once (mem.top, mem.topKids), before any await; pumpTop reads it
-function runTop($: any) {
-  mem.topGen += 1
-  const child = $.process.spawn({ argv: [mem.wb, 'top', '--json'] })
-  mem.top = child
-  mem.topKids.add(child)
-  void pumpTop($, child)
-}
-
-async function pumpTop($: any, child: any) {
-  await update($, topNow, () => ({ snap: null, busy: {} })) // the sparkline starts as the tab opens
-  let buf = '', err = '', ticked = false, putAway = false
-  try {
-    for await (const { stream, text } of child) {
-      if (!mem.topKids.has(child)) break // stopped meanwhile: its lines aren't the view's
-      if (stream === 'stderr') err = (err + text).slice(-2000) // why it ended, should it (#553)
-      if (stream !== 'stdout') continue
-      buf += text
-      let cut
-      while ((cut = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, cut)
-        buf = buf.slice(cut + 1)
-        let snap: Row
-        try { snap = JSON.parse(line) } catch { continue }
-        if (!snap || typeof snap !== 'object') continue
-        ticked = true
-        mem.topFails = mem.topBackoff = 0
-        mem.topWhy = ''
-        await update($, topNow, prev => {
-          const busy: Record<string, number[]> = {}
-          for (const g of (snap.gpus ?? []) as Row[])
-            if (typeof g.busy === 'number') busy[String(g.index ?? 0)] = [...(prev.busy[String(g.index ?? 0)] ?? []), g.busy].slice(-BUSY_KEEP)
-          return { snap, busy }
-        })
-      }
-      if (!mem.topKids.has(child)) break
-      if (!(await topWanted($))) { putAway = true; break } // off screen now: leaving the loop ends the child
-    }
-  } catch (e) {
-    err ||= String(e) // it could not start, or its stream closed: tried again after a while
-  }
-  const mine = mem.topKids.delete(child)
-  if (mine && mem.top === child) { // it ended by itself, not by stopTop
-    mem.top = null
-    // put away by the engine is no failure: booked as one, a pane shown again 5 s later got no
-    // child for 30 s, its last tick drawn as Now meanwhile (#552). Only an exit, a stream error or
-    // a child that printed nothing waits, doubling, and says why (#553)
-    if (putAway) await update($, topNow, () => ({ snap: null, busy: {} }))
-    else {
-      if (!ticked) mem.topFails += 1
-      mem.topWhy = brief(err) || 'it ended'
-      mem.topBackoff = Math.min(mem.topBackoff ? mem.topBackoff * 2 : TOP_RETRY_MS, RETRY_MAX_MS)
-      mem.topRetryAt = (await $.clock.now()) + mem.topBackoff
-      $.ui.invalidate('ui.render')
-    }
-  }
-}
-
-const gib = (n: number) => (n / 2 ** 30).toFixed(1)
-const secs = (s: number) => (s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`
-  : `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`)
-// lspci's long name cut to the card's own, as `wb top` draws it (top.short): its last bracket
-// when the name ends with one, else what follows the last bracket, the vendor's ("[AMD/ATI]
-// Phoenix1" was shown as AMD/ATI, #576); "(rev c4)" dropped
-export function cardName(name: string): string {
-  const n = name.replace(/\s*\(rev [0-9a-f]+\)\s*$/i, '').trim()
-  if (n.endsWith(']')) return [...n.matchAll(/\[([^\]]+)\]/g)].at(-1)?.[1] ?? n
-  return n.slice(n.lastIndexOf(']') + 1).trim() || n
-}
-// cpu: all in RAM on a machine with no GPU memory, its normal state, not a split (#551)
-const RACK_MARK: Record<string, string> = { resident: '●', cpu: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
-const RACK_COLOR: Record<string, string> = { resident: 'success', cpu: 'success', split: 'warning', "can't run": 'error' }
-
-// The rack rows folded into one line when more than RACK_FOLD_MIN of them (`wb top`'s top.FOLD):
-// the owner, 2026-11-21: a machine with many models tried drew a row each, and the tab's menu sat
-// a long scroll below a new user's first look. `wb top` and `wb models` still list every one.
-const RACK_FOLD = new Set(['idle', "can't run", 'remote'])
-const RACK_FOLD_MIN = 2
-
-// The live view as lines of coloured parts: each GPU (memory and busy as bars, watts, busy's
-// sparkline), what runs now, the rack (every model resident or with a task: where it is, its
-// speeds, its load time, the task on it; the idle, can't-run and remote ones on one line past
-// RACK_FOLD_MIN) and the queue. Nothing is said for what a platform can't tell.
-export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
-  const s = t.snap
-  // `why`: what `wb top` said as it ended, once it has failed twice: "Reading…" was all ever said (#553)
-  if (!s) return [[{ dim: true, text: why ? `This machine can't be read: ${why} (wb top --json)` : 'Reading this machine…' }]]
-  const out: { color?: string; dim?: boolean; bold?: boolean; text: string }[][] = []
-  for (const g of (s.gpus ?? []) as Row[]) {
-    const row: { color?: string; dim?: boolean; bold?: boolean; text: string }[] = [
-      { bold: true, text: g.ram ? 'RAM ' : `GPU ${g.index ?? ''} ` }, { dim: true, text: `${cardName(String(g.name ?? ''))} ` }]
-    if (typeof g.used === 'number' && g.total) {
-      const f = g.used / g.total
-      row.push({ color: f > 0.95 ? 'error' : f > 0.8 ? 'warning' : 'success', text: bar(f, 12) },
-        { text: ` ${gib(g.used)}/${gib(g.total)} GiB ` })
-    } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
-    // an Apple GPU: its bar is the RAM, and the most of it the GPU may wire is said here (#701)
-    if (typeof g.limit === 'number' && g.limit) row.push({ dim: true, text: `· GPU may wire ${gib(g.limit)} GiB ` })
-    if (g.stale) row.push({ dim: true, text: 'no reading ' })            // known, not read just now (#547)
-    if (typeof g.busy === 'number')
-      row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
-        { text: ` ${g.busy}% ` })
-    if (typeof g.watts === 'number') row.push({ text: `· ${Math.round(g.watts)} W ` })
-    const line = spark(t.busy[String(g.index ?? 0)] ?? [])
-    if (line.length > 1) row.push({ dim: true, text: line.slice(-24) })
-    out.push(row)
-  }
-  for (const r of (s.running ?? []) as Row[]) {
-    const parts = [r.phase, r.round ? `round ${r.round}` : '', typeof r.round_s === 'number' ? secs(r.round_s) : '',
-      typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
-      typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : '', ...apiParts(r)].filter(Boolean)
-    // an API task's model as the Tasks view says it, its place first: wb top's label is the bare id
-    const model = r.via === 'api' ? modelWord(String(r.model ?? ''), true, names) : r.label || r.model
-    out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${model} · ${parts.join(' · ')}` }])
-  }
-  if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
-  const rack = (s.rack ?? []) as Row[]
-  const folds = rack.filter(m => RACK_FOLD.has(m.state) && !m.tasks?.length)
-  const fold = folds.length > RACK_FOLD_MIN ? folds.length : 0
-  for (const m of fold ? rack.filter(m => !folds.includes(m)) : rack) {
-    const where = m.state === 'cpu' && typeof m.cpu_bytes === 'number' ? ` ${gib(m.cpu_bytes)} GiB in RAM`
-      : typeof m.gpu_bytes === 'number'
-        ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
-    // with its unit, as the history's `writes ~61 tok/s`: "writes ~61" said 61 of nothing (#1048's review)
-    const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}${NB}tok/s` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}${NB}tok/s` : '',
-      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
-    out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },
-      { text: `${m.label || m.model} ` }, { color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${m.state}${where}` },
-      { dim: true, text: facts.length ? ` · ${facts.join(' · ')}` : '' },
-      ...(m.tasks?.length ? [{ color: 'claude', text: ` ← ${m.tasks.join(', ')}` }] : [])])
-  }
-  if (fold) out.push([{ dim: true, text: `+${fold} more models idle, can't run or remote (wb top)` }])
-  for (const q of (s.queue ?? []) as Row[])
-    out.push([{ color: 'warning', text: '◌ ' }, { text: `${q.task} ` },
-      { dim: true, text: `waits for the GPU${typeof q.waited_s === 'number' ? ` (${secs(q.waited_s)})` : ''}` }])
-  return out
 }
 
 // The commands that hand work out: run as a command, not merely written down. #409 (2026-11-20):
@@ -1810,8 +1294,9 @@ function routesValid(doc: unknown): doc is Row {
 // What the conversation is told of the roles: `said`, their summary and the day cap ('. Day cap
 // $N'), '' while every role is the default and no cap is set (nothing to tell); `api`, whether any
 // role has an API model. The cap is in `said`, which is what a change is found by: a cap changed
-// alone (a terminal's wb route cap, the pane, a hand edit) never reached the conversation (2026-11-23)
-type Routes = { said: string; api: boolean; cap: number | null }
+// alone (a terminal's wb route cap, a hand edit) never reached the conversation (2026-11-23).
+// `web`: the newest change a role records was the web app's (`by`/`gpu_by` "web", #1283)
+type Routes = { said: string; api: boolean; cap: number | null; web?: boolean }
 async function readRoutes($: any): Promise<Routes> {
   const text: string | undefined = await $.fs.read(await routesPath($)).catch(() => undefined)
   if (text === undefined) return { said: '', api: false, cap: null }
@@ -1826,12 +1311,20 @@ async function readRoutes($: any): Promise<Routes> {
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
   const plain = cap === null && (doc.use ?? 'both') === 'both' && (doc.busy ?? 'wait') === 'wait' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
     !r.api && (r.thinking ?? 'off') === 'off')
-  return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap }
+  let newest = -Infinity, by = ''
+  for (const r of rows) {
+    for (const [ts, who] of [[r.ts, r.by], [r.gpu_ts, r.gpu_by]]) {
+      if (typeof ts === 'number' && ts > newest) [newest, by] = [ts, String(who ?? '')]
+    }
+  }
+  return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap,
+    web: by === 'web' }
 }
 const DEFAULT_ROUTES = routesSummary({})
 const ROUTES_NOTE = (r: Routes) => `Roles (the user's, wb route): ${r.said}. ` + (r.cap !== null ? '' : 'No day cap yet. ') +
   ROUTES_RULE
-const ROUTES_CHANGED = (said: string) => `The roles changed: ${said || DEFAULT_ROUTES}. ${ROUTES_RULE}`
+const ROUTES_CHANGED = (said: string, web = false) =>
+  `The roles changed: ${said || DEFAULT_ROUTES}${web ? ' (the user, on the web app)' : ''}. ${ROUTES_RULE}`
 
 // The deny for an edit of routes.json or route-ok.json with the file tools, else ''
 async function routesFileRefusal($: any, path: string): Promise<string> {
@@ -1880,156 +1373,6 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   if (said !== ROUTE_ALLOW) return NOT_CHANGED
   await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, at: (await $.clock.now()) / 1000 })).catch(() => {})
   return ''
-}
-
-const SPARKS = '▁▂▃▄▅▆▇█'
-// Values as one character each, the highest the full block; none for all zero
-export function spark(values: number[]): string {
-  const top = Math.max(0, ...values)
-  return top > 0 ? values.map(v => SPARKS[Math.min(7, Math.round((Math.max(0, v) / top) * 7))]).join('') : ''
-}
-
-const kilo = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
-const GUARD_WORDS: Record<string, string> = {
-  repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
-  round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
-  handovers: 'handovers without finishing',
-  spend: 'the API day cap', // Settings' and the Tasks view's words for it
-}
-
-// stats.STATS_MODEL_LINES, kept here too: the mod tracks main while wb runs from the user's clone,
-// so an older wb's feed (every model line, or only `models`) must not draw a row per model; and
-// with no line to go by (no task yet), what Optimized, Bench and What helps name (2026-11-21)
-const STATS_SHOWN = 3
-
-// The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
-// section left out when it has nothing, estimates said as such. A run of days that ended isn't
-// mentioned, only the best (the plan's rule: show what went right, never nag).
-export function statsLines(f: Record<string, any> | null, why = '', names: Names = NO_NAMES): { label: string; text: string }[] {
-  // `why`: the last `wb stats --json` failed, said (#553): with no feed yet "Reading…" never ended
-  if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
-  if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)` }, ...statsLines(f, '', names)]
-  // only when the feed has no section at all: with no judged task, a period of spec-gap
-  // discards (#569), the optimized windows and the bench results still have something to say (#549)
-  if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
-    return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
-  const out: { label: string; text: string }[] = []
-  const period = (name: string, label: string) => {
-    const p = f.periods?.[name]
-    if (!p) return
-    const s = p.score
-    const saved = p.savings?.saved ?? 0
-    const parts = [
-      s ? `score ${s.score}/100` : '',
-      p.savings ? (saved >= 0 ? `saved ~${kilo(saved)} Claude tokens (estimate)` : `cost ~${kilo(-saved)} more Claude tokens (estimate)`) : '',
-      `${p.tasks} task${p.tasks === 1 ? '' : 's'}`,
-      `${p.landed} landed${p.accepted_pct !== undefined ? ` (${p.accepted_pct}%)` : ''}`,
-      // left out of the count, not the saving: Claude's tokens were spent on them (#569)
-      p.spec_gaps ? `and ${p.spec_gaps} discard${p.spec_gaps === 1 ? '' : 's'} put down to the spec` : '',
-      // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
-      p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
-        (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
-      apiPeriod(p.api, names),
-    ]
-    out.push({ label, text: parts.filter(Boolean).join(' · ') })
-  }
-  period('week', 'This week')
-  period('all', 'All time')
-  if (f.streak) out.push({ label: 'Streak', text: f.streak.current
-    ? `${f.streak.current} day${f.streak.current === 1 ? '' : 's'} in a row with a task landed · best ${f.streak.best}`
-    : `best: ${f.streak.best} day${f.streak.best === 1 ? '' : 's'} in a row with a task landed` })
-  const ab = f.absorbed
-  if (ab) {
-    const parts = [
-      // attempts, whatever came of them; "green" only for the tasks whose tests then passed (#562)
-      ab.auto_fixes ? `${ab.auto_fixes} test failure${ab.auto_fixes === 1 ? '' : 's'} sent back to the agent` +
-        (ab.auto_fixed_tasks ? ` (${ab.auto_fixed_tasks} task${ab.auto_fixed_tasks === 1 ? '' : 's'} then green)` : '') : '',
-      ab.handovers_landed ? `${ab.handovers_landed} landed after a handover to a fresh session` : '',
-    ].filter(Boolean)
-    if (parts.length) out.push({ label: 'Without waking Claude', text: parts.join(' · ') })
-  }
-  const q = f.questions // a question wakes Claude: its own line, "answered" only for wb answer's (#562)
-  if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` +
-    (q.answered ? ` · ${q.answered} answered` : '') })
-  // the models OpenCode has now, a wb optimize variant folded under its source, the most recently
-  // used first, the rest on one line (`model_lines`, #638); an older wb's feed: its `models`.
-  // Capped here as well as in wb: a wb from before the cap sends every line (2026-11-21)
-  const all: [string, any][] = f.model_lines
-    ? (f.model_lines.lines ?? []).map((m: any) => [String(m.model), m])
-    : Object.entries(f.models ?? {})
-  const shown = all.slice(0, STATS_SHOWN), past = all.slice(STATS_SHOWN)
-  // a model as Now and the Tasks view name it (modelWord); Bench, Optimized and What helps by the same
-  const apiIds = new Set(all.filter(([, m]) => m.kind === 'api').map(([model]) => model))
-  const word = (model: string) => modelWord(model, apiIds.has(model), names)
-  for (const [model, m] of shown) {
-    const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
-    const speed = m.kind === 'api' ? (typeof m.paid === 'number' ? ` · paid ~${usd(m.paid)}/task` : '')
-      : m.speed?.write ? ` · writes ~${Math.round(m.speed.write)}${NB}tok/s` : ''
-    const change = typeof m.write_change_pct === 'number' && m.write_change_pct
-      ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
-    const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
-    out.push({ label: word(model) + windows, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
-      (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
-      speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
-  }
-  // the recent ones past stats.STATS_MODEL_LINES (and past this cap) and the older ones, one row;
-  // labelled "Other models" so the text after it doesn't say "more models" twice (2026-11-21)
-  const older = f.model_lines?.older
-  const moreModels = (f.model_lines?.more?.models ?? 0) + past.length
-  const moreTasks = (f.model_lines?.more?.tasks ?? 0) + past.reduce((n, [, m]) => n + (Number(m.tasks) || 0), 0)
-  const others = moreModels + (older?.models ?? 0), otherTasks = moreTasks + (older?.tasks ?? 0)
-  if (others) out.push({ label: 'Other models',
-    text: [moreModels ? `${moreModels} more` : '', older?.models ? `${older.models} older` : ''].filter(Boolean).join(' · ') +
-      ` model${others === 1 ? '' : 's'}: ${otherTasks} task${otherTasks === 1 ? '' : 's'} (wb stats --all)` })
-  // Optimized, Bench and What helps name only the models shown above, a line's variants with it,
-  // the rest counted, with where to see them (2026-11-21: 30 models' windows and runs made rows
-  // taller than the screen); no model line yet (no task, or only older ones): the first STATS_SHOWN
-  const ids = shown.length
-    ? new Set<string>(shown.flatMap(([model, m]) => [model, ...(m.variants ?? [])])) : null
-  const pick = <T,>(entries: [string, T][]): [[string, T][], number] => {
-    const kept = entries.filter(([m], i) => (ids ? ids.has(m) : i < STATS_SHOWN))
-    return [kept, entries.length - kept.length]
-  }
-  const counted = (kept: string[], rest: number, report: string) => kept.length
-    ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
-  const sized = Object.entries(f.sizes ?? {}) as [string, any][]
-  if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${ROLE_WORDS[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
-  if (f.days?.length) {
-    const line = spark(f.days.map((d: any) => d.tasks))
-    if (line) out.push({ label: 'Last 30 days', text: `${line}  tasks per day` })
-  }
-  const bests = [
-    f.bests?.largest_first_try ? `largest landed first try: ${f.bests.largest_first_try.lines} lines (${f.bests.largest_first_try.task})` : '',
-    f.bests?.fastest ? `fastest landing: ${f.bests.fastest.minutes} min (${f.bests.fastest.task})` : '',
-  ].filter(Boolean)
-  if (bests.length) out.push({ label: 'Bests', text: bests.join(' · ') })
-  const last = (f.milestones ?? []).at(-1)
-  if (last) out.push({ label: 'Milestone', text: last.kind === 'landed'
-    ? `${last.n} task${last.n === 1 ? '' : 's'} landed${last.day ? ` (${last.day})` : ''}`
-    // "(estimate)", as each period and the footer say it ("saved, estimated" said it a second way)
-    : `~${kilo(last.n)} Claude tokens saved (estimate${last.day ? `, ${last.day}` : ''})` })
-  const guards = Object.entries(f.guards ?? {}) as [string, number][]
-  if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
-    .map(([g, n]) => `${GUARD_WORDS[g] ?? g} ${n}`).join(' · ') })
-  const [helps, helpsRest] = pick(Object.entries(f.helps ?? {}) as [string, any][])
-  const helped = helps.map(([model, h]) => [model, Object.entries(h).filter(([, v]: any) => v[1])
-    .map(([k, v]: any) => `a ${k === 'smaller' ? 'smaller step' : k} helped ${v[0]} of ${v[1]}`)] as [string, string[]])
-    .filter(([, said]) => said.length)
-  helped.forEach(([model, said]) => out.push({ label: `What helps (${word(model)})`, text: said.join(' · ') }))
-  // the rest on a row of their own, not on the last model's, where it read as that model's (2026-11-21);
-  // no text command prints them, the feed does
-  if (helpsRest) out.push({ label: 'What helps', text: `${helped.length ? `${helpsRest} more` : helpsRest} model${helpsRest === 1 ? '' : 's'} (wb stats --json)` })
-  const [bench, benchRest] = pick(Object.entries(f.bench ?? {}) as [string, any][])
-  // the newest finished run, and a newer one beside it, never in its place (#570)
-  const sofar = (p: any) => `${p.of} of ${p.planned} ${p.running ? 'so far' : 'before it stopped'}` +
-    (p.of ? `, ${p.passed} passed` : '')
-  if (bench.length || benchRest) out.push({ label: 'Bench', text: counted(bench.map(([m, b]) => `${word(m)} ` +
-    [b.run !== undefined ? `${b.passed}/${b.of} (${b.day})` : '', b.partial ? `newer run ${sofar(b.partial)}` : '']
-      .filter(Boolean).join(', ')), benchRest, 'wb bench report') })
-  const [opt, optRest] = pick(Object.entries(f.optimized ?? {}) as [string, any][])
-  if (opt.length || optRest) out.push({ label: 'Optimized', text: counted(opt.map(([m, o]) => `${word(m)} ${Math.round(o.window / 1024)}K` +
-    (o.spill ? ` (${o.spill}% on the CPU)` : ' all on the GPU')), optRest, 'wb optimize report') })
-  return out
 }
 
 // The file tools' path fields: an edit in a task's worktree is writing that task's code
@@ -2259,8 +1602,12 @@ async function unsaid($: any, delegating: boolean): Promise<string[]> {
   if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
   const any = delegating || mem.open.size > 0 // out of the mode with nothing open: nothing changes
   if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
-  // the roles (#1014): any change, however made (the dialog, the pane, a terminal, a hand edit)
-  if (any && want.routes !== was.routes) out.push(was.routes ? ROUTES_CHANGED(want.routes) : ROUTES_NOTE(await readRoutes($)))
+  // the roles (#1014): any change, however made (the dialog, the web app, a terminal, a hand edit);
+  // the web app's says so (#1283)
+  if (any && want.routes !== was.routes) {
+    const now = await readRoutes($)
+    out.push(was.routes ? ROUTES_CHANGED(want.routes, !!now.web) : ROUTES_NOTE(now))
+  }
   if (any && want.workflows !== was.workflows) out.push(want.workflows === 'on' ? WORKFLOWS_RULE : WORKFLOWS_OFF) // #1041
   await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding,
     routes: any ? want.routes : was.routes, workflows: any ? want.workflows : was.workflows })
@@ -2296,23 +1643,7 @@ const mem = {
   wb: 'wb',
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
-  statsReading: false, // a `wb stats --json` under way (refreshStats)
-  statsLoaded: false, // the history was read in this load: the atom's feed may be an older load's
-  statsWhy: '', // why the last `wb stats --json` failed ('' when it didn't): said on the tab (#553)
-  statsRetryAt: 0, // not again before then, unless the tab is pressed
-  statsBackoff: 0, // the wait after the last failure, doubling
-  topWhy: '', // why the last `wb top` ended by itself: its stderr's last line
-  topFails: 0, // `wb top` runs in a row that ended with no tick: said under Now from the second
-  topBackoff: 0, // the wait before the next try, doubling
-  top: null as any, // the `wb top --json` child while the live view runs (syncTop)
-  topKids: new Set<any>(), // every child started and not yet ended: stopTop ends them all (#546)
-  topGen: 0, // bumped by each start and stop: a syncTop whose awaits saw it change starts nothing
-  topRetryAt: 0, // not before then, after one ended by itself
-  price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
-  roles: null as null | PaneRoles, // the Settings tab's roles and models, as wb last said them (rolesNow, #1023)
-  settingsCols: 0, // the Settings tab's body width at this draw (0 unknown): settingRow folds a long row to it
-  provNames: new Map<string, string>(), // each API provider's id → its name, from the tasks' task.json (namesNow)
-  apiOther: '', // the role whose API row's Other model… box is open (#1023)
+  roles: null as null | PaneRoles, // the roles as wb last said them, for the day-cap line (rolesNow, #1023)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
   ids: new Set<string>(), // the `sessions` atom: which tasks are this session's (mine)
@@ -2322,7 +1653,6 @@ const mem = {
   started: false, // the ears and timers run
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
   queued: [] as string[], // turns for Claude that a command asked for
-  probe: null as null | { at: number; said: ProbeState }, // wb's last word on the probe experiment (probeStatus)
   queuedRetryAt: 0, // a queued turn the engine dropped is tried again from then
   open: new Set<string>(), // this session's delegated tasks open at the last poll
   heldAsks: new Set<string>(), // questions (task:ts) held for a turn that could not take them (#542)
@@ -2351,8 +1681,11 @@ const mem = {
   chatAsks: new Map<string, ChatAsk>(), // dialogs on the page this session waits on: whose call (#1042)
   listenerAt: new Map<string, number>(), // another session's chat listener (pid@start), when last seen alive (#839)
   submitted: false, // this mod submitted a prompt while Claude was idle, and no turn has started since (#837)
-  chatUrlAt: 0, // when the web chat's link was last looked up
-  savingsAt: 0, // when the week's saving was last read
+  chatChecking: false, // a `wb chat url --json` under way (chatLink)
+  chatAgain: false, // asked for again meanwhile: once more after it
+  switchKey: '', // chat/switch.json as last read: changed (`wb chat on|off`), the link is looked up now
+  settingsKey: '', // settings-changes.jsonl's size@mtime when last read (settingsTurns)
+  settingsSeen: new Set<string>(), // its rows this load delivered (ts:key)
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
   eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
   claudePid: 0, // this Claude Code process, the `wb events` child's parent, as its hello says: 0 unknown (#687)
@@ -2369,12 +1702,9 @@ const mem = {
   // the opening animation while it plays (#963): its plan once the pane drew it, the frame on
   // screen, the ticks it waited for a first draw, its timer
   splash: null as null | { plan: Plan | null; f: number; waited: number; timer: { cancel: () => void } | null },
-  // the modeline's ticker while its line is wider than the bar (#976): the line, its columns, the step
-  ticker: null as null | { line: string; room: number; off: number; timer: { cancel: () => void } },
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
-  savingsFile: '', // savings.json, where wb keeps the kWh price ($WB_SAVINGS): the Stats key stamps it
   commandsFile: '', // commands.json ($WB_COMMANDS): Claude's edit never drops a repo's local_only (#1021)
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
   termDialogs: [] as TermDialog[], // dialogs up in the terminal while the user wasn't away (#959)
@@ -2594,8 +1924,6 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       sp = await claim($, ent.name, sp)
       recent = await recentEvents($, ent.name, `${base}/events.jsonl`)
     }
-    if (typeof sp.provider === 'string' && typeof sp.provider_name === 'string' && sp.provider_name)
-      mem.provNames.set(sp.provider, sp.provider_name)
     list.push({
       name: sp.name, phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
       label: String(sp.model_label ?? ''),
@@ -2752,7 +2080,7 @@ async function compactAtBoundary($: any): Promise<void> {
 // `wb update` takes the longest the engine allows: its steps may take 300 s each. `aborted`: the
 // engine cancelled the call (a plugin reload, a redraw superseding the one in flight; never a
 // timeout, which is wb hung and said as a failure), which is not wb failing, so it says nothing: "could not run wb route --json: ... aborted" showed on the
-// Settings tab after /reload-plugins and stayed ROLES_CACHE_MS, for a command that takes 0.12 s
+// pane's old Settings tab after /reload-plugins and stayed ROLES_CACHE_MS, for a command that takes 0.12 s
 // (#1142, 2026-11-23). A caller that keeps what it read keeps its last good value instead.
 export type WbRun = { ok: boolean; out: string; aborted?: boolean }
 async function runWb($: any, args: string[], timeoutMs = 120_000): Promise<WbRun> {
@@ -2816,9 +2144,6 @@ async function refreshLive($: any, list: WbTask[], now: number) {
   // the change kept for the clock's next poll. Another task, or one that stopped, is read at once.
   if (focus && ACTIVE.has(focus.phase) && mem.liveKey.startsWith(`${focus.name}@`) &&
     now - mem.liveAt < LIVE_EVERY_MS) return
-  // only the Tasks tab draws the transcript: on Stats or Settings each running round was exported
-  // every LIVE_EVERY_MS for nothing (#838); the key still differs, so it is read on the way back
-  if ((await read($, pane)).tab !== 'tasks') return
   const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
   if (!shown?.isShown) return // read when it shows again: the key still differs
   mem.watching = true
@@ -2916,25 +2241,9 @@ async function ears($: any) {
 // it buried the question Claude had just asked the person (the 2026-11-16 audit).
 const SCOUT_QUIET_MS = 60_000
 
-// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh",
-// with ", cost 0.27" once a price is set (as the Stats tab and `wb savings` label it: no currency
-// sign, the price is the user's); '' until a task can be compared, or when the output isn't wb's.
-export function savedLine(out: string): string {
-  let t: any
-  try { t = JSON.parse(out) } catch { return '' }
-  const api = apiMoney(t?.api)
-  if (!t || typeof t.tasks !== 'number' || !t.tasks || typeof t.saved !== 'number') return api ? apiAlone(t.api, api) : ''
-  const n = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
-  const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%, estimate)` : ' (estimate)'
-  const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens (estimate)`
-  const cost = typeof t.cost === 'number' ? `, cost ${t.cost.toFixed(2)}` : ''
-  const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${cost}` : ''
-  return `this week: ${what}${gpu}${api ? ` · API ${api}` : ''}`
-}
-
-// API dollars (#1022): OpenCode's unit, so a `$`, unlike the electricity's cost (the user's own
-// price, #609); a cent's fraction to two figures, written out ($0.00004), a free model's $0:
-// savings.usd's rule, so the CLI and the pane agree (toPrecision gave $0.000040 and $0.010)
+// API dollars (#1022): OpenCode's unit, so a `$`; a cent's fraction to two figures, written out
+// ($0.00004), a free model's $0: savings.usd's rule, so the CLI and the pane agree (toPrecision
+// gave $0.000040 and $0.010)
 export function usd(x: number): string {
   if (x === 0) return '$0'
   if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
@@ -2942,214 +2251,14 @@ export function usd(x: number): string {
   return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
 }
 
-// The words one model or provider goes by on every tab (#1048's review, seen live): a GPU model by
-// its label (`qwen3-coder 30B`, as the Tasks view and Now say it), not its id in the history under
-// Now; an API model as the Tasks view's place and model (`API DeepSeek deepseek-v4.1-flash`, the
-// id's last part, tasks.ts); a provider by its name (`DeepSeek`), never its id on one tab and its
-// name on the next. From what the pane has read already (wb models --json, wb route --json's
-// providers, the tasks' task.json, wb top's rack): an id nothing named stays the id.
-export type Names = { models: Record<string, string>; providers: Record<string, string> }
-export const NO_NAMES: Names = { models: {}, providers: {} }
-export const providerWord = (id: string, n: Names) => n.providers[id] || id
-export function modelWord(id: string, api: boolean, n: Names): string {
-  if (!api) return n.models[id] || id
-  const cut = id.indexOf('/') // the provider ends at the first /
-  return cut > 0 ? `API ${providerWord(id.slice(0, cut), n)} ${id.split('/').pop()}` : `API ${id}`
-}
-function namesNow(list: WbTask[], top: WbTop | null): Names {
-  const n: Names = { models: {}, providers: {} }
-  for (const g of mem.roles?.models?.gpu ?? []) if (g.label) n.models[g.id] = g.label
-  for (const m of (top?.snap?.rack ?? []) as Row[]) if (m.label && !n.models[m.model]) n.models[m.model] = m.label
-  for (const t of list) if (t.via !== 'api' && t.label && !n.models[t.model]) n.models[t.model] = t.label
-  for (const [id, p] of Object.entries(mem.roles?.routes?.providers ?? {})) if (p.name) n.providers[id] = p.name
-  for (const [id, name] of mem.provNames) if (!n.providers[id]) n.providers[id] = name
-  return n
-}
-
 // API dollars are estimates at the catalog's prices unless the user set the model's (wb model price,
 // #1135, 2026-11-23: the catalog ran about 2x DeepInfra's bill): `prices` is meter.basis's, missing
 // on rows from before it (the catalog's)
 export const isEst = (prices: unknown) => prices !== 'yours' && prices !== 'provider'
-export const estUsd = (x: number, prices: unknown) => (x && isEst(prices) ? '≈' : '') + usd(x)
-const PRICES: Record<string, string> = { catalog: 'catalog prices', yours: 'your prices' }
-export const pricesNote = (prices: unknown) => PRICES[typeof prices === 'string' ? prices : 'catalog'] ?? ''
 
-// A period's API money as the footer says it: never $0 for tasks with no price; '' with none
-export function apiMoney(a: any): string {
-  if (!a || !a.tasks) return ''
-  const known = a.tasks - (a.unknown ?? 0) - (a.plan ?? 0)
-  return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no price'
-}
-
-// An API-only week: API $1.27 on 6 tasks, or 1 API task, no price (no dollars to put "on")
-export function apiAlone(a: any, money: string): string {
-  const tasks = `task${a.tasks === 1 ? '' : 's'}`
-  return `this week: ${/^≈?\$/.test(money) ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
-}
-
-// A Stats period's API part (the feed's periods[*].api): API $1.27 (DeepSeek $0.84 · Anthropic $0.43)
-export function apiPeriod(a: any, names: Names = NO_NAMES): string {
-  const money = apiMoney(a)
-  if (!money) return ''
-  const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
-    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${providerWord(p, names)} ${estUsd(v.cost, v.prices)}`)
-  const inside = [provs.join(' · '), a.cost ? pricesNote(a.prices) : ''].filter(Boolean).join('; ')
-  return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
-}
-
-// An API task's RUNNING row's parts after its phase (wb top's `spend`, `waits`); its place and model
-// lead the row, as on the Tasks view (`API DeepSeek deepseek-flash`, modelWord)
-export function apiParts(r: Row): string[] {
-  if (r.via !== 'api') return []
-  return [typeof r.spend === 'number' ? estUsd(r.spend, r.prices) : '', r.waits ? `waits for ${r.waits}` : '']
-}
-
-// The electricity price `wb savings --json` says is set (per kWh), or null
-export function priceOf(out: string): number | null {
-  try {
-    const p = JSON.parse(out).price
-    return typeof p === 'number' && p > 0 ? p : null
-  } catch {
-    return null
-  }
-}
-
-// What the price row was typed, as `wb savings --price` takes it: "0,30", "€0.30", "0.30 EUR" and
-// "$0.3" are 0.3 (one comma or point, a currency sign or code before or after); empty is 'off'
-// (it clears the price); anything else, "0x10" or "1e3" among them, is null. Number() took
-// "0x10" as 16, and "0,30" and "€0.30" as nothing, with no hint why (#609).
-export function parsePrice(text: string): number | 'off' | null {
-  const s = text.trim()
-  if (!s) return 'off'
-  const m = /^(?:[^\d\s.,+-]{1,3}\s*)?(\d+(?:[.,]\d+)?|[.,]\d+)(?:\s*[^\d\s.,+-]{1,3})?$/u.exec(s)
-  const v = m ? Number(m[1].replace(',', '.')) : NaN
-  return v > 0 ? v : null
-}
-
-// The Settings tab's price row: wb checks and keeps it (`wb savings --price`), and its answer
-// is the week's saving again, now with the energy's cost (the footer's `, cost …`)
-async function setPrice($: any, text: string) {
-  const v = parsePrice(text)
-  if (v === null) {
-    $.ui.toast('workbench: the electricity price per kWh is a number, like 0.30 or 0,30 (empty clears it)')
-    return
-  }
-  const { ok, out } = await runWb($, ['savings', '--price', String(v), '--json'])
-  if (!ok) {
-    $.ui.toast(`workbench: ${brief(out)}`)
-    return
-  }
-  mem.price = priceOf(out)
-  const said = savedLine(out)
-  if (said !== (await read($, savings))) await update($, savings, () => said)
-  $.ui.invalidate('ui.render')
-}
-
-// The Settings tab's roles (#1023): Shared (the Agents switch, the busy row, each role's GPU | API,
-// Dynamic workflows, the day cap, wake), GPU (each role's GPU model, the sizes, optimize) and API
-// (connected providers, each role's API model and thinking, spend today). Read through wb (`wb route
-// --json`, `wb models --json`: neither asks a server, #705), kept ROLES_CACHE_MS and dropped after a
-// pick; routes.json stays flat, only the screen groups. A press is the user's yes: the mod writes the
-// dialog's one-shot approval (route-ok.json, `by` pane) for exactly that change, as `wb route
-// --dry-run --json` gives it, then runs it, under the same gate Claude meets; nothing is a flag on
-// the command line, which Claude could pass. A GPU pin or a size takes no yes (dry run: no gate).
+// `wb route --json` (and `wb models --json`), for the Tasks view's day-cap line, kept ROLES_CACHE_MS
 const ROLES_CACHE_MS = 10_000
-const upper = (w: string) => w.charAt(0).toUpperCase() + w.slice(1)
-// a no-break space inside a unit the pane's edge must not split: `GPU 0+1` wrapped as "GPU" and
-// "0+1", `per M` as "per" and "M" (#1048's review, seen at 120 and 80 columns)
-const NB = '\u00a0'
-const GPU_ROWS = 6 // GPU models with a sizes row; the rest are counted (wb models), as STATS_SHOWN
-const API_MENU = 12 // an API dropdown lists every runnable model up to this; past it, the ones in use
-const ROLE_LABELS: Record<string, string> = { significant: 'Complex coding', trivial: 'Trivial coding', writing: 'English writing' }
 const OLDER_WB = 'wb is older than the mod: wb update'
-const NO_PROVIDER = 'No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.'
-const AGENTS_STOPS: [string, string, string][] = [
-  // tasks already started too: an API task stops before its next round (#1213, 2026-11-24: only
-  // wb start read the switch, and a queued API task spent after 'nothing spends')
-  ['gpu', 'GPU', 'Every role runs on its GPU model: nothing spends, and an API task already started stops before its next round. Each role\'s own choice is kept for Both.'],
-  ['api', 'API', 'Every role runs on its API model; a role with none can\'t start.'],
-  ['both', 'Both (default)', 'Each role runs where its own row says.'],
-]
-// every value capitalized, as every other row's (#1048's review: "wait (default)" beside "Both (default)")
-const BUSY_STOPS: [string, string, string][] = [
-  ['wait', 'Wait (default)', 'A task waits until the GPU is free.'],
-  ['api', 'Use the role\'s API model', 'A task whose role has an API model starts on it while the GPU is busy; a running task never moves.'],
-]
-const WORKFLOWS_STOPS: [string, string, string][] = [
-  ['off', 'Off (default)', 'Claude runs one task at a time.'],
-  ['on', 'On', 'Claude may split a request into tasks that run at once, each on its own role\'s model.'],
-]
-const THINK_STOPS: [string, string, string][] = [
-  ['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
-  ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.'],
-]
-// A role's thinking row: THINK_STOPS, each stop its API model can't keep saying what the model does
-// instead (the row's `thinks`, thinkingSaid's): `Off (default)`, `Faster and cheaper` sat on a model
-// that can't turn thinking off, so the user kept it and paid for its reasoning (#1263, 2026-11-24).
-// Only a model's default or a thinking that stays on (runner's THINKING_DEFAULT, THINKING_STAYS) is
-// no cheaper: its lowest effort (THINKING_LOWEST, below the provider's default) still is, and the row
-// said On cost the same (#1263's review, 2026-11-24)
-const LOWEST_SAID = 'thinking at its lowest effort'
-export function thinkStops(row: Row): [string, string, string][] {
-  const said = (v: string) => thinkingSaid({ ...row, thinking: v })
-  const off = said('off'), on = said('on')
-  const offWhy = off.startsWith(LOWEST_SAID)
-    ? 'This model can\'t turn thinking off, but its lowest effort is still cheaper than On; for tasks started after this.'
-    : 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'
-  return [
-    off.startsWith('thinking off') ? THINK_STOPS[0]! : ['off', `Off (default): ${off}`, offWhy],
-    on.startsWith('thinking off') ? ['on', `On: ${on}`, 'This model doesn\'t reason, so this changes nothing; for tasks started after this.'] : THINK_STOPS[1]!,
-  ]
-}
-// a size in the roles' words (tasks.ts ROLE_WORDS): `significant only` sat under "Complex coding"
-const SIZE_STOPS: [string, string, string][] = [
-  ['all', 'Any size (default)', 'The router may give it any task.'],
-  ['trivial', `${upper(ROLE_WORDS.trivial!)} only`, 'The router gives it trivial coding tasks only.'],
-  ['significant', `${upper(ROLE_WORDS.significant!)} only`, 'The router gives it complex coding tasks only.'],
-]
-// A role's GPU | API row. `name`: its API model as the API group's row names it (the catalog's name),
-// so one model isn't `deepseek/deepseek-flash` here and `DeepSeek Flash` three rows down
-export function roleStops(label: string, api: string | undefined, name = api): [string, string, string][] {
-  return [['gpu', 'GPU', `${label} runs on this machine's GPU.`],
-    ['api', api ? `API (${name})` : 'API (set its model under API first)', api ? `${label} runs on ${api}; your code goes to its provider.` : 'Pick its API model under API first.']]
-}
-
-// A model's window as the pane says it: 40K
-const windowK = (n: unknown) => typeof n === 'number' && n > 0 ? ` (${Math.round(n / 1024)}K)` : ''
-
-// The GPU dropdown's entries: Auto first (the router, today's behaviour), then each GPU model with its
-// window and, on a machine with several cards, the ones its Ollama sees (`GPU 2+3`; nothing unknown)
-export function gpuStops(label: string, gpu: WbModels['gpu'], pinned: string): [string, string, string][] {
-  const out: [string, string, string][] = [['auto', 'Auto (the router picks)', `The router picks ${label}'s GPU model for each task.`]]
-  for (const g of gpu)
-    out.push([g.id, `${g.label}${windowK(g.window)}${g.cards?.length ? ` · GPU${NB}${g.cards.join('+')}` : ''}`, `Pins ${label} to ${g.id}: the router doesn't pick for it.`])
-  if (pinned !== 'auto' && !gpu.some(g => g.id === pinned)) out.push([pinned, `${pinned} (not found: wb models)`, 'A task of this role exits 3 until it is found again or another is picked.'])
-  return out
-}
-
-// The API dropdown's entries: the role's own model, the other roles', those used before, and with a
-// catalog no longer than API_MENU every runnable one (grouped by provider); then Other model…, a typed
-// id wb checks. Only providers whose key wb can hold are listed (wb models --json); a free model
-// carries its data-use mark (#1021).
-export function apiStops(label: string, m: WbModels | null, current: string, others: string[]): [string, string, string][] {
-  const listed = new Map((m?.api ?? []).map(x => [x.id, x]))
-  const price = (p: WbModels['api'][number]['price']) => p && typeof p.input === 'number' && typeof p.output === 'number'
-    ? ` · $${p.input}/$${p.output} per${NB}M` : ''
-  const line = (id: string): [string, string, string] => {
-    const x = listed.get(id)
-    if (!x) return [id, id, `${label} uses ${id}.`]
-    return [id, `${x.name} · ${x.provider_name}${windowK(x.window)}${price(x.price)}${x.free ? ` · ${m?.free_line || 'free'}` : ''}`, `${label} uses ${id} on API; your code goes to ${x.provider_name}.`]
-  }
-  const ids: string[] = []
-  const add = (id: string | undefined) => { if (id && !ids.includes(id)) ids.push(id) }
-  add(current)
-  others.forEach(add)
-  ;(m?.used ?? []).filter(id => listed.has(id)).forEach(add)
-  if ((m?.api.length ?? 0) <= API_MENU)
-    [...(m?.api ?? [])].sort((a, b) => `${a.provider_name}\0${a.name}`.localeCompare(`${b.provider_name}\0${b.name}`)).forEach(x => add(x.id))
-  return [...(current ? [] : [['none', '(none)', `${label} has no API model: it runs on the GPU.`] as [string, string, string]]),
-    ...ids.map(line), ['other', 'Other model…', 'Type an exact id (provider/model); wb checks it.']]
-}
 
 // `wb route --json` and `wb models --json`, kept ROLES_CACHE_MS. `why`: wb's line when the roles can't
 // be read (routes.json broken), or OLDER_WB for a wb without them; '' with no routes: nothing drawn.
@@ -3187,153 +2296,6 @@ export function rolesRead(last: PaneRoles | null, now: number, routesRun: WbRun,
   return { shown, keep: !!shown.routes || shown.why === OLDER_WB }
 }
 
-// A pane press on the roles: the change as wb computes it, approved for exactly that when it needs the
-// user's yes (the press is it), then made; wb's refusal (no day cap, an unknown id, a key wb can't hold)
-// in a toast, and the row keeps its old value. A change that took the yes says its line in a toast:
-// the press is the yes, so no dialog showed what it agreed to (where the code goes, what the model does
-// with thinking: #1263, 2026-11-24)
-async function paneRoute($: any, args: string[]): Promise<boolean> {
-  mem.roles = null
-  const dry = await runWb($, ['route', '--dry-run', '--json', ...args], 60_000)
-  let q: Row | null = null
-  try { q = dry.ok ? JSON.parse(dry.out) : null } catch { q = null }
-  if (!q) { $.ui.toast(`workbench: ${brief(dry.out)}`); return false }
-  if (q.gate && q.approval)
-    await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, by: 'pane', at: (await $.clock.now()) / 1000 })).catch(() => {})
-  const { ok, out } = await runWb($, ['route', ...args])
-  mem.roles = null
-  if (!ok) $.ui.toast(`workbench: ${brief(out)}`)
-  else if (q.gate && q.change) $.ui.toast(`workbench: ${q.change}`)
-  return ok
-}
-
-// The day cap as typed, as `wb route cap` takes it: "$5", "5,00", "5 USD" are 5; empty is 'off'
-// (clears it); else null. parsePrice's forms (Couplings)
-export function parseUsd(text: string): number | 'off' | null {
-  return parsePrice(text)
-}
-
-async function setCap($: any, text: string) {
-  const v = parseUsd(text)
-  if (v === null) { $.ui.toast('workbench: the API day cap is dollars, like 5 or $5 (empty clears it)'); return }
-  await paneRoute($, ['cap', String(v)])
-  $.ui.invalidate('ui.render')
-}
-
-// Spend today, from `wb route --json`: `≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`; the dollars by
-// `usd`, the Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge), and each
-// provider by its name and the Stats tab's ` · ` (#1048's review: `deepseek $0.28, anthropic`)
-export function spendLine(r: WbRoutes): string {
-  const s: WbRoutes['spend_today'] = r.spend_today ?? { usd: 0, by_provider: {} }
-  const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${r.providers?.[p]?.name || p} ${usd(v)}`)
-  // ≈ and "catalog prices" unless at the user's own (#1135): once, the providers' share it
-  const inside = [by.join(' · '), s.usd ? pricesNote(s.prices) : ''].filter(Boolean).join('; ')
-  const each = inside ? ` (${inside})` : ''
-  return `Spend today: ${estUsd(s.usd ?? 0, s.prices)}${r.day_usd != null ? ` of ${money(r.day_usd)}${each}` : `${each} · no day cap`}`
-}
-
-// The Connected line: each provider, a stored key as working ("key stored": "stored" alone said
-// nothing of what), the rest with why they can't run
-export function connectedLine(r: WbRoutes): string {
-  return 'Connected: ' + Object.values(r.providers ?? {}).map(p => p.key === 'stored' ? `${p.name} (key stored)` : `${p.name} (${p.why ?? p.key})`).join(' · ')
-}
-
-// The rows of the Settings tab's three groups (#1023), as elements: Shared's first part (above Claude
-// coding), its second (the cap, wake), GPU and API. `role`: the roles' read
-async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
-  const { Box, Text, Button } = kit
-  const r = role.routes, m = role.models
-  const dim = (key: string, text: string) => infoLine(kit, key, text)
-  if (!r && !role.why) return { top: [], cap: [], gpu: [], api: [] } // an aborted first read (#1142)
-  if (!r) {
-    const line = dim('roles-why', role.why)
-    return { top: [line], cap: [], gpu: [line, ...mediaRows(kit, $, view, m)], api: [] }
-  }
-  const roles = ROLES.map(name => ({ name, label: ROLE_LABELS[name]!, row: r.roles[name] }))
-  const top = [
-    settingRow(kit, $, 'agents', 'Agents', AGENTS_STOPS, r.use, view, v => paneRoute($, ['all', v])),
-    settingRow(kit, $, 'busy', 'When the GPU is busy', BUSY_STOPS, r.busy ?? 'wait', view, v => paneRoute($, ['busy', v])),
-    ...roles.map(({ name, label, row }) => settingRow(kit, $, `role-${name}`, label,
-      roleStops(label, row.api, m?.api.find(x => x.id === row.api)?.name), row.via, view, v => paneRoute($, [name, v]))),
-  ]
-  const cap = [
-    <kit.Input key="cap" label="▸ API day cap" value={r.day_usd != null ? String(r.day_usd) : ''}
-      placeholder="not set (needed before an API role; $5 suggested)" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
-  ]
-  const gpu: any[] = []
-  if (!m) gpu.push(dim('gpu-why', OLDER_WB))
-  else if (!m.gpu.length) gpu.push(dim('gpu-none', 'No GPU model found (wb models)'))
-  else {
-    for (const { name, label, row } of roles)
-      gpu.push(settingRow(kit, $, `gpu-${name}`, `${label} GPU model`, gpuStops(label, m.gpu, row.gpu), row.gpu, view, v => paneRoute($, [name, '--gpu', v])))
-    const pinned = new Set(roles.map(x => x.row.gpu))
-    const shown = [...m.gpu].sort((a, b) => Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || a.label.localeCompare(b.label)).slice(0, GPU_ROWS)
-    for (const g of shown) {
-      const size = g.sizes.length === 1 ? g.sizes[0]! : 'all'
-      // "<model> tasks": the model's name alone (`devstral 24B: trivial only`) didn't say what the row sets
-      gpu.push(settingRow(kit, $, `size-${g.id}`, `${g.label} tasks`, SIZE_STOPS, size, view,
-        v => runWb($, ['model', 'sizes', g.id, ...(v === 'all' ? [] : [v])]).then(({ ok, out }) => { mem.roles = null; if (!ok) $.ui.toast(`workbench: ${brief(out)}`) })))
-    }
-    if (m.gpu.length > GPU_ROWS) gpu.push(dim('gpu-more', `+${m.gpu.length - GPU_ROWS} more (wb models)`))
-    const o = m.optimize
-    gpu.push(
-      // the date as the Stats tab's (2026-11-20), not 11-20 (#1048's review)
-      <Box key="optimize-row" flexDirection="row" flexWrap="wrap" columnGap={1} paddingLeft={2}>
-        <Text dimColor>{`Optimize: ${o.running ? 'measuring now' : o.models ? `measured ${o.models} model${o.models === 1 ? '' : 's'}${o.done_at ? ` on ${new Date(o.done_at * 1000).toISOString().slice(0, 10)}` : ''}` : 'not run yet'} ·`}</Text>
-        <Button key="optimize" label="▸ Measure now" plain onPress={() => {
-          void runWb($, ['optimize', 'start']).then(({ out }) => { mem.roles = null; $.ui.toast(`workbench: ${brief(out)}`) })
-        }} />
-      </Box>)
-  }
-  gpu.push(...mediaRows(kit, $, view, m)) // Images and Audio, after the models (#1047)
-  // Ollama cloud's login runs tasks as a stored key does: NO_PROVIDER's /connect was no fix for it (#1077's review, 2026-11-23)
-  const stored = Object.values(r.providers ?? {}).some(p => p.key === 'stored' || p.key === 'ollama')
-  const anyApi = roles.some(x => !!x.row.api)
-  const api: any[] = []
-  if (!stored && !anyApi) api.push(dim('api-none', NO_PROVIDER))
-  else {
-    if (Object.keys(r.providers ?? {}).length) api.push(dim('api-connected', connectedLine(r)))
-    for (const { name, label, row } of roles) {
-      const others = roles.filter(x => x.name !== name).map(x => x.row.api).filter((x): x is string => !!x)
-      api.push(settingRow(kit, $, `api-${name}`, `${label} API model`, apiStops(label, m, row.api ?? '', others), row.api ?? 'none', view,
-        async v => { if (v === 'other') { mem.apiOther = name; return } if (v !== 'none') await paneRoute($, [name, '--api', v]) }))
-      if (mem.apiOther === name)
-        api.push(<kit.Input key={`api-${name}-other`} label="    Exact id: " value="" placeholder="provider/model, as OpenCode names it"
-          submitLabel="set" onSubmit={(v: string) => {
-            const id = v.trim()
-            mem.apiOther = ''
-            void (id ? paneRoute($, [name, '--api', id]) : Promise.resolve(false)).then(() => $.ui.invalidate('ui.render'))
-          }} />)
-    }
-    for (const { name, label, row } of roles)
-      api.push(settingRow(kit, $, `think-${name}`, `${label} thinking`, thinkStops(row), row.thinking ?? 'off', view, v => paneRoute($, [name, '--thinking', v])))
-    api.push(dim('api-spend', spendLine(r)))
-  }
-  return { top, cap, gpu, api }
-}
-
-// The GPU group's Images and Audio rows (#1047): a row per media kind with a choice (two or more
-// engines, from `wb models --json`'s media), the engine wb image / wb audio use without --engine;
-// one off this GPU ("gpu": false, another host) says so. A pick runs `wb image|audio --default NAME`
-// (wb writes images.json's "default" or audio.json's "default_<kind>"); no dialog: nothing spends
-// and nothing leaves the machine. An older wb's models carry no media: no rows.
-// each titled as what it picks: "Images: flux" read as images on or off (#1048's review)
-const MEDIA_ROWS: [string, string, string][] = [['image', 'Image engine', 'image'], ['speech', 'Speech engine', 'audio'],
-  ['sfx', 'Sound effects engine', 'audio'], ['music', 'Music engine', 'audio']]
-export function mediaStops(cmd: string, kind: WbMedia): [string, string, string][] {
-  return kind.engines.map(e => [e.name, `${e.name}${e.gpu ? '' : ' · off this GPU'}`, `wb ${cmd} runs ${e.name} unless --engine names another.`])
-}
-function mediaRows(kit: Row, $: any, view: WbPane, m: WbModels | null) {
-  const out: any[] = []
-  for (const [kind, title, cmd] of MEDIA_ROWS) {
-    const k = m?.media?.[kind as keyof NonNullable<WbModels['media']>]
-    if (!k || k.engines.length < 2) continue
-    out.push(settingRow(kit, $, `media-${kind}`, title, mediaStops(cmd, k), k.default ?? k.engines[0]!.name, view,
-      v => runWb($, [cmd, '--default', v]).then(({ ok, out }) => { mem.roles = null; if (!ok) $.ui.toast(`workbench: ${brief(out)}`) })))
-  }
-  return out
-}
-
 async function poll($: any) {
   if (!mem.root || !mem.person) return
   if (mem.polling) { // a slow file system must not stack polls, but no change may be missed
@@ -3361,15 +2323,12 @@ async function poll($: any) {
       if (!(await read($, pane)).minimized) void $.ui.open({ id: PANE, title: 'Workbench' }) // put away stays away
     }
     void refreshLive($, list, now)
-    void refreshStats($)
-    void syncTop($)
     if (!mem.busy && mem.queued.length && now >= mem.queuedRetryAt) void sendQueued($, mem.queued.shift()!)
     const isOpen = (t: WbTask) => ACTIVE.has(t.phase) || NEEDS.has(t.phase)
     // Only this session's tasks, and only in workbench mode, make a boundary: a task closing
     // compacted every session's context, delegating or not (the 2026-11-16 audit).
     const open = new Set(list.filter(t => isOpen(t) && mine(t)).map(t => t.name))
     if (on && [...mem.open].some(name => !open.has(name))) mem.boundary = true
-    if ([...mem.open].some(name => !open.has(name))) mem.savingsAt = 0 // one closed: its row is new
     if (!on) mem.boundary = false
     mem.open = open
     await sayRules($, on)
@@ -3396,15 +2355,7 @@ async function poll($: any) {
     await rewake($, now, list)
     await listen($, now)
     await readSwitch($)
-    await chatLink($)
-    if (now - mem.savingsAt > 10 * 60_000) {
-      mem.savingsAt = now
-      const { ok, out, aborted } = await runWb($, ['savings', '--json'])
-      const said = ok ? savedLine(out) : ''
-      mem.price = ok ? priceOf(out) : mem.price
-      if (aborted) mem.savingsAt = 0 // the line stays and the next poll reads (#1142)
-      else if (said !== (await read($, savings))) await update($, savings, () => said)
-    }
+    await settingsTurns($, now)
   } finally {
     mem.polling = false
   }
@@ -3713,26 +2664,119 @@ async function alive($: any, pid: number, start?: string): Promise<boolean | nul
   return !/^\d+$/.test(now) && (await psStart($, pid, false)) === start
 }
 
-// The web chat's switch, as the user left it (chat/switch.json, written by `wb chat on|off`): turned
-// off, the link goes and the away state with it, so no prompt is sent where nobody reads; turned
-// on, the link is looked up at once.
+// The web chat's switch (chat/switch.json, `wb chat on|off`): changed, the link is looked up now,
+// not up to CHAT_CHECK_MS later: what it means is wb's to say (chat.is_on: on unless it says off)
 async function readSwitch($: any) {
-  const web = !!(await readJson($, `${mem.root}/chat/switch.json`)).on
-  if (web === (await read($, chat)).web) return
-  if (web) mem.chatUrlAt = 0
-  await update($, chat, c => ({ ...c, web, ...(web ? {} : { url: '' }) }))
-  if (!web) await back($)
+  const key = await $.fs.read(`${mem.root}/chat/switch.json`).catch(() => '-')
+  if (key === mem.switchKey) return
+  if (mem.switchKey) void chatLink($) // off the poll's path: starting the app waits for it up to 10 s
+  mem.switchKey = key
 }
 
-// The web chat's link while it is on, looked up again every ten minutes (it changes only with the token)
-async function chatLink($: any) {
-  const now = await $.clock.now()
-  if (!(await read($, chat)).web || now - mem.chatUrlAt <= 10 * 60_000) return
-  mem.chatUrlAt = now
-  const { ok, out, aborted } = await runWb($, ['chat', 'url'])
-  if (aborted) { mem.chatUrlAt = 0; return } // the pinned link stays and the next poll reads (#1142)
-  const link = ok && /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''
-  if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
+// The web app's link (#1283): `wb chat url --json` (chat.ensure: its state, the link, why not), at
+// session start, every CHAT_CHECK_MS, and CHAT_RECHECK_MS after it says started, failed or blocked
+// (only when that is new: an app that stays down is asked again each minute, not every 3 s). A wb
+// older than --json (a nonzero exit, or output that isn't JSON): plain `wb chat url`, read as up.
+// A url is taken only whole, `#token=` and all. Off after `wb chat off`: away ends with it, so no
+// prompt is sent where nobody reads. An abort says nothing (#1142): the next look asks again.
+const LINK_STATES = new Set(['up', 'started', 'off', 'blocked', 'failed', 'checking'])
+const LINK_URL = /^https?:\/\/\S+#token=\S+$/
+export function linkOf(run: WbRun, plain = false): Link | null {
+  if (plain) {
+    const out = run.out.trim()
+    return run.ok && LINK_URL.test(out) ? { state: 'up', url: out }
+      : { state: 'failed', why: brief(run.ok ? `wb chat url printed no link${out ? `: ${out}` : ''}` : run.out) }
+  }
+  if (!run.ok) return null
+  let j: any
+  try { j = JSON.parse(run.out) } catch { return null }
+  if (!j || typeof j !== 'object' || !LINK_STATES.has(j.state)) return null
+  const url = typeof j.url === 'string' && LINK_URL.test(j.url) ? { url: j.url as string } : {}
+  const why = typeof j.why === 'string' && j.why.trim() ? { why: brief(j.why) } : {}
+  return { state: j.state, ...(j.state === 'off' ? {} : url), ...why }
+}
+async function chatLink($: any): Promise<void> {
+  if (mem.chatChecking) { mem.chatAgain = true; return }
+  mem.chatChecking = true
+  mem.chatAgain = false
+  try {
+    const was = (await read($, chat)).link
+    const json = await runWb($, ['chat', 'url', '--json'], 30_000)
+    if (json.aborted) return
+    let link = linkOf(json)
+    if (!link) {
+      const plain = await runWb($, ['chat', 'url'], 30_000)
+      if (plain.aborted) return
+      link = linkOf(plain, true)!
+    }
+    if (['started', 'failed', 'blocked'].includes(link.state) && link.state !== was.state)
+      void Promise.resolve().then(() => $.clock.sleep(CHAT_RECHECK_MS)).then(() => chatLink($), () => {})
+    if (JSON.stringify(link) !== JSON.stringify(was)) {
+      await update($, chat, c => ({ ...c, link: link! }))
+      $.ui.invalidate('ui.render')
+    }
+    if (link.state === 'off' && was.state !== 'off') await back($)
+  } catch {
+    // the engine gone meanwhile (a reload): the next look reads it
+  } finally {
+    mem.chatChecking = false
+  }
+  if (mem.chatAgain) return chatLink($)
+}
+
+// A setting the user changed in the web app's Settings (#1283; chat-admin-api appends each to
+// settings-changes.jsonl: {ts, key, label?, from, to, said, help?, by: "web"}) reaches Claude once,
+// in the session the web chat listens to (any session while none does): one with `help` (the
+// value just chosen is on but can't work yet, as Agent code navigation without probe) as a
+// [workbench] turn that asks Claude to offer to set it up, queued (mem.queued) as the pane's
+// Settings once queued it; any other as a row Claude reads, starting no turn. The roles, Claude
+// coding and Dynamic workflows aren't said twice: their own rows say every change (unsaid). A row
+// older than OLDEST_WAKE_MS is no news. The newest delivered is kept in $.store, every session's,
+// so a reload or another session never says it again.
+const SETTINGS_CHANGES = 'settings-changes.jsonl'
+const SETTINGS_TAIL = 64 << 10
+const SAID_ELSEWHERE = /^(?:agents|busy|cap|coding|workflows|(?:role|gpu|api|think)-[a-z]+)$/
+const one = (v: unknown, n: number) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n)
+const valueWord = (v: unknown) => v === null || v === undefined || v === '' ? 'off' : one(v, 120)
+export function settingSaid(r: Row): string {
+  const said = one(r.said, 300)
+  return `The user changed ${one(r.label, 80) || one(r.key, 80)} from ${valueWord(r.from)} to ${valueWord(r.to)} ` +
+    `on the web app.${said ? ` wb said: ${said}` : ''}`
+}
+export const SETTING_HELP = (r: Row) => `[workbench] ${settingSaid(r)}\n${String(r.help).trim().slice(0, 4000)}\n` +
+  'Offer to help with it, and install or change nothing without their yes.'
+async function settingsTurns($: any, now: number) {
+  const path = `${mem.root}/${SETTINGS_CHANGES}`
+  const stat = await $.fs.stat(path).catch(() => undefined)
+  const key = stat ? `${stat.size}@${stat.mtimeMs}` : ''
+  if (!key || key === mem.settingsKey) return
+  const st = await read($, chat)
+  const claim = await readJson($, `${mem.root}/chat/listener.json`)
+  if (claim.session && claim.session !== st.key) return // the listening session's: read again once it is this one's
+  const got = await readTail($, path, SETTINGS_TAIL)
+  if (!got) return
+  mem.settingsKey = key
+  let mark = 0
+  try { mark = Number(await $.store.get('settingsSeen')) || 0 } catch { /* no store: this load's set alone */ }
+  const notes: string[] = []
+  let newest = mark
+  for (const r of parseLines(got.text)) {
+    const ts = Number(r.ts) || 0, id = `${ts}:${String(r.key ?? '')}`
+    if (r.by !== 'web' || ts <= mark || mem.settingsSeen.has(id) || ts * 1000 < now - OLDEST_WAKE_MS) continue
+    mem.settingsSeen.add(id)
+    newest = Math.max(newest, ts)
+    const help = typeof r.help === 'string' && r.help.trim()
+    if (help) {
+      $.ui.toast(`workbench: ${one(r.label, 80) || one(r.key, 80)} changed on the web app: Claude will offer to set it up`)
+      mem.queued.push(SETTING_HELP(r))
+    } else if (!SAID_ELSEWHERE.test(String(r.key ?? ''))) notes.push(settingSaid(r))
+  }
+  if (newest > mark) try { await $.store.set('settingsSeen', newest) } catch { /* no store */ }
+  if (!notes.length || !mem.said) return // no conversation yet: nothing it lacks
+  const text = `[workbench] ${notes.join('\n')}`
+  const r = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+    .catch((err: unknown) => ({ deny: String(err) }))
+  if (r?.deny) mem.queued.push(`${text}\n\nNothing to do now; reply in one line.`)
 }
 
 // Claude's rows in the thread's tail, oldest first, for answersTo (#1096)
@@ -3770,7 +2814,7 @@ const ELSEWHERE_NOTE = '(This follows another Claude Code session\'s message in 
 
 async function listen($: any, now: number) {
   const st = await read($, chat)
-  if (!st.delegating || !st.web) return
+  if (!st.delegating || !webOn(st)) return
   const dir = `${mem.root}/chat`
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
   const claim = await readJson($, `${dir}/listener.json`)
@@ -3986,7 +3030,7 @@ async function owedAtTurnEnd($: any) {
 // turn's, so a turn that wrote nothing was recorded for a row written before it (Claude Code
 // 2.1.330 ends a test's turn before its start's stat returns; the nightly run, 2026-11-24).
 function chatTurnStart($: any) {
-  mem.chatTurnSize = (async () => (await read($, chat)).web
+  mem.chatTurnSize = (async () => webOn(await read($, chat))
     ? (await $.fs.stat(`${mem.root}/chat/messages.jsonl`).catch(() => undefined))?.size ?? 0 : -1)().catch(() => -1)
 }
 async function chatTurnEnd($: any) {
@@ -4235,6 +3279,7 @@ function startEars($: any) {
     if (mem.termDialogs.length) void termNotices($, now)
     if (!mem.eventsPid || mem.hasActive || mem.queued.length || now - mem.lastPoll > SAFETY_MS) void poll($)
   })
+  $.clock.every(CHAT_CHECK_MS, () => { void chatLink($) }) // the web app's link (#1283)
   $.clock.every(FRAME_MS, async () => {
     if (!mem.posed) return // not drawn in pixels, or the pane is closed
     const frame = frameOf(mem.posed, ++mem.tick)
@@ -4250,9 +3295,9 @@ function startEars($: any) {
 // in the Tasks page like normal and have no penalty beyond initial startup"). The /workbench that
 // turns the mode on starts it (a session's first, or the first after /workbench-quit or the
 // hand-back: the owner expected the quit and /workbench again to open with it, 2026-11-21),
-// unless the Settings row turned it off (`wb splash off`, splash.json); a reload, /workbench
+// unless the user turned it off (`wb splash off`, splash.json; the web app's Settings); a reload, /workbench
 // while the mode is on, a bring-back from the strip or a pane a task opened never do (the
-// `splashed` atom, which workbenchMode clears when the mode goes off). While it plays the pane's Tasks tab is one Raster the size of
+// `splashed` atom, which workbenchMode clears when the mode goes off). While it plays the pane is one Raster the size of
 // its body, repainted by its own timer through $.ui.blit; polling and loading carry on under it,
 // so the page it hands over to is current. It ends after its last frame, at a key in the pane
 // (Tab, a click, arrows and scroll), or when the pane is closed, too small or can't take a blit
@@ -4263,11 +3308,6 @@ function startEars($: any) {
 // (2026-11-21, review of #963); typing goes on beside it, and it's over in five seconds.
 const SPLASH = 'splash' // its Raster's key, for $.ui.blit
 const SPLASH_WAIT = 25 // ticks (2 s) it waits for the pane's first draw before giving up
-const SPLASH_STOPS: [string, string, string][] = [
-  ['on', 'Enabled (default)', 'The first /workbench of a session opens with a short animation; any key skips it.'],
-  ['off', 'Off', 'The Tasks page opens at once.'],
-]
-
 // splash.json as wb writes it (`wb splash on|off`): on unless it says off
 async function splashOn($: any): Promise<boolean> {
   try {
@@ -4297,34 +3337,6 @@ async function splashTick($: any, s: NonNullable<typeof mem.splash>) {
 }
 
 // Ends it: the timer cancelled, the page drawn (`redraw`: unless the render ending it draws it)
-// The modeline's ticker (#976, modeline.ts): a step a TICKER_MS, by blit alone, while the line is
-// wider than its room; stopped when it fits, goes, or the pane can't take a blit (closed: the next
-// draw starts it again, from where it was if the line is the same).
-const TICKER = 'ticker' // its Raster's key
-function syncTicker($: any, line: string, room: number): number {
-  const t = mem.ticker
-  if (t && t.line === line && t.room === room) return t.off
-  const off = t && t.line === line ? t.off % loopLength(line) : 0
-  stopTicker()
-  if (!line) return 0
-  const k: NonNullable<typeof mem.ticker> = { line, room, off, timer: { cancel: () => {} } }
-  mem.ticker = k
-  k.timer = $.clock.every(TICKER_MS, async () => {
-    if (mem.ticker !== k) return
-    k.off = (k.off + 1) % loopLength(k.line)
-    const r = await $.ui.blit({ requestId: PANE, key: TICKER, cells: tickerCells(k.line, k.off, k.room) })
-      .catch(() => ({ deny: 'gone' }))
-    if (r?.deny && mem.ticker === k) stopTicker(true)
-  })
-  return off
-}
-function stopTicker(keepLine = false) {
-  const t = mem.ticker
-  if (!t) return
-  try { t.timer.cancel() } catch { /* already stopped */ }
-  mem.ticker = keepLine ? { ...t, room: -1, timer: { cancel: () => {} } } : null // -1: none runs
-}
-
 function endSplash($: any, redraw = true) {
   const s = mem.splash
   if (!s) return
@@ -4391,27 +3403,16 @@ async function showPane($: any) {
   mem.paneOpened = true
   const opening = $.ui.open({ id: PANE, title: 'Workbench' })
   if ((await read($, pane)).minimized) await update($, pane, p => ({ ...p, minimized: false }))
-  void paneBack($, opening)
   return opening
 }
 
-// Once an open lands, the Stats tab's history and live view catch up: /workbench again and a
-// bring-back from the strip waited for the next poll, up to 30 s with no task (#552), and a
-// syncTop before the open resolved could still see the pane hidden
-async function paneBack($: any, opening: Promise<unknown>) {
-  await Promise.resolve(opening).catch(() => {})
-  void refreshStats($)
-  void syncTop($)
-}
-
-// Brings the pane back from the strip, on the tab asked for. Opened first, while the press is still
-// the person's: backseat-driver's opened after its awaits counted as its own, and an open the mod
-// makes after a close by hand waits for a wide terminal (2026-10-07).
-async function restorePane($: any, tab: string) {
+// Brings the pane back from the strip. Opened first, while the press is still the person's:
+// backseat-driver's opened after its awaits counted as its own, and an open the mod makes after a
+// close by hand waits for a wide terminal (2026-10-07).
+async function restorePane($: any) {
   const opening = $.ui.open({ id: PANE, title: 'Workbench' })
   mem.paneOpened = true
-  await update($, pane, p => ({ ...p, tab: tab || p.tab, minimized: false }))
-  void paneBack($, opening)
+  await update($, pane, p => ({ ...p, minimized: false }))
   $.ui.invalidate('ui.render')
   return opening
 }
@@ -4477,8 +3478,6 @@ export const register: Register = (on, options) => {
     mem.wb = bin ? (bin.includes('/') || bin.startsWith('~') ? abs(bin) : bin) : 'wb'
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
-    const priced = await $.env.get('WB_SAVINGS')
-    mem.savingsFile = priced ? abs(priced) : `${home}/.config/workbench/savings.json`
     const commands = await $.env.get('WB_COMMANDS')
     mem.commandsFile = commands ? abs(commands) : `${home}/.config/workbench/commands.json`
     mem.startedAt = await $.clock.now()
@@ -4540,6 +3539,7 @@ export const register: Register = (on, options) => {
     if (mem.person) {
       await checkVersion($)
       startEars($)
+      void chatLink($) // the modeline's link, now (#1283)
     }
     return next(e)
   })
@@ -4548,6 +3548,7 @@ export const register: Register = (on, options) => {
     if (!mem.person && mem.root) {
       mem.person = true
       startEars($)
+      void chatLink($)
     }
     return next(e)
   })
@@ -4615,7 +3616,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (r.decision) return r
     const st = await read($, chat)
-    if (!st.delegating || !st.web) return r
+    if (!st.delegating || !webOn(st)) return r
     const isAway = await away($, st), forAgents = agentsFor(mem.chatTurn, mem.agentTurn) // an agent's turn: the page too (#1042)
     if (!isAway && !forAgents.length) {
       const kind = KIND[e.tool_name] ?? 'permission'
@@ -4806,14 +3807,13 @@ export const register: Register = (on, options) => {
     if (e.id === PANE && e.origin?.kind === 'person') {
       endSplash($, false)
       await update($, pane, p => ({ ...p, minimized: true }))
-      stopTop($) // put away: the live view ends with it
       $.ui.invalidate('ui.render')
     }
     return next(e)
   })
 
   // Minimized: the strip, while there is something to bring back (workbench mode, or this session's
-  // tasks): its name, what the tasks are doing, and its tabs, each a way back
+  // tasks): its name, a way back, and what the tasks are doing
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!(await read($, pane)).minimized || e.props?.hasSurvey) return next(e)
     const { delegating } = await read($, chat)
@@ -4823,23 +3823,16 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="row" columnGap={2}>
         <Box flexShrink={0}>
-          <Button key="restore" label="▸ Workbench" plain onPress={() => { void restorePane($, '') }} />
+          <Button key="restore" label="▸ Workbench" plain onPress={() => { void restorePane($) }} />
         </Box>
-        {TABS.map(([tab, label]) => (
-          <Box flexShrink={0}>
-            <Button key={`restore-${tab}`} label={label} plain dimColor onPress={() => { void restorePane($, tab) }} />
-          </Box>
-        ))}
         <Text dimColor wrap="truncate-end">{parts.length ? `${parts.join(' · ')} · ${STRIP_HINT}` : STRIP_HINT}</Text>
       </Box>
     )
   })
 
-  // Where the ring is in the pane, so an open settings row shows that option's sentence; let through
+  // A key in the pane skips the opening animation; let through
   on('ui.focus', { requestId: PANE }, async ($, e, next) => {
     if (e.origin.kind === 'person') endSplash($) // Tab or a click skips the opening animation, and still moves (#963)
-    const focus = e.element && SETTING_ROWS.test(e.element) ? e.element : ''
-    if (focus !== (await read($, pane)).focus) await update($, pane, p => ({ ...p, focus }))
     return next(e)
   })
 
@@ -4848,21 +3841,19 @@ export const register: Register = (on, options) => {
     const { Box, Text, Raster, Button } = kit
     const list = await read($, tasks)
     const watched = await read($, live)
-    const { url, web, delegating } = await read($, chat)
-    const saved = await read($, savings)
-    const view = await read($, pane)
+    const { link, delegating } = await read($, chat)
     if (mem.splash) { // the opening animation, in place of the Tasks page while it plays (#963)
       const props = (e.props ?? {}) as Row
       const [cols, rows] = [Number(props.bodyColumns ?? 0), Number(props.scroll?.bodyRows ?? 0)]
       const s = mem.splash
-      const fits = (e as Row).surface === 'terminal' && view.tab === 'tasks' && props.placement !== 'widget'
+      const fits = (e as Row).surface === 'terminal' && props.placement !== 'widget'
       // where the page will put the apprentice and the modeline, as it stands now: the walk and the
       // bar go there. A row the page can't measure any more (a line that may wrap came) is no
       // row: an earlier exact one was measured without that line, so the page is taller now and
       // the bar would land above the real modeline (2026-11-21, review of #963). Before the words
       // leave, that makes them rise away; once they fall, the bar goes to the row the page
       // reaches at least.
-      const shape = fits ? pageShape(list, watched, delegating, saved, await $.clock.now(), cols) : null
+      const shape = fits ? pageShape(list, watched, delegating, link, await $.clock.now(), cols) : null
       let target = shape ? splashTarget(shape, rows) : null
       if (target && target.bar === null && s.plan?.ending === 'fall') target = { ...target, bar: Math.min(rows - 1, shape!.atLeast - 1) }
       // a new size plans again, from the same frame: a dock's second draw is a row shorter than its
@@ -4876,136 +3867,26 @@ export const register: Register = (on, options) => {
       if (target && s.plan) {
         return <Raster key={SPLASH} columns={cols} rows={rows} cells={packed(frameCells(s.plan, s.f))} />
       }
-      endSplash($, false) // too small, or not the Tasks tab on a terminal: the page at once
+      endSplash($, false) // too small, or not on a terminal: the page at once
     }
-    // the web chat's link while it is on, on the Settings tab only (the user, 2026-11-19: never under
-    // the tasks), then the tabs: last, since the pane follows its end (a row at the top scrolled away
-    // under a long transcript)
-    const pinned = web && url ? (
-      <Box marginTop={1}>
-        <Text>
-          <Text bold color="claude">web chat </Text>
-          <Text dimColor>{url}</Text>
-        </Text>
-      </Box>
-    ) : null
-    // under the tabs, on every tab, a modeline as in Emacs or Vim: the pane's name and the
-    // apprentice's face, in the theme's own colors so it reads on a dark or a light terminal (the
-    // user, 2026-11-21)
-    // what this session's agents are doing, after the name (#976): scrolling when wider than the bar
-    const doing = activity(list.filter(t => (ACTIVE.has(t.phase) || NEEDS.has(t.phase)) && mine(t)))
-    const room = Number(((e.props ?? {}) as Row).bodyColumns ?? 0) - 2 - `${FACE.rest} ${MODELINE} - `.length
-    const scrolls = !!doing && !!Raster && (e as Row).surface === 'terminal' && room >= 8 && [...doing].length > room
-    const offset = syncTicker($, scrolls ? doing : '', room)
-    const tabs = (
-      <Box flexDirection="column" marginTop={1}>
-        <Box flexDirection="row" columnGap={2}>
-          {TABS.map(([tab, label, hotkey]) => (
-            <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
-              onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($, true); void syncTop($) }) }} />
-          ))}
+    // last, since the pane follows its end, a modeline as in Emacs or Vim: the pane's name, the
+    // apprentice's face and the web app's link (#1283: Stats and Settings are there), in the
+    // theme's own colours so it reads on a dark or a light terminal (the user, 2026-11-21); in a
+    // narrow pane the link alone, or the link on rows of its own under the name (modeline.ts)
+    const bodyCols = Number(((e.props ?? {}) as Row).bodyColumns ?? 0) || Number(e.viewport?.columns ?? 0) || 60
+    const ml = modeline(link, bodyCols)
+    const header = (
+      <Box key="modeline" flexDirection="column">
+        <Box backgroundColor="claude" paddingX={1}>
+          <Text color="inverseText" bold wrap="truncate-end">{ml.bar}</Text>
         </Box>
-        <Box key="modeline" backgroundColor="claude" paddingX={1} flexDirection="row">
-          <Text color="inverseText" bold>{`${FACE.rest} ${MODELINE}${doing ? ' - ' : ''}`}</Text>
-          {scrolls
-            ? <Raster key={TICKER} columns={room} rows={1} cells={tickerCells(doing, offset, room)} />
-            : doing ? <Text color="inverseText">{doing}</Text> : null /* not bold: a scrolling line's Raster can't be */}
-        </Box>
+        {ml.rows.map((row, i) => (
+          <Box key={`modeline-url-${i}`} backgroundColor="claude">
+            <Text color="inverseText" wrap="truncate-end">{row}</Text>
+          </Box>
+        ))}
       </Box>
     )
-    // the Settings tab: Shared (the Agents switch, the busy row and the roles first, #1023; Claude
-    // coding, #93; Dynamic workflows, #1041; the day cap and wake; the Stats tab's, #406), one row
-    // each at rest; the prices are typed (an Input: wb checks them). Then GPU and API (#1023; API
-    // left out with no provider and no API role but its one line). Last, apart under Experimental,
-    // the web chat and the probe experiment: settings that may change or go away (the user, 2026-11-21)
-    if (view.tab === 'settings') {
-      const st = await statsSettings($)
-      const probe = await probeStatus($)
-      const probeAt = await probeMode($)
-      const prog = await progressSettings($)
-      const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
-      mem.settingsCols = Number(((e.props ?? {}) as Row).bodyColumns ?? 0) // settingRow folds to it
-      const roles = await roleRows(kit, $, view, await rolesNow($)) // Shared, GPU and API (#1023)
-      return (
-        <Box flexDirection="column">
-          <Text dimColor>{SETTINGS_HINT}</Text>
-          <Box flexDirection="column" marginTop={1}>
-            {heading(kit, 'Shared')}
-            {roles.top}
-            {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
-              v => runWb($, ['coding', v]))}
-            {settingRow(kit, $, 'workflows', 'Dynamic workflows', WORKFLOWS_STOPS, await workflowsMode($), view,
-              v => runWb($, ['workflows', v]))}
-            {roles.cap}
-            {infoLine(kit, 'wake', `Wake Claude: ${mem.wake ? 'on' : 'off'} · change it in /plugin → workbench → options`)}
-            {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
-              v => picked(['stats', 'set', 'recording', v]))}
-            {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,
-              v => picked(['stats', 'set', 'live', v]))}
-            {settingRow(kit, $, 'every', 'Live refresh', EVERY_STOPS, String(st.every), view,
-              v => picked(['stats', 'set', 'every', v]))}
-            {settingRow(kit, $, 'progress', 'Progress checks', progressStops(prog.after), prog.on ? 'on' : 'off', view,
-              v => runWb($, ['progress', v]))}
-            {settingRow(kit, $, 'splash', 'Opening animation', SPLASH_STOPS, (await splashOn($)) ? 'on' : 'off', view,
-              v => runWb($, ['splash', v]).then(({ ok, out }) => { if (!ok) $.ui.toast(`workbench: ${brief(out)}`) }))}
-            <kit.Input key="price" label="▸ Electricity price per kWh" value={mem.price ? String(mem.price) : ''}
-              placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
-          </Box>
-          <Box flexDirection="column" marginTop={1}>
-            {heading(kit, 'GPU')}
-            {roles.gpu}
-          </Box>
-          {roles.api.length ? (
-            <Box flexDirection="column" marginTop={1}>
-              {heading(kit, 'API')}
-              {roles.api}
-            </Box>
-          ) : null}
-          <Box flexDirection="column" marginTop={1}>
-            {heading(kit, 'Experimental', ' · may change or go away')}
-            {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
-            {settingRow(kit, $, 'probe', 'Agent code navigation', probeStops(probe, probeAt), probeAt, view,
-              v => setProbe($, v))}
-          </Box>
-          {pinned}
-          {tabs}
-        </Box>
-      )
-    }
-    // the Stats tab: the live view (#408, `wb top --json` while shown, with Live view on), then
-    // the history (#406, `wb stats --json`)
-    if (view.tab === 'stats') {
-      // drawn with no child: the engine shows the pane again (nothing else says so), so the live
-      // view starts now, not at the next poll, 30 s off with no task (#552)
-      if (!mem.top && !mem.topKids.size) void syncTop($)
-      const { feed } = await read($, statsFeed)
-      const cols = Math.max(30, Number(((e.props ?? {}) as Row).bodyColumns ?? e.viewport?.columns ?? 60))
-      const top = await read($, topNow)
-      const names = namesNow(list, top)
-      const now = (await statsSettings($)).live ? liveLines(top, mem.topFails >= 2 ? mem.topWhy : '', names) : []
-      return (
-        <Box flexDirection="column">
-          {now.length ? (
-            <Box flexDirection="column" marginBottom={1}>
-              {heading(kit, 'Now')}
-              {now.flatMap(parts => wrapParts(parts, cols)).map(parts => (
-                <Text wrap="truncate-end">{parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
-              ))}
-            </Box>
-          ) : null}
-          {statsLines(feed, mem.statsWhy, names).map(({ label, text }) => (
-            <Box flexDirection="column" marginBottom={label ? 0 : 1}>
-              {label
-                ? hangWords(`${label}: ${text}`, cols).map((l, i) => i === 0 && l.startsWith(label)
-                  ? <Text><Text bold>{label}</Text><Text dimColor>{l.slice(label.length)}</Text></Text>
-                  : <Text dimColor>{l}</Text>)
-                : <Text dimColor>{text}</Text>}
-            </Box>
-          ))}
-          {tabs}
-        </Box>
-      )
-    }
     const props = (e.props ?? {}) as Row
     const cols = Math.max(30, Number(props.bodyColumns ?? e.viewport?.columns ?? 60))
     const now = await $.clock.now()
@@ -5088,8 +3969,7 @@ export const register: Register = (on, options) => {
         )}
         {stage}
         {page.capLine && <Text wrap="truncate-end">{page.capLine.map(p => <Text color={p.color} dimColor={p.dim}>{p.text}</Text>)}</Text>}
-        {saved && <Text dimColor>{saved}</Text>}
-        {tabs}
+        {header}
       </Box>
     )
   })
