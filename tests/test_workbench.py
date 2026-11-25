@@ -27704,6 +27704,30 @@ class WebChat(Base):
             self.chat.notice_done(n["id"])
             self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
 
+    def test_another_sessions_turn_end_leaves_a_wait_on_the_listeners_reply_not_done(self):
+        # #1303: every session's mod records a turn end with no ids once messages.jsonl grew in
+        # its turn, and a wait on the listener's "On it" counted it: ask_claude.py exited 0,
+        # "Claude's turn is done", while the listener still worked on the request
+        tok = self._agent()
+        self._listening()
+        mid = self.call("/api/send", {"text": "fix the parser"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1")
+        run_wb("chat", "reply", "--to", mid, "--text", "On it.")
+        ack = self.chat.thread()[-1]
+        self.assertEqual(ack["turn_by"], "s1")
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        run_wb("chat", "ended", "--by", "s2")                             # another session's turn
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        run_wb("chat", "ended", mid, "--by", "s1")                        # the listener's
+        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        # a row without `turn_by` (an older wb's): any turn ending after it, as before
+        time.sleep(0.01)                                                  # after s1's end
+        old = self.chat.send("Done, from an older wb.", "claude", re=[mid], to=["my-agent"])
+        self.assertNotIn("turn_by", old)
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        run_wb("chat", "ended", "--by", "s2")
+        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+
     def test_a_message_with_no_reply_is_done_once_the_turn_that_took_it_ends(self):
         tok = self._agent()
         self._listening()

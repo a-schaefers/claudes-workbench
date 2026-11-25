@@ -5532,7 +5532,9 @@ client; the server needs no browser.
   <id>&timeout=<0–600, WAIT_DEFAULT 300>&until=done|reply` (`Handler._wait`, `chat.wait_state`)
   returns Claude's rows after `after` `addressed` to the caller (`to` names it; no `to` is the
   user's) and `done`: since the newest of them, else since `after`, a turn has ended (a message to
-  Claude: a `turns.jsonl` row lists it; a reply: a row `ended` at or after its `ts`). It holds on
+  Claude: a `turns.jsonl` row lists it; a reply: a row `ended` at or after its `ts`, by its
+  `turn_by` when it has one: another session's turn end with no ids, which every mod records once
+  messages.jsonl grew in its turn, made the listener's "On it" done, #1303). It holds on
   the `Hub` until a reply, `done` (with `until=done`), nobody listening (at once: `listener:
   null`) or the timeout; at most `MAX_WAITS` 16 at once (503), each looking every `WAIT_LOOK` 1 s
   whether its client hung up (`Handler._gone`: an aborted wait held its slot to its timeout, and
@@ -5577,11 +5579,13 @@ client; the server needs no browser.
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude"|"notice"|<agent name>, text, cid?, shots?,
   audio?, about?, files?, role?: "agent", re?: [ids], to?: ["user"|<agent name>], session?, claude_pid?,
-  claude_start?, claude_machine?}` (`claude_pid`: on every `from: claude` row, the Claude Code its
+  claude_start?, claude_machine?, turn_by?}` (`claude_pid`: on every `from: claude` row, the Claude Code its
   `wb chat reply`, `listen` or `wb shot --chat` ran under, its `CLAUDE_PID`, stamped in `chat.send`,
   for the owed reply, #1129; none: an older wb's row, or one run outside Claude Code; `session`,
   `claude_start`, `claude_machine` beside it on a `wb chat reply` from Claude Code: the session
-  that wrote it, whose mod takes the user's answer to it, #1096). A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
+  that wrote it, whose mod takes the user's answer to it, #1096; `turn_by`: the listener's key, its
+  `turns.jsonl` `by`, on a reply of the listening session's, `chat.caller_listens`: only that
+  session's turn end makes a wait on it done, #1303). A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
   terminal"` and adds `tool, what?` (2000 characters): news like Claude's
   (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only `from:
   claude`; `chat.thread` adds `answered` once settled. `files`: `[{id, name, size, type, path}]`.
@@ -5636,8 +5640,8 @@ client; the server needs no browser.
   last (it marks the upload whole; `by`: the agent that uploaded it, #1042); `uploads.lock`: one
   finishing at a time.
 - `prefs.json`: `{away: "ask"|"allow"}` (else `ask`), read by `chat.ask`.
-- `turns.jsonl`: `{ids, ended, by}`: a main turn of the listening session ended, having taken the
-  messages `ids` (none: it only wrote to the thread), from `wb chat ended` (the mod's
+- `turns.jsonl`: `{ids, ended, by}`: a main turn of a session ended (`by`, its mod's key), having taken the
+  messages `ids` (none: messages.jsonl grew in it, maybe another session's write), from `wb chat ended` (the mod's
   `chatTurnEnd`, #1042); read from its last 4 MiB.
 - `push.json`: `{subs: [{endpoint, ts, ua}]}` (`MAX_SUBS` 20, `push.lock`); `seen.jsonl`: `{id, ts,
   by: "page"|"push"|"refused", endpoint?, status?}` (with `endpoint`, that device only, #537; an
@@ -7529,8 +7533,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **An agent's turn** (`mem.agentTurn`, `agentsFor`) → the `classic.PermissionRequest` hook, `askForArgs`, `wb chat ask
   --for --here`, the ask's `for` (`makeAsk`'s `.ask-for`, `sw.js`); **an ask settled elsewhere** (`watchAsk`,
   `askSettledHere`, `sameCall`, `withdrawAsk`) → `expired` by `interrupted`, the page's "settled in the terminal".
-- **The turn-end record** (`turns.jsonl`: the mod's `chatTurnEnd`, `wb chat ended`) → `chat.taken`, `chat.wait_state`,
-  `wb chat reply`'s default `re`; the `[agent <name>] … [message <id>: …]` prompt → `chatPrompt`, `AGENT`, the
+- **The turn-end record** (`turns.jsonl`: the mod's `chatTurnEnd`, `wb chat ended`; its `by`, the mod's chat key, is
+  listener.json's `session` and a reply's `turn_by`) → `chat.taken`, `chat.wait_state`, `wb chat reply`'s default `re`; the `[agent <name>] … [message <id>: …]` prompt → `chatPrompt`, `AGENT`, the
   `prompt.submit` guard, the /workbench skill's *Agents on the web chat*.
 - **A Claude row's session** (`cli._chat_writer`: `session`, `claude_pid`, `claude_start`, `claude_machine`, as
   task.json's) → the mod's `answersTo` and `listen` (whose a user's message is, #1096), `ELSEWHERE_NOTE` ↔ reference/driving.md.
