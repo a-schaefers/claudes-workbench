@@ -209,29 +209,25 @@ def fresh_ceiling(cfg: dict) -> float | None:
     return round(top - max(STEP_GROWTH / window, tuning.CEILING_MARGIN), 6)
 
 
-def handover_warning(cfg: dict, api: bool = False) -> str:
-    """What to say of an entry whose output cap puts OpenCode's compaction too close to the
+def handover_warning(cfg: dict) -> str:
+    """What to say of a GPU entry whose output cap puts OpenCode's compaction too close to the
     earliest handover point (fresh_ceiling under every fresh_at value), or "". Nothing said so,
     and every long step compacted, the small-model summary the handover exists to avoid (#595,
     the audit of 1.90). At HANDOVER_ROOM or under, no successor has room, so no handover fits.
-    An API model's (``api``): models.api_limits already bounds its output, so only a small
-    catalog `limit.input` is left to cause it, which neither wb nor the user can lower: lowering
-    the output was advice that changed nothing (#1073, 2026-11-23)."""
+    Never an API model's: models.api_limits bounds its output, and a small catalog `limit.input`
+    is neither wb's nor the user's to lower (#1073), so wb start says nothing of it (#1322)."""
     top, at = fresh_ceiling(cfg), compaction_point(cfg)
     lo = min(tuning.KNOBS["fresh_at"].values)
     if top is None or top >= lo:
         return ""
     lim, opts = cfg.get("limit") or {}, cfg.get("options") or {}
-    said = (("limit.input", lim.get("input")), ("limit.output", lim.get("output"))) if api else \
-        (("limit.output", lim.get("output")), ("options.max_tokens", opts.get("max_tokens")))
+    said = (("limit.output", lim.get("output")), ("options.max_tokens", opts.get("max_tokens")))
     caps = ", ".join(f"{k} {v}" for k, v in said if v)
-    return (f"{'its catalog limits' if api else 'its output cap'} ({caps} of a {lim['context'] // 1024}K "
-            f"window) put{'' if api else 's'} OpenCode's "
+    return (f"its output cap ({caps} of a {lim['context'] // 1024}K window) puts OpenCode's "
             f"compaction at {max(at, 0):.0%} of the window, under a step's growth past the earliest "
             f"handover point ({lo:.0%}): " + ("no handover fits, so long steps compact" if top <= HANDOVER_ROOM else
                                f"handovers come at {top:.0%}, with little room")
-            + ("; a catalog's limits aren't wb's or yours to change: a model with a larger input limit "
-               "has room" if api else "; lower limit.output and options.max_tokens"))
+            + "; lower limit.output and options.max_tokens")
 
 
 # OpenCode 2.3 gives every provider a 300 s wait for the response headers (`headerTimeout`) and

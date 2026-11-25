@@ -232,9 +232,7 @@ def _opencode_again(task: store.Task) -> None:
     if (have := runner.opencode_version()) and have < (2, 0):
         die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
             f"{runner.OPENCODE_GET}", 3)
-    if have:
-        if drift := runner.untested(have):
-            print(f"note: {drift}")
+    if have:  # an untested version is wb doctor's to say, not every command's (#1322)
         task.set_status(opencode=f"{have[0]}.{have[1]}")
 
 
@@ -1266,18 +1264,32 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
         + [("every file your account reads" if p == "*" else privacy.home_path(p))
            + (" (--allow-path)" if p in granted else ' (commands.json "paths")')
            for p in dict.fromkeys(context.lane_paths(task))]
-    if privacy.first_for(repo, m.provider, task_name) or named:
+    first = privacy.first_for(repo, m.provider, task_name)
+    if first or named:
         info = privacy.where(m, routed.get("order"))
         rules = context.user_agents_md().is_file()  # Claude's own files go to no agent (#1061)
         whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
                  else f"the {routed.get('role') or _role(a)} role's model")
         subs = bool(gitops.submodule_sources(repo, task.spec.get("base") or "HEAD"))  # #1267
         notes.append(privacy.where_note(info, rules, named, whose, subs))
-    if gap := context.api_hidden_note(task):  # none with no lane (#1156)
+    # none with no lane (#1156); on the first task only: a refusal of one names it again,
+    # API_HIDDEN_WHY in the report (#1093, #1322)
+    if first and (gap := context.api_hidden_note(task)):
         notes.append(gap)
     if gap := context.git_url_note(repo):  # a token in a remote URL (#1072)
         notes.append(gap)
     return notes
+
+
+def _standing_setup(conf: dict, a) -> list[str]:
+    """What a start's worktree setup takes from commands.json "repos" (``conf``, the repo's
+    entry) rather than its own flags: wb start says only that, as Claude knows what it passed
+    (#1322). --setup takes the standing command's place (_worktree_setup)."""
+    links, copies = conf.get("siblings") or [], conf.get("copy") or []
+    cmd = conf.get("setup") if a.setup is None else None
+    return [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in links)] if links else []),
+            *([f"copies {', '.join(copies)}"] if copies else []),
+            *([f"runs `{cmd}`"] if cmd else [])]
 
 
 # What an install makes, at any depth: a monorepo's per-package node_modules or .venv
@@ -1494,7 +1506,8 @@ def cmd_start(a):
         die(line, 3)
     if not state["available"] and not held_up and not a.force:
         die(_cant_run(m, state), 3)
-    dirty = gitops.git(repo, "status", "--porcelain").strip()
+    # tracked files only: an untracked scratch file said so on every start (#1322)
+    dirty = gitops.git(repo, "status", "--porcelain", "--untracked-files=no").strip()
     if nobase := _no_base(repo, a.base):  # first: a typo read as a missing CLAUDE.md (the audit)
         die(nobase)  # `nobase`, not `why`: that is the router's reason, task.json's route
     if not _identity(repo):
@@ -1650,23 +1663,15 @@ def cmd_start(a):
     spawn_runner(task)
     print(f"started {a.name} on {f'{m.id} (API)' if api else m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {fixes}" if a.test else ""))
-    if a.test and not a.no_base_check:
-        print("base check: the runner runs the acceptance command once on the base first; what "
-              "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
-              "short or its command isn't found)")  # a base that passes is a note in that report, no wake (#881; #1152)
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
     if subs:
         print(f"note: submodules ({', '.join(subs[:5])}) are empty in the agent's worktree (your "
               "checkout lacks them at the base's commit): a build or test that needs them fails there")
-    if setup:
-        does = [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in setup["siblings"])]
-                  if setup.get("siblings") else []),
-                *([f"copies {', '.join(setup['copy'])}"] if setup.get("copy") else []),
-                *([f"runs `{setup['setup']}`"] if setup.get("setup") else [])]
-        print(f"setup: the runner sets the worktree up first ({'; '.join(does)}); a failure stops "
-              "the task before any round")
+    if setup:  # what Claude didn't pass itself: commands.json's standing setup (#1322)
+        if does := _standing_setup(context.repo_conf(repo, sub), a):
+            print(f"setup from commands.json: {'; '.join(does)}")
     elif "repos" not in context.commands_conf() or not context.repo_conf(repo, sub):
         if lack := _missing_dirs(repo, sub):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
@@ -1685,13 +1690,13 @@ def cmd_start(a):
     if a.backlog and hardware.system() == "wsl" and awake_how() != "windows" and not any(  # #516, #777
             t.spec.get("backlog") == a.backlog for t in store.all_tasks() if t.name != a.name):
         print(f"note: {WSL_SLEEPS}")
-    if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)
+    # finding 30 (the 2026-11-19 audit); on the repo's first task only, not every start (#1322)
+    if context.on_windows(str(repo), context.windows_drives()) and not any(
+            t.name != a.name and t.spec.get("repo") == str(repo) for t in store.all_tasks(archived=True)):
         print("note: the repo is on a Windows drive, where git is many times slower and wb checks "
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
     if fixed:
         print(f"note: {fixed}")
-    if drift := runner.untested(have):
-        print(f"note: {drift}")
     # an API task's ends with today's spend against the cap, or its plan's usage (meter.tail, #1019)
     print(routes.model_line(m.id, routed) + meter.tail(m) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
@@ -1699,8 +1704,6 @@ def cmd_start(a):
     for note in _api_notes(a.name, repo, m, a, routed) if api else ():  # #1016, #1021
         print(f"note: {note}")
     print(f"slice: {router.slice(m).line()}")
-    if gaps := results.spec_gap_line():
-        print(gaps)
     if handed:
         print("skills handed: " + ", ".join(handed))
     elif fits := skills.suggest(spec_text):
@@ -1716,22 +1719,18 @@ def cmd_start(a):
     elif api:  # none of the GPU's notes: it takes no GPU
         if slots_full:
             print(f"note: {_slot_note(m, a.name)}")
-    elif waits:
+    elif waits:  # where it runs beside others or loads first is the runner's to do (#1322)
         print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free")
-    elif held:
-        print(f"note: it runs beside {holding} on the GPU (their models fit together)")
-    elif not state["resident"]:
-        print("note: the runner loads it onto the GPU first, unloading what is there")
     if state["available"] and not api and (others := models.box_others(m)):  # another machine's task on the same box (#812)
         print(f"note: {urlparse(m.root).hostname} has {', '.join(others)} loaded, which no task here "
               f"runs: the runner loads {m.name} once it has gone {models.BOX_QUIET} s without a "
               f"request (up to {models.BOX_WAIT // 60} min); {models.BOX_SHARED}")
-    measured = None if api else (optimize.state().get("models") or {}).get(m.id)
-    if measured and (fit := optimize.advice(m.id, measured)):
-        print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
-    if gap := runner.handover_warning(m.config, api=api):  # #595; an API model's own words (#1073)
+    # #595: a GPU entry's, which lowering its output cap fixes; an API model's catalog limits
+    # aren't wb's or the user's to change, so its note changed nothing (#1073, #1322)
+    if not api and (gap := runner.handover_warning(m.config)):
         print(f"note: {m.id}: {gap}")
-    print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
+    if not os.environ.get("CLAUDECODE"):  # under Claude Code the mod wakes Claude (#1322)
+        print(f"next: wb wait {a.name}")
 
 
 def _elsewhere(name: str, u: dict | None, repo: Path, stack: list[str]) -> str:

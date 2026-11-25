@@ -972,7 +972,10 @@ class Lifecycle(Base):
         began = time.time()
         out = self.start("t-base", "ok", "--test", TEST_CMD)
         self.assertLess(time.time() - began, 10)
-        self.assertIn("base check: the runner runs the acceptance command", out)
+        self.assertNotIn("base check:", out)          # the report says what it saw (#1322)
+        self.assertTrue(out.endswith("\nnext: wb wait t-base\n"), out)
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):   # the mod wakes Claude: no next line
+            self.assertNotIn("next:", self.start("t-base2", "ok"))
         st = wait_phase("t-base", {"review"})
         self.assertIs(st["base_check"]["ok"], False)
         self.assertTrue((store.Task("t-base").dir / "base-tests.txt").exists())
@@ -981,13 +984,11 @@ class Lifecycle(Base):
         self.assertIn("check the tail shows it failing only for what the step changes", report)
         self.assertIn("on the base the acceptance command fails", run_wb("wait", "t-base", "--timeout", "1"))
 
-    def test_the_base_check_line_promises_a_check_in_only_for_a_cut_short_run(self):
-        # #881 (Claude's audit of 1.90.24): it promised a check-in when the command already
-        # passes on the base, which the runner never raises (a note in the first report)
-        out = self.start("t-bline", "ok", "--test", "true")
-        line = next(x for x in out.splitlines() if x.startswith("base check:"))
-        self.assertIn("a check-in at once if --test-timeout cuts it short", line)
-        self.assertNotIn("already passes", line)
+    def test_a_base_that_already_passes_raises_no_check_in(self):
+        # #881 (Claude's audit of 1.90.24): wb start's line promised a check-in when the command
+        # already passes on the base, which the runner never raises (a note in the first report);
+        # the line itself went in #1322
+        self.start("t-bline", "ok", "--test", "true")
         wait_phase("t-bline", {"review"})
         self.assertNotIn("checkin", [r["kind"] for r in store.notices() if r["task"] == "t-bline"])
 
@@ -6315,7 +6316,10 @@ class WorktreeSetup(Base):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
             "setup": "mkdir -p deps && touch deps/installed"}}}))
-        self.start("t-conf", "ok", "--test", self.NEEDS_DEPS, "--auto-fix", "0", "--no-self-review")
+        out = self.start("t-conf", "ok", "--test", self.NEEDS_DEPS, "--auto-fix", "0", "--no-self-review")
+        # what Claude didn't pass is said, and only that (#1322)
+        self.assertIn("\nsetup from commands.json: runs `mkdir -p deps && touch deps/installed`\n", out)
+        self.assertNotIn("setup from", self.start("t-conf2", "ok", "--setup", "true"))  # --setup in its place
         st = wait_phase("t-conf", {"review"})
         self.assertEqual(st["base_check"]["exit"], 2)
         self.assertIs(st["tests"]["ok"], True)
@@ -6747,15 +6751,15 @@ class WorktreeSetup(Base):
         self.assertIn("../../node_modules/, node_modules/", line)
         wait_phase("t-note", {"review"})
         out = start("t-pkgcopy", "--copy", "node_modules", "--test", "test -f node_modules/lodash/index.js")
-        self.assertIn("copies packages/app/node_modules", out)        # named from the repo's root
+        self.assertNotIn("setup from", out)         # a flag's copy is Claude's own: unsaid (#1322)
         st = wait_phase("t-pkgcopy", {"review"})
         wt = store.Task("t-pkgcopy").worktree
         self.assertEqual(store.Task("t-pkgcopy").spec["copy"], ["packages/app/node_modules"])
         self.assertTrue((wt / "packages/app/node_modules/lodash/index.js").is_file())
         self.assertFalse((wt / "node_modules").exists())               # not the root's
         self.assertIs(st["tests"]["ok"], True)
-        out = start("t-rootcopy", "--copy", "../../node_modules/")       # the note's own name
-        self.assertIn("copies node_modules", out)
+        start("t-rootcopy", "--copy", "../../node_modules/")       # the note's own name
+        self.assertEqual(store.Task("t-rootcopy").spec["copy"], ["node_modules"])
         wait_phase("t-rootcopy", {"review"})
         self.assertTrue((store.Task("t-rootcopy").worktree / "node_modules/.pnpm/store").is_dir())
         # a path only the root has is still read from the root, as before
@@ -6763,11 +6767,14 @@ class WorktreeSetup(Base):
                          "packages/app/node_modules")
         self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
 
-    def test_a_repo_on_a_windows_drive_gets_a_note(self):
-        # #201's finding 30: git is much slower on WSL's /mnt/c, and wb checks the worktree every step
+    def test_a_repo_on_a_windows_drive_gets_a_note_on_its_first_task_only(self):
+        # #201's finding 30: git is much slower on WSL's /mnt/c, and wb checks the worktree every
+        # step; said on every start until #1322
         with mock.patch.object(context, "on_windows", return_value=True):
             out = self.start("t-win", "ok")
+            again = self.start("t-win2", "ok")
         self.assertIn("on a Windows drive", out)
+        self.assertNotIn("on a Windows drive", again)
 
 class Context(Base):
     """The agent's context: continued round to round, handed to a fresh session when full."""
@@ -8210,15 +8217,13 @@ class StartChecks(Base):
         self.assertIn("a task name is", err.getvalue())
         run_wb("stop", "t-name")
 
-    def test_start_says_when_opencode_is_outside_the_tested_range(self):
-        # the 2026-11-19 audit (finding 26): only wb doctor looked, and only for 2.x or newer
+    def test_an_untested_opencode_is_wb_doctors_to_say_not_every_starts(self):
+        # the 2026-11-19 audit (finding 26) had every start say it; wb doctor alone does (#1322)
         os.environ["FAKE_VERSION"] = "opencode v3.1.0"
         out = self.start("t-v", "ok")
-        self.assertIn("note: OpenCode 3.1 is outside what workbench is tested with (2.3 up to 3.0)", out)
-        self.assertNotIn("before its first step", out)
+        self.assertNotIn("outside what", out)
         wait_phase("t-v", {"review"})
-        os.environ["FAKE_VERSION"] = "opencode v2.3.0"
-        self.assertNotIn("outside what", self.start("t-ok", "ok"))
+        self.assertEqual(store.Task("t-v").status["opencode"], "3.1")   # runner.opencode_moved's
         self.assertTrue(runner.untested((2, 2)))
         self.assertEqual(runner.untested((2, 9)), "")
 
@@ -29984,7 +29989,7 @@ class SkillLearning(Base):
         self.assertEqual(lessons.items(listed), ["Close the file. - it leaks on error",
                                                  "Check the return value of read."])
 
-    def test_a_round_the_spec_cost_is_claudes_record_shown_at_the_next_start(self):
+    def test_a_round_the_spec_cost_is_claudes_record_in_the_row_and_lessons_never_a_start_line(self):
         self.start("t-g1", "ok", "--test", TEST_CMD)
         wait_phase("t-g1", {"review"})
         run_wb("feedback", "t-g1", "--text", "1. Reject a blank row.",
@@ -29994,12 +29999,8 @@ class SkillLearning(Base):
         row = store.read_jsonl(store.home() / "results.jsonl")[0][-1]
         self.assertEqual(row["spec_gaps"], ["named a rule (one trailing newline) but no test for it"])
         self.assertIn("spec (t-g1 round 1): the spec missed: named a rule", run_wb("lessons"))
-        out = self.start("t-g2", "ok", "--test", TEST_CMD)
-        self.assertIn("your specs: 1 of the last 1 task(s) needed a round for a spec gap; "
-                      "last: named a rule (one trailing newline)", out)
-        wait_phase("t-g2", {"review"})
-        run_wb("accept", "t-g2", "-m", "feat: answer")
-        self.assertIn("your specs: 1 of the last 2 task(s)", self.start("t-g3", "ok", "--test", TEST_CMD))
+        # the scorecard at every start went (#1322): the row and the lesson keep it
+        self.assertNotIn("your specs", self.start("t-g2", "ok", "--test", TEST_CMD))
 
     def test_an_agents_lesson_from_a_discarded_task_is_not_kept(self):
         from workbench import lessons
@@ -38777,6 +38778,8 @@ class Privacy(_KeyholeTest):
             self.assertIn("note: an API task can't read ~/.npmrc (it holds a credential, which would "
                           "reach the provider): in its lane npm installs from a private registry fail",
                           self.start_api("t-dn1"))
+            # the repo's first API task only (#1322): a refusal of one says why again (API_HIDDEN_WHY)
+            self.assertNotIn("can't read ~/.npmrc", self.start_api("t-dn1b"))
             # a tool that stops on every run with its file unreadable is named as one (#1021's
             # review: the note said only private installs fail, and Maven never ran at all)
             (home / ".m2").mkdir()

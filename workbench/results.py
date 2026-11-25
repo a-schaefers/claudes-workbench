@@ -516,22 +516,6 @@ def _asks(asks: dict, answered: list | None = None) -> dict:
     return out
 
 
-SPEC_GAP_WINDOW = 10
-
-
-def spec_gap_line() -> str | None:
-    """Claude's own record as a spec writer, shown as it hands the next task off: how many of
-    the latest tasks needed a round for a gap in the spec (wb feedback|accept --spec-gap)."""
-    rows = [r for r in store.results() if "spec_gaps" in r][-SPEC_GAP_WINDOW:]
-    if not rows:
-        return None
-    hit = [r for r in rows if r["spec_gaps"]]
-    if not hit:
-        return f"your specs: no gaps in the last {len(rows)} task(s)"
-    return (f"your specs: {len(hit)} of the last {len(rows)} task(s) needed a round for a spec "
-            f"gap; last: {hit[-1]['spec_gaps'][-1][:160]} (the checklist: /workbench, Before wb start)")
-
-
 def table(only: set | None = None) -> str:
     """`wb stats`' table; ``only``: these models' rows alone (the ones the Stats tab shows)."""
     from .tuning import judged, stopped_outside  # tuning reads results' rows
