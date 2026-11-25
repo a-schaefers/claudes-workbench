@@ -11,7 +11,7 @@
      instant resync on return or when the network comes back. */
 (() => {
   'use strict'
-  const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread', about: 'wb-chat-about' }
+  const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread', about: 'wb-chat-about', hint: 'wb-chat-hint' }
   const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000, 30000]
   let viewing = null, sweeping = false  // the photo the viewer shows; a sweep of object URLs queued (#746)
   let nearView = null  // loads the thread's thumbnails as they near the view (#754)
@@ -31,6 +31,14 @@
 
   const load = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v) } catch { return d } }
   const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true } catch { return false } }
+
+  // what the chat is for (#1341), one wording: the empty state's, and over a thread the same words
+  // as a hint until dismissed on this device. load and save catch a storage that throws: there the
+  // hint shows on each open, and a dismissal holds until the page is left
+  let hintGone = load(K.hint, false) === true
+  $('hint-text').replaceChildren(...$('intro').querySelector('p').cloneNode(true).childNodes)
+  function drawHint() { $('hint').hidden = hintGone || !$('intro').hidden || !!document.querySelector('.keyless') }
+  $('hint-x').onclick = () => { hintGone = true; save(K.hint, true); drawHint() }
 
   // ---- the key ----
   let token = ''
@@ -324,6 +332,7 @@
   function render() {
     const list = items()
     $('intro').hidden = list.length > 0
+    drawHint()
     const want = []
     let prev = null
     for (const m of list) {
@@ -1157,6 +1166,7 @@
     document.querySelector('.keyless')?.remove()
     thread.append(box)
     $('composer').hidden = true
+    drawHint()
     drawPresence()
   }
 

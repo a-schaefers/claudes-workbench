@@ -108,12 +108,47 @@ async function run(engine, device) {
     listen(false)
     await until(async () => (await page.textContent('#presence-text')).includes('listening in ~/project'))
   })
+  // #1341: the chat says what it is for, in the empty state, and over a thread as a hint until dismissed
+  const PURPOSE = 'Message your driver from anywhere: most work can run from here.'
+  await check('the empty state says what the chat is for, and no hint repeats it', async () => {
+    if (!(await page.textContent('#intro p')).replace(/\s+/g, ' ').includes(PURPOSE)) throw new Error(await page.textContent('#intro p'))
+    if (await page.locator('#hint').isVisible()) throw new Error('the hint shows over the empty state')
+  })
   await check('a sent message lands once, with its tick', async () => {
     await page.fill('#input', 'hello from the phone')
     await page.click('#send')
     await until(() => messages().length === 1)
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Delivered'))
     if (await page.inputValue('#input')) throw new Error('the box was not cleared')
+  })
+  await check('over a thread the hint shows once, dismisses, and stays dismissed after a reload', async () => {
+    await until(async () => await page.locator('#hint').isVisible())
+    const said = (await page.textContent('#hint-text')).replace(/\s+/g, ' ')
+    for (const want of [PURPOSE, 'waits in its terminal', 'permissions granted', 'settings live here'])
+      if (!said.includes(want)) throw new Error(said)
+    await page.click('#hint-x')
+    await until(async () => await page.locator('#hint').isHidden())
+    if (await page.evaluate(() => localStorage.getItem('wb-chat-hint')) !== 'true') throw new Error('the dismissal was not kept')
+    await page.reload()
+    await until(async () => (await page.locator('.row').count()) >= 1)
+    await sleep(500)  // a claim that it does not come back
+    if (await page.locator('#hint').isVisible()) throw new Error('the hint came back after a reload')
+  })
+  await check('where storage throws, the hint still shows and dismisses, and the page still works', async () => {
+    const p = await ctx.newPage()
+    const errs = []
+    p.on('pageerror', e => errs.push(String(e)))
+    await p.addInitScript(() => {
+      for (const f of ['getItem', 'setItem', 'removeItem', 'key']) Storage.prototype[f] = () => { throw new DOMException('denied', 'SecurityError') }
+    })
+    try {
+      await p.goto(base + '#token=' + token)
+      await until(async () => (await p.locator('.row').count()) >= 1)
+      await until(async () => await p.locator('#hint').isVisible())
+      await p.click('#hint-x')
+      await until(async () => await p.locator('#hint').isHidden())
+      if (errs.length) throw new Error(errs.join(' | '))
+    } finally { await p.close() }
   })
   await check('a receipt shows as read', async () => {
     wb('chat', 'ack', messages()[0].id, '--by', 's1')
