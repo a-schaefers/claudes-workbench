@@ -3400,7 +3400,8 @@ def _prepare_now(task: store.Task) -> bool:
     secs = round(time.monotonic() - began, 1)
     task.dir.joinpath("setup.txt").write_text(
         f"$ {spec.get('setup') or ''}\nexit: {code}\nseconds: {secs}\nshell: {test_shell()}\n\n{output}")
-    if code == 0 and before is not None and (left := _setup_left(task, before)):
+    left = _setup_left(task, before) if before is not None else {}
+    if code == 0 and left:
         return _setup_unclean(task, left)
     if code == 0:
         try:
@@ -3425,6 +3426,11 @@ def _prepare_now(task: store.Task) -> bool:
                      f"\nthe lane refused {shlex.quote(n)}: wb allow {task.name} --path "
                      f"{shlex.quote(lane_grant(n, task) or n)}, if the setup needs it"
                      for n in lane_refused(task, output))
+    # Undone too when the setup failed or timed out: kept, the resume the notice advises took them
+    # as the checkout's (a fresh `before`), the task passed, and the review listed a codegen's
+    # gen/ before a failed install as the agent's, for wb accept to commit (#1347's review, 2026-11-24)
+    if left:
+        _undo_setup(task.worktree, left)
     task.set_status(phase="failed", last=what, infra="setup", failed_before="setup")  # #508
     # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
     task.notify("failed", f"task {task.name}: {what} before any round "

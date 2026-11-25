@@ -6433,6 +6433,34 @@ class WorktreeSetup(Base):
         self.assertFalse((t.worktree / "gen").exists())        # removed, its directories too
         self.assertEqual(gitops.changed(t.worktree), "")
 
+    def test_a_setup_that_writes_files_then_fails_has_them_undone_so_the_resume_is_told(self):
+        # #1347's review (2026-11-24): only a setup that exited 0 was undone; a codegen then a
+        # failed install left gen/ and its Gemfile.lock edit, the resume the notice advises
+        # snapshotted them as the checkout's, the task passed, and the review listed gen/f1 as
+        # the agent's beside its answer.txt
+        (self.repo / "Gemfile.lock").write_text("GEM\n  pkg (1.0)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Gemfile.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        flag = Path(self.tmp.name) / "online"
+        self.start("t-gen2", "ok", "--test", TEST_CMD, "--setup",
+                   "mkdir -p gen && echo x > gen/f1 && printf 'PLATFORMS\\n' >> Gemfile.lock && "
+                   f"test -e {shlex.quote(str(flag))}")
+        wait_phase("t-gen2", {"failed"})
+        t = store.Task("t-gen2")
+        note = [r for r in store.notices() if r["task"] == "t-gen2"][-1]
+        self.assertIn("the setup command failed (exit 1)", note["text"])
+        self.assertFalse((t.worktree / "gen").exists())        # undone, though the setup failed
+        self.assertEqual((t.worktree / "Gemfile.lock").read_text(), "GEM\n  pkg (1.0)\n")
+        self.assertEqual(gitops.changed(t.worktree), "")
+        flag.touch()                                           # fixed, as the notice says
+        run_wb("resume", "t-gen2")
+        st = wait_phase("t-gen2", {"failed", "review"})
+        self.assertEqual(st["phase"], "failed", st)            # not let through to the review
+        note = [r for r in store.notices() if r["task"] == "t-gen2"][-1]
+        self.assertIn("the setup changed files git tracks (Gemfile.lock) and wrote files git "
+                      "doesn't ignore (gen/f1), before any round", note["text"])
+        self.assertEqual(gitops.changed(t.worktree), "")
+
     @unittest.skipUnless(lane.abi(), "needs Landlock: without it nothing is the lane's (#773)")
     def test_a_setup_the_lane_refused_says_the_grant_that_reaches_it(self):
         # #824 (the second 2026-11-21 audit): a first `npm ci` refused ~/.npm, and the failed

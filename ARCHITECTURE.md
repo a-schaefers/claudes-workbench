@@ -1561,7 +1561,9 @@ worktree)", the remedy a setup that leaves the repo as committed (`npm ci`, `BUN
 bundle install`, `uv sync --locked`) or a commit of its change or a `.gitignore`, then "wb discard
 <task> and start again". `_undo_setup` checks the tracked ones out from HEAD (no hooks) and
 removes the new ones, so a `wb resume` is told the same again (#1347: a `bundle install`'s
-PLATFORMS was the agent's drift NOTE and was committed under its trailer). A load failure before the agent ran
+PLATFORMS was the agent's drift NOTE and was committed under its trailer). A setup that fails or
+times out has what it left for git to see undone the same way before its notice: kept, the resume
+that notice advises snapshotted them as the checkout's and the review listed them as the agent's. A load failure before the agent ran
 (`_load_failed`) sets `load` and adds "the agent never ran: once the model can, wb resume <task>
 starts it". Either way the results row has `ran: false`, which router and tuning skip (#581). A
 load failure after the agent ran (its row has `ran: true`) whose round n never reached it
