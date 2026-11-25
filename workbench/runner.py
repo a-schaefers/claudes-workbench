@@ -2126,6 +2126,11 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
 # only its first KEEP_HEAD and last KEEP_TAIL bytes are kept, for tests.txt and the tail.
 TEST_OUTPUT_CAP = 20 << 20
 KEEP_HEAD, KEEP_TAIL = 64 << 10, 256 << 10
+# A run stopped there has no verdict: a passing but verbose suite (Maven's console logging,
+# `pytest -s`) went back through both auto-fix rounds as "the bug is in this change", the base
+# check silent, nothing saying how to get under the cap (#1301, bar round 8, 2026-11-24).
+OUTPUT_CAPPED = f"the acceptance command's output passed {TEST_OUTPUT_CAP >> 20} MB, where wb stops it"
+QUIET_IT = "quiet it (-q, less logging) or narrow it"
 
 
 class _Capture(threading.Thread):
@@ -4006,6 +4011,9 @@ def base_check_line(r: dict, task: store.Task) -> str:
         return (f"note: the acceptance command ran past {limit}s on the base; not checked"
                 + (f". If it runs that long, a round's run may pass --test-timeout ({full}s) too: "
                    "raise it for a slow suite" if full > limit else ""))
+    if r["exit"] == "output limit":  # every round's run will stop there too (#1301)
+        return (f"warning: on the base {OUTPUT_CAPPED}, so every round's tests will stop there "
+                f"too: {QUIET_IT} (wb discard, then start again)")
     if line := missing_command(r, task):  # every round's tests will fail so too (#1152, 2026-11-24)
         return (f"warning: the acceptance command can't run in the agent's environment: {line} "
                 f"(exit {r['exit']} on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
@@ -4173,8 +4181,10 @@ def _base_check(task: store.Task) -> None:
     # an API task waits on no GPU: drive's "starting" stood until here (#1112, 2026-11-23)
     task.set_status(base_check=r, last="waiting for the GPU" if _gpu_side(task) else "starting")
     # every round's tests will too: a cut-short run, or a command the agent's environment lacks
-    # (#1152, 2026-11-24: round 1 and both auto-fix rounds ran first, told the bug was the change's)
-    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or missing_command(r, task):
+    # (#1152, 2026-11-24: round 1 and both auto-fix rounds ran first, told the bug was the change's),
+    # or output past TEST_OUTPUT_CAP, the same cap in every run (#1301)
+    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or r["exit"] == "output limit" \
+            or missing_command(r, task):
         task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}",
                     round=task.status.get("round", 1))
 
@@ -4711,8 +4721,9 @@ def not_the_code(task: store.Task, tests) -> str:
     and the agent edited code that may well have been right, nothing naming the limit; a device
     the lane refused (lane_refused, #331) was named only after both auto-fix rounds, and so was a
     command the agent's environment lacks (missing_command, #1152; a Python module, #1181; one a
-    later step's --test names, #1172, or one a failing base check never reached, #1208). The
-    part before the first colon is the cause, for status.last. "" when the failure may be the
+    later step's --test names, #1172, or one a failing base check never reached, #1208), and a
+    run stopped at TEST_OUTPUT_CAP went back as the change's bug too (#1301). The part before
+    the first colon is the cause, for status.last. "" when the failure may be the
     code's (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
         return ""
@@ -4723,6 +4734,11 @@ def not_the_code(task: store.Task, tests) -> str:
                 "start a slow suite's task with a larger --test-timeout")
     base = task.status.get("base_check") or {}
     cmd = task.spec.get("test_cmd")
+    if tests["exit"] == "output limit" and not (base.get("ok") and base.get("cmd") == cmd):
+        # #1301: unless the base check passed this same command, under the cap: then the
+        # flood is the change's (a print in a retry loop, the 2026-11-16 audit), as a hang is
+        return (f"{OUTPUT_CAPPED}: its failure says nothing about the change; run it in the "
+                f"worktree yourself, or {QUIET_IT} (wb next --test)")
     if (line := missing_command(tests, task)) and base.get("cmd") == cmd \
             and _missing_key(line) == _missing_key(missing_command(base, task)):
         # the same command (or Python module, #1181) not found as on the base: auto-fix rounds
