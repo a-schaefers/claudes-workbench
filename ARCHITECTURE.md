@@ -1737,7 +1737,8 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
 7. `files changed:` (`git status --porcelain`), NOTEs for files outside the spec, Claude's files
    (`claude_files_changed`: CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/`), `NOTE: edits in
    submodule <path> can't land: …` (`gitops.submodule_edits`, #419), `NOTE: new files in submodule
-   <path> won't be committed: …` (`gitops.submodule_check`, #889), and the diffstat's last line.
+   <path> won't be committed: …` (`gitops.submodule_check`, #889), and the diffstat's last line
+   (after `wb next`, the step's, from HEAD, as the files list and `wb diff` are: #1404).
 
 **Speed** (`measure_speed`): after each round the export's new messages give write and read samples
 (`router.record_speed`; a cut-short request with a first token still gives a read sample). A round
@@ -2837,7 +2838,7 @@ guides, release notes, stories, copy) runs under its own rules, not the coding o
   build, a spell or style lint) it runs as any task's test: base check, auto-fix, in the lane. A
   checker that needs the network fails there. wb looks for none: Claude picks it (SKILL.md doesn't say so yet).
 - **The record apart**: results rows carry `role`; `router.score`, `rank`, `choose` and
-  `expected` count a model's rows of the task's role (`router.of_role`: `role`, else `size`), so
+  `expected` count a model's rows of the task's role (`router.of_role`: writing's, else the row's `size`, #1398), so
   prose results never move a coding rank or the other way round. Only a writing task asks by its
   role (`router.record_role`, in `router.choose` from the role `routes.resolve` passes, `progress`, `wb watch`'s clock and the check-in's ETA, #1113): #1016 writes a
   role for every task, and a coding one is ranked and timed on its size's record, as before roles. With none yet, every model starts
@@ -2921,7 +2922,8 @@ report line, "nudged once", and so is a session that fills up reading (#1322).
 
 **Progress checks** (`workbench/progress.py`, #95): opt-in, `wb progress on [--after MIN]` / `off`,
 `$WB_HOME/progress.json` `{on, after?, ts}`; `after` survives a bare `on`/`off` (`set_enabled`,
-#578), `--after 0` clears it.
+#578), `--after 0` clears it; any other `--after` but a finite positive number is refused, and a
+stored one that isn't (progress.json by hand) is ignored (`progress.user_after`, #1401).
 - **Active work**: each round adds its time less answers and frozen time (`_Clock.ran`) to status
   `active_s`, on or off; GPU waits never count; results carry `active_minutes`. Per step: `wb next`
   stores `step_active_s` and resets `progress_checks`; checks and the ETA use
@@ -3949,7 +3951,7 @@ one lease. A media engine joins `gpu` when on this GPU (`media.on_gpu`, `media.s
 pool otherwise (`media.boxes`), or none (`"gpu": false`).
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` kept by `tuning.judged`, for the
-model, its `lineage` and the role (`router.of_role`: a row's `role`, else its `size`; with no role
+model, its `lineage` and the role (`router.of_role`: writing, else a row's `size`, its `role` with none; with no role
 asked, the size's; *The writing role*). `judged` drops `--spec-gap` discards, rows whose agent never
 ran (`ran` false, `failed_before`; older: not accepted, `tok_out` 0; #581), and discards after a stop
 that wasn't the step's (`tuning.stopped_outside`: the row's `infra`, unless steps were kept; #1245).
@@ -6795,7 +6797,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent or Claude wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021); a snap `--test` while the task's lane is on is refused before the commit, as at start (`cli._snap_test`; it names `wb allow <task> --path '*'`, #1271, but not on an API task while commands.json marks anything local_only, where that grant is refused: `privacy.local_only_place`, #1268). Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507, but edits in a filled submodule, which git status can't see, are no empty step: `cli._to_commit` sends them to `commit_all`'s refusal, as accept does, #1307); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + the task's protocol (`cli.protocol_for`: a writing task keeps `WRITING_PROTOCOL`); advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) advances from it (#85); the step is measured from where it began (`gitops.step_base`), so one an interrupted wb next committed still counts at accept (#1302). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` (the whole answer checked against `FILE_MAX` before any grant, #605) | Into `rules/<task>/grants.json` (`--always`: commands.json, once `context.commands_conf` passes); answers the oldest permission request (else the question) "Claude allowed … for this task. Run it again now and carry on." (`from now on` with `--always`), sent to a live agent as a `--now` steer. `--path` through `_lane_dir` (no link; not what `lane_refusal` or `kept_out` refuses, #912, nor a file the task's API lane hides, `api_hidden_refusal`, #1093; not in the task's repo or its git dir, where a planted hook runs outside the lane; a missing path named like a file refused, #670; made if missing); `*` turns the lane off. On an API task a directory local_only marks is refused first, exit 3 (`privacy.local_only_place`, #1268). |
-| `wb progress [on\|off]` | `--after MIN` (default the task's typical length on its model; refused with `off` or while off, #602; `0` clears) | The opt-in to *Progress checks*. |
+| `wb progress [on\|off]` | `--after MIN` (default the task's typical length on its model; refused with `off` or while off, #602, and unless finite and positive, #1401; `0` clears) | The opt-in to *Progress checks*. |
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (opens with `runner.STEP_NOTE`: a `smaller` intervention after a progress check, else a `hint`; delivered, status `step_note`: no auto-fix or self-review until Claude's next wb feedback or wb next, #1300) | Queued/running/testing/asking with a live runner only. steer.jsonl, delivered when the run ends, before the tests; `--now` at once. |
 | `wb note <task> --text "…"` | | A `captain` event. |
 | `wb splash [on\|off]` | | `$WB_HOME/splash.json`: the pane's opening (#963). |

@@ -228,9 +228,14 @@ def _rows(model: str, window) -> list[dict]:
 
 
 def work(row: dict) -> str | None:
-    """The kind of work a results row records: its `role`, else its `size` (a row from before the
-    roles). router.of_role ranks on it, record's speed baseline groups by it (#1025)."""
-    return row.get("role") or row.get("size")
+    """The kind of work a results row records: writing for a writing task, else its `size` (its
+    `role` for a row with none). router.of_role ranks on it, record's speed baseline groups by it
+    (#1025). A coding task is routed and sliced at its size (router.record_role), so it is filed
+    there too: `--role trivial --size significant` ran on the significant pick and moved only its
+    trivial record (#1398, 2026-11-25)."""
+    if row.get("role") == "writing":
+        return "writing"
+    return row.get("size") or row.get("role")
 
 
 def record(name: str, model: str, window, ceiling=None) -> dict:

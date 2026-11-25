@@ -8342,6 +8342,21 @@ class Context(Base):
         self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
                                        capture_output=True).returncode == 0)
 
+    def test_after_wb_next_the_review_notices_diffstat_is_the_steps_as_wb_diff_says(self):
+        # #1404 (2026-11-25): the stat line was the task's since its base, "2 files changed" beside
+        # a files list and a diff "(all of it)" that held step 2's one file
+        self.start("t-nst", "ok", "--test", TEST_CMD)
+        wait_phase("t-nst", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also add lib/helper.py.\n")
+        os.environ["FAKE_SCENARIO"] = "patch"
+        run_wb("next", "t-nst", "--spec", str(step2), "-m", "feat: the answer")
+        st = wait_phase("t-nst", {"review"})
+        report = store.Task("t-nst").round_dir(st["round"]).joinpath("summary.md").read_text()
+        stat = run_wb("diff", "t-nst", "--stat").strip().splitlines()[-1].strip()
+        self.assertEqual(stat, "1 file changed, 1 insertion(+)")
+        self.assertEqual(report.rstrip().splitlines()[-1].strip(), stat)
+
     def test_discarding_a_stuck_later_step_keeps_the_steps_wb_next_committed(self):
         # #494 (the audit of 1.90): steps landed with wb next, a later one stuck, and the
         # discard the notice suggested force-deleted the branch, the approved steps on no ref
@@ -22135,6 +22150,21 @@ class Progress(Base):
         self.assertIn("on: a task past 30 min", run_wb("progress", "on"))   # off and on again
         self.assertIn("past its typical length", run_wb("progress", "on", "--after", "0"))
         self.assertNotIn("after", progress.settings())
+
+    def test_an_after_that_is_negative_or_not_finite_is_refused_and_a_stored_one_is_ignored(self):
+        # #1401 (2026-11-25): -5 and inf said "on" and no check ever came; NaN crashed every round
+        run_wb("progress", "on", "--after", "30")
+        before = progress.path().read_text()
+        for bad in ("-5", "nan", "inf"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", err):
+                run_wb("progress", "on", "--after", bad)
+            self.assertIn("a positive number, or 0 to clear it", err.getvalue())
+            self.assertEqual(progress.path().read_text(), before)
+        progress.path().write_text('{"on": true, "after": -5}')   # written by hand
+        self.assertEqual(progress.typical({"size": "trivial"}),
+                         (float(progress.DEFAULT_MIN["trivial"]), "default"))
+        self.assertIn("past its typical length", run_wb("progress"))
 
     def test_a_check_recommends_and_a_steer_that_answers_it_is_learned_from(self):
         run_wb("coding", "only")
@@ -40715,9 +40745,10 @@ class Writing(Base):
         self.assertEqual([r for r in store.results() if r.get("task") == "t-row"][-1]["role"], "writing")
 
     def record(self, model, role, outcome, n, minutes=2.0):
-        for _ in range(n):
+        for _ in range(n):  # a trivial task's size is trivial, as wb start records it (#1398)
             store.append_jsonl(store.home() / "results.jsonl", {
-                "model": model, "size": "significant", "outcome": outcome, "ran": True,
+                "model": model, "size": "trivial" if role == "trivial" else "significant",
+                "outcome": outcome, "ran": True,
                 "minutes": minutes, "active_minutes": minutes, **({"role": role} if role else {})})
 
     def test_wb_start_routes_a_writing_task_on_its_writing_record_and_a_coding_one_on_its_coding_one(self):
@@ -40776,6 +40807,21 @@ class Writing(Base):
         self.assertIn("(typically 40m)", transcript.clock_line(task))
         self.assertEqual(runner.typical_now(task)["typical"]["min"], 40.0)
         self.assertIn("(typically 40m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
+
+    def test_a_coding_task_is_filed_under_the_size_it_was_routed_at_not_its_role(self):
+        # #1398 (2026-11-25): `--role trivial --size significant` ran on the significant pick, and
+        # its result moved the model's trivial record, never the significant one choose() reads
+        from workbench import router, tuning
+        m = cli.models.resolve("mimo")
+        for role, size in (("trivial", "significant"), ("significant", "trivial"),
+                           ("writing", "significant")):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": m.id, "role": role, "size": size, "outcome": "accepted", "ran": True,
+                "active_minutes": 10})
+        self.assertEqual([tuning.work(r) for r in store.results()], ["significant", "trivial", "writing"])
+        self.assertEqual(router.score(m, "significant").tries, 1)
+        self.assertEqual(router.score(m, "trivial").tries, 1)
+        self.assertEqual(router.score(m, "significant", role="writing").tries, 1)
 
     def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
         # the review of #1025: tuning.record set each row's speed against the median step of its
