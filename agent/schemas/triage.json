@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "description": "What to do with each item it was given, by id",
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": ["id", "action", "why"],
+        "properties": {
+          "id": {"type": "string", "maxLength": 80},
+          "action": {"type": "string", "enum": ["fix", "close", "ask", "later"]},
+          "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+          "why": {"type": "string", "maxLength": 400}
+        }
+      }
+    }
+  }
+}

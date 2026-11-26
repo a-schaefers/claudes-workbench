@@ -601,8 +601,14 @@ class Checker(unittest.TestCase):
         self.assertIn("mod/hooks/tasks.ts:CLOSED is still defined", self.errors())
 
     def test_an_export_over_budget(self):
-        self.edit("kernel/BOUNDARY.md", "| exports | 12 |", "| exports | 1 |")
-        self.assertRegex(self.errors(), r"budget: \d+ exports, over 1")
+        # the limit and the count are the table's, so a raised budget or the next export doesn't break this test
+        text = (self.root / "kernel/BOUNDARY.md").read_text()
+        limit = next(line for line in text.splitlines() if line.startswith("| exports | "))
+        self.edit("kernel/BOUNDARY.md", limit, "| exports | 1 |")
+        table = text.split("\n## Exports\n", 1)[1].split("\n## ", 1)[0]
+        rows = sum(1 for line in table.splitlines() if line.startswith("| `"))
+        self.assertGreater(rows, 1)
+        self.assertIn(f"budget: {rows} exports, over 1", self.errors())
 
     def test_a_module_over_its_lines(self):
         self.edit("kernel/BOUNDARY.md", "| module lines | 350 |", "| module lines | 10 |")

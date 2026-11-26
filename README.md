@@ -82,6 +82,16 @@ directing for you.
 `/workbench-quit-and-hand-back-claude` has Claude finish their tasks itself.
 `/workbench-update` installs the latest workbench (Claude Code tells you when there's one).
 
+## FAQ
+
+**Can another agent drive Workbench (Hermes Agent, for example)?** Yes, through the API. Make
+it a token (`wb chat token add <its name>`) and give it the skill in
+[`skill/agents/ask-workbench/`](skill/agents/ask-workbench/SKILL.md), or its MCP server. It hands
+your driver (Claude Code or OpenCode) a request over the web chat's API, waits for the report,
+and follows up, and it is told which driver answered. Its message is a teammate's request, never
+your yes: spending, pushing or deleting still waits for you. The API:
+[docs/chat-api.md](docs/chat-api.md).
+
 ## Contributing
 
 Fixes are welcome: [CONTRIBUTING.md](CONTRIBUTING.md).

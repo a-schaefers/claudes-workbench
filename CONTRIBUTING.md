@@ -51,7 +51,8 @@ update` asks GitHub) as `your pull request #<n> merged: dropped the local patch`
 reworded or squashed. A patch that no longer applies changes nothing: `wb update` names it, and
 you resolve it by hand or drop it, and so does an untracked file on a path the rebased patches
 add. `wb patch check <commit>` applies only the patch's tests to plain upstream and runs the ones
-it added: when they pass there (a skipped one is no pass), upstream likely fixed the same thing
+it added, each by its directory's runner (`mod/`'s through claude, `opencode-plugin/`'s through
+OpenCode's Bun, `kernel/`'s props): when they pass there (a skipped one is no pass), upstream likely fixed the same thing
 another way, and you may drop it (it drops nothing itself). So give every patch a test: `wb patch list` marks one without
 ` (no test)`. The tip before each rebase is kept at `refs/workbench/before-update`, its reflog listing the
 earlier ones. A change under `mod/` reaches Claude Code
@@ -72,9 +73,13 @@ only once committed, through `wb update` (it copies the clone's HEAD into the pl
 3. **Prepare the branch**: `wb patch upstream <commit> --name <slug>` makes branch `pr/<slug>`
    from fresh upstream main in its own worktree (`$WB_HOME/upstream/<slug>`), with only that
    commit cherry-picked, and copies `.github/pull_request_template.md` to
-   `$WB_HOME/upstream/<slug>.md`. It prints the tests, that file, the one `wb patch send` line and
-   gh's state, and runs none of them.
-4. **Test it there** (section 4), and fill in every section of the body file. Read it as the
+   `$WB_HOME/upstream/<slug>.md`. It runs the patch's own tests there and writes each command and
+   its last line into that file (`Tests run by wb: …`, or `not run` and why), adds a
+   `Workbench-Driver:` trailer to the branch's commit (the tool and model that prepared it: Claude
+   Code, OpenCode, an agent or a terminal), and prints the suites to run, the template's sections
+   still unfilled, `no Scope trailer` when the commit has none, the one `wb patch send` line and
+   gh's state.
+4. **Test it there** (section 4), and fill in every section of the body file (keep wb's lines). Read it as the
    public text it becomes: take out local paths, hostnames and project names.
 5. **Send it**:
    ```sh
@@ -137,8 +142,12 @@ the code around your change.
   anything Claude does differently in `skill/workbench/SKILL.md`. README.md stays simple.
   `tests/test_docs.py` catches a missing command, flag, module or variable, not a stale sentence.
 - **Tests**: `python3 -m unittest` (the whole suite, about 20 minutes; one class:
-  `python3 -m unittest tests.test_workbench.Update`), and for `mod/`: `claude plugin validate mod
-  && claude plugin test mod`. **A skip is not a pass**: the real-OpenCode tests (`RealOpenCode*`)
+  `python3 -m unittest tests.test_workbench.Update`); for `mod/`: `claude plugin validate mod
+  && claude plugin test mod`; for `opencode-plugin/`, or the mod's core it imports
+  (`mod/hooks/core.ts`, `kernel.js`, `golden/`): `BUN_BE_BUN=1 opencode test opencode-plugin/test &&
+  BUN_BE_BUN=1 opencode check -p opencode-plugin`. `wb patch upstream` names each one a patch
+  needs, and CI runs both plugins' (its `mod` and `opencode-plugin` jobs), so a patch for one
+  path can't break the other. **A skip is not a pass**: the real-OpenCode tests (`RealOpenCode*`)
   skip without `opencode` on PATH, the Landlock tests without Landlock (macOS, old kernels), and
   a few without git-lfs, ssh-keygen or ffmpeg. `python3 -m unittest -v 2>&1 | grep skipped` names
   them; a change to `context.py`, the config layer, `gitguard.py` or `lane.py` needs them run where

@@ -4,18 +4,26 @@
 it serves (`workbench/chat_static/`) is one client of it; another agent with a token of its own is
 another. No browser is needed: the server runs headless, and everything below works with curl.
 
+What reads and answers the messages is **the driver**: the Claude Code or OpenCode session in
+workbench mode that listens on the chat (Claude's Workbench, or OpenCode Workbench with any model
+OpenCode runs). The API is the same for both, and says which one listens and which one wrote each
+reply (`driver`, *The driver*).
+
 This page is the reference for both. The same API, machine-readable, is `docs/chat-api.yaml`
 beside it (OpenAPI 3.1: the `/api/v1/` paths, bearer auth, the one error schema, the
 `Idempotency-Key`), for a tool that builds a client from one; a test keeps its paths exactly the
 routes the server serves. The internals are in ARCHITECTURE.md, *The web chat*.
 
 **Handing it to another agent:** make it a token (`wb chat token add my-agent`) and point it at
-`skill/agents/claude-workbench/` in this repository. That directory is a portable skill (the
-agentskills.io format, `SKILL.md` with `name` and `description`), and its `scripts/ask_claude.py`
-does the whole flow below with the standard library alone. An agent that speaks MCP uses its
-`scripts/mcp_server.py` instead ([An MCP server](#an-mcp-server)).
+`skill/agents/ask-workbench/` in this repository. That directory is a portable skill (the
+agentskills.io format, `SKILL.md` with `name` and `description`), and its
+`scripts/ask_workbench.py` does the whole flow below with the standard library alone. An agent
+that speaks MCP uses its `scripts/mcp_server.py` instead ([An MCP server](#an-mcp-server)). Before
+workbench 2.2 the skill was `skill/agents/claude-workbench/` (`ask_claude.py`): that path still
+runs the new scripts.
 
 ## Contents
+- [The driver](#the-driver)
 - [Base URL and auth](#base-url-and-auth)
 - [Errors](#errors)
 - [Retry safety](#retry-safety)
@@ -27,6 +35,21 @@ does the whole flow below with the standard library alone. An agent that speaks 
 - [The stream's events](#the-streams-events)
 - [Versions](#versions)
 
+## The driver
+
+- **Which driver listens:** `GET /api/health` says `driver` while one does, and the `listener`
+  (in `/api/state`, `/api/wait` and `/api/send`) carries the same `driver`: `{"tool": "claude"}`
+  for Claude Code, `{"tool": "opencode", "model": "<provider>/<id>"}` for OpenCode (the model of
+  that session, when its server says).
+- **Which driver answered:** each reply carries `driver`, its writer, in the same shape. Show it
+  as the answer's author; the client script prints `[answered by …]`.
+- **One at a time:** with both drivers open on one machine, one listens (it holds the chat's
+  claim, `listener`), and only its replies thread onto an agent's message; the other's plain
+  reports go to the user.
+- **The names kept:** a driver's reply is `from: "claude"` whichever driver wrote it, and
+  `claude_pid` is Claude Code's alone. Branch on `driver`, never on `from`, to tell them apart. A
+  chat before 2.2 has no `driver` anywhere.
+
 ## Base URL and auth
 
 - **Base URL:** `http://localhost:1337` by default (the port is `wb chat serve --port`; `wb chat
@@ -36,8 +59,8 @@ does the whole flow below with the standard library alone. An agent that speaks 
   is the user's own setup, for instance `tailscale serve --bg 1337` for https on the tailnet.
 - **Paths:** every `/api/<x>` below is also served at `/api/v1/<x>`, by the same handler with the
   same rules (an agent's denials too). New clients use `/api/v1/` (workbench 2.1 and later);
-  `/api/` stays for the page and older clients, and `ask_claude.py` keeps it, so it works with any
-  server.
+  `/api/` stays for the page and older clients, and `ask_workbench.py` keeps it, so it works with
+  any server.
 - **Host check:** a request whose `Host` header is a name the server doesn't answer to gets
   `403 {"error": "unknown host <host>: add it to chat.json's hosts", "code": "unknown_host"}`. An
   address it listens on always passes.
@@ -71,9 +94,9 @@ does the whole flow below with the standard library alone. An agent that speaks 
       (the next request is 401 `token_revoked`; a held wait answers it too and an open stream
       closes).
 - **Agents never carry the user's authority.** An agent's message is stored with `role:
-  "agent"` and `from: "<name>"`. Claude gets it as `[agent <name>] …`, not as the user's
+  "agent"` and `from: "<name>"`. The driver gets it as `[agent <name>] …`, not as the user's
   `[web chat] …`, and treats it as a teammate's request. Anything that needs the user's yes
-  (spending, pushing, opening a pull request, deleting) waits for the user; Claude says so in
+  (spending, pushing, opening a pull request, deleting) waits for the user; the driver says so in
   its reply.
 - **Agent access** is on while the chat's server runs and at least one agent token exists. There
   is no other switch. With the chat off (`wb chat off`) no session listens: `/api/health` says
@@ -107,7 +130,7 @@ too (an unsupported method, a malformed request line):
 | 403 | `forbidden` | refused otherwise |
 | 404 | `not_found` | no such path, message, upload, file, screenshot, take, open task or setting's listener (for an agent, also one not in its view) |
 | 409 | `conflict` | another sender's `cid` or upload id, something else where an upload goes, wb refusing a setting, or the GPU busy with a task (a transcription) |
-| 410 | `expired` | a message never passed to Claude (unread past 6 hours: send it again), or a screenshot pruned with its task |
+| 410 | `expired` | a message never passed to the driver (unread past 6 hours: send it again), or a screenshot pruned with its task |
 | 411 | `length_required` | an upload without its `Content-Length` |
 | 413 | `too_large` | a body, file or message over its limit (or a request line or headers too long) |
 | 415 | `json_only` | a `POST` that isn't `application/json` |
@@ -125,7 +148,7 @@ Nobody listening is not an error: `listener: null` on a 200 (*The agent flow*).
 ## Retry safety
 
 A send cut short (a reset connection, a proxy's 502, the client's own timeout) may or may not have
-landed. Send it again with the same key and Claude is never asked twice:
+landed. Send it again with the same key and the driver is never asked twice:
 - **`Idempotency-Key: <1 to 255 printable characters, no spaces>`** on `POST /api/send`, say a
   fresh UUID per request. The same key from the same token within 24 hours answers with the
   message the first send made, sends nothing, and carries `Idempotent-Replayed: true` (the
@@ -133,7 +156,7 @@ landed. Send it again with the same key and Claude is never asked twice:
   idempotency_key_reused`, never a new request dropped. Only a send that landed is remembered: a
   refused one sent nothing, so its retry is checked afresh. A replay costs none of an agent's
   sends a minute.
-- **`cid`** in the body does the same within the thread (*`POST /api/send`*); `ask_claude.py`
+- **`cid`** in the body does the same within the thread (*`POST /api/send`*); `ask_workbench.py`
   sends both, the same value, and tries a cut send again for up to two minutes. Still cut, it
   exits 2 naming the key, and `--key <key>` sends the same request again under it; its files'
   upload ids come from the key and their bytes, so the body matches (keep a key's body the same:
@@ -144,47 +167,47 @@ landed. Send it again with the same key and Claude is never asked twice:
 ## The agent flow, end to end
 
 ```sh
-export CLAUDE_WB_URL=http://localhost:1337 CLAUDE_WB_TOKEN=wba-…   # from wb chat token add my-agent
-auth=(-H "Authorization: Bearer $CLAUDE_WB_TOKEN")
+export WORKBENCH_URL=http://localhost:1337 WORKBENCH_TOKEN=wba-…   # from wb chat token add my-agent
+auth=(-H "Authorization: Bearer $WORKBENCH_TOKEN")
 
-# 1. Is a Claude Code session in workbench mode listening? If not: do it yourself, or try later.
-curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/health"
-# {"api": 1, "listening": true}
+# 1. Is a driver (Claude Code or OpenCode in workbench mode) listening? If not: do it yourself, or try later.
+curl -s "${auth[@]}" "$WORKBENCH_URL/api/health"
+# {"api": 1, "listening": true, "driver": {"tool": "opencode", "model": "deepinfra/…"}}
 
 # 2. (optional) Upload a file under an id of your own (8 to 64 of A-Z a-z 0-9 -).
 id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 curl -s "${auth[@]}" -T notes.txt -H "X-File-Name: notes.txt" -H "Content-Type: text/plain" \
-  "$CLAUDE_WB_URL/api/upload/$id"
+  "$WORKBENCH_URL/api/upload/$id"
 # {"upload": {"id": "…", "name": "notes.txt", "size": 812, "type": "text/plain", "path": "…"}, "new": true}
 
 # 3. Send one request: the repo, the goal, what "done" means.
 curl -s "${auth[@]}" -H 'Content-Type: application/json' \
   -d '{"text": "In ~/src/app: add a --json flag to `app list`. Done: tests pass, on a branch.", "files": ["'$id'"]}' \
-  "$CLAUDE_WB_URL/api/send"
+  "$WORKBENCH_URL/api/send"
 # {"message": {"id": "1795436900218-c2fe2e", "from": "my-agent", "role": "agent", …}, "listener": {…}, "state": {…}}
 
-# 4. Wait for Claude's replies to it, until its turn is done.
-curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900218-c2fe2e&timeout=300"
-# {"replies": [{"id": "1795436900301-a1b2c3", "from": "claude", "text": "On it: …", "re": [...], "to": ["my-agent"]}],
+# 4. Wait for the driver's replies to it, until its turn is done.
+curl -s "${auth[@]}" "$WORKBENCH_URL/api/wait?after=1795436900218-c2fe2e&timeout=300"
+# {"replies": [{"id": "1795436900301-a1b2c3", "from": "claude", "driver": {"tool": "opencode", …}, "text": "On it: …", "re": [...], "to": ["my-agent"]}],
 #  "done": false, "listener": {…}, "waiting_on_user": false}
 
 # 5. Keep reading from the last reply's id until "done" is true.
-curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout=300"
+curl -s "${auth[@]}" "$WORKBENCH_URL/api/wait?after=1795436900301-a1b2c3&timeout=300"
 # {"replies": [], "done": true, "listener": {…}, "waiting_on_user": false}
 
-# 6. A later report (Claude hands work to local agents, ends its turn, and is woken when they
+# 6. A later report (the driver hands work to its agents, ends its turn, and is woken when they
 #    finish): wait for the next reply, however long the gap.
-curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout=600&until=reply"
+curl -s "${auth[@]}" "$WORKBENCH_URL/api/wait?after=1795436900301-a1b2c3&timeout=600&until=reply"
 ```
 
 - **`listener: null`** (from `/api/send` or `/api/wait`) means no session is listening: the
   message waits in the queue, and is read once a session in workbench mode with the chat on
   listens. A message unread for 6 hours (`expire` in the state) is never passed on.
-- **What `done` means:** the Claude turn that took the message (or that wrote the newest reply
-  returned) has ended; another Claude Code session's turn never counts. Claude may still report later, after work it handed off: its reply says
+- **What `done` means:** the driver's turn that took the message (or that wrote the newest reply
+  returned) has ended; another session's turn never counts. The driver may still report later, after work it handed off: its reply says
   so, and `until=reply` waits for that report.
-- **`waiting_on_user: true`**: Claude is paused on the user (a permission, a plan, a question, or
-  a consent it asked in words). Claude Code's dialogs are answered in its terminal, by the user
+- **`waiting_on_user: true`**: the driver is paused on the user (a permission, a plan, a question,
+  or a consent it asked in words). The driver's dialogs are answered in its terminal, by the user
   alone; the web page shows a line while one waits. Keep waiting.
 - **Follow-ups** are new messages: send again, and wait on the new id.
 
@@ -192,7 +215,7 @@ curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout
 
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
-  `messages` holds only its own messages and Claude's rows whose `to` names it. No
+  `messages` holds only its own messages and the driver's rows whose `to` names it. No
   `push`, `savings`, `build`, `tasks` or `dictate`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
@@ -208,24 +231,27 @@ The user's own token reads everything, as below.
 
 ## An MCP server
 
-`skill/agents/claude-workbench/scripts/mcp_server.py` puts the agent flow behind three MCP tools,
+`skill/agents/ask-workbench/scripts/mcp_server.py` puts the agent flow behind three MCP tools,
 for an agent or tool that speaks MCP. It is a stdio server (newline-delimited JSON-RPC), standard
-library only, started by the agent's MCP client. It reads the same `CLAUDE_WB_URL` and
-`CLAUDE_WB_TOKEN` as `ask_claude.py`, from its environment.
+library only, started by the agent's MCP client. It reads the same `WORKBENCH_URL` and
+`WORKBENCH_TOKEN` as `ask_workbench.py`, from its environment (`CLAUDE_WB_URL` and
+`CLAUDE_WB_TOKEN`, their names before 2.2, still work; so does the old path,
+`skill/agents/claude-workbench/scripts/mcp_server.py`, and the tool's old name, `ask_claude`).
 
-It is for the user's own agents on this machine, talking to the user's own Claude Code session.
+It is for the user's own agents on this machine, talking to the user's own driver.
 It calls only the `/api/v1/` paths, so it needs a chat from workbench 2.1 or later (an older one
-is said so, nothing sent). It listens on nothing but stdio. It refuses a `CLAUDE_WB_URL` whose host isn't this machine's
+is said so, nothing sent). It listens on nothing but stdio. It refuses a `WORKBENCH_URL` whose host isn't this machine's
 (`localhost`, `127.*`, `::1`, or an IP address of its own, such as the tailnet or LAN address a
 chat bound only there is reached at): every tool says so, and nothing is sent. It follows no redirect.
 
-- **`ask_claude {text, key?}`**: checks `/api/v1/health` (not listening: refused, nothing sent),
-  sends the request and returns its id at once. `key` (optional, 1 to 64 of `A-Z a-z 0-9 . _ :
+- **`ask_workbench {text, key?}`**: checks `/api/v1/health` (not listening: refused, nothing
+  sent), sends the request and returns its id at once, naming the driver that listens. `key` (optional, 1 to 64 of `A-Z a-z 0-9 . _ :
   -`; a new one per call by default) goes as the send's `cid` and its `Idempotency-Key` header, so
   a retry under the same key lands once: it answers `replayed: true` and says it was not sent
   again. A send cut off by a restart is sent again under it. The same key on another request is
   refused (`idempotency_key_reused`), nothing sent.
-- **`get_reply {id, wait?}`**: Claude's replies to that request and its status:
+- **`get_reply {id, wait?}`**: the driver's replies to that request, which driver answered
+  (`driver`, each reply's too), and its status:
   - `done`: the turn that took it has ended. A later report can still come (its reply says so);
     `get_reply` shows it then.
   - `still working`.
@@ -234,20 +260,20 @@ chat bound only there is reached at): every tool says so, and nothing is sent. I
   - `expired`: unread past 6 hours, never passed on (the chat's `410 expired`).
 
   It holds up to `wait` seconds (default 20, at most 300) for the turn to end.
-- **`list_requests {}`**: the agent's 20 newest requests, how far each got, and whether Claude
-  listens.
+- **`list_requests {}`**: the agent's 20 newest requests, how far each got, and which driver
+  listens, if any.
 
 The config, one line. For OpenCode (`opencode.json`; `codemode: false` offers the tools as
 themselves, not behind `execute`):
 
 ```json
-"mcp": {"servers": {"claude-workbench": {"type": "local", "command": ["python3", "/path/to/workbench/skill/agents/claude-workbench/scripts/mcp_server.py"], "environment": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}, "codemode": false}}}
+"mcp": {"servers": {"ask-workbench": {"type": "local", "command": ["python3", "/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "environment": {"WORKBENCH_URL": "http://localhost:1337", "WORKBENCH_TOKEN": "wba-…"}, "codemode": false}}}
 ```
 
 For clients that read an `mcpServers` map (Cursor's `mcp.json`, Gemini CLI's `settings.json`):
 
 ```json
-"mcpServers": {"claude-workbench": {"command": "python3", "args": ["/path/to/workbench/skill/agents/claude-workbench/scripts/mcp_server.py"], "env": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}}}
+"mcpServers": {"ask-workbench": {"command": "python3", "args": ["/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "env": {"WORKBENCH_URL": "http://localhost:1337", "WORKBENCH_TOKEN": "wba-…"}}}
 ```
 
 The token is the agent's own (`wb chat token add <name>`), with an agent's view and limits.
@@ -257,16 +283,18 @@ The token is the agent's own (`wb chat token add <name>`), with an agent's view 
 Every `/api/` path below needs the bearer token. *User only* means an agent token gets 403.
 
 ### `GET /api/health`
-`{"api": 1, "listening": bool}`. `listening` is true while a Claude Code session in workbench
-mode, with the web chat on, is listening. An agent's first call.
+`{"api": 1, "listening": bool, "driver"?: {"tool": "claude"|"opencode", "model"?}}`. `listening`
+is true while a driver (a Claude Code or OpenCode session in workbench mode, with the web chat
+on) is listening, and `driver` says which, only then (*The driver*). An agent's first call.
 
 ### `GET /api/state`
 The whole state the page draws (an agent's token gets its own view: *An agent's view*):
 - `api`: this API's version (1).
 - `messages`: the thread's last 200 rows (*Rows*), each of the user's and agents' with
-  `received` (Claude's receipt, or null) and `expired: true` once unread past `expire`. A notice
+  `received` (the driver's receipt, or null) and `expired: true` once unread past `expire`. A notice
   (a dialog waiting in the terminal) is left out once it settles.
-- `listener`: the listening session `{session, cwd, pid, start, machine?, parent?, busy}`, or null.
+- `listener`: the listening session `{session, cwd, pid, start, machine?, parent?, busy, driver}`,
+  or null (`driver`: *The driver*).
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
 - `savings`: the week's `wb savings` totals and `score`, and `api`: the week's API tasks apart
   (`tasks`, `cost` in dollars, `unknown`, `plan`, `trials`, `claude`, `self_est`, `by_provider`,
@@ -288,28 +316,28 @@ a 17th makes the oldest give way, and waits 5 s for a place before `503 {"error"
 streams"}`. An agent's 17th never pushes another out: it is 503 at once. A client sends the bearer header, so it uses `fetch`, not `EventSource`.
 
 ### `GET /api/wait?after=<id>&timeout=<s>&until=done|reply`
-A long poll for Claude's replies after the message `after` (a message's or a reply's id).
+A long poll for the driver's replies after the message `after` (a message's or a reply's id).
 - `timeout`: 0 to 600 seconds (default 300). Behind a proxy with a shorter idle limit, ask less.
 - `until`: `done` (default) returns at the first reply or once `done`; `reply` returns only at a
   new reply (for a later report after a turn already done).
 - It also returns at once when nobody is listening (`listener: null`), at the timeout, and when
-  Claude comes to wait on the user during it (`waiting_on_user` turns true; one already true at
+  the driver comes to wait on the user during it (`waiting_on_user` turns true; one already true at
   the start doesn't return it again).
 - Response: `{"replies": [...], "done": bool, "listener": {...}|null, "waiting_on_user": bool}`.
-  - `replies`: Claude's rows after `after` that are for the caller: their `to` names the agent,
+  - `replies`: the driver's rows after `after` that are for the caller: their `to` names the agent,
     or, for the user's token, `to` names `"user"` or is absent.
   - `done`: a turn has ended since the newest reply returned (one of the session that wrote it:
-    its `turn_by`), or, with none, since `after` (for a message to Claude: the turn that took it).
-  - `waiting_on_user`: Claude is paused on the user: one of Claude Code's dialogs waits in the
+    its `turn_by`), or, with none, since `after` (for a message to the driver: the turn that took it).
+  - `waiting_on_user`: the driver is paused on the user: one of its dialogs waits in the
     terminal, and the phone was told of it. The work is waiting on the human, not stuck: keep
     waiting.
 - Errors: 400 for a bad `after`, `timeout` or `until`; `404 {"error": "no such message", "code":
   "not_found"}` for an id not in the thread's recent part (the last 4 MiB), or, for an agent, not
   in its view; `410 expired` at once for a message unread past 6 hours with no reply (it was never
-  passed to Claude: send it again); `503` when 16 waits are open already.
+  passed to the driver: send it again); `503` when 16 waits are open already.
 - A wait can be cut: the server restarts itself on an update (a reset connection, or 502 to 504
   from a proxy in front meanwhile), and `503` passes. Wait again, after a short pause, with the
-  same `after`: nothing was lost (`ask_claude.py` does for up to two minutes in a row, then exits
+  same `after`: nothing was lost (`ask_workbench.py` does for up to two minutes in a row, then exits
   2 naming `--after`: a chat down that long is off, asleep or out of reach, not restarting).
 
 ### `POST /api/send`
@@ -322,7 +350,7 @@ long`):
 - `files`: optional, up to 10 upload ids (uploaded first; the same content twice is kept once).
 - `about`: optional, the user's only, what it answers: `{task, n}` (a pair of `wb shot`
   screenshots), `{audio: <batch>, n}` (a take of a `wb chat listen` shortlist) or `{task}` alone
-  (a task, from the page's task sheet: any task wb has, but a bench replay; Claude gets `(about
+  (a task, from the page's task sheet: any task wb has, but a bench replay; the driver gets `(about
   task <task>)` and decides whether to steer it). An agent's send with `about` is `400 {"error":
   "agent messages can't carry about"}`.
 
@@ -356,7 +384,7 @@ The upload's bytes: a PNG, JPEG, GIF, WebP or AVIF image as itself, anything els
 such file` (for an agent, also when it isn't its own).
 
 ### `GET /api/latest` (user only)
-What a push notification shows: `{now, messages: [Claude's last message for the user, or an
+What a push notification shows: `{now, messages: [the driver's last message for the user, or an
 open notice], push: {test}}`. A reply only to
 agents is never pushed.
 
@@ -391,7 +419,7 @@ open task"}`. Every answer is `{task, part, …, now}`:
 ### `POST /api/transcribe/<id>` (user only)
 `{}`: the words of an upload that is a voice clip (`audio/*`, `video/*` or
 `application/octet-stream`), heard by the computer's listener → `{"text": "..."}`, for the user to
-edit and send as a message (the clip itself is never sent to Claude). The words are kept with the
+edit and send as a message (the clip itself is never sent to the driver). The words are kept with the
 upload, so asking again never transcribes twice. Errors: 404 `no such upload`, `dictation is off:
 …` (no listener); 415 `not a voice clip (<type>)`; 409 `{error, busy: true, why}` while a task
 holds the GPU a GPU listener needs (it never waits for it: ask again later, as the page does);
@@ -424,19 +452,19 @@ change made at the terminal shows (#1392).
 
 ### `POST /api/settings` (user only)
 `{key, value}` (`value`: a string, a number, or null for a number row's off), JSON only (else 415
-`json only`). It runs that row's `wb` command as the user, not as Claude:
+`json only`). It runs that row's `wb` command as the user, not as the driver:
 - 200 `{"ok": true, "said": <wb's line>, "rows": [...], "help"?: <note>}`. `help` comes when the
-  value just chosen needs Claude's help to work (Agent code navigation on with probe not set up).
-  The server returns it and records it (below), and Claude in the terminal offers to set it up
+  value just chosen needs the driver's help to work (Agent code navigation on with probe not set
+  up). The server returns it and records it (below), and the driver in the terminal offers to set it up
   (installing nothing without the user's yes); showing it is the Settings view's job.
 - 400 `{"error": "no such setting"}` for an unknown `key`; 400 `{"error": "not one of its
   choices"}` for a value the row doesn't take (nothing runs for either).
 - 409 `{"ok": false, "error": <wb's line>, "rows": [...]}` when wb refused.
 
 A change that went through is recorded (`settings-changes.jsonl` in the state directory: `{ts,
-key, label, from, to, said, help?, by: "web"}`), so Claude in the terminal hears of it. Claude
-changes a row through the same writer with `wb settings set`, on the user's yes in the
-conversation; its rows say `by: "claude"`.
+key, label, from, to, said, help?, by: "web"}`), so the driver in the terminal hears of it. The
+driver changes a row through the same writer with `wb settings set`, on the user's yes in the
+conversation; its rows say `by: "claude"` (either driver's: the name kept).
 
 ### `GET /api/stats` (user only)
 The Stats view's history: `{"feed": <wb stats --json>, "routes": <wb route --json, or null>,
@@ -470,23 +498,24 @@ an unparsable body 400 `bad json`.
 
 A **message** (`messages`, `replies`, `message`):
 - `id` (`<ms>-<6 hex>`), `ts` (seconds), `text`.
-- `from`: `"user"`, `"claude"`, `"notice"` (a dialog waits in the terminal: `text` the waiting line,
+- `from`: `"user"`, `"claude"` (the driver's, whichever driver wrote it: *The driver*), `"notice"`
+  (a dialog waits in the terminal: `text` the waiting line,
   `tool`, `kind`: `permission`, `plan`, `question` or `elicitation`, `what?`; no buttons, since
-  Claude Code's dialogs are answered in the terminal), or an agent's name
+  the driver's dialogs are answered in the terminal), or an agent's name
   with `role: "agent"`.
-- On a message to Claude: `cid?`, `files?: [{id, name, size, type, path}]`, `about?`, and in the
+- On a message to the driver: `cid?`, `files?: [{id, name, size, type, path}]`, `about?`, and in the
   state `received: {id, ts, by, how: "now"|"into"|"queued"} | null`, `expired?` (`into`: an
   agent's message read into a turn it may not have opened: answer it with `--to`; `queued`: held
   for the running turn, `now` once it ends, an agent's `into`).
-- On Claude's reply: `re?: [message ids]` (what it answers: `wb chat reply --to`, else the
+- On the driver's reply: `re?: [message ids]` (what it answers: `wb chat reply --to`, else the
   messages that opened that turn or the user's delivered into it, the user's alone when the
-  user's are among them; from another Claude Code session than the listening one, none: it is
-  the user's),
+  user's are among them; from another session than the listening one, of either driver, none:
+  it is the user's), `driver?: {tool, model?}` (which driver wrote it: *The driver*),
   `to?: ["user" | agent names]` (whose those messages are, or `"user"` for a question to the
   user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `auto?: true`
   (the turn's own answer, which the mod posted when a turn that had the message ended with no
   reply to it: at most 4,000 characters, the whole in the terminal), `claude_pid?`
-  (the Claude Code process that wrote it, on every Claude row: a reply, a screenshot, a listen),
+  (the Claude Code process that wrote it, on every row Claude Code writes: a reply, a screenshot, a listen),
   and on a `wb chat reply` from Claude Code `session?`, `claude_start?`, `claude_machine?` beside
   it (the Claude Code session that wrote it, so the user's answer goes back to that session),
   `turn_by?` (on the listening session's reply: whose turn's end makes a wait on it `done`).
@@ -509,6 +538,7 @@ bumps it; adding a field or an endpoint doesn't (the admin endpoints, `/api/sett
 `/api/stats` and `/api/top`, came in 2.0 under version 1).
 - **1** (2026-11-23): agent tokens, `/api/health`, `/api/wait`, `role`/`re`/`to` on rows, an
   agent's view of its own conversation. Before 2.0 shipped, the user's dialog cards and their
-  endpoints left it (#1350): Claude Code's dialogs are answered in the terminal. Added since, in
+  endpoints left it (#1350): the driver's dialogs are answered in the terminal. Added since, in
   the same version (workbench 2.1): the `/api/v1/` paths, `code` on every error (`error` kept as
-  the text), a revoked token's own code, `410 expired` from `/api/wait`, and `Idempotency-Key`.
+  the text), a revoked token's own code, `410 expired` from `/api/wait`, and `Idempotency-Key`;
+  (workbench 2.2) `driver` on `/api/health`, the listener and each reply (*The driver*).

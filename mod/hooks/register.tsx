@@ -74,7 +74,8 @@ import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, taskLines } from './tasks'
-import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, compactPlan, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, tellPlan, WAKE_OPENING } from './core'
+import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, codingGate, compactPlan, editFields, gateOf, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, tellPlan, WAKE_OPENING } from './core'
+import type { Gate as CommandGate } from './core'
 import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
@@ -588,14 +589,17 @@ const CODING_RULES: Record<string, string> = {
 
 // Dynamic workflows (#1041), the user's choice (`wb workflows`): whether Claude may run several
 // tasks at once for one request. Off (the default) adds nothing: the skill says one at a time.
-const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workflows` shows it): you may split a ' +
-  'request into several tasks that run at once, mixing roles and the GPU and API sides; each runs on its own ' +
-  'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
-  'acceptance command), name its tasks with one shared prefix and pass it as `--group <prefix>` on each `wb start` ' +
-  '(the pane draws them under one header), and say the plan in one line before you start them. ' +
-  'The GPU lease and the provider slots decide what runs together (the rest queue). Review each result on its ' +
-  'own merits; merge logic first, then tests, then UI or docs.'
-const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
+// #1278: on, a substantive request is a deep workflow (wb run), its fan-out the run's, not tasks
+// Claude starts at once; and the mod wakes Claude for no run row yet, so the wake is a background
+// `wb wait <run>` (the review of #1278, 2026-11-25: told "don't poll", Claude was never woken)
+const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb deepmode` shows it): run a substantive ' +
+  'request as a deep workflow on their agents, as the /workbench skill\'s *Deep workflows* says: pick a flow ' +
+  '(`wb run flows`), say it in at most three lines, start it once with `wb run start`, then wait for its notices ' +
+  'with `wb wait <run>` in the background, again after each. Never fan out by starting several tasks at once ' +
+  'yourself: the run starts its items, each on its own role\'s model, never one you pick, and the GPU lease, the ' +
+  'provider slots and the day cap decide what runs together. Review each result on its own merits; merge logic ' +
+  'first, then tests, then UI or docs.'
+const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb deepmode` shows it): run one task ' +
   'at a time again, as the /workbench skill says.'
 
 async function workflowsMode($: any): Promise<string> {
@@ -614,26 +618,8 @@ async function workflowsMode($: any): Promise<string> {
 // two commands): heredoc bodies and comments dropped, quotes and backslashes undone within a word,
 // a `$(…)` or backtick inside double quotes read as the commands it runs, and only a simple
 // command's own word counts, past `VAR=x`, the reserved words and the wrappers (with their
-// options): `wb` or a path ending in `/wb`.
-const HANDS_OUT = new Set(['start', 'next', 'feedback', 'steer', 'answer', 'resume'])
-const RESERVED = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!', '{'])
-// A wrapper that runs the rest: the options of it that take a value, and the words it takes
-// before the command (timeout's duration)
-const PREFIXES: Record<string, [string[], number]> = {
-  env: [['-u', '-C', '-S', '--unset', '--chdir', '--split-string'], 0],
-  time: [['-f', '-o', '--format', '--output'], 0],
-  nohup: [[], 0], exec: [['-a'], 0], command: [[], 0],
-  timeout: [['-s', '-k', '--signal', '--kill-after'], 1],
-  nice: [['-n', '--adjustment'], 0], ionice: [['-c', '-n', '--class', '--classdata'], 0],
-  stdbuf: [['-i', '-o', '-e', '--input', '--output', '--error'], 0],
-  // `sudo git push`, `xargs -I{} git push` hid the command from the consent gate (#1005)
-  sudo: [['-u', '-g', '-h', '-p', '-C', '-U', '-r', '-t', '-D', '-R', '-T', '--user', '--group', '--host',
-    '--prompt', '--close-from', '--other-user', '--role', '--type', '--chdir', '--chroot', '--command-timeout'], 0],
-  doas: [['-u', '-C'], 0],
-  xargs: [['-I', '-L', '-l', '-n', '-P', '-s', '-d', '-E', '-e', '-a', '--max-args', '--max-procs', '--max-lines',
-    '--max-chars', '--delimiter', '--arg-file', '--eof', '--replace', '--process-slot-var'], 0],
-}
-
+// options): `wb` or a path ending in `/wb`. Which words those are is the kernel's (Kernel.Gate's
+// gateOf, `delegates`); the parsing here is the host's (kernel/BOUNDARY.md, *Rulings*).
 // Where the `(` at `open` closes (the end when it never does), as bash finds it: quotes, comments
 // and heredoc bodies skipped. A `gh issue create --body "$(cat <<'EOF' …)"` whose body said
 // "doesn't (it can't)" or "a)" closed there, and the body's backquoted `wb patch send` after it
@@ -833,34 +819,8 @@ function simpleCommands(src: string, info: Shell = newShell()): string[][] {
   return out
 }
 
-// Where a simple command's own word is: past `VAR=x`, the reserved words and the wrappers
-function commandAt(words: string[]): number {
-  let i = 0
-  for (;;) {
-    const w = words[i] ?? ''
-    if (/^[A-Za-z_]\w*=/.test(w) || RESERVED.has(w)) { i++; continue }
-    const prefix = PREFIXES[w]
-    if (!prefix) break
-    i++
-    let positional = prefix[1]
-    while (i < words.length) {
-      const o = words[i]!
-      if (o === '--') { i++; break }
-      if (o.startsWith('-') && o.length > 1) { i += prefix[0].includes(o) ? 2 : 1; continue }
-      if (positional > 0) { positional--; i++; continue }
-      break
-    }
-  }
-  return i
-}
-
 export function delegates(command: string): boolean {
-  for (const words of simpleCommands(command)) {
-    const i = commandAt(words)
-    const cmd = words[i] ?? ''
-    if ((cmd === 'wb' || cmd.endsWith('/wb')) && HANDS_OUT.has(words[i + 1] ?? '')) return true
-  }
-  return false
+  return simpleCommands(command).some(words => gateOf(words).delegates)
 }
 
 // The consent gate (#1005, 2026-11-22). The owner's rule, absolute: a user's Claude never forks,
@@ -882,16 +842,6 @@ const UPSTREAM = 'a-schaefers/workbench' // the GitHub home; patches.json's upst
 // redirects the old name, so a send naming it, or a clone whose origin and patches.json still say
 // it, still lands upstream and still asks first
 const FORMER_UPSTREAM = ['a-schaefers/claudes-workbench']
-const GH_WRITES: Record<string, Set<string>> = {
-  pr: new Set(['create', 'comment', 'edit', 'merge', 'review', 'close', 'reopen', 'ready', 'update-branch', 'lock', 'unlock']),
-  issue: new Set(['create', 'comment', 'edit', 'close', 'reopen', 'delete', 'lock', 'unlock', 'transfer', 'pin', 'unpin', 'develop']),
-  repo: new Set(['fork', 'edit', 'delete', 'rename', 'archive', 'unarchive', 'sync']),
-  workflow: new Set(['run', 'enable', 'disable']),
-  run: new Set(['rerun', 'cancel', 'delete']),
-  release: new Set(['create', 'edit', 'delete', 'upload', 'delete-asset']),
-  label: new Set(['create', 'edit', 'delete', 'clone']),
-}
-const GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'])
 const PYTHON = /^python[\d.]*$/
 // what runs code it is handed as text (stdin, -c, -e); a shell's (STDIN_SHELL) is read as commands
 const RUNS_CODE = /^(?:bash|sh|zsh|dash|ksh|ash|fish|python[\d.]*|node|perl|ruby|php|deno|bun)$/
@@ -934,7 +884,7 @@ function codeFed(words: string[], i: number, cmd: string, info: Shell): string |
   }
   if (code.length) return code.join('\n')
   const printed = (from: string[]) => {
-    const said = from.slice(commandAt(from) + 1)
+    const said = from.slice(gateOf(from).at + 1)
     return `${said.join(' ')}\n${said.join('\n')}\n${info.stdin.get(from) ?? ''}`
   }
   if (script !== undefined && script !== '-' && !(STDIN_SHELL.test(cmd) && args.includes('-s'))) {
@@ -949,14 +899,16 @@ function codeFed(words: string[], i: number, cmd: string, info: Shell): string |
 
 // A line's simple commands as bash runs them, `bash -c '…'` and `eval` read inside, and what a
 // program that runs text is handed (#1364): a shell's stdin read as commands too (`fed`: inside
-// text another program runs), an interpreter's code kept as text (`code`). `writes`: the files its
-// redirects write. Shared by upstreamAim, routeCalls and writesTo.
-type Run = { words: string[]; fed: boolean; code?: string; writes: string[] }
+// text another program runs), an interpreter's code kept as text (`code`). `gate`: the kernel's
+// reading of its words and its redirects' files (Kernel.Gate). Shared by upstreamAim, routeCalls
+// and writesTo.
+type Run = { words: string[]; fed: boolean; code?: string; gate: CommandGate }
 function runs(src: string, fed = false, info: Shell = newShell()): Run[] {
   return simpleCommands(src, info).flatMap(words => {
-    const run: Run = { words, fed, writes: info.writes.get(words) ?? [] }
-    const i = commandAt(words)
-    const cmd = wordOf(words[i])
+    const gate = gateOf(words, info.writes.get(words) ?? [])
+    const run: Run = { words, fed, gate }
+    const i = gate.at
+    const cmd = gate.word
     const c = words.findIndex((w, j) => j > i && /^-[a-z]*c$/.test(w))
     // every shell's -c (fish's, ksh's too: the old backstop caught them; the review of #1364)
     if (STDIN_SHELL.test(cmd) && c > 0 && words[c + 1] !== undefined) return [run, ...runs(words[c + 1]!, fed, info)]
@@ -975,71 +927,6 @@ const NOT_SENT = 'workbench: not sent: the user did not approve it in the dialog
 const NOT_SHOWN = (why: string) => `workbench: not sent: the dialog can't show what it sends (${why}). Run ` +
   'wb patch send as a command of its own, its --title written out and --body-file naming the file, so the ' +
   'user sees both.'
-
-// gh api writes with a method other than GET, or with fields (POST by default; with an explicit
-// GET gh sends them as the query)
-function apiWrites(args: string[]): boolean {
-  let method = '', fields = false
-  for (let j = 0; j < args.length; j++) {
-    const a = args[j]!
-    const m = /^(?:-X|--method(?==|$))=?(.*)$/.exec(a)
-    if (m) method = (m[1] || args[++j] || '').toUpperCase()
-    else if (/^-[fF]/.test(a) || /^--(?:field|raw-field|input)(?:=|$)/.test(a)) fields = true
-  }
-  return method ? method !== 'GET' && method !== 'HEAD' : fields
-}
-
-// A command word as the system finds it: its name, lowercased (macOS finds `GIT` as git)
-const wordOf = (w: string | undefined) => (w ?? '').split('/').pop()!.toLowerCase()
-
-// The words wb gets when this command runs it: `wb` or a path to it, or Python running a
-// `…/wb` or `-m workbench…` (`python3 <source>/bin/wb patch send` was no send, the review of #1005)
-function wbArgs(cmd: string, args: string[]): string[] | null {
-  if (cmd === 'wb') return args
-  if (!PYTHON.test(cmd)) return null
-  for (let j = 0; j < args.length; j++) {
-    const a = args[j]!
-    if (a.startsWith('-m')) {
-      const mod = a === '-m' ? args[j + 1] ?? '' : a.slice(2)
-      return mod.startsWith('workbench') ? args.slice(j + (a === '-m' ? 2 : 1)) : null
-    }
-    if (a === '-X' || a === '-W') j++
-    else if (!a.startsWith('-')) return wordOf(a) === 'wb' ? args.slice(j + 1) : null
-  }
-  return null
-}
-
-// What one simple command sends: 'send' (wb patch send), 'out' (another outward form), '' (none),
-// and the directories it names with git's -C
-function sendsOut(words: string[]): { kind: '' | 'send' | 'out'; dirs: string[] } {
-  const i = commandAt(words)
-  const cmd = wordOf(words[i])
-  const args = words.slice(i + 1)
-  if (cmd === 'gh') {
-    const pos: string[] = []
-    for (let j = 0; j < args.length && pos.length < 2; j++) {
-      const a = args[j]!
-      if (a === '-R' || a === '--repo') j++
-      else if (!a.startsWith('-')) pos.push(a.toLowerCase())
-    }
-    const [group = '', sub = ''] = pos
-    const out = group === 'api' ? apiWrites(args) : !!GH_WRITES[group]?.has(sub)
-    return { kind: out ? 'out' : '', dirs: [] }
-  }
-  if (cmd === 'git') {
-    const dirs: string[] = []
-    let j = 0
-    for (; j < args.length && args[j]!.startsWith('-'); j++) {
-      if (args[j] === '-C') dirs.push(args[j + 1] ?? '')
-      if (GIT_VALUED.has(args[j]!)) j++
-    }
-    return { kind: (args[j] ?? '').toLowerCase() === 'push' ? 'out' : '', dirs }
-  }
-  const wb = wbArgs(cmd, args)
-  if (wb && wb[0] === 'patch' && wb[1] === 'send') return { kind: 'send', dirs: [] }
-  // wb patch zip only writes a file the user may email themselves: nothing outward (#1291)
-  return { kind: '', dirs: [] }
-}
 
 const inside = (p: string, dir: string) => !!dir && (p === dir || p.startsWith(`${dir}/`))
 
@@ -1074,14 +961,6 @@ export function originIs(url: string, slug: string | string[]): boolean {
 // upstream there is no user's Claude). `named`: the line names the slug; `outAt`: every directory
 // an outward command in it runs in, for the hook to check by real path; `shown`: the outward text
 // when it isn't a command of its own (fed to a shell)
-// A cd or pushd's target word as written (`cd --` and the flags skipped): undefined for none
-// (home), '-' for the last directory. Shared by upstreamAim and routeCalls (#1125).
-function cdTarget(words: string[], i: number): string | undefined {
-  const rest = words.slice(i + 1)
-  const k = rest.indexOf('--')
-  return k >= 0 ? rest[k + 1] : rest.find(w => !/^-[LPe@]+$/.test(w))
-}
-
 export type Aim = { why: '' | 'send' | 'dir' | 'plugin' | 'slug'; at: string; words: string[]; named: boolean; outAt: string[]; shown?: string }
 
 // Whether a command line sends something to workbench upstream, and why. `dirs` are the gated
@@ -1102,12 +981,11 @@ export function upstreamAim(command: string, cwd: string, home: string, slug: st
   let runner = ''
   const codes: string[] = []
   for (const run of runs(command)) {
-    const { words } = run
+    const { words, gate: g } = run
     if (!run.fed) fedHere = here
-    const i = commandAt(words)
-    const cmd = wordOf(words[i])
-    if (cmd === 'cd' || cmd === 'pushd') {
-      const to = cdTarget(words, i)
+    const cmd = g.word
+    if (g.gate === 'cd') {
+      const to = g.args[0]
       if (to === '-') continue
       const p = absolutePath(to ?? (home || '/'), home, run.fed ? fedHere : here)
       if (run.fed) fedHere = p
@@ -1119,12 +997,13 @@ export function upstreamAim(command: string, cwd: string, home: string, slug: st
       runner ||= now
       codes.push(run.code)
     }
-    const { kind, dirs: viaC } = sendsOut(words)
-    if (!kind) continue
+    // wb patch send, or another outward form (Kernel.Gate); wb patch zip only writes a file the
+    // user may email themselves: nothing outward (#1291)
+    if (g.gate !== 'send' && g.gate !== 'outward') continue
     // fed to a shell: it runs, but the dialog shows the line, not this command of its own
     const own = run.fed ? { words: [] as string[], shown: words.map(quoted).join(' ') } : { words }
-    if (kind === 'send') return { why: 'send', at: now, named, outAt, ...own }
-    const at = [now, ...viaC.map(d => absolutePath(d, home, now))]
+    if (g.gate === 'send') return { why: 'send', at: now, named, outAt, ...own }
+    const at = [now, ...g.dirs.map(d => absolutePath(d, home, now))]
     outAt.push(...at)
     if (textNames || at.some(p => dirs.some(d => inside(p, d)))) return { why: 'dir', at: now, named, outAt, ...own }
     const plugin = inPlugins(at)
@@ -1144,27 +1023,6 @@ export function upstreamAim(command: string, cwd: string, home: string, slug: st
     if (named) return aim('slug')
   }
   return { why: '', at: '', words: [], named, outAt }
-}
-
-// wb patch send's own words: its slug, --title and --body-file (the last given, as argparse
-// takes them; wb refuses abbreviations, so only these spellings count), --draft, --anyway
-export function sendArgs(words: string[]) {
-  const i = commandAt(words)
-  const rest = (wbArgs(wordOf(words[i]), words.slice(i + 1)) ?? []).slice(2)
-  let slug: string | undefined, title: string | undefined, file: string | undefined
-  let draft = false, anyway = false
-  for (let j = 0; j < rest.length; j++) {
-    const a = rest[j]!
-    if (a === '--') { slug ??= rest[j + 1]; break }
-    if (a === '--title') title = rest[++j]
-    else if (a === '--body-file') file = rest[++j]
-    else if (a.startsWith('--title=')) title = a.slice('--title='.length)
-    else if (a.startsWith('--body-file=')) file = a.slice('--body-file='.length)
-    else if (a === '--draft') draft = true
-    else if (a === '--anyway') anyway = true
-    else if (!a.startsWith('-')) slug ??= a
-  }
-  return { slug, title, file, draft, anyway }
 }
 
 const SHOW_CHARS = 600
@@ -1204,13 +1062,13 @@ async function personal($: any, wt: string): Promise<boolean> {
 async function sendQuestion($: any, command: string, slug: string, aim: Aim, home: string): Promise<Sending> {
   const head = `Claude wants to send this to GitHub (${slug}), publicly: ${shownCommand(command, aim)}`
   if (aim.why !== 'send') return { question: `${head} — Send it?` }
-  const args = sendArgs(aim.words)
   if (!aim.words.length) return { deny: NOT_SHOWN('it is inside text another program runs') }
-  if (!args.slug) return { deny: NOT_SHOWN('no slug') }
-  if (args.title === undefined) return { deny: NOT_SHOWN('no --title') }
-  if (args.file === undefined) return { deny: NOT_SHOWN('no --body-file') }
-  if (/[$`]/.test(args.title) || /[$`]/.test(args.file)) return { deny: NOT_SHOWN('a $ or a backtick in --title or --body-file, whose value only the shell knows') }
-  const path = absolutePath(args.file, home, aim.at)
+  // wb patch send's own words, read by the kernel (Kernel.Gate's `send`), and what it lacks
+  const args = gateOf(aim.words).send
+  const lacks: Record<string, string> = { slug: 'no slug', title: 'no --title', bodyFile: 'no --body-file',
+    shell: 'a $ or a backtick in --title or --body-file, whose value only the shell knows' }
+  if (args.lack) return { deny: NOT_SHOWN(lacks[args.lack] ?? args.lack) }
+  const path = absolutePath(args.bodyFile, home, aim.at)
   const text: string | undefined = await $.fs.read(path).catch(() => undefined)
   if (text === undefined) return { deny: NOT_SHOWN(`can't read ${path}`) }
   const lines = text.split('\n')
@@ -1458,47 +1316,31 @@ const ROUTES_RULE = 'Never pass --model for an API model or change a role withou
 // a ``cwd``, and after a cd to a word with `$` or a backquote in it (`cd "$REPO"`), to none (an
 // unquoted `$(…)` leaves none) or to `-`; read as a literal path, it failed the dry run to spawn,
 // so the call skipped the dialog into wb's "is the mod loaded?" (the review of #1125). An
-// absolute one after it is known again.
-// Where `set` is in `wb settings …`'s words, or -1: wb takes `settings`' own `--json` before it, so
-// `wb settings --json set cap 9` was no call, and the change wb gates was refused unasked, as if
-// the mod weren't loaded (the review of #1336, 2026-11-25)
-function settingsSet(wb: string[]): number {
-  const s = wb.findIndex((w, j) => j > 0 && !w.startsWith('-'))
-  return s > 0 && wb[s] === 'set' ? s : -1
-}
-
+// absolute one after it is known again. Which commands those are, and their dry runs' arguments,
+// is the kernel's (Kernel.Gate: `route`, `start`, `settings`).
 export function routeCalls(command: string, cwd = '', home = ''): { calls: string[][]; hidden: boolean; at: string[] } {
   const calls: string[][] = []
   const at: string[] = []
   let here = cwd
   let hidden = false
-  for (const { words, fed, code } of runs(command)) {
-    const i = commandAt(words)
-    const cmd = wordOf(words[i])
-    if (cmd === 'cd' || cmd === 'pushd') {
+  for (const { fed, code, gate: g } of runs(command)) {
+    const cmd = g.word
+    if (g.gate === 'cd') {
       if (fed) continue
-      const to = cdTarget(words, i)
+      const to = g.args[0]
       if (!to || to === '-' || /[$`]/.test(to)) here = ''
       else if (here || to.startsWith('/')) here = absolutePath(to, home, here)
       continue
     }
     if (code !== undefined && spawns(cmd, code) && ROUTE_TEXT.test(code)) hidden = true
-    const wb = wbArgs(cmd, words.slice(i + 1))
-    const route = wb?.[0] === 'route', start = wb?.[0] === 'start' && wb.some(w => /^--m/.test(w))
-    const set = wb?.[0] === 'settings' ? settingsSet(wb) : -1
-    if (!route && !start && set < 0) continue
+    if (g.gate !== 'route' && g.gate !== 'start' && g.gate !== 'settings') continue
     if (fed) { hidden = true; continue }
-    if (route) calls.push(wb!.slice(1))
-    else if (set > 0) calls.push(['--settings', ...wb!.slice(1, set), ...wb!.slice(set + 1)])
-    else calls.push(['--start', ...wb!.slice(1)])
+    calls.push([...g.args])
     at.push(here)
   }
   return { calls, hidden, at }
 }
 
-// Copy-like commands: they write their last operand, or -t's directory (a file of each source's name)
-const COPIES = new Set(['cp', 'mv', 'install', 'ln', 'rsync'])
-const COPY_VALUED = new Set(['-S', '--suffix', '-m', '--mode', '-o', '--owner', '-g', '--group'])
 // An interpreter's code that writes a file: Python's, Node's, Perl's, Ruby's, PHP's usual calls
 const WRITES_CODE = new RegExp([
   // open(…, 'w') with the path built inside (`os.path.join(…)`, two levels deep), the mode a string
@@ -1511,36 +1353,11 @@ const WRITES_CODE = new RegExp([
   String.raw`\bopen\s*\(?\s*(?:my\s+)?\$?\w*\s*,\s*['"]\+?>`,
 ].join('|'))
 
-// What one command writes: its redirects' files, tee's, a copy's destination (`names`: the sources,
-// whose names it takes in a directory), dd's of=
-function targets(run: Run): { to: string; names: string[] }[] {
-  const out = run.writes.map(to => ({ to, names: [] as string[] }))
-  const i = commandAt(run.words)
-  const cmd = wordOf(run.words[i])
-  const args = run.words.slice(i + 1)
-  if (cmd === 'tee') out.push(...args.filter(a => !a.startsWith('-')).map(to => ({ to, names: [] })))
-  else if (cmd === 'dd') out.push(...args.filter(a => a.startsWith('of=')).map(a => ({ to: a.slice(3), names: [] })))
-  else if (COPIES.has(cmd)) {
-    const ops: string[] = []
-    let dir: string | undefined
-    for (let j = 0; j < args.length; j++) {
-      const a = args[j]!
-      if (a === '--') { ops.push(...args.slice(j + 1)); break }
-      if (a === '-t' || a === '--target-directory') dir = args[++j]
-      else if (a.startsWith('--target-directory=')) dir = a.slice('--target-directory='.length)
-      else if (COPY_VALUED.has(a)) j++
-      else if (!a.startsWith('-')) ops.push(a)
-    }
-    if (dir !== undefined) out.push({ to: dir, names: ops })
-    else if (ops.length > 1) out.push({ to: ops[ops.length - 1]!, names: ops.slice(0, -1) })
-  }
-  return out
-}
-
 // Whether a command line writes ``file`` (#1364): a redirect's target, tee's file, a copy's
 // destination (its directory with a source of its name too) or dd's of=, a shell's fed commands'
-// too; or an interpreter's code with a write call (WRITES_CODE) and the file in a string that is
-// a path, the file's directory named (as written, `~`, $WB_HOME, `WB_HOME`) or the one it runs in.
+// too (Kernel.Gate's `writes`); or an interpreter's code with a write call (WRITES_CODE) and the
+// file in a string that is a path, the file's directory named (as written, `~`, $WB_HOME,
+// `WB_HOME`) or the one it runs in.
 // A word the mod can't resolve (another variable, a glob) is no write, and a mention never is: a
 // gh issue create whose heredoc named route-ok.json was refused as writing it (2026-11-24).
 export function writesTo(command: string, file: string, cwd: string, home: string, root: string): boolean {
@@ -1562,16 +1379,15 @@ export function writesTo(command: string, file: string, cwd: string, home: strin
   for (const run of runs(command)) {
     if (!run.fed) fedHere = here
     const at = run.fed ? fedHere : here
-    const i = commandAt(run.words)
-    const cmd = wordOf(run.words[i])
-    if (cmd === 'cd' || cmd === 'pushd') {
-      const to = cdTarget(run.words, i)
+    const cmd = run.gate.word
+    if (run.gate.gate === 'cd') {
+      const to = run.gate.args[0]
       const p = to === undefined ? home : to === '-' ? '' : resolve(to, at)
       if (run.fed) fedHere = p
       else here = p
       continue
     }
-    for (const t of targets(run)) {
+    for (const t of run.gate.writes) {
       const p = resolve(t.to, at)
       if (p === file || (p === dir && t.names.some(n => base(n) === name))) return true
     }
@@ -1754,8 +1570,9 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   return ''
 }
 
-// The file tools' path fields: an edit in a task's worktree is writing that task's code
-const EDIT_TOOLS: Record<string, string> = { Edit: 'file_path', MultiEdit: 'file_path', Write: 'file_path', NotebookEdit: 'notebook_path' }
+// The file tools' path fields: an edit in a task's worktree is writing that task's code (Kernel.Coding's
+// editTools, Claude Code's rows)
+const EDIT_FIELDS = editFields('claude-code')
 
 async function codingMode($: any): Promise<string> {
   try {
@@ -1865,7 +1682,7 @@ export function tasksNamed(command: string, cwd: string, roots: string[], homes:
 async function callRows($: any, e: Row): Promise<{ tasks: string[]; row: Row }> {
   const none = { tasks: [] as string[], row: {} }
   if (!mem.root) return none
-  const field = EDIT_TOOLS[e.tool]
+  const field = EDIT_FIELDS[e.tool]
   let tasks: string[] = [], row: Row
   if (field) {
     const path = e[field]
@@ -1915,22 +1732,21 @@ async function codingRefusal($: any, path: string): Promise<string> {
   const task = taskOfPath(path, mem.root)
   if (!task) return ''
   const mode = await codingMode($)
-  if (mode === 'decide') return ''
   const file = `${mem.root}/tasks/${task}/coding.json`
   let allowed: Row[] = []
   try {
-    allowed = JSON.parse(await $.fs.read(file)).allowed || []
+    const rows = JSON.parse(await $.fs.read(file)).allowed
+    allowed = Array.isArray(rows) ? rows.filter(x => x && typeof x === 'object') : []
   } catch {}
-  const open = allowed.find(x => !x.used)
-  if (open) {
+  // the rules are the kernel's (Kernel.Coding), so both hosts gate an edit alike
+  const { verdict, open } = codingGate({ mode, allowed: allowed.map(x => ({ used: !!x.used, when: !!x.when, started: !!x.started })) })
+  if (verdict === 'start') {
     // a one-task exception (#94) is under way from its first edit: the next hand-back spends it
-    if (open.when && !open.started) {
-      open.started = (await $.clock.now()) / 1000
-      await $.fs.write(file, JSON.stringify({ allowed })).catch(() => {})
-    }
-    return ''
+    allowed[open]!.started = (await $.clock.now()) / 1000
+    await $.fs.write(file, JSON.stringify({ allowed })).catch(() => {})
   }
-  if (mode === 'ask') {
+  if (verdict === 'pass' || verdict === 'start') return ''
+  if (verdict === 'ask') {
     if (!(await consent($, `Let Claude edit ${task}'s code now?`, CODING_ALLOW, "Don't", 'nothing was edited'))) return NOT_EDITED(task)
     await runWb($, ['coding', 'allow', task, `--said=${CODING_SAID}`], 15_000)
     return ''
@@ -3874,7 +3690,7 @@ export const register: Register = (on, options) => {
     const awayWhy = await awayRefusal($, String(e.tool))
     if (awayWhy) return { deny: awayWhy }
     // Claude coding (#92): Claude's own edit in a task's worktree waits for the user's choice
-    const field = EDIT_TOOLS[e.tool]
+    const field = EDIT_FIELDS[e.tool]
     const path = field ? (e as any)[field] : undefined
     if (typeof path === 'string') {
       const why = (await codingRefusal($, path)) || (await routesFileRefusal($, path))

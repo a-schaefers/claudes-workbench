@@ -59,6 +59,9 @@ STOPPED = ("stuck", "failed")
 # The open phases in the order a tally of them reads, the work under way first: the mod's pane
 # header and status line count by it, through the kernel's openCounts (#1325)
 OPEN_ORDER = ("running", "testing", "asking", "queued", "review", "stuck", "failed")
+# a run item's notices that still go to Claude (#1278): an ask_reviewer question needs an answer
+# only Claude has, and a check-in is the user's own request
+RUN_GLOBAL = ("question", "checkin")
 
 
 def parked(st: dict) -> bool:
@@ -91,6 +94,8 @@ PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_AUDIO", "WB_C
              "WB_SOURCE",
              # the roles (#1014), the user's file for agents (#1102)
              "WB_ROUTES", "WB_AGENTS_MD",
+             # deep workflows' flows and role cards (#1278): a run's driver starts items elsewhere
+             "WB_FLOWS", "WB_ROLES",
              # where OpenCode's global config (and, XDG_DATA_HOME, its sessions) are: relative,
              # wb start found the model and the runner, which runs elsewhere, didn't (#650)
              "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
@@ -1066,9 +1071,12 @@ def append_jsonl(path: Path, row: dict, after: float | None = None) -> dict:
 _results_seen: dict = {}  # path -> (inode, size, mtime_ns), rows: results() parses a file once
 
 
-def results(trials: bool = False) -> list[dict]:
+def results(trials: bool = False, reports: bool | None = None) -> list[dict]:
     """results.jsonl's rows: the evidence the router and the skill records learn from, which a
-    trial run (a check of workbench itself on a scratch repo) is not, unless asked for.
+    trial run (a check of workbench itself on a scratch repo) is not, unless asked for, nor a
+    report task's row (`report`, #1278: a finder's or a judge's, no coding step), unless
+    ``reports`` (by default as ``trials``: the money readers ask for every row, and a report
+    task's dollars were spent like any other's).
     The file is parsed again only when it changed (its inode, size or mtime): the router, the
     slice and `wb tune` asked for it per model, size and knob, and at 20,000 rows `wb models`
     read it 9 times (2.9 s) and `wb tune` 25 (7.8 s) (#727). Callers don't change the rows."""
@@ -1085,17 +1093,21 @@ def results(trials: bool = False) -> list[dict]:
         rows = read_jsonl(path)[0] if stamp else []
         _results_seen.clear()  # one file at a time: a test's WB_HOME, then the next one's
         _results_seen[path] = (stamp, rows)
-    return list(rows) if trials else [r for r in rows if not r.get("trial")]
+    reports = trials if reports is None else reports
+    return [r for r in rows if (trials or not r.get("trial")) and (reports or not r.get("report"))]
 
 
-def notices() -> list[dict]:
+def notices(runs: bool = False) -> list[dict]:
     """notify.jsonl's rows that are whole: a dict with a task's name, a kind and a time. One row
     without a `task` made every command that acknowledges raise (the 2026-11-16 audit, when the
-    agent's lane could still write the file), and a name like ../../x put the ack elsewhere."""
+    agent's lane could still write the file), and a name like ../../x put the ack elsewhere.
+    ``runs``: a run's notices too (#1278: `run` in a task's place), which every caller that indexes
+    `task` never asks for."""
     return [r for r in read_jsonl(home() / "notify.jsonl")[0]
-            if isinstance(r, dict) and isinstance(r.get("task"), str) and NAME_RE.match(r["task"])
-            and isinstance(r.get("kind"), str) and isinstance(r.get("ts"), (int, float))
-            and isinstance(r.get("text", ""), str)]
+            if isinstance(r, dict) and isinstance(r.get("kind"), str) and isinstance(r.get("ts"), (int, float))
+            and isinstance(r.get("text", ""), str)
+            and (isinstance(r.get("task"), str) and NAME_RE.match(r["task"])
+                 or runs and "task" not in r and isinstance(r.get("run"), str) and NAME_RE.match(r["run"]))]
 
 
 def newest_ts(path: Path) -> float:
@@ -1245,12 +1257,19 @@ class Task:
             acked = float((self.dir / "acked").read_text() or 0)
         except (OSError, ValueError):
             acked = 0.0
-        row = append_jsonl(home() / "notify.jsonl",
-                           {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
+        path = home() / "notify.jsonl"
+        if kind not in RUN_GLOBAL and self.spec.get("run"):
+            from . import runs  # only here: runs imports store
+            if runs.item_open(self.spec):  # #1278: an open run's item wakes its live driver, never Claude
+                path = runs.run_dir(self.spec["run"]) / "notify.jsonl"
+        row = append_jsonl(path, {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
                            after=acked if math.isfinite(acked) else 0.0)
         # each named task's newest notice, in its own directory: the mod's idle net read it from
         # notify.jsonl's last 1 MiB only, and after a reload woke Claude again for a review whose
-        # notice it had acknowledged, pushed out of that tail by later ones (#844)
+        # notice it had acknowledged, pushed out of that tail by later ones (#844). A run item's
+        # too, whose notice its driver acknowledges (runs._ack_items): with no mark the idle net
+        # read `acked` against the status written after the notice, and woke Claude a minute into
+        # each code item's review mid-run (the review of #1278, 2026-11-25)
         for name in dict.fromkeys([self.name, *(extra.get("tasks") or [])]):
             if not isinstance(name, str) or "/" in name or name.startswith("."):
                 continue  # a batch names tasks wb named: nothing outside tasks/

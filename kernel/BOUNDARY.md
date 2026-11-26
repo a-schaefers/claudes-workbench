@@ -13,7 +13,7 @@ A decision moves in only when all of these hold:
 - it is a state machine or a classifier with closed outcomes;
 - the need is cited (an issue, a drift found);
 - the host already reads its inputs;
-- it is not on the per-tool-call path, but for the gate classifier (*Rulings*).
+- it is not on the per-tool-call path, but for the gate classifier and the coding gate (*Rulings*).
 
 The same commit adds its row to `## Exports`, deletes what `replaces` names, and updates
 ARCHITECTURE.md's *Couplings*.
@@ -36,6 +36,9 @@ defined (`tests/test_kernel.py`).
 | `modesPlan` | Kernel.Mode | the sessions kept in workbench mode: whether this process's is, and the record to keep | mod/hooks/register.tsx:MODES_KEEP_MS | core.ts; register.tsx (`keepMode`, `modeKept`); the OpenCode plugin from #1312 |
 | `compactPlan` | Kernel.Mode | a task boundary: the mark kept, whether to read the context's usage now, and whether to compact | mod/hooks/register.tsx:COMPACT_AT | core.ts; register.tsx (`poll`, `compactAtBoundary`); the OpenCode plugin from #1315 (its compaction) |
 | `awayNow` | Kernel.Away | whether the user is away from the terminal: the web chat used lately, or one of the session's tasks open since | mod/hooks/register.tsx:AWAY_MS | core.ts; register.tsx; the OpenCode plugin from #1319 |
+| `gateOf` | Kernel.Gate | which gate one simple command meets: cd, a send, an outward gh or git form, a role change (route, start with a model, settings set) or none; whether it hands work out; what it writes | mod/hooks/register.tsx:commandAt, mod/hooks/register.tsx:RESERVED, mod/hooks/register.tsx:PREFIXES, mod/hooks/register.tsx:HANDS_OUT, mod/hooks/register.tsx:GH_WRITES, mod/hooks/register.tsx:GIT_VALUED, mod/hooks/register.tsx:apiWrites, mod/hooks/register.tsx:wordOf, mod/hooks/register.tsx:wbArgs, mod/hooks/register.tsx:sendsOut, mod/hooks/register.tsx:sendArgs, mod/hooks/register.tsx:cdTarget, mod/hooks/register.tsx:settingsSet, mod/hooks/register.tsx:COPIES, mod/hooks/register.tsx:COPY_VALUED, mod/hooks/register.tsx:targets | core.ts; register.tsx (delegates, runs, upstreamAim, sendQuestion, routeCalls, writesTo); the OpenCode plugin's shell gate from #1314 |
+| `codingGate` | Kernel.Coding | an edit of a task's code under the user's coding mode and the task's allowances: pass, start, ask, refuse | born:#1325 | core.ts; register.tsx (codingRefusal); OpenCode's edit gate |
+| `editTools` | Kernel.Coding | each host's file tools and the field that names the file | mod/hooks/register.tsx:EDIT_TOOLS | core.ts (editFields); register.tsx (codingRefusal's caller, callRows) |
 
 ## Modules
 
@@ -48,6 +51,8 @@ defined (`tests/test_kernel.py`).
 | Kernel.Away | `awayNow` |
 | Kernel.Notice | `noticesDue`, `noticePlan`, `rewakePlan` |
 | Kernel.Mode | `tellPlan`, `modesPlan`, `compactPlan` |
+| Kernel.Gate | `gateOf` (*The gate classifier*) |
+| Kernel.Coding | `codingGate`, `editTools` |
 
 ## Rulings
 
@@ -59,11 +64,17 @@ Final, from #1356's production plan (#1354), with the owner's ruling on the gate
   gate a shell command meets is a kernel decision, not host glue. One classifier over a parsed
   command, its argv words plus its redirect and `tee` targets, with closed outcomes; Claude Code
   feeds it shellparse's output, OpenCode its own scan of the command line. It is #1364's fix (a
-  command's words, never what its text mentions) and the shell gate #1314 uses. It is the one
-  decision on the per-tool-call path the entry test lets in. Parsing the command line stays in
-  each host, and so do the refusals' words and the dialog.
-- **Stays in TypeScript:** parsing a command line (shellparse's `simpleCommands`; OpenCode scans
-  its own), the mode's wording and `$` (its machine comes in: below), the web chat's asks (#1350-1352 delete most of them),
+  command's words, never what its text mentions) and the shell gate #1314 uses. It is one of the two
+  decisions on the per-tool-call path the entry test lets in (the coding gate, below, is the other). Parsing the command line stays in
+  each host, and so do the refusals' words and the dialog. Shipped as `gateOf` (#1325).
+- **The coding gate's rules come in** (#1325, Claude's recommendation, the owner's to overturn):
+  `codingGate` and each host's file tools (`editTools`). Finding the task from the path
+  (`taskOfPath`), reading `coding.json`, the dialog and `wb coding allow` stay in each host. The
+  mode machine and `compactPlan` came in by the same ruling (below); `taskParts` stays out.
+- **Stays in TypeScript:** parsing a command line (shellparse's `simpleCommands`, and `runs`:
+  `bash -c`, `eval` and what a shell is fed, read inside; OpenCode scans its own), reading an
+  interpreter's code (`spawns`, `OUTWARD_TEXT`, `ROUTE_TEXT`, `WRITES_CODE`: text), the paths a gate
+  resolves (`cd`'s, `-C`'s), the mode (wording and `$`), the web chat's asks (#1350-1352 delete most of them),
   formatting (`usd`, `providerWord`, `money`, `absolutePath`).
 - **Stays in wb:** routes, the settings offer, scout timing, the verdicts of record (`claim_ack`).
 - **Never in the kernel:** effects; parsing text (a command line, prompts, task.json); wording
@@ -93,19 +104,48 @@ Final, from #1356's production plan (#1354), with the owner's ruling on the gate
   rest of `workbenchMode` is effects (the pane, the listener claim), and `firstTask` parses text:
   both stay in the host. `taskParts` stays out (rendering).
 
+## The gate classifier
+
+`gateOf` (Kernel.Gate; `core.ts`: `gateOf(words, writes = [])`, its `gate` typed `GateName`) takes
+one simple command, as the host's parser read it: `words`, quotes undone, and `writes`, the files
+its redirects write (`>`, `>>`, `>|`, `&>`; a descriptor like `2>&1` is no file). A heredoc's body, a
+here-string and an interpreter's code are never words (#1364): the host passes only what the
+command runs. Out, every field always present:
+
+| field | what |
+| --- | --- |
+| `at`, `word` | the command's own word (past `VAR=x`, reserved words and the wrappers) and its name lowercased |
+| `gate` | closed: `cd`, `send`, `outward`, `route`, `start`, `settings`, or `""` |
+| `args` | `cd`: its target (none: home; `-`: the last directory); `send`: wb patch send's words; `route`, `start`, `settings`: the arguments `wb route --dry-run --json` takes (`--start …`, `--settings …`) |
+| `dirs` | `outward`: git's `-C` directories |
+| `delegates` | it hands work out (`wb start`, `next`, `feedback`, `steer`, `answer`, `resume`) |
+| `writes` | every file it writes: the redirects', tee's, dd's `of=`, a copy's destination with `names`, its sources |
+| `send` | `send`: `slug`, `title`/`titled`, `bodyFile`/`filed`, `draft`, `anyway`; `lack`: `slug`, `title`, `bodyFile`, `shell` (a `$` or backtick only the shell knows) or `""` |
+
+What a host does with each outcome, the same on both: follows `cd` from the session's directory
+(a fed shell's within it); gates `send` always, and `outward` when it runs in or names a gated
+directory or the upstream; refuses a `send` it can't show (`lack`, or inside text a shell is fed);
+dry-runs `route`, `start` and `settings` and asks on a gated change, one to a call, refusing one
+inside text a shell is fed; refuses a command that writes an approval file (`writes`). The OpenCode
+plugin's shell gate (#1314) feeds it its own scan's simple commands.
+
 ## Budget
 
 Raised only by an edit to this table that names the move.
 
 | budget | limit |
 | --- | --- |
-| exports | 12 |
+| exports | 16 |
 | kernel.js bytes | 65,536 |
 | kernel/src lines | 1,200 |
 | module lines | 350 |
 | core.ts lines | 250 |
 
 `kernel/src lines` and `module lines` leave out the generated Tables.
+
+Exports went from 12 to 16 with #1325's Notice and Mode moves (2026-11-25): the gate lane's three
+(`gateOf`, `codingGate`, `editTools`) and Phase, Owner, Away, Notice and Mode's ten beside `tables`
+came to 14.
 
 ## Wire types
 

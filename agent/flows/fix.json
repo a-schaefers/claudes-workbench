@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "name": "fix",
+  "description": "A fixer per finding, each with its regression test, a reviewer per fix with up to 2 refixes, then Claude reviews each",
+  "params": {"findings": "list"},
+  "stages": [
+    {"id": "code", "card": "fix", "items": "{params.findings}",
+     "prompt": "Fix this finding, with a regression test that fails before the fix:\n\n{item}\n\n{context}"},
+    {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 2},
+     "prompt": "Review this fix. The finding it fixes:\n{item}\n\nThe change:\n{diff}"},
+    {"id": "claude", "final": true, "from": "review"}
+  ]
+}

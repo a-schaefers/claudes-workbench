@@ -73,6 +73,12 @@ NO_CAP = "there is no API day cap (routes.json day_usd): ask the user for one (w
 # so the task stops as for NO_CAP, but saying so: NO_CAP's advice there brought up the dialog
 # "every role starts over on the GPU" for a cap that was set (wave 2's review)
 UNREADABLE = "routes.json can't be read ({why}), so the day cap can't be kept: wb route shows it"
+# The day cap's own refusal (`refusal`: at the cap, or within one request of it), and only it: the
+# one that clears at midnight. A run's driver tells it from wb start's other exit 3s by this, which
+# NO_CAP, NO_PRICE and UNREADABLE lack: matched on "day cap", a refusal that never clears was
+# tried again every tick of an --overnight run, a spec file and two journal rows each 30 s (the
+# review of #1278, 2026-11-25)
+RESETS = "it resets at local midnight"
 
 
 CATALOG, YOURS, PROVIDER = "catalog", "yours", "provider"  # a figure's basis (#1135)
@@ -369,6 +375,16 @@ def task_total(name: str) -> float:
     return round(sum(r["usd"] for r in _task_rows(name)), 10)
 
 
+def run_total(names) -> float:
+    """Everything the ledger books for a run's tasks (#1278), any day: one read of the ledger."""
+    want = set(names)
+    if not want:
+        return 0.0
+    rows, _ = store.read_jsonl(ledger_path())
+    return round(sum(r["usd"] for r in rows if isinstance(r, dict) and r.get("task") in want
+                     and r.get("kind") in ("step", "reconcile") and _num(r.get("usd"))), 10)
+
+
 def usd(x: float | None) -> str:
     """Every dollar figure wb prints: $5.00, $0.42; `<$0.01` under a cent, `$0` for none, and
     `unknown` for None. One rule here, the pane's and the chat's `usd` too: meter's "$5" and
@@ -506,11 +522,11 @@ def refusal(m, role: str | None = None, advice: bool = True, tokens: int = FIRST
     if cap() is None:
         return f"{who}: {no_cap()}"
     if (c := cap()) is not None and (t := today()["usd"]) >= c:
-        return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap (it resets at local "
-                f"midnight)" + (_ask(role, "a higher cap", task, asked) if advice else ""))
+        return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap ({RESETS})"
+                + (_ask(role, "a higher cap", task, asked) if advice else ""))
     if (w := request_floor(m, tokens)) and t + w > c:
         return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap, and one "
-                f"request on it can cost up to {usd(w)} (it resets at local midnight)"
+                f"request on it can cost up to {usd(w)} ({RESETS})"
                 + (_ask(role, f"a cap of at least {usd(_enough(t, w))}", task, asked) if advice else ""))
     return None
 

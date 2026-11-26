@@ -75,3 +75,24 @@ export const modesPlan = (modes: unknown, ids: Iterable<string>, now: number, on
 // A task boundary (Kernel.Mode): the mark kept, whether to read the context's usage now, and
 // whether it is far enough along to compact
 export const compactPlan = (facts: Parameters<typeof K.compactPlan>[0]): ReturnType<typeof K.compactPlan> => K.compactPlan(facts)
+
+// Which gate one simple command meets (Kernel.Gate, #1364, #1314): its words as the host's parser
+// read them (Claude Code's shellparse, OpenCode's own scan) and the files its redirects write in;
+// the command's own word, the gate (closed), what that gate needs (cd's target, the dry run's
+// arguments, git's -C, the send's arguments), whether it hands work out, and every file it writes
+export type GateName = '' | 'cd' | 'send' | 'outward' | 'route' | 'start' | 'settings'
+export type Gate = Omit<ReturnType<typeof K.gateOf>, 'gate'> & { readonly gate: GateName }
+export const gateOf = (words: ReadonlyArray<string>, writes: ReadonlyArray<string> = []): Gate =>
+  K.gateOf({ words, writes }) as Gate
+
+// The coding gate's rules (Kernel.Coding, #92): an edit of a task's code under the user's mode and
+// the task's allowances; `open`, the allowance a `start` stamps (-1 for none)
+export type CodingFacts = Parameters<typeof K.codingGate>[0]
+export type CodingVerdict = 'pass' | 'start' | 'ask' | 'refuse'
+export type Coding = Omit<ReturnType<typeof K.codingGate>, 'verdict'> & { readonly verdict: CodingVerdict }
+export const codingGate = (facts: CodingFacts): Coding => K.codingGate(facts) as Coding
+// A host's file tools, each with the field that names the file it writes (Kernel.Coding's editTools);
+// no prototype, so a tool named `constructor` finds no field
+export const editFields = (host: 'claude-code' | 'opencode'): Readonly<Record<string, string>> =>
+  Object.assign(Object.create(null),
+    Object.fromEntries(K.editTools.filter(t => t.host === host).map(t => [t.tool, t.field])))
