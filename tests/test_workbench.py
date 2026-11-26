@@ -31379,6 +31379,30 @@ class WebChat(Base):
         listening = self.call("/api/state", token=tok)[1]["listener"]
         self.assertEqual((listening["session"], listening["driver"]), ("s1", {"tool": "claude"}))
 
+    def test_an_opencode_listeners_own_report_reaches_the_agent_with_no_heartbeat_to_name_it(self):
+        # the #1366 review, 2026-11-25: an OpenCode claim without `driver`, which no fresh heartbeat
+        # listed (none written, one past 120 s, a session newer than its last beat), read as Claude
+        # Code's, and the listening session's own report went to the user alone: the agent's wait
+        # sat to its timeout. The caller's session matching the claim's is the listener all the same
+        from workbench import models
+        tok = self._agent()
+        me = os.getpid()
+        claim = {"session": "ses_oc1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)}
+        store.write_json(self.chat.chat_dir() / "listener.json", claim)
+        self.assertFalse(list(store.heartbeats()))
+        mid = self.call("/api/send", {"text": "refactor the parser"}, token=tok)[1]["message"]["id"]
+        self.chat.ack(mid, "ses_oc1")
+
+        def report(shell, text):
+            with mock.patch.dict(os.environ, shell):
+                r = self.chat.reply(text)
+            return r.get("re", []), r.get("to", ["user"])
+        self.assertEqual(report({"OPENCODE_SESSION_ID": "ses_oc2"}, "another OpenCode session's"), ([], ["user"]))
+        self.assertEqual(report({"OPENCODE_SESSION_ID": "ses_oc1"}, "On it."), ([mid], ["my-agent"]))
+        store.write_json(self.chat.chat_dir() / "listener.json", {**claim, "driver": "opencode"})
+        self.assertEqual(report({"CLAUDECODE": "1", "CLAUDE_PID": str(me)}, "Claude Code's own report."),
+                         ([], ["user"]))      # a claim that says its driver keeps Claude Code out too
+
     def test_ask_workbench_asks_a_wait_the_server_cut_again_and_names_after_only_at_the_deadline(self):
         # #1107: the server re-execs itself on a code change (a `wb update`), and a proxy in front
         # answers 502 meanwhile; the client ended at once, exit 1, with a bare error and no

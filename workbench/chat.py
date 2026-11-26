@@ -776,9 +776,15 @@ def _listens_across(lst: dict, sid: str) -> bool:
     Claude Code sessions: an OpenCode caller has no CLAUDE_PID to compare, and an OpenCode claim
     no `parent`. An OpenCode session (``sid``) listens when the claim is OpenCode's and its
     `session`, if it names one, is ``sid``; Claude Code (CLAUDE_PID) never does while OpenCode
-    listens; a caller of neither, unknown, does, as before."""
+    listens; a caller of neither, unknown, does, as before. A caller whose session is the claim's
+    `session` listens before any driver check: an OpenCode claim without `driver`, which no fresh
+    heartbeat lists (none written, one past 120 s, a session newer than its last beat), read as
+    Claude Code's, and the listener's own report missed the agent waiting on it (the #1366
+    review, 2026-11-25)."""
     if isinstance(lst.get("machine"), str) and lst["machine"] and lst["machine"] != store.machine():
         return False
+    if sid and lst.get("session") == sid:
+        return True
     if listener_driver(lst)["tool"] != "opencode":
         return False  # an OpenCode session's call while Claude Code listens
     if sid:

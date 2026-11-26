@@ -6548,8 +6548,8 @@ client; the server needs no browser.
 - **Send, then wait.** `wb chat reply` writes `re` (`--to`, else `chat.taken` for the listening
   session's own calls, `chat.caller_listens`: its `CLAUDE_PID` is listener.json's `parent`, either
   unknown counting as yes; when an OpenCode session calls or listens, `chat._listens_across`: an
-  OpenCode caller (`store.opencode_session`) listens only when the claim is OpenCode's
-  (`listener_driver`) and names its session (or none), Claude Code's (`CLAUDE_PID`) never while
+  OpenCode caller (`store.opencode_session`) listens when the claim names its session, else only
+  when the claim is OpenCode's (`listener_driver`) and names none, Claude Code's (`CLAUDE_PID`) never while
   OpenCode listens, a caller of neither still yes: with both drivers open the one not listening
   threaded its report onto the listener's message, #1363's matrix, #1366; another session's plain reply is the user's: its report went to the
   agent the listener was answering, pushed to no phone, #1129; the user's alone
@@ -6728,8 +6728,10 @@ client; the server needs no browser.
   `parent` its parent, the listening Claude Code, which `chat.caller_listens` checks against a
   `wb chat reply`'s `CLAUDE_PID`, #1129). An OpenCode session's claim (#1319's) names the
   listening OpenCode session's id as `session`, which `chat._listens_across` checks against a
-  caller's `OPENCODE_SESSION_ID`, and may say `driver: "opencode"` (or `{tool, model}`); without
-  it, a live heartbeat listing that session makes it OpenCode's (`chat.listener_driver`, #1366). Counts
+  caller's `OPENCODE_SESSION_ID` (a match is the listener before any driver check), and says
+  `driver: "opencode"` (or `{tool, model}`): without it, only a live heartbeat listing that session
+  makes it OpenCode's (`chat.listener_driver`, #1366), and none (no beat, one past 120 s, a session
+  newer than its last beat) reads as Claude Code's, which then counts as the listener too. Counts
   while its pid is this user's and started at `start` (`chat._alive` = `models._alive`: a root
   daemon on a recycled pid answered EPERM, #532), without a pid while its `ts` is under 15 s, and
   always when `machine` is another's (`chat.listener`, #922).
@@ -9662,7 +9664,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
 - **listener.json's `parent`** (the mod's `listen`) → `chat.caller_listens`; **a Claude row's `claude_pid`** (`chat.send`)
   → the mod's `owedAtTurnEnd` (#1129). **An OpenCode claim's `session` and `driver`** (the OpenCode plugin's
-  listener, #1319) → `chat.listener_driver`, `chat._listens_across` (the session is `OPENCODE_SESSION_ID`'s);
+  listener, #1319: it must say `driver: "opencode"`, and `session` is the listening session's `OPENCODE_SESSION_ID`,
+  not a server's, as a tool run in the server has none) → `chat.listener_driver`, `chat._listens_across`;
   **the driver's shape** (`{tool, model?}`, `chat.DRIVER_TOOLS`) → `chat.writer_driver`, `/api/health`,
   `ask_workbench.who` (`DRIVERS`), the MCP server, docs/chat-api.md's *The driver*, docs/chat-api.yaml's `Driver`.
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
