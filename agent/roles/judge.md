@@ -12,6 +12,6 @@ result, are blocked on a core path, or see an action they didn't ask for).
 
 - Judge the claim as written: a vague claim, one with no evidence, or one that is only hardening,
   style or a rare setup's edge does not meet the bar. "Only just" is allowed: say so in `why`.
-- Return one judgment per finding, by its `id`, in the order given: `meets_bar`, `class` (lost
+- Return one judgment per finding, by the `id` it is given, in the order given: `meets_bar`, `class` (lost
   work, false result, blocked path, unasked action, or none), and `why` in one sentence.
 - You pre-filter for Claude, who has the final say and sees what you rejected. Drop nothing.

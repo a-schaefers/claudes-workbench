@@ -9042,6 +9042,17 @@ so the layer's denies still come last. task.json `card` fixes the card at start.
 `items` or `from` (+ `split`), `keep`, `flow` pipeline|barrier, `batch`, `attempts`, `refix`, `on_failure`,
 `max_items` (`MAX_ITEMS` 200, the rest `not_run`, named), `claude`, `final`, and `prompt` (the item's spec, by
 default `{item}`; `runs.render` only substitutes, an object as fenced JSON, each place cut at `runs.CUTS`, said).
+Over a code stage (`runs.CODE_PLACES`) a report's prompt may carry `{diff}` and `{report}`: the reviewed round's
+report (`store.Task.report`: the coder's summary and test line, `runs._code_report`), so a review after a refix
+reads the coder's "done, or declined with why" (the shipped build, fix and best-of reviews carry it; #1134's
+study found reasoned declines asked again until `max` ran out). **A batch** (`batch` N): each member is
+`runs.member`, its key as `id` (an object's own `id` replaced, anything else under `item`), and its schema
+`runs.batch_schema`: the answer list (`runs.answers_key`, the first top-level array of objects requiring `id`)
+exactly N long, each `id` one of the batch's, written to `runs/<run>/schemas/<stage>-<n>.json` and passed as
+`--schema`, so an invented, missing or extra id gets the one repair round. A member still unanswered (a
+duplicate in its place) goes under `not_run` as `unjudged` (`runs.unanswered`); a batch's trail lists its
+members as its judge was given them, and a null batch names them (`members`). Before, lenses' and triage's
+judgments reached Claude without what they judged, by ids the judge invented, a skipped one gone.
 Refused: an unknown key or placeholder, a last stage that isn't `final`, and after a code stage anything but a
 report over its `{diff}`. Run names `runs.RUN_RE` (24), stage ids `STAGE_RE` (8): `<run>-<stage>-<n>` fits a task
 name, and the run a `--group`. A run and a task never share a name (`runs.taken`, `cmd_start`).
@@ -9276,7 +9287,7 @@ $WB_HOME (~/.local/state/workbench)
                                  why, pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
                                  budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|fed|amend|notice|resumed|reaped,
                                  stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), ok?}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
-                                 {key, input, result, task}; specs/<stage>-<n>.md (each item's spec); notify.jsonl (its items' notices, the driver's);
+                                 {key, input, result, task}; specs/<stage>-<n>.md (each item's spec); schemas/<stage>-<n>.json (a batch's schema, runs.batch_schema); notify.jsonl (its items' notices, the driver's);
                                  result.json (runs.report_of at the end); acked (its notices taken); driver.log
   runs/.archive/<run>/           a run closed ARCHIVE_DAYS, moved by gc (runs.archive)
   results.jsonl                  one row per closed task
