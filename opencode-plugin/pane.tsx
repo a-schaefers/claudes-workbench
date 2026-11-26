@@ -15,7 +15,7 @@
 //
 // The TUI part imports this only in setup (tui.ts), never at load: it imports OpenTUI and Solid,
 // which only OpenCode's TUI provides.
-import { createEffect, createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
+import { createEffect, createMemo, createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
 import { TextAttributes } from '@opentui/core'
 import { Apprentice, mountSplash, PANEL, replaySplash, type Panel, type SplashHost } from './splash.tsx'
 import { AGENT, WorkbenchPane, type Link, type Live, type PaneTask, type Tasks } from './pane.ts'
@@ -251,9 +251,12 @@ function Page(props: { readonly host: Host; readonly feed: Feed; readonly panel:
         <scrollbox flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" scrollbarOptions={{ visible: false }}>
           <Index each={history()}>
             {l => {
-              const r = lineRun(l())
-              return <text wrapMode={view() === 'diff' ? 'none' : 'word'} fg={colour(theme, r.fg)}>
-                <span style={{ bg: colour(theme, r.bg), attributes: attrs(r) }}>{r.text}</span>
+              // a memo, never a const: an Index row is made once for its index and only its item
+              // changes, so a line read once here kept the text it was first drawn with (#1472: `d`
+              // showed the transcript under the diff's separator, a 600-line tail froze, 2026-11-26)
+              const r = createMemo(() => lineRun(l()))
+              return <text wrapMode={view() === 'diff' ? 'none' : 'word'} fg={colour(theme, r().fg)}>
+                <span style={{ bg: colour(theme, r().bg), attributes: attrs(r()) }}>{r().text}</span>
               </text>
             }}
           </Index>

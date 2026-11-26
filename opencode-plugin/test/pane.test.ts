@@ -294,6 +294,23 @@ test('no pane module hands OpenCode a task\'s worktree: no location, move or vcs
   }
 })
 
+test('no Index row of the panel reads its item once at its top, so a row redraws when its line changes (#1472)', async () => {
+  // Solid makes an Index row once per index and changes only its item: a `const r = f(l())` at
+  // the row's top kept the first text, so `d` showed the transcript under the diff's separator
+  // and a 600-line tail froze (2026-11-26). Each row's body before its JSX may read the item only
+  // through a memo.
+  let rows = 0
+  for (const f of ['pane.tsx', 'splash.tsx']) {
+    const src = (await Bun.file(new URL(`../${f}`, import.meta.url)).text()).replace(/^\s*\/\/.*$/gm, '')
+    const stale = [...src.matchAll(/<Index each=\{[^\n]*\}>\s*\{\s*(\w+)\s*=>\s*\{([\s\S]*?)\breturn\b/g)].flatMap(m => {
+      rows++
+      return m[2]!.split('\n').filter(line => line.includes(`${m[1]}()`) && !line.includes('createMemo('))
+    })
+    expect([f, stale]).toEqual([f, []])
+  }
+  expect(rows > 0).toBe(true)  // the history's row is one: the scan finds what it checks
+})
+
 test('the panel\'s driver row says the session\'s model, its side and another pin, and offers OpenCode\'s own /models', () => {
   const text = (r: ReturnType<typeof driverRow>) => (r ?? []).map(x => x.text).join('')
   const api = { model: 'deepinfra/m', label: 'deepinfra/m#high', kind: 'api', pin: 'session' }

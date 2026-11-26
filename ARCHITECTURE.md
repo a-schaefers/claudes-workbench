@@ -8813,7 +8813,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     (`driverRow`; its press opens `/models`, *The driver*), the task rows (a press on a task's first line follows it, the mod's
     `followTask`), the separator (`── <task> · transcript ───`, a press or `d` switches to `diff`),
     the meta and routed lines, the history in a `scrollbox` with sticky scroll at the bottom (it
-    follows the end, stops while scrolled up and follows again at the bottom, #1332), the stage
+    follows the end, stops while scrolled up and follows again at the bottom, #1332; each row
+    reads its line through a memo, as an `Index` row is made once for its index: a row that read
+    it once kept its first text, the transcript under the diff's separator, a 600-line tail
+    frozen, #1472; the source scan in `pane.test.ts`), the stage
     (`Apprentice` in its pose, `frameOf`, the bubble from tasks.ts's `speechOf` with `WHO`), the cap
     row (`capRow`, `≈` on a catalog estimate as in the mod) and the modeline on the accent. The tail (`live`, or `diff`) runs every `TAIL_MS`
     2 s only while the page is drawn (closing the panel stops it, #1332); one loop, a press starts
