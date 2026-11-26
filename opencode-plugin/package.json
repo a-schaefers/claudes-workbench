@@ -22,6 +22,7 @@
     "agent.ts",
     "consent.ts",
     "consent-tui.ts",
+    "tools.ts",
     "gates.ts",
     "words.ts",
     "calls.ts",
