@@ -35356,6 +35356,10 @@ class RealOpenCodePlugin(Base):
         os.environ["HOME"] = str(self.root / "home")  # no routes.json of the user's
         state = self.root / "wb-state"
         state.mkdir()
+        # the plugin's wb runs on this WB_HOME, so the chat is off here too: off only in the test's,
+        # the prompt's `wb chat url` brought a chat server up that outlived the test (PR #1445's CI)
+        with mock.patch.dict(os.environ, {"WB_HOME": str(state)}):
+            chat.set_on(False)
         (state / "coding.json").write_text(json.dumps({"mode": "only"}))
         (state / "notes.md").write_text("- Always run the tests.\n")
         with socket.socket() as sock:
