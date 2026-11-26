@@ -41348,6 +41348,33 @@ class Routes(Base):
         self.assertEqual(roles["trivial"]["api_status"]["why"], "not in OpenCode's catalog now")
         self.assertEqual(roles["significant"]["api_status"]["why"], "not in OpenCode's catalog now")
 
+    def test_a_role_on_a_provider_with_no_key_names_the_missing_key_and_its_login_wherever_it_is_said(self):
+        # #1529 (the owner's scenario, 2026-11-26): OpenCode lists a provider's models only once
+        # it holds a key, so a role on Anthropic with no Anthropic key read "not in OpenCode's
+        # catalog now" on every surface, a retired id to Claude, who offered another model
+        self.route("significant", "anthropic/claude-haiku-5-5", "--day-usd", "5")
+        os.environ["WB_FAKE_API"] = "anthropic=nokey"
+        runner.models.hosted(fresh=True)
+        self.assertIsNone(runner.models.lookup("anthropic/claude-haiku-5-5"))
+        note = ("OpenCode lists a provider's models only once it holds its key, and it holds none for "
+                "anthropic: run `opencode auth login anthropic` in a terminal and add it, or check the id")
+        login = f"not in OpenCode's catalog now: {note}"
+        self.assertIn(f"significant  API anthropic/claude-haiku-5-5 (anthropic) ({login})", self.route()[1])
+        roles = json.loads(self.route("--json")[1])["roles"]
+        self.assertEqual(roles["significant"]["api_status"]["why"], login)
+        self.assertEqual(self.route("trivial", "anthropic/claude-haiku-5-5")[::2],
+                         (3, f"wb: {cli.ROUTE_CATALOG}; {note}\n"))
+        self.assertIn(f"significant  anthropic/claude-haiku-5-5  {login}", run_wb("models"))
+        self.assertIn("OpenCode lists a provider's models only once it holds a key (`opencode auth login "
+                      "<provider>` in a terminal adds one)", run_wb("models", "--api", "claude"))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as out, redirect_stderr(err):
+            run_wb("start", "t-nokey", "--spec", str(self.spec), "--repo", str(self.repo), "--role", "significant")
+        self.assertEqual(out.exception.code, 3)
+        self.assertIn(f"significant role: anthropic/claude-haiku-5-5 can't run: {login}. Ask the user", err.getvalue())
+        # a provider with a key whose id the catalog dropped is still the id's miss, not a key's
+        self.assertEqual(runner.models.unlisted_why("deepseek/deepseek-gone"), "not in OpenCode's catalog now")
+
     def test_a_provider_connected_after_the_catalog_was_read_can_be_routed_and_listed(self):
         # #1076: wb route and wb models --api read plain hosted(), so a provider connected after
         # any wb command read "not in OpenCode's catalog" for HOSTED_TTL (/connect changes no stamp)
@@ -51037,7 +51064,8 @@ class ApiCompat(Base):
                     writing={"via": "gpu", "api": "acme/coder-pro"})
         out = run_wb("models")
         self.assertIn("significant  oauthco/chat-1  can't run: needs a key wb can hold outside the lane", out)
-        self.assertIn("trivial      gone/x  not in OpenCode's catalog now", out)
+        self.assertIn("trivial      gone/x  not in OpenCode's catalog now: OpenCode lists a provider's models only "
+                      "once it holds its key, and it holds none for gone", out)  # #1529
         self.assertIn("writing      gpu (the router's pick above) · API kept: acme/coder-pro", out)
         Path(os.environ["WB_ROUTES"]).write_text("{not json")
         self.assertIn("roles: routes.json can't be read", run_wb("models"))

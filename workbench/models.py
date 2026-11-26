@@ -974,6 +974,51 @@ def lookup(model_id: str, cached: bool = False) -> Model | None:
     return _hosted_exact(model_id)
 
 
+UNLISTED = "not in OpenCode's catalog now"
+
+
+def keyless_provider(model_id: str) -> str:
+    """The provider of an API id the catalog doesn't list when OpenCode holds no key for it (no
+    catalog row and no `auth list` row of it: hosted.json's `known`), else "". OpenCode's
+    model.list lists only providers that can authenticate, so a role on Anthropic with only a
+    DeepInfra key read "not in OpenCode's catalog now" on every surface, a retired or mistyped
+    id to Claude, who offered another provider's model, never `opencode auth login` (#1529,
+    2026-11-26). hosted.json as it is, never an OpenCode start: the pane's cached reads call it
+    too. Never a provider of this machine's (the GPU side) nor one the config leaves unloaded,
+    nor after a failed read."""
+    doc = _read_hosted()
+    pid, _, name = (model_id or "").partition("/")
+    known = doc.get("known")
+    if not name or doc.get("error") or not isinstance(known, list) or pid in known \
+            or pid in _dict(doc.get("providers")):
+        return ""
+    try:
+        cfg = read_config()
+        gpu = _sides(cfg, _overrides())[0]
+    except (RuntimeError, OSError):
+        return ""
+    enabled = cfg.get("enabled_providers")
+    if pid in gpu or pid in (cfg.get("disabled_providers") or []) or (enabled and pid not in enabled):
+        return ""
+    return pid
+
+
+def no_key_note(pid: str) -> str:
+    """keyless_provider's fix: the catalog can't tell a provider with no key from a mistyped one
+    (#1529), so the id is named for a check too."""
+    from . import keyhole  # keyhole imports this module lazily too
+    return (f"OpenCode lists a provider's models only once it holds its key, and it holds none for "
+            f"{pid}: run `{keyhole.login(pid)}` in a terminal and add it, or check the id")
+
+
+def unlisted_why(model_id: str) -> str:
+    """Why an API id a lookup missed can't run: UNLISTED, with its read's failure, or with the
+    missing key's fix (keyless_provider, #1529)."""
+    if err := hosted_error():
+        return f"{UNLISTED} (its read failed: {err})"
+    return f"{UNLISTED}: {no_key_note(pid)}" if (pid := keyless_provider(model_id)) else UNLISTED
+
+
 def gpu_side(model_id: str) -> bool:
     """Whether an id is the GPU side's whether or not discover() still lists it: its provider is
     configured on this machine (or opted in) and its name is no Ollama cloud name. hosted() never
@@ -1464,7 +1509,13 @@ def _build_hosted() -> dict:
         return provs[pid]
 
     data = listed.get("data") if isinstance(listed, dict) else listed
-    for e in data if isinstance(data, list) else []:
+    data = data if isinstance(data, list) else []
+    # the providers `auth list` or the catalog names, whether hosted() lists them or not (a
+    # server OpenCode found on this machine): what tells a provider OpenCode holds no key for
+    # from an id the catalog dropped (keyless_provider, #1529)
+    doc["known"] = sorted({*auth, *(e["providerID"] for e in data
+                                    if isinstance(e, dict) and isinstance(e.get("providerID"), str))})
+    for e in data:
         if not (isinstance(e, dict) and isinstance(e.get("providerID"), str) and isinstance(e.get("id"), str)):
             continue
         pid = e["providerID"]

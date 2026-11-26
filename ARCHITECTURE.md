@@ -4830,7 +4830,8 @@ API; a GPU-only user's section reads hosted.json as it is, never rebuilt, so `wb
 did before API models (#1026's review: 4 s on a slow read, every `HOSTED_TTL`), and with no hosted.json
 yet says `catalog: not read yet (wb models --api <text> reads it)`. Each role (`significant`,
 `trivial`, `writing`, from `routes.read`, where each runs by `routes.effective_via`): `gpu (the router's pick above)` or its pinned GPU id, `· API kept: <id>` when one is stored; an
-API role its id, `ready` or status's `why` (or `not in OpenCode's catalog now`), `· thinking off|on`,
+API role its id, `ready` or status's `why` (or `models.unlisted_why`: `not in OpenCode's catalog now`, with a
+provider's missing key named, #1529), `· thinking off|on`,
 `· set by you MM-DD` (`_set_on`: none for a `ts` that isn't a time, a hand-edited 1e20 or NaN), and
 under it the model's `slice:` (`router.slice`, as `wb start` prints it: plan mode sizes a step to it
 before any start, #1131); a
@@ -4846,7 +4847,9 @@ role is on API or a key is stored; otherwise it dies as before. `--api TEXT` (`_
 catalog ids containing TEXT (any case), sorted, at most `API_LIST_MAX` 30, each with the catalog's own window (`catalog_limit`),
 `$in/$out per 1M in/out` (the catalog's rate, or the user's once `wb model price` set them, #1135; none for a 0 entry, `plan usage` for a plan's, #1396) from its first untiered price, the free note and ` · no tool calls` when the catalog says it has none (`tool_call` false: the first run's free pick, #1193), then `and N more: a longer
 text narrows it`; nothing matching reads the catalog again once when `models.miss_rereads()` (as
-`_hosted_exact`: a just-connected provider, #1076); it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
+`_hosted_exact`: a just-connected provider, #1076), and still nothing says `wb models counts them per provider;
+OpenCode lists a provider's models only once it holds a key (`` `opencode auth login <provider>` `` in a terminal
+adds one)` (#1529); it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
 `discover()`): never an API model as OpenCode's default.
 
 **The slice** (`router.slice(m)`), one per model whatever the role (writing slices like
@@ -5295,7 +5298,12 @@ longer found exits 3, never the router's other pick nor a model its id is a frag
 `API <id> (<provider>) · thinking off` (what the model does with it: `routes.thinking_said`, *What a role's thinking does*; `thinking: review only` with `thinking_review` on, #1059, also after a GPU role's `API kept`), `API kept: <id>`, `set by you|Claude|the driver|an agent MM-DD` (`cli._by_word`): on API from
 `by`/`ts`, who sent its code there, which a GPU pin since never replaces; on the GPU the newer of
 `by`/`ts` and `gpu_by`/`gpu_ts`,
-`(not in OpenCode's catalog now)` for an API model the catalog no longer lists; no prices note after it, #1322) and the cap,
+`(not in OpenCode's catalog now)` for an API model the catalog no longer lists (`models.unlisted_why`: for a
+provider OpenCode holds no key for, `models.keyless_provider`, `: OpenCode lists a provider's models only once it
+holds its key, and it holds none for <pid>: run `` `opencode auth login <pid>` `` in a terminal and add it, or
+check the id` after it, `models.no_key_note`, which `routes.resolve`'s can't-run line, `api_status`'s why and
+`wb models` say too: the catalog lists only providers that can authenticate, so a role on a provider with no
+key read as a retired id, #1529); no prices note after it, #1322) and the cap,
 under a first line while Agents isn't Both (`cli._agents_line`: `Agents: GPU (every role runs on the
 GPU; wb route all both goes back to each role's own below)`); `--json` the normalized document (its
 `use` and `busy` too) plus `summary`, per role `thinks` (from the cached catalog),
@@ -5339,7 +5347,8 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   with no key stored, `models.keyless_free`, run with Zen's own `public` through the keyhole,
   #1193: the try with no GPU and no key; judged on the model read again
   after `status`, whose fresh key check may have written a key stored since back, #1388), else refused with discovery's why (`cli._route_api`): `not in
-  OpenCode's catalog: wb models lists the API models`, a GPU id (`… is a GPU model: wb route <role>
+  OpenCode's catalog: wb models lists the API models` (`cli._catalog_miss`; for a provider OpenCode holds no key
+  for, `; ` and `models.no_key_note` after it, #1529), a GPU id (`… is a GPU model: wb route <role>
   --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run `` `opencode auth
   login <p>` `` in a terminal and add it`, said once; a configured provider on another host of the LAN, not opted in, gets its
   `local: true` hint instead, of that or of the keyhole's refusal of its `npm` package (#1066), `provider <p>: <host> isn't this machine; …`, #1109: `cli._off_lan`,
@@ -7508,7 +7517,8 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   `/models`), the GPU models, then the API models (`_api_stops`, each saying where the
   conversation goes), the pin added when not listed; without it an info row, `Claude Code
   (fixed)` (`settings.DRIVER_CLAUDE`);
-  `role-<significant|trivial|writing>` → `wb route <role> gpu|api`; `coding` → `wb coding
+  `role-<significant|trivial|writing>` → `wb route <role> gpu|api` (a role on API whose `api_status` says
+  it can't run says `<Label> can't run on <id>: <why>.`, #1529); `coding` → `wb coding
   only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`;
   `progress` → `wb progress on|off` (On names an `--after` threshold). *web* (the web app's own, "Web
   app" on the page and in `wb settings`, #1355): `reach` ("Web app reach", phone reach) → `wb chat reach local|tailnet` (`REACH`; a bind of the user's own reads
@@ -9924,7 +9934,8 @@ $WB_HOME (~/.local/state/workbench)
                                  models._api_model, #1192, #1387)}}, models: {<id>: {name (at the provider: modelID), limit, cost, variants,
                                  capabilities, reasoning, tool_call, family, status, free, cloud?, and from the catalog (catalog: true)
                                  type, title, released (ms), compatibility, package, api, overlay (bool: headers or a body of its own,
-                                 never their values): what models.catalog_doc rebuilds the task's catalog from, #1015}}}; fresh HOSTED_TTL 600 s
+                                 never their values): what models.catalog_doc rebuilds the task's catalog from, #1015}}}, known ([<pid>…]: the
+                                 providers `auth list` or the catalog names, in providers or not: models.keyless_provider, #1529); fresh HOSTED_TTL 600 s
                                  (an error DOWN_SECS), rebuilt on a changed stamp; never holds a key
   api-health.json  .lock         each API provider's last bad answer (models.note_api): {<pid>: {state: no_credit|rate_limited|
                                  unreachable, until (epoch; a null from before #1068 reads as ts + CREDIT_RECHECK_SECS), why (redacted), ts,
