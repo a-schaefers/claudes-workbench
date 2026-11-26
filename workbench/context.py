@@ -684,6 +684,23 @@ def allow_always(key: str, items: list[str]) -> None:
         conf[key] = have + [x for x in items if x not in have]
 
 
+def with_repo_test(standing: str | None, test: str | None) -> str | None:
+    """The acceptance command a task runs: commands.json `repos.<path>.test`, the repo's standing
+    one (a team's lint and format, which NO_HOOKS keeps from running as a pre-commit hook), then
+    the task's own --test, both to pass (#1295, P2). One whose every simple command --test already
+runs isn't run twice (`make` before `make test` is); a part
+    a shell would split otherwise (`;`, a newline, `||`, a lone `&`) goes in parentheses."""
+    standing = (standing or "").strip()
+    if not standing:
+        return test
+    if not (test or "").strip():
+        return standing
+    if all(c in _simple_commands(test) for c in _simple_commands(standing)):  # --test runs it already
+        return test
+    wrap = lambda c: f"({c})" if re.search(r"[;\n]|\|\||(?<!&)&(?!&)", c) else c  # noqa: E731
+    return f"{wrap(standing)} && {wrap(test.strip())}"
+
+
 def commands_conf() -> dict:
     """commands.json, checked: a file that doesn't parse, or an `allow`, `paths` or `env` that
     isn't a list of strings, is refused, not read as {} (the 2026-11-16 audit: a trailing comma
@@ -732,6 +749,14 @@ def commands_conf() -> dict:
                                '(true: API models never get this repo)')
         if why := mcp_list_refusal(v.get("mcp")):
             raise RuntimeError(f'{path}: "repos" → {repo!r}: {why}')
+        # the repo's standing acceptance command and the skills every task there gets (#1295, P2)
+        if "test" in v and not (isinstance(v["test"], str) and v["test"].strip()):
+            raise RuntimeError(f'{path}: "repos" → {repo!r}: "test" is a command, e.g. "make lint", '
+                               'run with every task\'s tests')
+        if "skills" in v and not (isinstance(v["skills"], list) and all(
+                isinstance(x, str) and skills.NAME.match(x) for x in v["skills"])):
+            raise RuntimeError(f'{path}: "repos" → {repo!r}: "skills" is a list of the skill '
+                               'library\'s names, e.g. ["django-style"]')
     return conf
 
 
@@ -3986,29 +4011,15 @@ FIXED_SHARE = 0.4
 
 
 def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
-    """About how many tokens the agent reads before its first step (OpenCode's own prompt, the
-    instruction files, AGENTS.md, round 1's prompt), and each part's, largest first. A 25 KB
-    CLAUDE.md on a 32K window started the agent near its handover point, and it looped between
-    reading and handovers (the 2026-11-19 audit)."""
-    files, _ = instruction_files(task)
-    rules = rules_dir(task)
-    # at wb start the runner has yet to check the worktree out (#529): the checkout stands in
-    wt = task.worktree if task.worktree.is_dir() else Path(task.spec["repo"])
-    named = {rules / "HANDBOOK.md": "the handbook", rules / "AGENTS.md": f"~/{USER_AGENTS_MD}"}
-    paths = [*files, task.round_dir(1) / "prompt.md"]  # AGENTS.md among the files (#994)
-    parts = [("OpenCode's own prompt and tools", OPENCODE_BASE_TOKENS)]
-    for p in paths:
-        try:
-            n = p.stat().st_size // CHARS_PER_TOKEN
-        except OSError:
-            continue
-        if p.is_relative_to(rules / "project-rules"):
-            named[p] = f".claude/rules/{p.relative_to(rules / 'project-rules')}"
-        elif p.is_relative_to(rules / "checkout"):  # an API task's copy (#1091)
-            named[p] = str(p.relative_to(rules / "checkout"))
-        label = named.get(p) or ("the spec" if p.name == "prompt.md" else
-                                 str(p.relative_to(wt)) if p.is_relative_to(wt) else p.name)
-        parts.append((label, n))
+    """About how many tokens the agent reads before its first step, and each part's, largest
+    first: what agent_setup says reaches its prompt (OpenCode's own prompt and tools, the
+    instruction files, OpenCode's global AGENTS.md and `instructions`, the skills and references
+    listed, round 1's prompt). A 25 KB CLAUDE.md on a 32K window started the agent near its
+    handover point, and it looped between reading and handovers (the 2026-11-19 audit); and what
+    the user's global OpenCode setup added (its AGENTS.md, skills, instructions) went uncounted,
+    so a 32K window was judged on part of its load (#1295, P1)."""
+    parts = [(it["name"], it["bytes"] // CHARS_PER_TOKEN) for it in agent_setup(task)
+             if it["state"] == "reaches" and it["prompt"] and it["bytes"]]
     parts.sort(key=lambda x: -x[1])
     return sum(n for _, n in parts), parts
 
@@ -4032,15 +4043,411 @@ def denied_skills(extra: list[str] | None = None, project: list[Path] | None = N
     return sorted(names | {"workbench", *(extra or [])})
 
 
+# What reaches an agent, from where (#1295, P1): agent_setup's states. `reaches`: the agent's
+# OpenCode loads it (in the prompt, or run beside it); `dropped`: wb leaves it out; `denied`: a
+# rule refuses it (a skill by name, an MCP server stubbed, the driver's own plugin removed).
+SETUP_STATES = ("reaches", "dropped", "denied")
+# What OpenCode puts around each skill and reference it lists in the system prompt (2.4's
+# skill/instructions.ts, reference/instructions.ts): an entry's tags, and the references' lead
+# (the skills' lead is in OPENCODE_BASE_TOKENS: it is there with no skill too)
+SKILL_TAGS = len("  <skill>\n    <id></id>\n    <name></name>\n    <description></description>\n  </skill>\n")
+REFERENCE_TAGS = len("  <reference>\n    <name></name>\n    <path></path>\n"
+                     "    <description></description>\n  </reference>\n")
+REFERENCES_LEAD = len("Project references provide additional directories that can be accessed when "
+                      "relevant.\n<available_references>\n</available_references>\n")
+# a plugin's tools, as its source names them: a V2 plugin's `editor.add({ name: "x", … })` in its
+# tool transform, or the `tool()` helper's `x: tool({…})`
+PLUGIN_TOOL = re.compile(r"""\badd\(\s*\{\s*name\s*:\s*["']([\w-]+)["']|["']?([A-Za-z_][\w-]*)["']?\s*:\s*tool\s*\(""")
+PLUGIN_SOURCES = (".ts", ".js")  # what OpenCode loads from a plugins directory (source-directory.ts)
+
+
+def _setup_item(kind: str, name: str, path, state: str, size: int | None, why: str,
+                prompt: bool = True, **more) -> dict:
+    return {"kind": kind, "name": name, "path": str(path or ""), "state": state, "bytes": size,
+            "prompt": prompt, "why": why, **more}
+
+
+def _size(p) -> int | None:
+    try:
+        return Path(p).stat().st_size
+    except OSError:
+        return None
+
+
+def home_short(p) -> str:
+    """A path with the home directory as `~`."""
+    s, h = str(p), str(Path.home())
+    return "~" + s[len(h):] if s == h or s.startswith(h.rstrip(os.sep) + os.sep) else s
+
+
+def opencode_dirs() -> list[Path]:
+    """The config directories the agent's OpenCode reads skills and plugins from: the system's,
+    the global one ($XDG_CONFIG_HOME/opencode) and $OPENCODE_CONFIG_DIR's (OpenCode 2.4's
+    config/discovery.ts; the project's are off, PROJECT_CONFIG_OFF)."""
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+    out = [models._system_dir(), xdg]
+    if os.environ.get("OPENCODE_CONFIG_DIR"):
+        out.append(models._config_dir())
+    return list(dict.fromkeys(out))
+
+
+def _home_lane() -> list[tuple[str, str]]:
+    """The part of every task's read lane that bears on the user's own files, as read_rules
+    gives it (the last match wins): the home directory hidden but its dotfiles, and secrets and
+    workbench's own hidden in them."""
+    home = Path.home()
+    try:
+        dots = [str(d) for d in home.iterdir() if d.name.startswith(".")]
+    except OSError:
+        dots = []
+    return [("deny", os.path.realpath(home)), *(("allow", os.path.realpath(d)) for d in dots),
+            *(("deny", h) for h in sorted(secret_paths() | private_paths()))]
+
+
+def _read_lane(task: store.Task | None):
+    """Whether the agent's lane reads a path, as a function of it: True for all with no lane.
+    The home's part first (_home_lane), then, for what that hides, the task's own lane
+    (read_rules: its repo, its skills, its tools' roots), walked only then: the walk makes the
+    lane's directories, and wb start counts the prompt before the runner starts."""
+    if not lane.held() or not lane_on():
+        return lambda path: True
+    home, full = _home_lane(), []
+
+    def reads(path) -> bool:
+        if _lane_reads(path, home) or task is None:
+            return _lane_reads(path, home)
+        if not full:
+            full.append(read_rules(task))
+        return _lane_reads(path, full[0])
+    return reads
+
+
+def _lane_reads(path, rules: list[tuple[str, str]] | None) -> bool:
+    """Whether the read lane ``rules`` (read_rules' shape) lets the agent's OpenCode read
+    ``path``: a global instruction file in ~/notes, outside the dotfiles, never reached it
+    (#1295, P1)."""
+    if rules is None:
+        return True
+    real, ok = os.path.realpath(path), True
+    for verdict, at in rules:
+        if real == at or _under(real, at):
+            ok = verdict == "allow"
+    return ok
+
+
+UNREAD = "the agent's lane doesn't read it (outside the home's dotfiles): OpenCode skips it"
+
+
+def _skill_items(root: Path, whose: str, denied: set[str], seen: set[str],
+                 every: bool = False, reads=lambda p: True) -> list[dict]:
+    """Each SKILL.md under ``root``, as OpenCode lists it: reaches unless its name is denied
+    (``every``: all of them are, Claude's and the cross-tool ones, denied_skills)."""
+    out = []
+    found, real = [], set()
+    # through links, as OpenCode scans (a skill linked in, `wb setup`'s own), each directory once
+    for d, dirs, files in os.walk(root, followlinks=True) if root.is_dir() else ():
+        if (r := os.path.realpath(d)) in real:
+            dirs[:] = []
+            continue
+        real.add(r)
+        dirs[:] = sorted(n for n in dirs if not n.startswith(".") and n != "node_modules")
+        found += [Path(d) / "SKILL.md"] if "SKILL.md" in files else []
+    for md in found:
+        try:
+            meta = skills.parse(md)
+        except (OSError, UnicodeDecodeError):
+            continue
+        name = str(meta.get("name") or md.parent.name)
+        desc = str(meta.get("description") or "")
+        if not every and not reads(md):
+            out.append(_setup_item("skills", f"skill {name}", md.parent, "dropped", 0,
+                                   f"{whose}: {UNREAD}", prompt=False))
+        elif every or name in denied:
+            if f"-{name}" in seen:  # one line a name, a synced copy beside the skill too
+                continue
+            seen.add(f"-{name}")
+            out.append(_setup_item("skills", f"skill {name}", md.parent, "denied", 0,
+                                   f"{whose}: denied by name (denied_skills)", prompt=False))
+        elif name not in seen:
+            seen.add(name)
+            out.append(_setup_item("skills", f"skill {name}", md.parent, "reaches",
+                                   SKILL_TAGS + 2 * len(name) + len(desc),
+                                   f"{whose}: OpenCode lists it by its name and description"))
+    return out
+
+
+def _plugin_item(spec: str, source: Path | None, where: str, reads=lambda p: True) -> dict:
+    """A plugin the agent's OpenCode loads: a local file's tools read from its source."""
+    if source is not None and not reads(source):
+        return _setup_item("plugins", f"plugin {spec}", source, "dropped", 0, f"{where}: {UNREAD}",
+                           prompt=False, tools=[])
+    tools = None
+    if source is not None and source.is_file():
+        try:
+            tools = sorted({a or b for a, b in PLUGIN_TOOL.findall(source.read_text(errors="replace"))})
+        except OSError:
+            tools = None
+    say = (f"its tools {', '.join(tools)} go into every request, allowed (the user's own)" if tools
+           else "it runs in the agent's OpenCode, in the lane" if tools is not None
+           else "it runs in the agent's OpenCode, in the lane; its tools are known once it loads")
+    return _setup_item("plugins", f"plugin {spec}", source or "", "reaches", None,
+                       f"{say} ({where})", prompt=bool(tools), tools=tools or [])
+
+
+def agent_setup(task: store.Task | None = None) -> list[dict]:
+    """What wb's agents get, each source with its path, state (SETUP_STATES) and prompt bytes
+    (None when only a run says: a fetched URL, a plugin's tools): OpenCode's own prompt, wb's
+    handbook, the user's AGENTS.md, the project's files (with ``task``), OpenCode's global AGENTS.md,
+    `instructions`, skills, `references`, plugins and their tools, `formatter` and `lsp`, MCP
+    servers, the system config (/etc/opencode), the skill library, and what is kept out. Each a
+    dict {kind, name, path, state, bytes, prompt, why} (`prompt`: it puts text or tools in every
+    request; `tools` for a plugin). What a customizer set up reached agents unseen, counted
+    nowhere: OpenCode's global skills, AGENTS.md and `instructions`, a plugin's tools (#1295, P1).
+    wb doctor and the web app's Settings show it; fixed_prompt sums it."""
+    out: list[dict] = []
+    add = out.append
+    reads = _read_lane(task)
+    add(_setup_item("opencode", "OpenCode's own prompt and tools", "", "reaches",
+                    OPENCODE_BASE_TOKENS * CHARS_PER_TOKEN,
+                    "its system prompt and the tools DENIED_TOOLS leaves, measured"))
+    # wb's own and the project's: the task's instruction files, as the layer hands them
+    if task is not None:
+        files, nested = instruction_files(task)
+        rules = rules_dir(task)
+        wt = task.worktree if task.worktree.is_dir() else Path(task.spec["repo"])
+        named = {rules / "HANDBOOK.md": "the handbook", rules / "AGENTS.md": f"~/{USER_AGENTS_MD}"}
+        for f in files:
+            if f.is_relative_to(rules / "project-rules"):
+                label = f".claude/rules/{f.relative_to(rules / 'project-rules')}"
+            elif f.is_relative_to(rules / "checkout"):  # an API task's copy (#1091)
+                label = str(f.relative_to(rules / "checkout"))
+            else:
+                label = named.get(f) or (str(f.relative_to(wt)) if f.is_relative_to(wt) else f.name)
+            add(_setup_item("instructions", label, f, "reaches", _size(f),
+                            "wb's" if label == "the handbook" else
+                            "yours, copied for the lane" if f == rules / "AGENTS.md" else
+                            "the project's, handed back in the layer"))
+        if nested:
+            add(_setup_item("instructions", "context.md", task.dir / "context.md", "reaches",
+                            len(_map_text(nested).encode()), "the map of nested CLAUDE.md and AGENTS.md"))
+        add(_setup_item("task", "the spec", task.round_dir(1) / "prompt.md", "reaches",
+                        _size(task.round_dir(1) / "prompt.md"), "round 1's prompt: the spec and PROTOCOL"))
+    else:
+        add(_setup_item("instructions", "the handbook", HANDBOOK, "reaches", _size(HANDBOOK), "wb's"))
+        if (mine := user_agents_md()).is_file():
+            add(_setup_item("instructions", f"~/{USER_AGENTS_MD}", mine, "reaches", _size(mine),
+                            "yours, for every agent"))
+        add(_setup_item("project", "the project's files", "", "reaches", None,
+                        "CLAUDE.md, AGENTS.md, .claude/rules and their imports: counted per task "
+                        "(wb start)", prompt=False))
+    # OpenCode's own reading, which wb leaves on: the global AGENTS.md; Claude's stays off
+    oc_home = opencode_dirs()[1]
+    if (g := oc_home / "AGENTS.md").is_file():
+        add(_setup_item("instructions", home_short(g), g, "reaches", _size(g),
+                        "OpenCode's global instructions: it loads them itself"))
+    if (c := Path.home() / ".claude" / "CLAUDE.md").is_file():
+        add(_setup_item("instructions", "~/.claude/CLAUDE.md", c, "dropped", 0,
+                        "Claude's, not the agents' (#1061: OPENCODE_DISABLE_CLAUDE_CODE_PROMPT)",
+                        prompt=False))
+    # the config files the agent's OpenCode layers under the task's layer, and the user's
+    # OPENCODE_CONFIG_CONTENT as rules_env keeps it (the layer's keys but `plugins` dropped)
+    users_file = models._users_config()
+    try:
+        docs = [(path, doc) for path, doc in models._layers() if path != users_file]
+    except RuntimeError as e:
+        docs = []
+        add(_setup_item("config", "OpenCode's config", "", "dropped", 0, str(e), prompt=False))
+    content = models.users_config_content()
+    for path, _ in docs:
+        add(_setup_item("config", home_short(path), path, "reaches", 0,
+                        "OpenCode layers it under the task's layer"
+                        + (" (the system's)" if path.parent == models._system_dir() else ""),
+                        prompt=False))
+    if users_file is not None and users_file.exists():
+        add(_setup_item("config", f"{home_short(users_file)} (OPENCODE_CONFIG)", users_file,
+                        "dropped", 0, "the task's layer takes OPENCODE_CONFIG's place: what it "
+                        "sets reaches no agent (its providers do: models.agent_providers)", prompt=False))
+    sources = [(home_short(p), d) for p, d in docs] + ([(models.CONTENT, content)] if content else [])
+    for where, doc in sources:
+        ins = doc.get("instructions")
+        for entry in ins if isinstance(ins, list) else []:
+            if not isinstance(entry, str) or not entry:
+                continue
+            if where == models.CONTENT:  # the layer sets `instructions`: rules_env drops theirs
+                add(_setup_item("instructions", entry, "", "dropped", 0,
+                                f"{where}: the task's layer sets instructions", prompt=False))
+            elif "://" in entry:
+                add(_setup_item("instructions", entry, "", "reaches", None,
+                                f"named in {where}: OpenCode fetches it at every start"))
+            else:
+                pat = os.path.expanduser(entry)
+                pat = pat if os.path.isabs(pat) else str(oc_home / pat)
+                for f in sorted(glob.glob(pat, recursive=True)):
+                    if os.path.isfile(f) and not reads(f):
+                        add(_setup_item("instructions", home_short(f), f, "dropped", 0,
+                                        f"named in {where}'s instructions: {UNREAD}", prompt=False))
+                    elif os.path.isfile(f):
+                        add(_setup_item("instructions", home_short(f), f, "reaches", _size(f),
+                                        f"named in {where}'s instructions"))
+    # skills: the handed ones and the project's (the layer's), the config directories' own, the
+    # config's `skills`, and Claude's and the cross-tool ones, denied by name
+    own = project_skill_dirs(task) if task is not None else []
+    have = skills.available()
+    mine = [n for n in (task.status.get("skills") or []) if n in have] if task is not None else []
+    extra = list(task.spec.get("deny_skills") or ()) if task is not None else []
+    # as the layer denies them: a handed skill keeps its name, but `workbench` and deny_skills
+    denied = (set(denied_skills(extra, own)) - set(mine)) | {"workbench", *extra}
+    seen: set[str] = set()
+    for n in mine:
+        desc = str(have[n].get("description") or "")
+        seen.add(n)
+        add(_setup_item("skills", f"skill {n}", have[n]["path"], "reaches",
+                        SKILL_TAGS + 2 * len(n) + len(desc), "the library's, handed to this task"))
+    if task is None:
+        add(_setup_item("library", f"the skill library ({len(have)})", skills.library(), "dropped", 0,
+                        "only the skills Claude hands a task, and a repo's commands.json \"skills\"",
+                        prompt=False))
+    for d in own:
+        out += _skill_items(d, "the project's", denied, seen, reads=reads)
+    for d in opencode_dirs():
+        for sub in ("skill", "skills"):
+            out += _skill_items(d / sub, f"OpenCode's {home_short(d / sub)}", denied, seen, reads=reads)
+    for where, doc in sources:
+        listed = doc.get("skills")
+        for entry in listed if isinstance(listed, list) else []:
+            if not isinstance(entry, str) or not entry:
+                continue
+            if where == models.CONTENT:
+                add(_setup_item("skills", entry, "", "dropped", 0,
+                                f"{where}: the task's layer sets skills", prompt=False))
+            elif re.match(r"https?://", entry):
+                add(_setup_item("skills", entry, "", "reaches", None,
+                                f"named in {where}: OpenCode fetches its index at every start"))
+            elif os.path.isabs(d := os.path.expanduser(entry)):
+                out += _skill_items(Path(d), f"named in {where}", denied, seen, reads=reads)
+            elif task is not None:  # relative to the directory OpenCode runs in
+                out += _skill_items(task.workdir / d, f"named in {where}", denied, seen, reads=reads)
+    for d in (Path.home() / ".claude" / "skills", Path.home() / ".agents" / "skills"):
+        out += _skill_items(d, "Claude's" if ".claude" in d.parts else "the cross-tool ~/.agents",
+                            denied, seen, every=True)
+    # references (listed only with a description), plugins, formatter and lsp, MCP servers
+    refs = {}
+    for where, doc in sources:
+        r = doc.get("references")
+        refs.update({k: (v, where) for k, v in r.items()} if isinstance(r, dict) else {})
+    lead = False
+    for name, (v, where) in sorted(refs.items()):
+        entry = v if isinstance(v, dict) else {"path": v}
+        at = str(entry.get("path") or entry.get("repository") or "")
+        desc = entry.get("description")
+        git = not isinstance(v, dict) and not str(v).startswith((".", "/", "~")) or "repository" in entry
+        why = f"named in {where}" + ("; a git clone in each task's own OpenCode home" if git else "")
+        if entry.get("hidden") or not isinstance(desc, str):
+            add(_setup_item("references", f"reference {name}", at, "dropped", 0,
+                            f"{why}: OpenCode lists only a described, unhidden one", prompt=False))
+            continue
+        size = REFERENCE_TAGS + len(name) + len(at) + len(desc) + (0 if lead else REFERENCES_LEAD)
+        lead = True
+        add(_setup_item("references", f"reference {name}", at, "reaches", size,
+                        f"{why}: listed with its path and description"))
+    for d in opencode_dirs():
+        for sub in ocplugin.DISCOVERED:
+            try:
+                found = sorted((d / sub).iterdir()) if (d / sub).is_dir() else []
+            except OSError:
+                found = []
+            for f in found:
+                if f.is_dir() and ocplugin.is_copy(f):
+                    add(_setup_item("plugins", "plugin workbench", f, "denied", 0, "the driver's, "
+                                    f"removed in every task's layer ({PLUGIN_OFF}, #1311)", prompt=False))
+                elif f.is_dir() or f.suffix in PLUGIN_SOURCES:
+                    add(_plugin_item(f.name, f if f.is_file() else None, f"OpenCode's {home_short(d / sub)}",
+                                     reads))
+    for where, doc in sources:
+        base = Path(where).expanduser().parent if where != models.CONTENT else Path.cwd()
+        for key in ("plugins", "plugin"):
+            entries = doc.get(key)
+            for entry in entries if isinstance(entries, list) else []:
+                spec = ocplugin.target(entry)
+                if not spec or spec.startswith("-"):
+                    continue
+                if ocplugin.ours(entry, base):
+                    add(_setup_item("plugins", "plugin workbench", spec, "denied", 0, "the driver's, "
+                                    f"removed in every task's layer ({PLUGIN_OFF}, #1311)", prompt=False))
+                    continue
+                local = ocplugin.local_dir(spec, base)
+                add(_plugin_item(spec, local, f"named in {where}", reads))
+    for key, what in (("formatter", "formatters run after each edit, outside the shell rules"),
+                      ("lsp", "language servers run, their diagnostics in the tools' results")):
+        for where, doc in sources:
+            v = doc.get(key)
+            if isinstance(v, dict) and v:
+                add(_setup_item("runs", f"{key} ({', '.join(sorted(map(str, v)))})", "", "reaches",
+                                0, f"named in {where}: {what}", prompt=False))
+    try:
+        theirs = users_mcp_servers()
+        given = set(task_mcp(task)) if task is not None else set(
+            commands_conf().get("mcp") or []) | {n for v in (commands_conf().get("repos") or {}).values()
+                                                 if isinstance(v, dict) for n in v.get("mcp") or []}
+    except RuntimeError:
+        theirs, given = {}, set()
+    for name in sorted(theirs):
+        if name == "workbench":
+            continue
+        add(_setup_item("mcp", f"MCP server {name}", "", "reaches" if name in given else "denied", None
+                        if name in given else 0, "named in commands.json \"mcp\": its tools go into "
+                        "every request" if name in given else "stubbed, its tools denied: "
+                        "commands.json \"mcp\" opts one in (#1202)", prompt=name in given))
+    return out
+
+
+def setup_said(items: list[dict]) -> dict:
+    """agent_setup's ``items`` in words, for wb doctor and the web app's Settings: {"instructions",
+    "skills", "plugins", "runs", "kept": [phrase], "tokens": the prompt's estimate, "library": the
+    library's line}. OpenCode's own prompt, the config files and the per-task placeholder are said
+    by tokens alone; skills kept out by name are one count, not their names."""
+    def size(it):
+        return f" {it['bytes'] / 1000:.1f} KB" if it["bytes"] else ""
+    out: dict = {k: [] for k in ("instructions", "skills", "plugins", "runs", "kept")}
+    denied_skills_n = 0
+    for it in items:
+        k = it["kind"]
+        if it["state"] != "reaches":
+            if k == "skills":
+                denied_skills_n += 1
+            elif k != "library":
+                out["kept"].append(it["name"])
+        elif k in ("instructions", "references"):
+            out["instructions"].append(it["name"] + size(it))
+        elif k == "skills":
+            out["skills"].append(it["name"].removeprefix("skill ") + size(it))
+        elif k == "plugins":
+            out["plugins"].append(it["name"].removeprefix("plugin ")
+                                  + (f" (tools {', '.join(it['tools'])})" if it.get("tools") else ""))
+        elif k in ("runs", "mcp"):
+            out["runs"].append(it["name"])
+    if denied_skills_n:
+        out["kept"].insert(0, f"{denied_skills_n} skill{'s' * (denied_skills_n != 1)} denied by name "
+                              "(Claude's, ~/.agents', `workbench`)")
+    out["tokens"] = sum(it["bytes"] for it in items if it["state"] == "reaches" and it["prompt"]
+                        and it["bytes"]) // CHARS_PER_TOKEN
+    out["library"] = next((it["name"] for it in items if it["kind"] == "library"), "")
+    return out
+
+
+def _map_text(nested: list[str]) -> str:
+    lines = ["# Directory instructions in this repository", "",
+             "Before you change files under one of these directories, read its file and follow it:"]
+    lines += [f"- `{p}`" for p in nested]
+    return "\n".join(lines) + "\n"
+
+
 def write_map(task: store.Task, nested: list[str]) -> Path | None:
     """A short note pointing at the directory-level instructions, read only where they apply."""
     if not nested:
         return None
     path = task.dir / "context.md"
-    lines = ["# Directory instructions in this repository", "",
-             "Before you change files under one of these directories, read its file and follow it:"]
-    lines += [f"- `{p}`" for p in nested]
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text(_map_text(nested))
     return path
 
 

@@ -12,7 +12,8 @@
 // again with no reload, a draft kept, and a change this page didn't make is toasted on any view.
 (() => {
     'use strict';
-    const GROUPS = [['shared', 'Agents and roles'], ['gpu', 'GPU'], ['api', 'API'], ['terminal', 'Terminal'],
+    const GROUPS = [['shared', 'Agents and roles'], ['gpu', 'GPU'], ['api', 'API'],
+        ['setup', 'What your agents get'], ['terminal', 'Terminal'],
         ['experimental', 'Experimental']];
     const SEG_MAX = 4; // a segmented control up to this many choices, a <select> past it
     const OTHER = '\u0000other'; // the select's "Other model…" (never a model id: a NUL)

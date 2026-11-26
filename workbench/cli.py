@@ -1897,6 +1897,19 @@ def cmd_start(a):
         die(NO_IDENTITY)
     sub = _package(repo, Path(a.repo).resolve(), a.base)
     _need_claude_md(repo, a.base, a, sub)
+    # the repo's standing acceptance command and skills (commands.json "repos", #1295 P2): its
+    # `test` runs before the task's own --test, in the agent's lane, as one acceptance command
+    # (granted, base-checked, sent back to auto-fix as --test is); a report task runs none
+    standing = context.repo_conf(repo, sub)
+    if not report and (test := context.with_repo_test(standing.get("test"), a.test)) != a.test:
+        a.test = test
+        _lane_fits(repo, a.test, off="*" in (a.allow_path or []))  # a snap there too (#1271)
+    if listed := standing.get("skills"):
+        lib = skills.available()
+        if gone := [n for n in listed if n not in lib]:
+            print(f'note: commands.json "repos" skills {", ".join(gone)}: not in the library (wb '
+                  "skill list), left out")
+        handed = list(dict.fromkeys([*handed, *(n for n in listed if n in lib)]))
     if sub:
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
@@ -2534,6 +2547,9 @@ def cmd_next(a):
             die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
     dropped = _stale_notes(task)
+    if a.test is not None and not spec.get("report"):  # the repo's standing one first (#1295 P2)
+        a.test = context.with_repo_test(context.repo_conf(spec["repo"], spec.get("subdir")).get("test"),
+                                        a.test)
     if a.allow or a.test:
         exact, tools = context.test_allowances(a.test)
         context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
@@ -9021,6 +9037,8 @@ def cmd_doctor(a):
         for note in context.mcp_checkout_notes([name], list(repos) if where == "every task" else
                                                [r for r in repos if name in (repos[r].get("mcp") or ())]):
             print(f"--  {note.removeprefix('note: ')}")
+    for said in setup_lines():  # what the agents get, the user's global OpenCode setup too (#1295 P1)
+        print(f"--  {said}")
     snapped = context.snaps(context.TOOLCHAINS) if context.lane_on() else []
     if snapped and sys.platform.startswith("linux"):
         print(f"--  {', '.join(snapped)}: snaps, which can't run in the agent's lane "
@@ -9058,6 +9076,23 @@ def cmd_doctor(a):
     for row in experiment_lines():
         print(f"--  experiment {row}")
     sys.exit(0 if ok else 1)
+
+
+def setup_lines() -> list[str]:
+    """wb doctor's "what your agents get" (context.agent_setup, #1295 P1): what reaches every
+    agent before a task's own files, and what is kept from them. Informs: the user's own setup,
+    shown, never judged."""
+    try:
+        said = context.setup_said(context.agent_setup())
+    except (OSError, RuntimeError) as e:
+        return [f"what your agents get can't be read: {e}"]
+    got = [*said["instructions"], *(f"skill {x}" for x in said["skills"]),
+           *(f"plugin {x}" for x in said["plugins"]), *said["runs"]]
+    out = [f"agents get {', '.join(got)}: about {said['tokens'] / 1000:.1f}K tokens with OpenCode's "
+           "own, before a task's project files and spec (wb start counts those)"]
+    if said["kept"]:
+        out.append(f"kept from agents: {', '.join(said['kept'])}")
+    return out
 
 
 def _image_flag(s) -> None:
