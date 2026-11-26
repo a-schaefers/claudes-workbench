@@ -42108,10 +42108,29 @@ class OpenCodeDriver(Base):
         os.environ["OPENCODE_SESSION_ID"] = "ses_b"
         out = self.wb("status", "--session", "ses_b", "--repo", self.here)[1]
         self.assertIn("t-oc", out)
-        self.assertIn("open elsewhere (other sessions'): t-cc", out)
+        self.assertIn("open elsewhere (a gone Claude Code session's): t-cc", out)  # #1482
         os.environ.pop("OPENCODE_SESSION_ID")                     # the mod's own: Claude Code's
         out = self.wb("status", "--session", "sess-2", "--repo", self.here)[1]
-        self.assertIn("open elsewhere (other sessions'): t-oc", out)
+        self.assertIn("open elsewhere (a gone OpenCode session's): t-oc", out)
+
+    def test_an_opencode_callers_status_names_a_gone_claude_code_sessions_task_with_the_adopt_that_takes_it(self):
+        # #1482 (the #1373 audit, 2026-11-26): after a switch from Claude Code to OpenCode in one
+        # repo, the gone session's tasks were listed as another live session's, with no hint, so
+        # the driver left their reviews alone; a live Claude Code session's stay another's
+        dead = subprocess.Popen(["true"]); dead.wait()
+        live = os.getpid()
+        self.task("t-gone", phase="review", session="cc-1", claude_pid=dead.pid)
+        self.task("t-live", phase="review", session="cc-2", claude_pid=live,
+                  claude_start=runner.models._started(live), claude_machine=store.machine())
+        self.beat("ses_c")
+        os.environ["OPENCODE_SESSION_ID"] = "ses_c"
+        cwd = os.getcwd(); os.chdir(self.here); self.addCleanup(os.chdir, cwd)
+        out = self.wb("status")[1]
+        self.assertIn("open elsewhere (other sessions'): t-live (", out)
+        self.assertNotIn("t-gone", out.split("open elsewhere (other sessions'): ")[1].splitlines()[0])
+        self.assertIn(f"open elsewhere (a gone Claude Code session's): t-gone ({self.here}; "
+                      "wb adopt t-gone takes it here)", out)
+        self.assertEqual(self.wb("adopt", "t-gone")[1].strip(), "adopted t-gone")
 
     def test_a_task_started_while_its_servers_beat_is_stale_records_that_server(self):
         # the #1309 re-review: driver_record took a server only from a fresh beat, so a task started

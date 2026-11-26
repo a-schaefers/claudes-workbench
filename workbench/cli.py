@@ -3078,12 +3078,33 @@ def _caller(a) -> tuple:
     return os.getcwd(), ids, "claude"
 
 
+def _adopt_hint(name: str) -> str:
+    """The `wb adopt` that takes a gone owner's task into the caller's session: under Claude Code
+    it needs the session's id (cmd_adopt's --session), under OpenCode none (_adopt_opencode)."""
+    if store.caller_kind() == "opencode":
+        return f"wb adopt {name}"
+    return f"wb adopt {name} --session {os.environ.get('CLAUDE_CODE_SESSION_ID') or '<id>'}"
+
+
 def _others_line(others, what):
-    if others:  # by name: all_tasks' order follows the file system's (flaky in CI on 0.90's merge)
-        return (f"{what} (other sessions'): "
-                + ", ".join(f"{t.name} ({t.spec.get('repo')})"
-                            for t in sorted(others, key=lambda t: t.name)))
-    return ""
+    """The tasks another session owns, by name (all_tasks' order follows the file system's: flaky
+    in CI on 0.90's merge); those whose session `_owner_gone` says is gone apart, each with the
+    `wb adopt` that takes it here. In one list with the live ones, a Claude Code session's tasks
+    read as another live session's from OpenCode (the directory rule never crosses drivers, #1309),
+    and the driver left them alone, their reviews unwoken (#1482, 2026-11-26)."""
+    if not others:
+        return ""
+    others = sorted(others, key=lambda t: t.name)
+    gone = [t for t in others if t.spec.get("session") and _owner_gone(t.spec)]
+    live = [t for t in others if t not in gone]
+    lines = [f"{what} (other sessions'): " + ", ".join(f"{t.name} ({t.spec.get('repo')})" for t in live)
+             ] if live else []
+    for tool in ("claude", "opencode"):
+        if mine := [t for t in gone if store.driver_of(t.spec) == tool]:
+            lines.append(f"{what} (a gone {'OpenCode' if tool == 'opencode' else 'Claude Code'} "
+                         "session's): " + ", ".join(f"{t.name} ({t.spec.get('repo')}; "
+                                                    f"{_adopt_hint(t.name)} takes it here)" for t in mine))
+    return "\n".join(lines)
 
 
 STATUS_MODEL = 24  # wb status's model column

@@ -156,7 +156,9 @@ export const HOST_LINES: readonly Rule[] = [
   // agents read OpenCode's global AGENTS.md (context.py, the project-config note), as the driver does
   line("It never gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`: those are yours. When you will review against one of those global rules,",
     "It never gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`; it does get OpenCode's global `~/.config/opencode/AGENTS.md`, as you do. When you will review against a global rule it doesn't get,"),
-  line('one whose Claude Code process has exited,', 'one whose session is gone,'),
+  // a Claude Code session's tasks come to OpenCode only by `wb adopt`: the directory rule never
+  // crosses drivers (#1309), and "gone" read as if it did (#1482, 2026-11-26)
+  line('one whose Claude Code process has exited,', "one whose OpenCode session is gone (a Claude Code session's only by `wb adopt`),"),
   // a scheduled run is Claude Code headless (`wb schedule`): never this agent
   line(', and a run of yours that is headless (`claude -p`, nobody at the terminal).', '.'),
   line("Claude Code's dialogs in that turn", "OpenCode's prompts in that turn"),
