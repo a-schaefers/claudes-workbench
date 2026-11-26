@@ -693,7 +693,13 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
   const up = await import('./upstream.ts').catch(() => undefined)
   if (up) {
     const origin = (cwd: string) => git(['remote', 'get-url', 'origin'], cwd)
-    const upstream = new up.Upstream({ env, dir, read: readText, real: realOf, origin, asker })
+    // gh's word on .permissions.push, never its token: upstream's maintainer is never asked (upstream.ts)
+    const canPush = (slug: string) => new Promise<boolean>(done => {
+      const child = execFile('gh', ['api', `repos/${slug}`, '--jq', '.permissions.push'], { timeout: 8000, maxBuffer: 1 << 16 },
+        (e, stdout) => done(!e && String(stdout ?? '').trim() === 'true'))
+      child.stdin?.end()
+    })
+    const upstream = new up.Upstream({ env, dir, read: readText, real: realOf, origin, asker, canPush })
     await c.tool.hook('execute.before', e => upstream.before(e))
   }
   return async () => {

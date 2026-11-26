@@ -45,7 +45,14 @@ export interface UpstreamDeps {
   readonly real: (path: string) => string
   readonly origin: (dir: string) => Promise<string> // `git -C <dir> remote get-url origin`, '' when it fails
   readonly asker: Pick<Asker, 'ask'>
+  // whether the signed-in GitHub user can push to the slug (`gh api repos/<slug> --jq
+  // .permissions.push`), false when gh can't say: none, no gate is lifted
+  readonly canPush?: (slug: string) => Promise<boolean>
 }
+
+// A no, or gh's silence, is asked again only after this (a yes holds for the server's life), so a
+// user's gated calls don't each wait on gh (the mod's PUSH_RECHECK_MS)
+export const PUSH_RECHECK_MS = 10 * 60_000
 
 export const NO_FORM_SENT = 'workbench: not sent: no OpenCode window is open on this session to ask the user in ' +
   '(the form shows in the terminal UI), so nothing was asked and nothing was sent. Tell them; once one is open, ' +
@@ -67,7 +74,21 @@ export function packageCaches(env: Env): string[] {
 }
 
 export class Upstream {
-  constructor(private d: UpstreamDeps) {}
+  private readonly pushable = new Map<string, { ok: boolean; at: number }>()
+  constructor(private d: UpstreamDeps, private now: () => number = Date.now) {}
+
+  // Upstream's maintainer or a collaborator (they can push to it): their own driver's writes there
+  // are their own work, never a send upstream, so never asked. The gate is for a user's driver
+  // reaching the maintainer's repository; it held the owner's own issue comments until he answered
+  // (2026-11-26: "it never should halt our work"). The mod's canPush.
+  private async maintainer(slug: string): Promise<boolean> {
+    if (!this.d.canPush) return false
+    const now = this.now(), had = this.pushable.get(slug)
+    if (had && (had.ok || now - had.at < PUSH_RECHECK_MS)) return had.ok
+    const ok = await this.d.canPush(slug).catch(() => false)
+    this.pushable.set(slug, { ok, at: now })
+    return ok
+  }
 
   async before(e: UpstreamBefore): Promise<void> {
     const why = await this.refusal(e)
@@ -125,6 +146,7 @@ export class Upstream {
     if (aim.why === 'send') return SEND_VIA_TOOL
     if (aim.why === 'plugin' && !aim.named && !originIs(await this.d.origin(aim.at), g.slugs)) return ''
     if (aim.why === 'slug' && await this.developer(aim.at, g)) return ''
+    if (await this.maintainer(g.slug)) return ''
     return this.ask(session, `The driver wants to send this to GitHub (${g.slug}), publicly: ${shownCommand(command, aim)}`)
   }
 
@@ -134,6 +156,7 @@ export class Upstream {
     const g = this.where(env, cwd)
     if (!githubAimsUpstream(name, input, g.slugs)) return ''
     if (await this.developer(cwd, g)) return ''
+    if (await this.maintainer(g.slug)) return ''
     return this.ask(session, `The driver wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shownInput(input)}`)
   }
 

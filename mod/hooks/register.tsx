@@ -696,6 +696,26 @@ async function developerClone($: any, dir: string, slug: string | string[], notI
   return originIs(await originOf($, dir), slug)
 }
 
+// Whether the signed-in GitHub user can push to ``slug`` (`gh api repos/<slug> --jq .permissions.push`,
+// gh's word only, never its token): upstream's maintainer or a collaborator, whose own Claude's
+// writes there are their own work, not a send upstream. The gate is for a user's Claude reaching
+// the maintainer's repository; it held the owner's own Claude's issue comments from his clone
+// until he clicked (2026-11-26: "it never should halt our work"). A yes is kept for the session, a
+// no or no answer (no gh, no network) PUSH_RECHECK_MS, so a user's gated calls don't each wait on gh
+const PUSH_RECHECK_MS = 10 * 60_000
+async function canPush($: any, slug: string): Promise<boolean> {
+  const now: number = await $.clock.now()
+  const had = mem.pushable.get(slug)
+  if (had && (had.ok || now - had.at < PUSH_RECHECK_MS)) return had.ok
+  let ok = false
+  try {
+    const r = await $.process.run(['gh', 'api', `repos/${slug}`, '--jq', '.permissions.push'], { timeoutMs: 8000 })
+    ok = r.exitCode === 0 && String(r.stdout ?? '').trim() === 'true'
+  } catch { /* no gh: asked */ }
+  mem.pushable.set(slug, { ok, at: now })
+  return ok
+}
+
 // What the gate reads each time: patches.json's clone and upstream, the gated directories
 type Gate = { home: string; cwd: string; slug: string; slugs: string[]; dirs: string[]; plugins: string[] }
 async function gateConf($: any): Promise<Gate> {
@@ -833,6 +853,8 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
   if (!aim.why) return ''
   if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slugs)) return ''
   if (aim.why === 'slug' && await developerClone($, aim.at, g.slugs, [...g.dirs, ...g.plugins])) return ''
+  // the maintainer's own: never asked, but `wb patch send`, whose yes it checks (send-ok.json)
+  if (aim.why !== 'send' && await canPush($, g.slug)) return ''
   const q = await sendQuestion($, command, g.slug, aim, g.home)
   if ('deny' in q) return q.deny
   const no = await askToSend($, q.question)
@@ -847,6 +869,7 @@ async function mcpRefusal($: any, tool: string, input: Row): Promise<string> {
   const g = await gateConf($)
   if (!mcpAimsUpstream(tool, input, g.slugs)) return ''
   if (await developerClone($, g.cwd, g.slugs, [...g.dirs, ...g.plugins])) return ''
+  if (await canPush($, g.slug)) return ''
   return askToSend($, `Claude wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shownInput(input)} — Send it?`)
 }
 
@@ -1435,6 +1458,7 @@ async function sayRules($: any, delegating: boolean) {
 // The module's own memory: reset by a reload, which runs register and session.start again.
 const mem = {
   flows: new Map<string, FlowCommand>(), // the flows' slash commands, registered at session.start (#1295)
+  pushable: new Map<string, { ok: boolean; at: number }>(), // canPush's answers by slug
   wake: true,
   root: '',
   startedAt: 0,
