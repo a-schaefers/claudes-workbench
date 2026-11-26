@@ -10,8 +10,10 @@
 import type { ServerContext, ServerPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
 import { calls } from './calls.ts'
+import { chat } from './chat.ts'
 import { consent } from './consent.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
+import { startDriver, type DriverHost } from './driver.ts'
 
 export const ID = 'workbench'
 
@@ -26,9 +28,13 @@ const plugin: ServerPlugin = {
   async setup(ctx) {
     if (process.env.WB_TASK) return
     await ctx.rpc.register(Workbench, { status: async () => status(ctx.options) })
-    // each part's cleanup joins `stops`, and setup returns them together at its end
+    // each part's cleanup joins `stops`, and setup returns them together at its end: a part added
+    // after another's `return` never ran (the chat-path review, 2026-11-25)
     const stops: (() => Promise<void>)[] = []
-    // the consent gates first: their execute.before refusal comes before a call's row (#1314)
+    const stopChat = await chat(ctx) // the web chat: in-process turns and chat_reply (#1319)
+    if (stopChat) stops.push(stopChat)
+    stops.push(await startDriver(ctx as ServerContext & DriverHost))  // the driver's heartbeat and RPC (#1316)
+    // the consent gates before the calls: their execute.before refusal comes before a call's row (#1314)
     const stopConsent = await consent(ctx)
     if (stopConsent) stops.push(stopConsent)
     const stopCalls = await calls(ctx) // the driver's calls in claude-calls/ (#1331)

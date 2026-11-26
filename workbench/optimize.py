@@ -67,7 +67,7 @@ def candidates() -> list[models.Model]:
     Nor this machine's when it has no GPU Ollama can use (no_gpu_here). Nor an API model, an
     Ollama cloud one included, whatever a later discovery lists: a probe or a --bench replay
     would send code to ollama.com or a paid provider unasked (#1026)."""
-    held = models.keep_loaded()
+    held = models.keep_loaded(drivers=False)  # the user's alone: free_gpu() unloads a driver's too
     bare: dict = {}
     return [m for m in models.discover().values()
             if m.engine == "ollama" and getattr(m, "kind", "gpu") == "gpu" and not m.cloud and m.id not in held and not models._kept_name(m.name, held)

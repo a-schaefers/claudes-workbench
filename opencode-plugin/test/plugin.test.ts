@@ -43,7 +43,7 @@ test('under WB_TASK neither part does anything at all (#1363)', async () => {
   }
 })
 
-test('the server part registers the status method and nothing else', async () => {
+test('the server part registers the status method and the driver\'s (#1316), nothing else', async () => {
   const was = process.env.WB_TASK
   delete process.env.WB_TASK
   const registered: string[] = []
@@ -58,7 +58,7 @@ test('the server part registers the status method and nothing else', async () =>
   } finally {
     if (was !== undefined) process.env.WB_TASK = was
   }
-  expect(registered).toEqual(['workbench', 'status', 'status'])
+  expect(registered).toEqual(['workbench', 'status', 'status', 'workbench-driver', 'driver', 'pin', 'driver', 'pin'])
 })
 
 test('the options\' wb is the one run, even when another is on PATH', () => {

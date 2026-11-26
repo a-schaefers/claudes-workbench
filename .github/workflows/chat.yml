@@ -1,8 +1,10 @@
-# The web chat in real browsers (tests/e2e_chat.mjs: WebKit as an iPhone, Chromium as a Pixel:
+# The web chat in real browsers (tests/e2e_chat.mts: WebKit as an iPhone, Chromium as a Pixel:
 # reloads, receipts, reconnecting, dialogs) on each pull request and push to main that changes the
 # chat, its server, its page or the test. Not a required check: check.yml is the merge gate; this
 # says whether the page still works where the Python tests can't look (#91, 2026-11-19).
-# Playwright isn't a workbench dependency: the version pinned here is installed beside the run.
+# Playwright isn't a workbench dependency: the version pinned here is installed beside the run,
+# with the Node types the tests are type-checked against (scripts/web.py tests, #1323); Node runs
+# the TypeScript tests as they are, its types stripped.
 
 name: chat
 
@@ -13,14 +15,20 @@ on:
       - 'workbench/chat.py'
       - 'workbench/webpush.py'
       - 'workbench/chat_static/**'
-      - 'tests/e2e_chat.mjs'
+      - 'tests/e2e_*'
+      - 'tests/tsconfig.json'
+      - 'scripts/web.py'
+      - 'scripts/install-tsc.sh'
       - '.github/workflows/chat.yml'
   pull_request:
     paths:
       - 'workbench/chat.py'
       - 'workbench/webpush.py'
       - 'workbench/chat_static/**'
-      - 'tests/e2e_chat.mjs'
+      - 'tests/e2e_*'
+      - 'tests/tsconfig.json'
+      - 'scripts/web.py'
+      - 'scripts/install-tsc.sh'
       - '.github/workflows/chat.yml'
   workflow_dispatch:
 
@@ -40,6 +48,8 @@ jobs:
     env:
       # The Playwright the browser test was last verified with.
       PLAYWRIGHT_VERSION: '1.62.1'
+      # the Node types the tests are checked against: the runner's Node line
+      NODE_TYPES_VERSION: '24.19.2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +60,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
-      - run: npm install --prefix "$RUNNER_TEMP/pw" "playwright@$PLAYWRIGHT_VERSION"
+      - run: npm install --prefix "$RUNNER_TEMP/pw" "playwright@$PLAYWRIGHT_VERSION" "@types/node@$NODE_TYPES_VERSION"
+      - run: python3 scripts/web.py tests "$RUNNER_TEMP/pw/node_modules"
       - run: '"$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium webkit'
-      - run: PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" node tests/e2e_chat.mjs
+      - run: PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" node tests/e2e_chat.mts

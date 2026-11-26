@@ -13,7 +13,7 @@
 // time against this machine's typical length as words with a tilde, never a bar, and only with
 // TYPICAL_MIN timed tasks behind it. No percentage of a task: nobody knows how much of one is done.
 import type { WbTask } from '../types'
-import { CLOSED } from './core'
+import { CLOSED, openCounts, phaseOf } from './core'
 
 /** One run of a row's text in one style. */
 export type Part = { text: string; color?: string; dim?: boolean; bold?: boolean; underline?: boolean }
@@ -37,7 +37,8 @@ export type TaskFacts = Pick<WbTask, 'name' | 'phase' | 'round' | 'model' | 'lab
   est?: boolean
 }
 
-const WORKING = new Set(['running', 'testing', 'asking']) // where the context and the estimate mean something
+// a round under way (store.WORKING, through the kernel's phaseOf): where the context and the estimate mean something
+const working = (phase: string) => phaseOf({ phase, parked: false }).working
 /** Each phase's colour; the glyph and the word say the same without it. */
 export const COLOR: Record<string, string> = {
   queued: 'subtle', running: 'claude', testing: 'suggestion', asking: 'warning',
@@ -144,7 +145,7 @@ export function placeOf(t: TaskFacts, short: boolean): string {
 
 // the step's active seconds so far: before this round, plus the round under way
 const activeOf = (t: TaskFacts, now: number) =>
-  (t.activeS || 0) + (WORKING.has(t.phase) && t.roundStartedAt ? Math.max(0, now - t.roundStartedAt) / 1000 : 0)
+  (t.activeS || 0) + (working(t.phase) && t.roundStartedAt ? Math.max(0, now - t.roundStartedAt) / 1000 : 0)
 const typicalOf = (t: TaskFacts) => (t.typicalN >= TYPICAL_MIN && t.typicalMin > 0 ? t.typicalMin * 60 : 0)
 // late from the progress checks' own points, 1x and 2x status `late_min`, never from a raw median:
 // a typical length of 4 minutes coloured a 5-minute task late, where no check comes before
@@ -154,7 +155,7 @@ const typicalOf = (t: TaskFacts) => (t.typicalN >= TYPICAL_MIN && t.typicalMin >
 // live); with no estimate shown there is no word to repeat, so no colour either.
 const lateOf = (t: TaskFacts, now: number): '' | 'warning' | 'error' => {
   const typ = typicalOf(t)
-  if (!(t.lateMin > 0) || !typ || !WORKING.has(t.phase)) return ''
+  if (!(t.lateMin > 0) || !typ || !working(t.phase)) return ''
   const active = activeOf(t, now), at = t.lateMin * 60
   if (active < typ) return ''
   return active >= 2 * at ? 'error' : active >= at ? 'warning' : ''
@@ -165,7 +166,7 @@ const lateOf = (t: TaskFacts, now: number): '' | 'warning' | 'error' => {
  * or while it isn't working. */
 export function etaOf(t: TaskFacts, now: number): { text: string; color?: string } | null {
   const typ = typicalOf(t)
-  if (!typ || !WORKING.has(t.phase)) return null
+  if (!typ || !working(t.phase)) return null
   const active = activeOf(t, now), left = typ - active
   if (left > 0) return { text: `~${ago(left * 1000)} left` }
   const late = lateOf(t, now)
@@ -174,7 +175,7 @@ export function etaOf(t: TaskFacts, now: number): { text: string; color?: string
 
 /** The context window's fill and the handover point, while it is working; null when unknown. */
 export function ctxOf(t: TaskFacts): { frac: number; freshAt: number | null } | null {
-  if (!WORKING.has(t.phase) || !(t.window > 0) || !(t.ctxUsed > 0)) return null
+  if (!working(t.phase) || !(t.window > 0) || !(t.ctxUsed > 0)) return null
   return { frac: t.ctxUsed / t.window, freshAt: t.freshAt }
 }
 
@@ -241,7 +242,7 @@ const doingOf = (t: TaskFacts): string | null => {
 }
 const doingText = (t: TaskFacts): string | null => {
   if (CLOSED.has(t.phase) || t.parked) return null
-  if (t.phase === 'stuck' || t.phase === 'failed') return t.last ? `${t.last} · Claude steers it next` : 'Claude steers it next'
+  if (phaseOf(t).stopped) return t.last ? `${t.last} · Claude steers it next` : 'Claude steers it next'
   if (t.phase === 'review') return t.tests === 'pass' || /Claude reviews next$/.test(t.last) || !t.last ? null : t.last
   if (t.phase === 'asking') {
     const asked = [...(t.recent ?? [])].reverse().find(l => l.startsWith('asks: '))
@@ -416,14 +417,12 @@ function line2(r: Row, cols: number, conn2: string, L: Layout, mw: number): Part
   return clipParts(trimEnd(parts), cols)
 }
 
-const COUNTED = ['running', 'testing', 'asking', 'queued', 'review', 'stuck', 'failed']
+// The header's counts, each open phase's in store.OPEN_ORDER, and how many are done (a review, or
+// closed): the kernel's openCounts, which the status line counts by too
 function header(group: string, tasks: TaskFacts[], cols: number, compact: boolean, usd: (x: number) => string): Part[] {
   const n = tasks.length
-  const done = tasks.filter(t => t.phase === 'review' || CLOSED.has(t.phase)).length
-  const counts = COUNTED.flatMap(p => {
-    const k = tasks.filter(t => t.phase === p).length
-    return k ? [{ text: `${k} ${p}`, ...(p === 'stuck' || p === 'failed' ? { color: 'error' } : { dim: true }) }] : []
-  })
+  const { counts: open, done } = openCounts(tasks)
+  const counts = open.map(c => ({ text: `${c.n} ${c.phase}`, ...(c.stopped ? { color: 'error' } : { dim: true }) }))
   const paid = tasks.filter(t => typeof t.spend === 'number')
   const sum = paid.reduce((s, t) => s + (t.spend as number), 0)
   const spend = paid.length ? (sum && paid.some(t => t.est) ? '≈' : '') + usd(sum) : ''
@@ -492,7 +491,7 @@ export function taskLines(list: TaskFacts[], o: { cols: number; now: number; spi
 /** Whether an API task is working (running, testing, asking): the day cap's line shows only then.
  * A queued one waiting for its provider's slot drew it too (the #1048 review, seen live): the owner
  * chose "only while an API task runs". */
-export const apiWorking = (list: Pick<TaskFacts, 'via' | 'phase'>[]) => list.some(t => t.via === 'api' && WORKING.has(t.phase))
+export const apiWorking = (list: Pick<TaskFacts, 'via' | 'phase'>[]) => list.some(t => t.via === 'api' && working(t.phase))
 
 /** The API day cap's line, only while an API task is working (the owner, 2026-11-23: on Tasks only
  * then; Settings has it always): `API today $0.42 of the $5 day cap  █▍░░░░░░░░`, warning from

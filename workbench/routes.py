@@ -19,7 +19,11 @@ the record of the user's yes (2026-11-23 review). The change line is the dialog'
 
 A role's `fallback` (#1196, the user's own, none by default): an exact API id on another provider,
 or `gpu` (the role's GPU side), which a task of the role on its API model moves to when that
-provider is down or out of credit: at wb start, and once in the runner. Claude never sets one."""
+provider is down or out of credit: at wb start, and once in the runner. Claude never sets one.
+
+The top-level `driver` (#1316, the OpenCode path): an optional standing default for the driver,
+the model with the final say, which the plugin's /workbench applies to its session; `session`
+(no key) leaves each session's own /models choice. `wb route driver` sets it (driver_change)."""
 from __future__ import annotations
 
 import copy
@@ -82,6 +86,25 @@ NO_CAP = (f"no day cap yet: ask the user for one (suggest ${DAY_USD_SUGGEST}), t
 FALLBACK_GPU = "gpu"
 FALLBACK_OFF = "none"
 FALLBACK_LINE = "on the role's fallback, as you set"  # wb start's line and the move's (#1196)
+# The driver (the model with the final say) on the OpenCode path (#1316): it is whatever the
+# session runs on, picked in OpenCode's own /models, and wb doesn't own the choice. The top-level
+# `driver` is an optional standing default the plugin's /workbench applies to the session
+# (switchModel): an exact OpenCode id, `#variant` allowed, or `session` (the default: no pin,
+# stored as no key). Not a fourth role: ROLES say where tasks go, and nothing routes a task here.
+DRIVER_SESSION = "session"
+
+
+def driver_ref(text) -> tuple[str, str, str] | None:
+    """An OpenCode model reference `provider/id#variant` as OpenCode parses it (schema/src/model.ts
+    `Model.Ref.parse`: the provider ends at the first `/`, the variant starts at the first `#`
+    after it): (provider, id, variant or ""), or None when it isn't one."""
+    if not isinstance(text, str) or text != text.strip() or any(c.isspace() for c in text):
+        return None
+    provider, slash, rest = text.partition("/")
+    mid, hash_, variant = rest.partition("#")
+    if not provider or not slash or "#" in provider or not mid or (hash_ and (not variant or "#" in variant)):
+        return None
+    return provider, mid, variant
 
 
 class RoutesError(RuntimeError):
@@ -172,7 +195,14 @@ def normalize(doc) -> dict:
     busy = doc.get("busy", "wait")
     if busy not in BUSY:
         raise RoutesError(f"busy is {busy!r}, not {' or '.join(BUSY)}")
-    return {"v": 1, "use": use, "busy": busy, "day_usd": _cap(doc.get("day_usd")), "roles": out}
+    # the driver pin (#1316): kept only when it pins one, so a file without it reads as before.
+    # One that isn't an OpenCode id reads as no pin rather than an unreadable file: refused, a
+    # hand edit's typo made every wb start exit 3, Claude Code's too, while the mod's routesValid
+    # (which never reads `driver`) went on telling Claude the roles (the review of #1316,
+    # 2026-11-25). wb writes only a parsed one (driver_change).
+    drv = doc.get("driver")
+    pinned = {"driver": drv} if drv != DRIVER_SESSION and driver_ref(drv) is not None else {}
+    return {"v": 1, "use": use, "busy": busy, "day_usd": _cap(doc.get("day_usd")), "roles": out, **pinned}
 
 
 def effective_via(doc: dict, role: str) -> str:
@@ -861,6 +891,36 @@ def stamp(ch: Change, by: str, now: float | None = None) -> dict:
     for r in ch.roles:
         ch.doc["roles"][r].update(dict(said=ch.line, by=by, ts=ts) if ch.gated else dict(gpu_by=by, gpu_ts=ts))
     return ch.doc
+
+
+DRIVER_APPLIED = "the plugin's /workbench switches its OpenCode session to it"  # #1316
+
+
+def driver_change(doc: dict, pin: str, gpu: Callable[[str], bool], who: Callable[[str], str]) -> Change:
+    """`wb route driver <id>|session` (#1316): routes.json's top-level `driver`, the standing
+    default the OpenCode plugin's /workbench applies to its session. A GPU model's pin (``gpu``:
+    one discover() finds) sends nothing off the machine and needs no yes; any other id is taken
+    for an API model, failing closed: the driver's whole conversation, the code in it, would go
+    to its provider, so a model's call needs the host's dialog, as a role's API change does.
+    `session` takes the pin off (no yes either). Nothing is stamped: no task goes by it."""
+    new = copy.deepcopy(doc)
+    old = doc.get("driver") or DRIVER_SESSION
+    if pin == DRIVER_SESSION:
+        new.pop("driver", None)
+    elif driver_ref(pin) is None:
+        raise RoutesError(f"{pin!r} isn't an OpenCode model id (provider/model, #variant allowed) "
+                          f"or {DRIVER_SESSION}")
+    else:
+        new["driver"] = pin
+    if pin == old:
+        return Change(new, "", False)
+    if pin == DRIVER_SESSION:
+        return Change(new, "driver: each OpenCode session's own (/models), no pin", False)
+    bare = pin.split("#", 1)[0]
+    if gpu(bare):
+        return Change(new, f"driver: {pin} (GPU): {DRIVER_APPLIED}", False)
+    return Change(new, f"driver: {pin} (API, {who(bare)}): {DRIVER_APPLIED}, and that session's "
+                       "conversation, the code in it, goes to its provider", True)
 
 
 def summary(doc: dict) -> str:

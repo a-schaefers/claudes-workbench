@@ -17,10 +17,9 @@
 // Claude's own context. In workbench mode, whatever compacts it (the engine at its limit, /compact,
 // this mod), the summary is told to keep the delegation state, and after a compaction or /clear
 // the open tasks come back as a context block. At a task boundary (one of this session's just
-// closed, none waiting for Claude) the mod compacts early once Claude is COMPACT_AT of the way to
-// the engine's own compaction, so a long delegation session sheds finished tasks' detail at a
-// clean point instead of mid-review.
-const COMPACT_AT = 0.5
+// closed, none waiting for Claude) the mod compacts early once Claude is half of the way to the
+// engine's own compaction (`WB_COMPACT_AT`; the kernel's `compactPlan`), so a long delegation
+// session sheds finished tasks' detail at a clean point instead of mid-review.
 const KEEP_ON_COMPACT =
   'Workbench delegation is in progress. Keep: the user\'s goals and decisions, which tasks were ' +
   'delegated (names, repos, branches, what each is for), which are open and what each needs ' +
@@ -75,7 +74,7 @@ import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, taskLines } from './tasks'
-import { ACTIVE, CHAT_STALE_MS, codingGate, editFields, gateOf, NEEDS, NO_ANSWER, PARKS, WAKE_OPENING } from './core'
+import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, codingGate, compactPlan, editFields, gateOf, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, tellPlan, WAKE_OPENING } from './core'
 import type { Gate as CommandGate } from './core'
 import type { Part as RowPart } from './tasks'
 
@@ -86,11 +85,13 @@ const PANE = 'workbench'
 const POLL_MS = 1500 // the clock's redraw while a task runs
 const SAFETY_MS = 30_000 // a poll at least this often, whatever the watcher says
 const KEEP_CLOSED_MS = 30 * 60 * 1000 // closed tasks stay in the pane for half an hour
-const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older than an hour
+// a settings change from the web app older than an hour is no news, as a notice that old wakes
+// no one (the kernel's noticesDue)
+const OLDEST_WAKE_MS = 60 * 60 * 1000
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-11',
+  shape: 'tasks-12',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -142,26 +143,18 @@ const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // which starts the app if it isn't up), and again CHAT_RECHECK_MS after a start or a failure
 const CHAT_CHECK_MS = 60_000
 const CHAT_RECHECK_MS = 3_000
-// the user counts as away this long after they last used the web chat: a web message, or a page
-// in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
-const AWAY_MS = 6 * 3600 * 1000
-// ...or for as long as this session has a task open: a night's batch outlasts six hours, and its
-// permission prompts then waited in the terminal until morning (#110, 2026-11-18). Backlog tasks
-// alone held it, so one long task asked for from the phone that finished past six hours was
-// reported in the terminal only, its question a dialog there (#1402, 2026-11-25).
-export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
-  if (!webAt) return false
-  if (now - webAt < AWAY_MS) return true
-  return list.some(t => isMine(t) && (ACTIVE.has(t.phase) || waitsOnClaude(t)))
-}
+// Whether the user is away (the kernel's awayNow, which the OpenCode plugin judges by too): six
+// hours after they last used the web chat (chat/away.json's `at`, #959), or for as long as this
+// session has a task open (#110, #1402)
+export const awayNow = (webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean =>
+  awayOf(webAt, now, list.map(t => ({ phase: t.phase, parked: t.parked, mine: isMine(t) })))
 // Whether the weekly model check and the automatic optimize may run: no task anywhere active (the
 // GPU's, and a check's question beside a running task's), and none of this session's waiting on
 // Claude lately. Any task open at any age once gated both, so one stuck, failed or unreviewed
-// task left after a quit stopped them for good (#541); one idle past REWAKE_MAX_MS waits for a
+// task left after a quit stopped them for good (#541); one idle past rewake's 12 hours waits for a
 // session long gone, as rewake judges it; a parked one waits for no one.
 export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) => boolean): boolean {
-  return !list.some(t => ACTIVE.has(t.phase) ||
-    (waitsOnClaude(t) && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
+  return !list.some(t => ACTIVE.has(t.phase) || rewakeOf(t, now, isMine(t)).recent)
 }
 // Away is the user's, not one session's (#688): the listening session records the last web
 // message in chat/away.json and a prompt typed in any session clears it, so every delegating
@@ -254,10 +247,10 @@ export function attachedLines(files: unknown): string {
     ? [`\n[attached: ${f.path} (${size(Number(f.size) || 0)}, ${String(f.type || 'unknown type')})]`] : []).join('')
 }
 
-// Waiting on Claude, unless parked: stopped by /workbench-quit (`wb stop --all`, status `parked`),
-// which the status line, rewake, the boundary and the jobs' gate don't count. It stayed "awaiting
-// review" and kept the weekly check off for good (#541); the pane and `wb status --all` still show it.
-const waitsOnClaude = (t: WbTask) => NEEDS.has(t.phase) && !t.parked
+// Waiting on Claude, unless parked (the kernel's phaseOf `waits`): one stopped by /workbench-quit
+// (`wb stop --all`, status `parked`) the status line, rewake, the boundary and the jobs' gate
+// don't count. It stayed "awaiting review" and kept the weekly check off for good (#541); the
+// pane and `wb status --all` still show it.
 const COLOR: Record<string, string> = {
   queued: 'subtle', running: 'claude', testing: 'suggestion', asking: 'warning',
   review: 'success', stuck: 'error', failed: 'error', accepted: 'inactive', discarded: 'inactive',
@@ -490,7 +483,6 @@ const BATCH_NEXT = (names: string[]) => names.length > 1
     `session, \`wb discard ${names[0]}\` drops it.`
 const batchOf = (row: Row): string[] | null =>
   Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
-const RUNNING = new Set(['queued', 'running', 'testing'])
 // A stop at the day's API spend cap (#1019, cause `spend`) is the user's call: feedback would run
 // a round that stops again at once, so the wake asks for their decision, as the notice does. Each
 // remedy has its own next step: "the role on the GPU … then wb resume" resumed the task on its API
@@ -1819,25 +1811,25 @@ async function wanted($: any, delegating: boolean, notesToo = true): Promise<Sai
 async function unsaid($: any, delegating: boolean): Promise<string[]> {
   const want = await wanted($, delegating, !mem.said?.notes) // said once: not read at every poll
   const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide', routes: '', workflows: 'off' } // after the await: no other caller in between
-  const out: string[] = []
-  if (want.notes && !was.notes) out.push(NOTES_NOTE(want.notes))
-  if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
   const any = delegating || mem.open.size > 0 // out of the mode with nothing open: nothing changes
-  if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
-  // the roles (#1014): any change, however made (the dialog, the web app, a terminal, a hand edit);
-  // the web app's says so (#1283)
-  if (any && want.routes !== was.routes) {
-    const now = await readRoutes($)
-    // the web app's only when this change stamped a role there: newer than the stamp last told, or
-    // (none told this load) made since this poll's window began (review of #1283, 2026-11-25: a day
-    // cap set in the terminal after a role last set on the web app read "(the user, on the web app)")
-    const since = mem.routesStamp ?? (await $.clock.now()) / 1000 - ROUTES_FRESH_S
-    out.push(was.routes ? ROUTES_CHANGED(want.routes, !!now.web && (now.stamp ?? 0) > since) : ROUTES_NOTE(now))
-    mem.routesStamp = Math.max(now.stamp ?? since, since)
+  const plan = tellPlan({ first: false, want, was, known: true, any, delegating, away: false })
+  const out: string[] = []
+  for (const say of plan.say) {
+    if (say === 'notes') out.push(NOTES_NOTE(want.notes))
+    else if (say === 'wakeOff') out.push(WAKE_OFF_NOTE)
+    else if (say === 'coding') out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
+    else if (say === 'workflows') out.push(want.workflows === 'on' ? WORKFLOWS_RULE : WORKFLOWS_OFF) // #1041
+    else { // the roles (#1014): any change, however made (the dialog, the web app, a terminal, a hand edit); the web app's says so (#1283)
+      const now = await readRoutes($)
+      // the web app's only when this change stamped a role there: newer than the stamp last told, or
+      // (none told this load) made since this poll's window began (review of #1283, 2026-11-25: a day
+      // cap set in the terminal after a role last set on the web app read "(the user, on the web app)")
+      const since = mem.routesStamp ?? (await $.clock.now()) / 1000 - ROUTES_FRESH_S
+      out.push(say === 'routesChanged' ? ROUTES_CHANGED(want.routes, !!now.web && (now.stamp ?? 0) > since) : ROUTES_NOTE(now))
+      mem.routesStamp = Math.max(now.stamp ?? since, since)
+    }
   }
-  if (any && want.workflows !== was.workflows) out.push(want.workflows === 'on' ? WORKFLOWS_RULE : WORKFLOWS_OFF) // #1041
-  await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding,
-    routes: any ? want.routes : was.routes, workflows: any ? want.workflows : was.workflows })
+  await setSaid($, plan.said)
   return out
 }
 
@@ -1937,48 +1929,26 @@ const mem = {
   termDialogs: [] as TermDialog[], // dialogs up in the terminal, for the page's waiting line (#959, #1350)
 }
 
-// Whether path b is path a or inside it, by whole components: /x/ab is not inside /x/a. In lower
-// case where the file system ignores it (`mem.fold`, macOS): ~/Repos typed for ~/repos once
-// missed (the 2026-11-19 audit). wb records task paths real (getcwd, git's toplevel).
-const parts = (p: string) => (mem.fold ? p.toLowerCase() : p).split('/').filter(c => c && c !== '.')
-const within = (a: string, b: string) => {
-  const [pa, pb] = [parts(a), parts(b)]
-  return pa.length <= pb.length && pa.every((c, i) => c === pb[i])
-}
-
-// Whether a task is this session's. One `wb start` ran in this process's sessions (task.json
-// `session`) is, wherever it ran: by directory alone, a `cd /tmp/x && wb start` task was no one's
-// (the 0.90 review). One without (started by hand, or before 0.90) goes by directory: its repo
-// is the session's directory or inside it (a folder of several repos), or the session is inside
-// the task's spot (`spotOf`: its package, else its cwd, else the repo; #695), or where `wb start` ran (`cwd`) is the session's directory or inside it. So
-// does another session's whose Claude Code process (`claude_pid`) is gone: a new process in the
-// project adopts it (the 0.90 review: after a crash or an update, plain `claude` in the same repo
-// was woken for none of them). A session in the home directory or / claims none by directory: a
-// task started from ~ belonged to every session under it (the 0.90 review). A task with no key
-// at all is everyone's. `wb`'s _scope judges the same.
-// A session inside the repo counts only inside the task's own spot: its package (repo/subdir),
-// else where `wb start` ran when that is inside the repo, else the repo. Inside the repo alone, a
-// session in a monorepo's sibling package was woken for another package's review (#695).
-const spotOf = (t: { repo?: string; cwd?: string; subdir?: string }) =>
-  t.subdir ? `${t.repo}/${t.subdir}` : t.cwd && within(t.repo!, t.cwd) ? t.cwd : t.repo!
-const near = (t: { repo?: string; cwd?: string; subdir?: string }) => {
-  const at = parts(mem.cwd).join('/')
-  if (!at || (mem.home && at === parts(mem.home).join('/'))) return false
-  return (!!t.cwd && within(mem.cwd, t.cwd)) ||
-    (!!t.repo && (within(mem.cwd, t.repo) || within(spotOf(t), mem.cwd)))
-}
-// Where `wb start` ran (`cwd`) is this session's very directory. In ~ or /, where `near` claims
-// nothing, that still adopts a gone session's task: `claude` restarted in ~ after a `wb start
-// --repo ~/proj` there was woken for none (#1403, 2026-11-25). One without a session stays no ~
-// session's, as `wb`'s _scope judges.
-const ranHere = (t: { cwd?: string }) => !!mem.cwd && !!t.cwd && parts(t.cwd).join('/') === parts(mem.cwd).join('/')
-const mine = (t: { session?: string; repo?: string; cwd?: string; subdir?: string; claude_pid?: number; claude_start?: string }) => {
-  if (t.session && mem.ids.size) {
-    return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && (near(t) || ranHere(t)))
-  }
-  if (!mem.cwd || (!t.cwd && !t.repo)) return true
-  return near(t)
-}
+// Whether a task is this session's: the kernel's owns (Kernel.Owner), which `wb`'s _scope judges
+// the same and the OpenCode plugin judges by too. One `wb start` ran in this process's sessions
+// (task.json `session`) is, wherever it ran; once that Claude Code process is gone (`claude_pid`,
+// mem.deadPids) a new process near it adopts it, never another driver's (#1309); one without a
+// session goes by directory, in ~ or / by none; one with no key at all is everyone's. Paths by whole
+// components (/x/ab is not inside /x/a), in lower case where the file system ignores it
+// (`mem.fold`, macOS: ~/Repos typed for ~/repos once missed, the 2026-11-19 audit). wb records
+// task paths real (getcwd, git's toplevel). The facts are gathered here; the kernel compares them.
+type OwnerKeys = { session?: string; repo?: string; cwd?: string; subdir?: string; claude_pid?: number; claude_start?: string; driver?: unknown }
+// a task's driver as store.driver_of names it: task.json `driver.tool` opencode, else claude with
+// a session, else none (WbTask carries it as scan read it)
+const driverOf = (t: { session?: string; driver?: unknown }): string =>
+  typeof t.driver === 'string' ? t.driver
+    : (t.driver as { tool?: unknown } | null)?.tool === 'opencode' ? 'opencode' : t.session ? 'claude' : ''
+const ownerOf = (t: OwnerKeys) => owns({
+  session: String(t.session ?? ''), ids: [...mem.ids], driver: driverOf(t), host: 'claude',
+  gone: mem.deadPids.has(pidKey(t)), cwd: String(t.cwd ?? ''), repo: String(t.repo ?? ''),
+  subdir: String(t.subdir ?? ''), here: mem.cwd, home: mem.home, fold: mem.fold,
+})
+const mine = (t: OwnerKeys) => ownerOf(t).mine
 
 // Whether another session's task's Claude Code process is gone (mem.deadPids, for `mine`): `kill
 // -0` and its start (task.json `claude_start`: a recycled pid is another process, #532), a live
@@ -2017,7 +1987,7 @@ const ownPid = (t: { claude_pid?: number; claude_start?: string }) =>
 // task.json as it stands after the claim, whoever won.
 async function claim($: any, name: string, sp: Row): Promise<Row> {
   if (!mem.claudePid || !sp.session || !mem.ids.size || !mem.deadPids.has(pidKey(sp)) || ownPid(sp)) return sp
-  if (!mem.ids.has(sp.session) && !near(sp) && !ranHere(sp)) return sp
+  if (!ownerOf(sp).claims) return sp // neither its id nor near it: never this session's to adopt
   const id = await $.session.id().catch(() => '')
   const ids = [...new Set([id, ...mem.ids].filter(Boolean))]
   const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)
@@ -2034,8 +2004,8 @@ async function claim($: any, name: string, sp: Row): Promise<Row> {
 // neither parked by a quit (store.parked, #698) nor taken over by Claude (#834)
 const delegatedWork = (st: Row) => {
   const phase = String(st.phase ?? 'queued')
-  if (ACTIVE.has(phase)) return true
-  return NEEDS.has(phase) && !(PARKS.has(phase) && st.parked) && !st.taken_over
+  const p = phaseOf({ phase, parked: !!st.parked })
+  return p.active || (p.waits && !st.taken_over)
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a
@@ -2106,7 +2076,7 @@ async function readTail($: any, path: string, max: number): Promise<{ text: stri
     return null
   }
 }
-const NOTIFY_TAIL = 1 << 20 // far more than OLDEST_WAKE_MS's hour of notices
+const NOTIFY_TAIL = 1 << 20 // far more than an hour of notices (noticesDue's)
 const EVENTS_TAIL = 64 << 10 // the pane shows a task's last four events
 
 // A task's last four events, read again only when events.jsonl's size or mtime changed: every
@@ -2145,7 +2115,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
     const phase = String(st.phase ?? 'queued')
     const updatedAt = Number(st.updated_at ?? 0) * 1000
     if (!ACTIVE.has(phase) && !NEEDS.has(phase) && now - updatedAt > KEEP_CLOSED_MS) {
-      if (phase === 'accepted' || phase === 'discarded') mem.gone.add(ent.name)
+      if (CLOSED.has(phase)) mem.gone.add(ent.name)
       continue
     }
     let sp = await readJson($, `${base}/task.json`)
@@ -2166,7 +2136,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), subdir: String(sp.subdir ?? ''),
-      session: String(sp.session ?? ''),
+      session: String(sp.session ?? ''), driver: driverOf(sp),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
       parked: PARKS.has(phase) && !!st.parked, // as store.parked (#698)
@@ -2210,7 +2180,7 @@ export function viewFacts(sp: Row, st: Row) {
 // its rows. The render draws them and pageShape counts them, one row each: none wraps.
 type ListRow = { parts: RowPart[]; task: string; first: boolean }
 function listRows(list: WbTask[], followed: string, now: number, spin: string, cols: number, bodyRows: number): ListRow[] {
-  const open = list.filter(t => t.phase !== 'accepted' && t.phase !== 'discarded')
+  const open = list.filter(t => !CLOSED.has(t.phase))
   const headers = new Set(open.map(t => t.group).filter(g => g && open.filter(t => t.group === g).length >= 2)).size
   const lines = taskLines(list, { cols, now, spin, followed, compact: compactWanted(open.length, headers, bodyRows), usd })
   const out: ListRow[] = []
@@ -2285,10 +2255,10 @@ async function scoutOffered($: any, now: number): Promise<void> {
   await $.fs.write(path, JSON.stringify({ ...st, offered_at: now / 1000 })).catch(() => {})
 }
 
-async function compactAtBoundary($: any): Promise<void> {
+async function compactAtBoundary($: any, at: Omit<Parameters<typeof compactPlan>[0], 'percentSet' | 'percent' | 'tokens' | 'window' | 'autoCompact' | 'threshold'>): Promise<void> {
   const set = await $.env.get('WB_COMPACT_AT') // a percentage; 0 turns it off
-  const at = set && Number.isFinite(Number(set)) ? Number(set) / 100 : COMPACT_AT
-  if (!at) return
+  const percentSet = !!set && Number.isFinite(Number(set))
+  if (percentSet && !Number(set)) return
   let context
   try {
     ({ context } = await $.session.usage({ breakdown: 'summary' }))
@@ -2296,8 +2266,9 @@ async function compactAtBoundary($: any): Promise<void> {
     return // no reading yet (a session before its first turn)
   }
   const b = context.breakdown
-  const limit = b?.isAutoCompactEnabled && b.autoCompactThreshold ? b.autoCompactThreshold : context.window
-  if (!context.tokens || context.tokens < at * limit) return
+  const plan = compactPlan({ ...at, percentSet, percent: percentSet ? Number(set) : 0, tokens: Number(context.tokens) || 0,
+    window: Number(context.window) || 0, autoCompact: !!b?.isAutoCompactEnabled, threshold: Number(b?.autoCompactThreshold) || 0 })
+  if (!plan.compact) return
   try {
     await $.session.compact({ instructions: KEEP_ON_COMPACT }) // no toast: Claude Code shows it (#1322)
   } catch {
@@ -2353,8 +2324,8 @@ const focusOf = (list: WbTask[], followed: string, picked = mem.picked): WbTask 
   const kept = list.find(t => t.name === followed && ACTIVE.has(t.phase))
   if (kept) return kept
   const by = (ts: WbTask[], k: 'createdAt' | 'updatedAt') => [...ts].sort((a, b) => b[k] - a[k])[0]
-  return by(list.filter(t => ACTIVE.has(t.phase) && t.phase !== 'queued'), 'createdAt') ??
-    by(list.filter(t => t.phase === 'queued'), 'createdAt') ??
+  return by(list.filter(t => phaseOf(t).working), 'createdAt') ??
+    by(list.filter(t => ACTIVE.has(t.phase) && !phaseOf(t).working), 'createdAt') ??
     by(list.filter(t => NEEDS.has(t.phase)), 'updatedAt')
 }
 
@@ -2555,14 +2526,13 @@ async function poll($: any) {
     // Only this session's tasks, and only in workbench mode, make a boundary: a task closing
     // compacted every session's context, delegating or not (the 2026-11-16 audit).
     const open = new Set(list.filter(t => isOpen(t) && mine(t)).map(t => t.name))
-    if (on && [...mem.open].some(name => !open.has(name))) mem.boundary = true
-    if (!on) mem.boundary = false
+    const was = [...mem.open]
     mem.open = open
     await sayRules($, on)
-    if (mem.boundary && !mem.busy && !list.some(t => waitsOnClaude(t) && mine(t))) {
-      mem.boundary = false
-      await compactAtBoundary($)
-    }
+    const at = { on, was, open: [...open], boundary: mem.boundary, busy: mem.busy, waiting: list.some(t => phaseOf(t).waits && mine(t)) }
+    const plan = compactPlan({ ...at, percentSet: false, percent: 0, tokens: 0, window: 0, autoCompact: false, threshold: 0 })
+    mem.boundary = plan.boundary
+    if (plan.check) await compactAtBoundary($, at)
     // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn,
     // in a session that delegates with wakes on: the plugin runs in every session, and one for
     // another project got the check, spent the day's offer and ignored wake off (#919)
@@ -3210,17 +3180,13 @@ async function deliver($: any, now: number) {
     if (file.key) mem.notifyRows = file
   }
   if (file.key === mem.lastNotify && !mem.busy) return
-  // Per task, its newest notice and every question: two asked at once (parallel tool calls) are
-  // both open, and the newest alone hid the first, its agent blocked (the 2026-11-16 audit).
-  const due = new Map<string, Row[]>()
-  for (const row of file.rows) {
-    // Every notice counts for rewake, however old: a notice delivered before a reload (or by
-    // another session) is news Claude had, not a lost one (the 2026-11-16 audit).
-    // a batch's notice is news for each task it names (acked with it), or rewake woke for the rest
-    for (const n of [row.task, ...(batchOf(row) ?? [])]) mem.noticed.set(n, Math.max(mem.noticed.get(n) ?? 0, row.ts))
-    if (row.ts * 1000 < Math.max(mem.startedAt, now) - OLDEST_WAKE_MS) continue
-    due.set(row.task, [...(due.get(row.task) ?? []).filter(r => r.kind === 'question'), row])
-  }
+  // Per task, its newest notice and every question, none over an hour old: the kernel's
+  // noticesDue (Kernel.Notice). Every notice counts for rewake, however old, a batch's for each
+  // task it names (`noticed`): news Claude had, not a lost one (the 2026-11-16 audit).
+  const { due: picked, noticed } = noticesDue(file.rows, mem.startedAt, now)
+  for (const n of noticed) mem.noticed.set(n.task, Math.max(mem.noticed.get(n.task) ?? 0, n.ts))
+  const rows0 = file.rows
+  const due = picked.map(d => [d.task, d.picks.map(i => rows0[i]!)] as const)
   // A wake held for the turn leaves the file unseen, so the poll after the turn sends it: a second
   // task's wake held while the first one's turn ran was never sent (the 2026-11-16 audit).
   let held = false
@@ -3236,31 +3202,34 @@ async function deliver($: any, now: number) {
     // sent back is acknowledged and dropped.
     const status = await readJson($, `${root}/tasks/${name}/status.json`)
     for (const row of rows) {
-      if (row.ts <= acked) continue
-      const current = row.kind === 'checkin'
-        ? RUNNING.has(status.phase) // a check-in is news while the task still runs
-        : row.kind === 'question' && row.id
-          // this question, still unanswered, while the task still asks: a question the runner
-          // dropped (timed out, its round ended or stopped) woke Claude for nobody (the 0.90 review)
-          ? status.phase === 'asking' && await asking($, name, String(row.id))
-          : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
+      const key = `${name}:${row.ts}`
+      // what to do with it is the kernel's noticePlan (Kernel.Notice): still true (a check-in
+      // while the task runs; this question, still unanswered, while the task asks: one the runner
+      // dropped woke Claude for nobody, the 0.90 review; else the phase its kind names), toasted
+      // once, and the act. The host reads the facts and carries it out
+      const question = row.ts > acked && row.kind === 'question' && !!row.id
+      const plan = noticePlan({
+        kind: String(row.kind ?? ''), hasId: !!row.id, phase: String(status.phase ?? ''),
+        questionOpen: question && await asking($, name, String(row.id)), ts: Number(row.ts), acked,
+        own, wake: mem.wake, busy: mem.busy, toasted: mem.toasted.has(key), heldAsk: mem.heldAsks.has(key),
+      })
+      if (plan.act === 'skip') continue
       const batch = batchOf(row)
       const headline = headlineOf(row)
-      const key = `${name}:${row.ts}`
-      if (current && !mem.toasted.has(key)) {
+      if (plan.toast) {
         mem.toasted.add(key)
         $.ui.toast(`workbench: ${name} ${headline}`)
       }
-      if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
+      if (plan.act === 'none') continue // the toast only: the notice stays for its session or wb wait
       const next = await nextOf($, row, name)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
       const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
-      if (mem.busy && current) {
+      if (plan.act === 'steer' || plan.act === 'hold') {
         // A question can't wait for the turn to end: its agent is blocked, and after the ask
         // timeout it guesses (a 20-minute review turn, #542). It goes into the running turn, as
         // a web message does; refused, it is held like the rest, which deliver once the turn ends.
-        if (row.kind === 'question') {
+        if (plan.act === 'steer') {
           if (!(await take($, name, row.ts))) { acked = row.ts; continue } // another session's wake took it
           await raiseAck($, ackPath, row.ts) // acknowledge before sending: never twice
           if (await intoTurn($, text)) {
@@ -3274,13 +3243,13 @@ async function deliver($: any, now: number) {
         continue
       }
       const prev = acked
-      if (current && !(await take($, name, row.ts))) { acked = row.ts; continue } // taken by another
+      if (plan.act === 'wake' && !(await take($, name, row.ts))) { acked = row.ts; continue } // taken by another
       await raiseAck($, ackPath, row.ts) // acknowledge before waking: never wake twice
       acked = row.ts
-      if (!current) {
+      if (plan.act !== 'wake') {
         // held through the turn and timed out unseen: said, not acknowledged in silence (#542)
-        if (mem.heldAsks.delete(key) && row.id && (ACTIVE.has(status.phase) || NEEDS.has(status.phase))
-          && (await $.fs.read(`${root}/tasks/${name}/ask/${row.id}.answer`).catch(() => '')).startsWith(NO_ANSWER)) {
+        mem.heldAsks.delete(key)
+        if (plan.act === 'missed' && (await $.fs.read(`${root}/tasks/${name}/ask/${row.id}.answer`).catch(() => '')).startsWith(NO_ANSWER)) {
           void wake($, name, `${WAKE_OPENING} \`${name}\` asked a question while you were busy.\n\n${row.text}\n\n` +
             MISSED_NOTE(name), prev, row.ts)
         }
@@ -3373,15 +3342,19 @@ async function wake($: any, name: string, text: string, prev: number, ts: number
 
 // The safety net under deliver: a task of this session's waiting on Claude whose news never
 // reached it (a lost or swallowed notice; on 2026-11-16 a failure sat unseen for an hour) wakes
-// Claude anyway, once, after a minute of Claude being idle. `acked` past the task's newest notice
-// (or, with none, the moment it entered that state) means Claude has had the news.
+// Claude anyway, once, after a minute of Claude being idle: the kernel's rewakePlan (Kernel.Notice).
+// `acked` past the task's newest notice (or, with none, the moment it entered that state) means
+// Claude has had the news; one idle past 12 hours waited for a session long gone (wb status shows it).
+// A minute, as rewake waits: a failed send to the web chat, or a queued prompt, is tried again then
 const REWAKE_MS = 60_000
-const REWAKE_MAX_MS = 12 * 3600_000 // older than this, it waited for a session long gone: wb status shows it
+const rewakeOf = (t: WbTask, now: number, own: boolean, had = { acked: 0, seen: -1, marked: 0 }) => rewakePlan({
+  phase: t.phase, parked: t.parked, mine: own, updatedAt: t.updatedAt, now, busy: mem.busy, wake: mem.wake,
+  dropped: mem.dropped.get(t.name) ?? 0, ...had,
+})
 async function rewake($: any, now: number, list: WbTask[]) {
-  if (mem.busy || !mem.wake) return
   for (const t of list) {
-    if (!waitsOnClaude(t) || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
-    if (now - (mem.dropped.get(t.name) ?? 0) < REWAKE_MS) continue // dropped: once a minute
+    const own = mine(t)
+    if (!rewakeOf(t, now, own).candidate) continue // dropped: once a minute too
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     // Claude had the news if it acked the task's latest notice: the runner's last status write
@@ -3389,11 +3362,10 @@ async function rewake($: any, now: number, list: WbTask[]) {
     // The task's own `noticed` mark too (Task.notify): after a reload mem.noticed holds only
     // notify.jsonl's last 1 MiB, and a review whose notice had left it woke Claude again (#844)
     const marked = Number(await $.fs.read(`${mem.root}/tasks/${t.name}/noticed`).catch(() => '')) || 0
-    const seen = mem.noticed.get(t.name)
-    const noticed = seen !== undefined || marked ? Math.max(seen ?? 0, marked) : undefined
-    if (noticed !== undefined ? acked >= noticed : acked * 1000 >= t.updatedAt) continue
+    const plan = rewakeOf(t, now, own, { acked, seen: mem.noticed.get(t.name) ?? -1, marked })
+    if (!plan.due) continue
     await $.fs.write(ackPath, String(now / 1000))
-    const kind = t.phase === 'asking' ? 'question' : t.phase
+    const kind = plan.kind
     // its newest notice says why it stopped, as deliver's wake would have: from the phase alone a
     // provider's, the day cap's, a local-only or an Agents-GPU stop woke as "got stuck … Steer it
     // with wb feedback", which wb refuses or which runs a round on an agent that wasn't stuck
@@ -3509,24 +3481,16 @@ async function workbenchMode($: any, on: boolean) {
 // session resumed in a new process (`claude --continue`/`--resume`) comes back in it: the atom
 // died with the old process, and until Claude happened to run a delegating command the chat
 // didn't listen, the pane and status line didn't show it, and a compaction dropped it (#689).
-// Kept MODES_KEEP_MS; a quit clears every id this process has had.
-const MODES_KEEP_MS = 30 * 24 * 3600_000
+// Kept 30 days (the kernel's `modesPlan`); a quit clears every id this process has had.
 async function keepMode($: any, on: boolean) {
   try {
     const now = await $.clock.now()
-    const was = (await $.store.get('modes')) as Record<string, number> | undefined
-    const modes: Record<string, number> = {}
-    for (const [id, at] of Object.entries(was && typeof was === 'object' ? was : {})) {
-      if (typeof at === 'number' && now - at < MODES_KEEP_MS && !mem.ids.has(id)) modes[id] = at
-    }
-    if (on) for (const id of mem.ids) modes[id] = now
-    await $.store.set('modes', modes)
+    await $.store.set('modes', modesPlan(await $.store.get('modes'), mem.ids, now, on).modes)
   } catch {} // no store (an older Claude Code, a test without one): the mode lasts this process
 }
 async function modeKept($: any): Promise<boolean> {
   try {
-    const modes = (await $.store.get('modes')) as Record<string, number> | undefined
-    return !!modes && typeof modes === 'object' && [...mem.ids].some(id => typeof modes[id] === 'number')
+    return modesPlan(await $.store.get('modes'), mem.ids, 0, false).kept
   } catch {
     return false
   }
@@ -3558,23 +3522,22 @@ async function restorePane($: any) {
 // Outside workbench mode only this session's: another session's task running opened the pane and
 // filled the status line in a session the user kept off workbench, and /workbench-quit couldn't
 // clear it (2026-11-17)
+const WAITING_WORD: Record<string, string> = { review: 'awaiting review' }
 function taskParts(list: WbTask[], on: boolean) {
   const shown = on ? list : list.filter(t => mine(t))
-  const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
+  const live = shown.filter(t => phaseOf(t).running)
   // what waits on Claude is this session's alone, in the mode too: another session's reviews
   // counted in this one's "N awaiting review", as if this Claude had them to do (#693)
-  const asking = shown.filter(t => t.phase === 'asking' && mine(t))
-  const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking' && mine(t))
+  const own = shown.filter(t => mine(t))
+  const asking = own.filter(t => { const p = phaseOf(t); return p.active && p.needsClaude })
   // a stuck or failed task is counted as such: "2 awaiting review" said so for one review and one
-  // stuck task (seen live, #1048)
-  const count = (phase: string, word: string) => {
-    const n = waiting.filter(t => t.phase === phase).length
-    return n ? [`${n} ${word}`] : []
-  }
+  // stuck task (seen live, #1048). The kernel's openCounts tallies them, as the pane's header does;
+  // a parked one waits for no one
+  const waiting = openCounts(own).counts.filter(c => !c.active && c.waiting > 0)
   return { live, parts: [
     ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
     ...asking.map(t => `${t.name} asks`),
-    ...count('review', 'awaiting review'), ...count('stuck', 'stuck'), ...count('failed', 'failed'),
+    ...waiting.map(c => `${c.waiting} ${WAITING_WORD[c.phase] ?? c.phase}`),
   ] }
 }
 
@@ -3904,23 +3867,25 @@ export const register: Register = (on, options) => {
     const st = await read($, chat)
     const isAway = await away($, st)
     const blocks = [...r.blocks]
-    if (st.delegating) blocks.push({ name: 'workbench-mode', text: MODE_NOTE(mem.skill) })
     const want = await wanted($, st.delegating)
     // /workbench as the first message said them in its text already (#540)
     const had = mem.skillTurn ? mem.said : null
     mem.skillTurn = false
-    await setSaid($, want)
-    if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
-    if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
-    if (want.workflows === 'on' && had?.workflows !== 'on') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
-    if (isAway) {
-      blocks.push({ name: 'web-chat', text: AWAY_NOTE })
-      mem.awayNoted = true
-    }
-    if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
-    if (want.routes && had?.routes !== want.routes) { // read while delegating or with a task open, as `wanted` does
-      const routes = await readRoutes($) // once any role has an API model (#1014)
-      if (routes.api) blocks.push({ name: 'workbench-routes', text: ROUTES_NOTE(routes) })
+    const plan = tellPlan({ first: true, want, was: had ?? want, known: !!had, any: true, delegating: !!st.delegating, away: isAway })
+    await setSaid($, plan.said)
+    for (const say of plan.say) {
+      if (say === 'mode') blocks.push({ name: 'workbench-mode', text: MODE_NOTE(mem.skill) })
+      else if (say === 'coding') blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
+      else if (say === 'notes') blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
+      else if (say === 'workflows') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
+      else if (say === 'away') {
+        blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+        mem.awayNoted = true
+      } else if (say === 'wakeOff') blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
+      else if (say === 'routes') { // read while delegating or with a task open, as `wanted` does
+        const routes = await readRoutes($) // once any role has an API model (#1014)
+        if (routes.api) blocks.push({ name: 'workbench-routes', text: ROUTES_NOTE(routes) })
+      }
     }
     const { ok, out: status, aborted } = await runWb($, ['status', ...(await scope($))])
     if (!ok && !aborted) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)

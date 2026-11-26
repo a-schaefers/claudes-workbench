@@ -11,5 +11,17 @@
     "./tui": "./tui.ts",
     "./rpc": "./rpc.ts"
   },
-  "files": ["server.ts", "tui.ts", "rpc.ts", "wb.ts", "consent.ts", "consent-tui.ts", "gates.ts", "words.ts", "calls.ts"]
+  "files": [
+    "server.ts",
+    "tui.ts",
+    "rpc.ts",
+    "wb.ts",
+    "chat.ts",
+    "driver.ts",
+    "consent.ts",
+    "consent-tui.ts",
+    "gates.ts",
+    "words.ts",
+    "calls.ts"
+  ]
 }
