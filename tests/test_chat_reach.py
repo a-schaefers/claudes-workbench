@@ -17,6 +17,8 @@ from workbench import chat, settings, story  # noqa: E402
 from tests.test_workbench import Base, run_wb  # noqa: E402
 
 NAME = "box.example-tail.ts.net"
+NOWHERE = "192.0.2.1"  # TEST-NET-1 (RFC 5737): on no machine's interfaces
+LISTENABLE = chat.listenable
 
 
 class Reach(Base):
@@ -25,15 +27,16 @@ class Reach(Base):
         tmp = Path(self.tmp.name)
         self.bin = tmp / "ts-bin"
         self.bin.mkdir()
-        # `tailscale status --json` up (FAKE_TS=down: stopped), `serve status --json` serving the
-        # chat's port when FAKE_TS_SERVE names it
+        # `tailscale status --json` up (FAKE_TS=down: stopped; FAKE_TS_IP: its one address),
+        # `serve status --json` serving the chat's port when FAKE_TS_SERVE names it
         (self.bin / "tailscale").write_text(textwrap.dedent(f"""\
             #!{sys.executable}
             import json, os, sys
             if sys.argv[1:] == ["status", "--json"]:
                 up = os.environ.get("FAKE_TS") != "down"
                 print(json.dumps({{"BackendState": "Running" if up else "Stopped", "Self": {{
-                    "DNSName": "{NAME}.", "HostName": "box", "TailscaleIPs": ["100.64.0.7", "fd7a::7"]}}}}))
+                    "DNSName": "{NAME}.", "HostName": "box",
+                    "TailscaleIPs": [os.environ["FAKE_TS_IP"]] if "FAKE_TS_IP" in os.environ else ["100.64.0.7", "fd7a::7"]}}}}))
             elif sys.argv[1:] == ["serve", "status", "--json"]:
                 port = os.environ.get("FAKE_TS_SERVE")
                 print(json.dumps({{"Web": {{"{NAME}:443": {{"Handlers": {{"/": {{"Proxy": f"http://127.0.0.1:{{port}}"}}}}}}}}}}
@@ -42,6 +45,10 @@ class Reach(Base):
                 sys.exit(2)
             """))
         (self.bin / "tailscale").chmod(0o755)
+        # the fake's address is on no interface here either: taken as one but in #1499's test
+        listen = mock.patch.object(chat, "listenable", lambda ip: ip != NOWHERE)
+        listen.start()
+        self.addCleanup(listen.stop)
         self.conf = chat.config_path()
         self.conf.parent.mkdir(parents=True, exist_ok=True)
 
@@ -99,6 +106,29 @@ class Reach(Base):
         self.assertEqual(self.changes(), [])
         with self.assertRaises(ValueError):
             chat.set_reach("lan")  # no LAN option: a wildcard bind is the user's own edit
+
+    def test_a_tailnet_address_this_machine_cannot_bind_is_refused_and_never_takes_localhost_down_1499(self):
+        # #1499 (2026-11-26): under Tailscale's userspace networking (Docker, LXC) the tailnet
+        # address is on no interface; `reach tailnet` wrote the bind anyway, and the server's
+        # rebind to it failed, closed its localhost server too and exited, every restart the same
+        with mock.patch.object(chat, "listenable", LISTENABLE):
+            self.assertTrue(chat.listenable("127.0.0.1"))
+            self.assertFalse(chat.listenable(NOWHERE))
+            with self.with_tailscale(FAKE_TS_IP=NOWHERE):
+                said = self.refused("chat", "reach", "tailnet", "--port", "1400")
+                self.assertIn(f"tailnet address {NOWHERE} is on none of its interfaces", said)
+                self.assertIn("`tailscale serve --bg 1400`", said)              # the route that works there
+                self.assertFalse(self.conf.exists())
+                self.assertEqual(self.changes(), [])
+                self.conf.write_text(json.dumps({"bind": chat.TAILNET_BIND}))  # by hand, or before the fix
+                servers, p = chat.make_servers(0)
+                try:
+                    self.assertEqual([s.server_address[0] for s in servers], ["127.0.0.1"])  # localhost kept
+                    self.assertEqual(p["skipped"], ["tailscale (its address isn't on this machine)"])
+                    self.assertEqual(chat.plan()["binds"], p["binds"])          # replan: nothing to restart for
+                finally:
+                    for s in servers:
+                        s.server_close()
 
     def test_local_drops_the_bind_and_a_bind_of_the_users_own_reads_custom(self):
         self.conf.write_text(json.dumps({"bind": ["127.0.0.1", "tailscale"], "hosts": ["laptop"]}))

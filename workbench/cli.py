@@ -7564,7 +7564,7 @@ def chat_reach(to: str | None, port: int) -> None:
                                           "custom": " (chat.json's own bind)"}[now])
         return
     try:
-        got = chat.set_reach(to)
+        got = chat.set_reach(to, port)
     except ValueError as e:
         die(f"wb chat reach {to}: {e}")
     except chat.ConfigError as e:

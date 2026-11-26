@@ -279,6 +279,20 @@ def _inbound(r: dict) -> bool:
     return r.get("from") == "user" or r.get("role") == "agent"
 
 
+def listenable(ip: str) -> bool:
+    """Whether a server here can listen on ``ip``: an address one of this machine's interfaces
+    carries. Tailscale's userspace networking (Docker or LXC, no /dev/net/tun) reports a tailnet
+    address no interface has, and the chat bound to it failed EADDRNOTAVAIL, closed its localhost
+    server too and exited, every restart the same: the whole web app down (#1499, 2026-11-26).
+    Only that refusal counts: another (a port, a permission) is make_servers' to say."""
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((ip, 0))
+    except OSError as e:
+        return e.errno != errno.EADDRNOTAVAIL
+    return True
+
+
 def tailscale(windows: bool = False) -> dict:
     """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up (no Self, or a
     BackendState other than Running); {"missing": True} when there is no CLI to ask (said apart
@@ -333,10 +347,11 @@ def reach() -> str:
     return "local" if all(b in LOOPBACK for b in binds) else "custom"
 
 
-def set_reach(to: str) -> dict:
+def set_reach(to: str, port: int = PORT) -> dict:
     """Write chat.json's `bind` for ``to`` (REACH), its other keys kept: {"from", "to", "ts"?: the
     tailscale() it checked}. ValueError, nothing written, for another value, or `tailnet` while
-    Tailscale isn't up here (its reason)."""
+    Tailscale isn't up here or its address can't be listened on (its reason, naming the
+    `tailscale serve --bg <port>` that works there)."""
     if to not in REACH:
         raise ValueError(f"reach is {' or '.join(REACH)}")
     was = reach()
@@ -347,6 +362,10 @@ def set_reach(to: str) -> dict:
         raise ValueError("no tailscale command here: install Tailscale (tailscale.com/download), sign in, then "
                          "this again" if ts.get("missing") else
                          "Tailscale isn't up here: `tailscale up`, then this again")
+    if to == "tailnet" and not listenable(ts["ip"]):  # plan() would skip it (#1499)
+        raise ValueError(f"this machine's tailnet address {ts['ip']} is on none of its interfaces (Tailscale's "
+                         f"userspace networking), so nothing can listen on it: leave reach local and run "
+                         f"`tailscale serve --bg {port}`, which serves the web app to your tailnet over https")
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # the user's file, edited in place under its lock (a link to their dotfiles stays one, #495)
@@ -3449,6 +3468,9 @@ def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict
             if not ts.get("ip"):
                 skipped.append("tailscale (CLI not found: put `tailscale` on PATH)" if ts.get("missing")
                                else "tailscale (no Tailscale address)" if ts else "tailscale (not running)")
+                continue
+            if not listenable(ts["ip"]):  # userspace networking: binding it took localhost down too (#1499)
+                skipped.append("tailscale (its address isn't on this machine)")
                 continue
             b = ts["ip"]
             allowed |= {n.lower() for n in ts["names"]}
