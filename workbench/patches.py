@@ -970,9 +970,12 @@ def upstream(root, kind, commit, slug) -> None:
     note_install(root)
     with _noting() as noted:  # the local commit wb update later drops when its pull request merges
         _table(noted, "prepared")[slug] = _ident(root, sha)
+    # the kernel's own check when the patch touches kernel/ (#1356): the suite holds the committed
+    # bundle offline, but only kernel.py check rebuilds it and runs its props (the toolchain once)
+    kernel = _git(root, "diff", "--quiet", f"{sha}^", sha, "--", "kernel", check=False).returncode != 0
     print("next (none of this has run):")
-    print(f"  cd {wt} && python3 -m unittest" + (" && claude plugin validate mod && claude plugin test mod"
-                                                 if mod else ""))
+    print(f"  cd {wt} && python3 -m unittest" + (" && python3 scripts/kernel.py check" if kernel else "")
+          + (" && claude plugin validate mod && claude plugin test mod" if mod else ""))
     if not repo:
         print(f"{remote} ({_shown_url(url)}) isn't on GitHub, and wb patch send sends only there: send it "
               "the way that project takes changes")
@@ -1202,10 +1205,22 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
         raise PatchError(f"{pr} changes .github/workflows/, and GitHub refuses that push over https without "
                          "the token's workflow scope, so nothing was sent: the user runs "
                          "! gh auth refresh -h github.com -s workflow")
-    if os.environ.get("CLAUDECODE") == "1" and not _approved(slug, title, body_file, draft, anyway):
+    # an OpenCode driver's shell too (#1309), and an agent's (#1310): store.under_model. Each
+    # sent with no one asked
+    if store.under_model() and not _approved(slug, title, body_file, draft, anyway):
         again = " ".join(["wb patch send", slug, "--title", _quote(title), "--body-file",
                           shlex.quote(os.path.abspath(body_file)), *(["--draft"] if draft else []),
                           *(["--anyway"] if anyway else [])])
+        if store.caller_kind() == "agent":  # its reviewer or the user decides (#1310)
+            raise PatchError("in an agent's shell wb patch send goes only on the user's yes in the driver's "
+                             "dialog, and the user approved none for this send, so nothing was sent. Ask "
+                             "the reviewer (ask_reviewer); or the user runs it in a terminal of their own: "
+                             f"{again}")
+        if store.caller_kind() == "opencode":
+            raise PatchError("in OpenCode wb patch send goes only through the workbench plugin's dialog, "
+                             "and the user approved none for this send, so nothing was sent (is the plugin "
+                             "installed and loaded?). Or the user runs it in a terminal of their own, "
+                             f"outside OpenCode: {again}")
         raise PatchError("in Claude Code wb patch send goes only through the workbench mod's dialog, and "
                          "the user approved none for this send, so nothing was sent (is the mod installed "
                          "and loaded? wb doctor says). Or the user runs it in a terminal of their own, "

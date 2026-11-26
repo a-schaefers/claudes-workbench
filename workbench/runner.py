@@ -695,6 +695,27 @@ REMOTE_CACHES_OFF = {"NX_SKIP_REMOTE_CACHE": "true", "PANTS_REMOTE_CACHE_WRITE":
 # user's personal skills from the agent by its own rules (context.denied_skills), which are made
 # for OpenCode's default.
 CLAUDE_CODE_OFF = ("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS")
+# And the driver's own marks (#1310, 2026-11-25): `wb start` run from an OpenCode session's shell
+# carries what OpenCode 2.4.1's shell tool sets on every command (core/src/tool/plugin/shell.ts:
+# AGENT=1, OPENCODE=1, AI_AGENT, OPENCODE_SESSION_ID; core/src/shell.ts: OPENCODE_TERMINAL=1), and
+# every agent then had the driver's session as its own, its tests too. The agent's OpenCode sets
+# each again for the agent's own session, but AI_AGENT only when unset (`||=`): Claude Code's
+# (`claude-code_…`) named every agent's shell Claude Code's. `WB_DRIVER` is the plugin's mark in
+# #1296's first design: dropped too, should a plugin set it. Other drivers put theirs in
+# process.env, which the shell tool's base environment is (core/src/shell.ts), so they reached
+# agents too (the #1310 review, 2026-11-25): OPENCODE_CLIENT (`opencode acp`'s `acp`, Desktop's
+# `desktop`: the agent's OpenCode took it as its app name, in its User-Agent to providers and its
+# observability tag) and OPENCODE_PRINT_LOGS (a driver's --print-logs: the agent's `run
+# --standalone` passed its server's whole log into runner.log every round, each "cli starting"
+# line with the round's prompt) describe the driver's process, so both drop. Desktop's
+# OPENCODE_EXPERIMENTAL_ICON_DISCOVERY and OPENCODE_EXPERIMENTAL_FILEWATCHER stay: 2.4.1's core and
+# CLI read neither (flags come through OPENCODE_FLAGS). The rest of what a driver's shell adds
+# stays: TERM (OpenCode's own shell sets it again), NO_PROXY with the loopback hosts (the agent's
+# OpenCode adds the same), and the server password, never there (OpenCode's Env.session leaves it
+# out, its server deletes it) and SECRET_ENV's (PASSW) if it were. Who runs a wb call is
+# store.caller_kind's, WB_TASK first: the agent's own shell has an OPENCODE_SESSION_ID again.
+DRIVER_ENV = ("OPENCODE_SESSION_ID", "OPENCODE", "AGENT", "AI_AGENT", "OPENCODE_TERMINAL", "WB_DRIVER",
+              "OPENCODE_CLIENT", "OPENCODE_PRINT_LOGS")
 
 
 def env_kept(name: str, value: str, through: set) -> bool:
@@ -768,7 +789,8 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py). ``run``: the
     one run it is for (WB_RUN), which sweep can then end alone."""
     through = set(context.commands_conf().get("env", []))
-    keep = {k: v for k, v in os.environ.items() if env_kept(k, v, through) and k not in CLAUDE_CODE_OFF}
+    keep = {k: v for k, v in os.environ.items()
+            if env_kept(k, v, through) and k not in CLAUDE_CODE_OFF and k not in DRIVER_ENV}
     layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer),
@@ -6969,13 +6991,21 @@ def awake_for_review(task: store.Task):
     detached, so when a batch's last task (or its last parallel ones) reached review none was
     held, and on Linux and WSL2, where Claude Code holds none of its own, the machine could
     idle-sleep mid-review, the feedback round and the summary waiting for the user (#1105,
-    2026-11-23). The waiter process, its pid the inhibitor's, or None."""
+    2026-11-23). An OpenCode driver's task (#1309): while the OpenCode server whose beat lists its
+    session runs, that beat's `pid` (store.driver_server `live`). The waiter process, its pid the
+    inhibitor's, or None."""
     from . import cli  # cli imports this module
-    pid, spec = task.spec.get("claude_pid"), task.spec
+    spec = task.spec
+    pid, start, on = spec.get("claude_pid"), spec.get("claude_start"), spec.get("claude_machine")
+    if store.driver_of(spec) == "opencode":  # driver_server judged the server's machine already
+        d = spec.get("driver") if isinstance(spec.get("driver"), dict) else {}
+        _, hb = store.driver_server(spec.get("session"), d)
+        pid, on = (hb or {}).get("pid"), None
+        start = d.get("start") if pid == d.get("pid") and isinstance(d.get("start"), str) else None
     if not spec.get("backlog") or task.status.get("phase") not in ("review", "stuck", "failed") \
             or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 \
-            or spec.get("claude_machine") not in (None, store.machine()) \
-            or not models._alive(pid, spec.get("claude_start")) or not cli.awake_how():
+            or on not in (None, store.machine()) \
+            or not models._alive(pid, start) or not cli.awake_how():
         return None
     try:
         waiter = subprocess.Popen([sys.executable, "-c", AWAIT_CLAUDE, str(pid), str(REVIEW_AWAKE_SECS)],

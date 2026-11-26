@@ -6,7 +6,8 @@
 # /bin/sh, as a user who isn't root: scripts/ci-wsl.sh), both of which the README says workbench
 # runs on. Either one failing turns the run red, and a release waits for a green run on its commit
 # (docs/release-checklist.md; the 2026-11-19 audit: the macOS job could fail unseen and ran
-# without OpenCode, and nothing ran WSL at all).
+# without OpenCode, and nothing ran WSL at all). Its first macOS shard also runs the kernel's
+# `scripts/kernel.py check` (#1356): the same bundle bytes on macOS as on Linux.
 #
 # The real-OpenCode tests run against the OpenCode pinned below (OPENCODE_VERSION, installed from
 # its release with the hash pinned here); opencode.yml runs them on the newest OpenCode. The Lane
@@ -31,9 +32,18 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # check.yml's suite: 7.5 minutes at 594c0bc, 27 at 24dfb6d (#950)
+    # check.yml's suite: 7.5 minutes at 594c0bc, 27 at 24dfb6d (#950), then past 60 in one
+    # process, cancelled in the last two runs before 2.1 (run 45707953076 on 4a32884, 2026-11-25).
+    # So check.yml's way: three shards, each run by scripts/suite.sh as four processes, one per
+    # CPU, about 8 minutes (check.yml's sixths take three to four so), room left for a hang's
+    # 600 s. The mod's test runs once, in shard 1.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
+      WB_TEST_SHARD: ${{ matrix.shard }}/3
       WB_TEST_HANG_SECS: '600'  # a hung test fails, named (tests/__init__.py, #950)
       # Always the newest release.
       CLAUDE_CODE_VERSION: latest
@@ -59,10 +69,14 @@ jobs:
       - name: Landlock
         run: |
           python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
-      - run: python3 -m unittest
-      - run: npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION
-      - run: claude --version
-      - run: claude plugin validate mod && claude plugin test mod
+      # exec: a cancel's signal reaches suite.sh, which prints every log so far (check.yml's step)
+      - run: exec scripts/suite.sh "$WB_TEST_SHARD" 4
+      - if: matrix.shard == 1
+        run: npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION
+      - if: matrix.shard == 1
+        run: claude --version
+      - if: matrix.shard == 1
+        run: claude plugin validate mod && claude plugin test mod
 
   macos:
     runs-on: macos-latest
@@ -99,17 +113,35 @@ jobs:
         run: |
           python3 -c 'from workbench import lane; print("lane:", lane.kind() or "none here: the Seatbelt test skips")'
       - run: python3 -X faulthandler -m unittest -v
+      # The kernel on macOS, on one shard (#1356): its bundle must build to the same bytes here as on
+      # check.yml's Linux, and its props run under OpenCode's Bun. The toolchain as check.yml's.
+      - if: matrix.shard == 1
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/workbench/kernel
+          key: kernel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kernel/toolchain.json', 'kernel/spago.lock') }}
+      - if: matrix.shard == 1
+        run: python3 scripts/kernel.py fetch
+      - if: matrix.shard == 1
+        run: python3 scripts/kernel.py check
 
   wsl:
     runs-on: windows-2025
-    # 29 minutes at 24dfb6d (#950)
+    # 29 minutes at 24dfb6d (#950), then past 60 in one process, cancelled in the last two runs
+    # before 2.1 (run 45707953076, 2026-11-25): `check`'s three shards, each four processes
+    # (scripts/suite.sh, in scripts/ci-wsl.sh; WSL2's VM has the runner's four CPUs)
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       # check.yml's OpenCode, its Linux x64 asset's hash
       OPENCODE_VERSION: '2.3.0'
       OPENCODE_SHA256: 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b'
+      WB_TEST_SHARD: ${{ matrix.shard }}/3
       WB_TEST_HANG_SECS: '600'  # a hung test fails, named (tests/__init__.py, #950)
-      WSLENV: OPENCODE_VERSION:OPENCODE_SHA256:WB_TEST_HANG_SECS
+      WSLENV: OPENCODE_VERSION:OPENCODE_SHA256:WB_TEST_SHARD:WB_TEST_HANG_SECS
     steps:
       # LF endings and the repo's own text: the clone inside WSL is made from this checkout
       - run: git config --global core.autocrlf false

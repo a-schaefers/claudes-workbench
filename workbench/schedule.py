@@ -48,8 +48,10 @@ ALLOWED = ("Bash(wb:*)", "Read", "Grep", "Glob")
 DENIED = ("Bash(git push:*)", "Bash(gh:*)")
 # Claude Code's own marks: inherited from a session the fire was started from (`wb schedule run`),
 # CLAUDECODE made claude refuse to start nested, and the session id would have made the night's
-# tasks that session's rather than headless Claude's
-CLAUDE_MARKS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_CODE_ENTRYPOINT")
+# tasks that session's rather than headless Claude's; an OpenCode driver's session id the same
+# (#1309: headless Claude's CLAUDECODE outranks it, but bench and optimize drop it too)
+CLAUDE_MARKS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_CODE_ENTRYPOINT",
+                "OPENCODE_SESSION_ID")
 PROMPT = """\
 A scheduled workbench run, `{name}`, with nobody at the terminal: Claude Code runs headless (claude -p).
 First read the /workbench skill, {skill}, and in its reference/driving.md the sections *Overnight:
