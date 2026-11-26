@@ -38,6 +38,12 @@ test('a model id is parsed as OpenCode parses provider/id#variant', () => {
   for (const bad of ['', 'nomodel', '/x', 'p/', 'p/x#', 'p/x#a#b', 'p#q/x']) expect(parseRef(bad)).toBeUndefined()
 })
 
+// #1477 (2026-11-26): wb maps a subagent's own shell to its lead by the beat (store.opencode_root)
+test('a subagent session\'s row in the beat names its parent, a lead\'s none', () => {
+  const beat = beatOf(1, undefined, 0, [{ id: 'kid', parentID: 'lead' }, { id: 'lead' }, { id: 'odd', parentID: '' }], new Map())
+  expect(beat.sessions).toEqual({ kid: { parent: 'lead' }, lead: {}, odd: {} })
+})
+
 test('a beat holds every session listed, its last primary request over its selection', () => {
   const used = new Map<string, Used>([['s2', { model: 'ollama/big', used: 99 }]])
   const beat = beatOf(42, '/db', 7, [

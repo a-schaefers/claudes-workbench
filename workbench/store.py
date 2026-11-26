@@ -422,13 +422,51 @@ SESSION_RE = re.compile(r"[\w-]{1,128}")  # a session id a file may hold, as the
 
 
 def opencode_session() -> str:
-    """The OpenCode session this `wb` runs for: OPENCODE_SESSION_ID, unless WB_TASK says this is
-    an agent's call (OpenCode re-sets the id in the agent's own shells, #1310) or Claude Code's
-    Bash runs it (CLAUDECODE, ranked first, exactly as before 2.2). "" for none or a malformed id."""
+    """The OpenCode driver session this `wb` runs for: OPENCODE_SESSION_ID's root (opencode_root:
+    a subagent's session is its lead's, #1477), unless WB_TASK says this is an agent's call
+    (OpenCode re-sets the id in the agent's own shells, #1310) or Claude Code's Bash runs it
+    (CLAUDECODE, ranked first, exactly as before 2.2). "" for none or a malformed id."""
     if os.environ.get("CLAUDECODE") == "1" or os.environ.get("WB_TASK"):
         return ""
     sid = os.environ.get("OPENCODE_SESSION_ID", "")
-    return sid if SESSION_RE.fullmatch(sid) else ""
+    return opencode_root(sid) if SESSION_RE.fullmatch(sid) else ""
+
+
+# A subagent's session (OpenCode's task tool) is its lead's child, with an id of its own, which
+# OpenCode's shell tool sets in its commands: a task its `wb start` recorded under that id was
+# another session's to the lead, so /workbench-quit's `wb stop --all` left it running and a bare
+# `wb wait` never took its notice, while the plugin woke the lead for it (#1477, 2026-11-26). The
+# beats say each session's `parent` (SessionInfo's parentID), and a session's driver is its root.
+def _parents() -> dict:
+    """Each session's parent, as this machine's fresh beats list them."""
+    out: dict = {}
+    for hb in heartbeats():
+        if not _beating(hb):
+            continue
+        for sid, row in hb["sessions"].items():
+            p = row.get("parent") if isinstance(row, dict) else None
+            if isinstance(p, str) and p != sid and SESSION_RE.fullmatch(p):
+                out.setdefault(sid, p)
+    return out
+
+
+def opencode_root(sid: str, parents: dict | None = None) -> str:
+    """``sid``'s root session by the fresh beats' `parent`s (16 up at most, a loop cut): itself
+    when no beat names a parent (a lead, a session not beaten yet)."""
+    parents = _parents() if parents is None else parents
+    seen = {sid}
+    while (p := parents.get(sid)) and p not in seen and len(seen) <= 16:
+        seen.add(p)
+        sid = p
+    return sid
+
+
+def opencode_family(sid: str) -> list[str]:
+    """``sid``'s root and every session under it by the fresh beats: whose tasks a driver's scope
+    takes (cli._caller), one recorded under a subagent's own id before a beat named its parent too."""
+    parents = _parents()
+    root = opencode_root(sid, parents)
+    return [root, *sorted(s for s in parents if s != root and opencode_root(s, parents) == root)]
 
 
 def under_model() -> bool:
@@ -468,7 +506,7 @@ def beat_path(pid: int) -> Path:
 def heartbeats() -> list[dict]:
     """This machine's OpenCode servers' heartbeats, `$WB_HOME/drivers/opencode-<machine_tag>-<pid>.json`,
     each as the plugin's server part writes its own: {tool: "opencode", pid, machine?, store?, ts,
-    sessions: {<id>: {model?, variant?, dir?}}}, `pid` the file name's; with `store` (the server's
+    sessions: {<id>: {model?, variant?, dir?, parent?}}}, `pid` the file name's; with `store` (the server's
     database), `sessions` every session in it when the listing began, at `ts` (ARCHITECTURE.md,
     *The heartbeat*). A file of another machine's (its tag, or its `machine`) is left out: its
     pids aren't this one's to judge (#922), and so is one not of that shape. A file of this

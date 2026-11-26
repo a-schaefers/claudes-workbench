@@ -41,7 +41,7 @@ def _num(v) -> bool:
 
 def write_beat(doc) -> Path:
     """`wb driver beat`: the plugin's heartbeat (stdin's JSON: {pid, store?, ts, sessions: {<id>:
-    {model?, variant?, dir?, used?}}}) as `drivers/opencode-<machine_tag>-<pid>.json`, this
+    {model?, variant?, dir?, used?, parent?}}}) as `drivers/opencode-<machine_tag>-<pid>.json`, this
     machine's `machine` added and every row checked, an odd one dropped. ValueError when the
     beat can't be one: `pid` must be this call's own OpenCode server, a process it runs under
     (store._lineage), so no other process's beat is ever written, nor one for a pid that isn't
@@ -70,6 +70,9 @@ def write_beat(doc) -> Path:
             out["dir"] = d
         if _num(u := row.get("used")) and "model" in out:
             out["used"] = u
+        # a subagent's lead (#1477): store.opencode_root maps its calls to that driver
+        if isinstance(p := row.get("parent"), str) and p != sid and store.SESSION_RE.fullmatch(p):
+            out["parent"] = p
         rows[sid] = out
     st = doc.get("store")
     beat = {"tool": "opencode", "pid": pid, "machine": store.machine(),

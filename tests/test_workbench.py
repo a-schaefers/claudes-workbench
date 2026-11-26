@@ -41673,17 +41673,18 @@ class OpenCodeDriver(Base):
                 code = e.code
         return code, out.getvalue(), err.getvalue()
 
-    def beat(self, *sessions, ago=0.0, pid=None, **kw):
+    def beat(self, *sessions, ago=0.0, pid=None, parents=None, **kw):
         """The heartbeat the plugin's server part in server ``pid`` (default: this process, a server
         that runs) writes: these sessions, every one in its store (`store`, default the user's;
-        None: a beat that names none)."""
+        None: a beat that names none), a subagent's with its `parent` (``parents``)."""
         pid = pid or os.getpid()
         kw.setdefault("store", self.db)
         if kw["store"] is None:
             kw.pop("store")
         store.write_json(store.beat_path(pid), {
             "tool": "opencode", "pid": pid, "ts": time.time() - ago, **kw,
-            "sessions": {s: {"model": "deepseek/deepseek-flash", "variant": "fast", "dir": self.here}
+            "sessions": {s: {"model": "deepseek/deepseek-flash", "variant": "fast", "dir": self.here,
+                             **({"parent": parents[s]} if s in (parents or {}) else {})}
                          for s in sessions}})
 
     def task(self, name, phase="running", **spec):
@@ -42010,6 +42011,38 @@ class OpenCodeDriver(Base):
         self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)  # t-b's is ses_b's
         os.environ["OPENCODE_SESSION_ID"] = "ses_b"
         self.assertEqual(self.wb("wait", "--timeout", "1")[1], "[review] t-b\nt-b is ready\n")
+
+    def test_a_task_a_subagent_session_starts_is_its_leads_to_list_stop_and_wait_on(self):
+        # #1477 (2026-11-26): a subagent's session (OpenCode's task tool) has its own id, which its
+        # shell's wb start recorded: the lead's status said "open elsewhere", its /workbench-quit's
+        # wb stop --all left the task running and a bare wb wait never took its notice, while the
+        # plugin woke the lead for it. The beat names the subagent's parent, and its driver is the root
+        doc = {"pid": os.getpid(), "store": self.db, "ts": time.time(), "sessions": {
+            "ses_lead": {"dir": self.here}, "ses_kid": {"dir": self.here, "parent": "ses_lead"},
+            "ses_odd": {"parent": "not an id!"}}}
+        self.assertEqual(self.beat_in(doc), (0, "", ""))          # wb driver beat keeps the parent
+        self.assertEqual({s: r.get("parent") for s, r in store.read_json(store.beat_path(os.getpid()))["sessions"].items()},
+                         {"ses_lead": None, "ses_kid": "ses_lead", "ses_odd": None})
+        self.beat("ses_lead", "ses_kid", "ses_b", parents={"ses_kid": "ses_lead"})
+        os.environ["OPENCODE_SESSION_ID"] = "ses_kid"
+        self.assertEqual(store.opencode_session(), "ses_lead")
+        self.start("t-sub", "ok")
+        wait_phase("t-sub", {"review"})
+        self.assertEqual(store.Task("t-sub").spec["session"], "ses_lead")
+        # one recorded under the subagent's own id, before any beat named its parent
+        self.opencode_task("t-early", "ses_kid")
+        self.opencode_task("t-b", "ses_b")
+        os.environ["OPENCODE_SESSION_ID"] = "ses_lead"
+        self.assertEqual(cli._caller(argparse.Namespace())[1], ["ses_lead", "ses_kid"])
+        out = self.wb("status")[1]
+        self.assertIn("open elsewhere (other sessions'): t-b", out)
+        self.assertNotIn("t-sub", out.split("open elsewhere")[1])
+        self.assertNotIn("t-early", out.split("open elsewhere")[1])
+        self.assertIn("[review] t-sub", self.wb("wait", "--timeout", "1")[1])
+        out = self.wb("stop", "--all", "--park-waiting")[1]
+        self.assertIn("t-early", out.split("left running")[0])
+        self.assertIn("left running (other sessions'): t-b", out)
+        self.assertNotEqual(store.Task("t-early").status["phase"], "running")
 
     def test_wb_adopt_from_an_opencode_session_takes_a_gone_owners_task_and_refuses_a_live_ones(self):
         self.opencode_task("t-x", "ses_old")

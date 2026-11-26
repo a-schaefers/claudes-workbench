@@ -186,6 +186,26 @@ test('the typed start (#1335) asks on an API model with its typed argv, writes t
   }
 })
 
+// #1477 (2026-11-26): a subagent's typed start ran wb as its own child session, so its task was
+// another session's to the lead; wb runs it, and takes its yes, as the root, the form in the child
+test('a subagent\'s typed start asks in its own session and runs wb, and writes the yes, as its lead\'s', async () => {
+  const home = scratch()
+  try {
+    const calls: string[][] = [], asked: string[] = []
+    const d = deps(home, 'yes', GATED, calls)
+    const start = tools({ ...d, root: async s => s === 'ses_kid' ? 'ses_lead' : s,
+      asker: { ask: async s => { asked.push(s); return 'yes' } } }).find(t => t.name === 'start')!
+    expect(await start.execute({ name: 't', spec: 'Do x.\n', model: 'deepseek/x' }, { sessionID: 'ses_kid' }))
+      .toEqual({ content: 'ran start' })
+    expect(asked).toEqual(['ses_kid'])
+    expect(calls.map(c => c[0])).toEqual(['ses_lead', 'ses_lead'])
+    expect(existsSync(join(home, 'route-ok.ses_lead.json'))).toBe(true)
+    expect(existsSync(join(home, 'route-ok.ses_kid.json'))).toBe(false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('the send tool shows the title and body, and writes what wb patch send checks on the yes', async () => {
   const home = scratch()
   try {

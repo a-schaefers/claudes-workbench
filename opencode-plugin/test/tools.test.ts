@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  dirOfSession, NAMESPACE, SPECS, START_INPUT, WAIT_MAX_MIN, WAIT_MIN, procedureTools, runner, sessionDirs, startCall, tools,
+  dirOfSession, NAMESPACE, SPECS, START_INPUT, WAIT_MAX_MIN, WAIT_MIN, procedureTools, runner, sessionDirs, sessionRoots, startCall, tools,
   type Ran, type RunOpts,
 } from '../tools.ts'
 import { NAMESPACE_DESCRIPTION } from '../wb.ts'
@@ -125,6 +125,23 @@ test("a session's directory is its location's directory alone, never joined with
   expect(asked).toBe(2)
   expect(dirOfSession({ location: { directory: '/r/pkg/web' }, subpath: 'pkg/web' } as never)).toBe('/r/pkg/web')
   expect(dirOfSession({})).toBe(undefined)
+})
+
+// #1477 (2026-11-26): a subagent's typed call ran wb as its own child session; its task was then
+// another session's to the lead, whose /workbench-quit left it running
+test("a subagent session's typed call runs wb as its root session, in the subagent's own directory", async () => {
+  let asked = 0
+  const parents: Record<string, string> = { ses_grandkid: 'ses_kid', ses_kid: 'ses_lead' }
+  const root = sessionRoots({ session: { get: async ({ sessionID }) => { asked++; return { parentID: parents[sessionID] } } } })
+  expect([await root('ses_grandkid'), await root('ses_grandkid'), await root('ses_lead')]).toEqual(['ses_lead', 'ses_lead', 'ses_lead'])
+  expect(asked).toBe(4)                                    // three up, once; the lead's own one look
+  const failing = sessionRoots({ session: { get: async () => { throw new Error('gone') } } })
+  expect(await failing('ses_x')).toBe('ses_x')
+  const seen: RunOpts[] = []
+  const tools = procedureTools({ run: async (_args, opts) => { seen.push(opts); return { code: 0, out: 'ok', err: '' } },
+    dir: async s => `/repo/${s}`, root })
+  await tools.find(t => t.name === 'status')!.execute({}, { sessionID: 'ses_kid' })
+  expect([seen[0]!.session, seen[0]!.cwd]).toEqual(['ses_lead', '/repo/ses_kid'])
 })
 
 test("setup registers the six in the workbench namespace, direct tools, under the namespace's one description, and nothing without a tool domain", async () => {

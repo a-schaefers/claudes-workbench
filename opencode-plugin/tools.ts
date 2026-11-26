@@ -235,6 +235,7 @@ export const said = (r: Ran, soft?: number): string =>
 export interface Deps {
   readonly run: Run
   readonly dir: (session: string) => Promise<string>
+  readonly root?: (session: string) => Promise<string>   // the session wb runs it as (sessionRoots)
 }
 
 // The tool definitions OpenCode's ToolEditor takes. A nonzero exit is wb's own words, thrown: the
@@ -248,7 +249,8 @@ export function procedureTools(d: Deps) {
     options,
     execute: async (input: unknown, ctx: { sessionID: string; signal?: AbortSignal }) => {
       const call = spec.call((input ?? {}) as Row)
-      const r = await d.run(call.args, { session: ctx.sessionID, cwd: await d.dir(ctx.sessionID), input: call.stdin,
+      const session = d.root ? await d.root(ctx.sessionID) : ctx.sessionID
+      const r = await d.run(call.args, { session, cwd: await d.dir(ctx.sessionID), input: call.stdin,
         timeout: call.timeout, signal: ctx.signal })
       // its exit too: the procedure reads some by number (exit 3 names the fix, accept's 5: not merged)
       if (r.code && r.code !== spec.soft) throw new Error(`${said(r)}\n(exit ${r.code})`)
@@ -262,7 +264,7 @@ export function procedureTools(d: Deps) {
 export interface ToolsContext {
   readonly options: ServerContext['options']
   readonly location?: { readonly directory?: string }
-  readonly session?: { get(input: { sessionID: string }): Promise<{ location?: { directory?: string }; subpath?: string }> }
+  readonly session?: { get(input: { sessionID: string }): Promise<{ location?: { directory?: string }; subpath?: string; parentID?: string }> }
   readonly tool?: {
     transform(cb: (editor: { namespace(ns: { name: string; description: string }): void; add(tool: object): void }) => void):
       Promise<{ dispose(): Promise<void> } | unknown>
@@ -291,11 +293,36 @@ export function sessionDirs(c: Pick<ToolsContext, 'location' | 'session'>): (ses
   }
 }
 
+// A session's root, up its parentIDs: a subagent's session (OpenCode's task tool) is its lead's
+// child, and its typed calls ran wb as the child, so the task it started was another session's to
+// the lead (its /workbench-quit left it running, a bare wait never took its notice) while the wakes
+// went to the root (notices.ts `root`; #1477, 2026-11-26). wb maps a subagent's own shell the same
+// way by the beat (store.opencode_root). Itself when session.get can't say; read once.
+export function sessionRoots(c: Pick<ToolsContext, 'session'>): (session: string) => Promise<string> {
+  const known = new Map<string, string>()
+  return async sessionID => {
+    const had = known.get(sessionID)
+    if (had) return had
+    let cur = sessionID
+    try {
+      for (let i = 0; i < 16; i++) {
+        const parent = (await c.session?.get({ sessionID: cur }))?.parentID
+        if (typeof parent !== 'string' || !parent || parent === cur) break
+        cur = parent
+      }
+    } catch {
+      return cur   // as far as it got, read again next time
+    }
+    known.set(sessionID, cur)
+    return cur
+  }
+}
+
 // The server part's setup of the tools; nothing on a server without the tool domain
 export async function tools(ctx: ServerContext): Promise<(() => Promise<void>) | undefined> {
   const c = ctx as unknown as ToolsContext
   if (!c.tool?.transform) return undefined
-  const d: Deps = { run: runner(ctx.options), dir: sessionDirs(c) }
+  const d: Deps = { run: runner(ctx.options), dir: sessionDirs(c), root: sessionRoots(c) }
   const reg = await c.tool.transform(editor => {
     editor.namespace({ name: NAMESPACE, description: NAMESPACE_DESCRIPTION })
     for (const t of procedureTools(d)) editor.add(t)
