@@ -650,6 +650,19 @@ def run_name(name: str, started: float) -> str:
     raise ScheduleError(f"{name}: {SAME_DAY} fires on one date already")
 
 
+def held_why(run) -> str:
+    """Why a flow's fire waits on its last run: going, or held for Claude, with its why and the
+    command that answers it. A checkpoint left open past the next night skipped that fire as
+    `still going`, and every later night's too, with no word of what held it (#1510, 2026-11-26)."""
+    st = run.status
+    phase, held = st.get("phase"), " ".join(str(st.get("why") or "").split())[:200]
+    if phase == "checkpoint":
+        return f"run {run.name} waits for Claude at a checkpoint ({held}): wb run resume {run.name}, and the next fire starts"
+    if phase == "paused":
+        return f"run {run.name} is paused ({held}): wb run resume {run.name}, and the next fire starts"
+    return f"run {run.name} is still going"
+
+
 def _fire_flow(name: str, s: dict, started: float) -> int:
     """A flow's fire (#1295): `wb run start` itself, as the user would, with no Claude: the run's
     own driver, budget and `--overnight` carry the night, and its final stage waits for Claude in
@@ -657,8 +670,9 @@ def _fire_flow(name: str, s: dict, started: float) -> int:
     from . import runs as runs_
     last = next((r for r in reversed(runs(name)) if r.get("run")), None)
     if last and (lr := runs_.Run(last["run"])).exists and lr.open() and runs_.driver_alive(lr):
-        _row(name, {"ts": started, "outcome": "skipped", "why": f"run {last['run']} is still going"})
-        print(f"{name}: skipped, run {last['run']} is still going")
+        why = held_why(lr)
+        _row(name, {"ts": started, "outcome": "skipped", "why": why})
+        print(f"{name}: skipped, {why}")
         return 0
     if why := spend_skip():
         _row(name, {"ts": started, "outcome": "skipped", "why": why})

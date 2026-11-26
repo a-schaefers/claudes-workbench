@@ -737,6 +737,29 @@ class ScheduledFlows(Base):
         self.assertEqual(schedule.runs("nightly")[-1]["run"], f"nightly-{day}-2")
         self.assertIn(f"started run nightly-{day}-2 · flow night", schedule.summary(schedule.runs("nightly")[-1]))
 
+    def test_a_flow_fire_held_by_its_last_runs_checkpoint_says_so_and_how_to_answer_it(self):
+        # #1510: a checkpoint left open past the next night skipped that fire as `still going`,
+        # every night after it too, with no word of what held it
+        from workbench import schedule
+        run_wb("schedule", "add", "nightly", "--flow", "night", "--repo", str(self.repo), "--at", "Sun 02:00")
+        day = time.strftime("%y%m%d")
+        with mock.patch.object(schedule.shutil, "which", side_effect=lambda p, path=None: None if p == "claude" else "/x"):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(schedule.fire("nightly"), 0)
+        r = runs.Run(f"nightly-{day}")
+        r.set_status(phase="checkpoint", why="nightly-code-1 (code 1) is failed:\n opencode exited 1")
+        with mock.patch.object(runs, "driver_alive", return_value=True), redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(schedule.fire("nightly"), 0)
+        row = schedule.runs("nightly")[-1]
+        self.assertEqual(row["outcome"], "skipped")
+        self.assertEqual(row["why"], f"run nightly-{day} waits for Claude at a checkpoint (nightly-code-1 (code 1) is failed: "
+                                     f"opencode exited 1): wb run resume nightly-{day}, and the next fire starts")
+        self.assertIn("waits for Claude at a checkpoint", out.getvalue())
+        r.set_status(phase="paused", why="the budget")
+        self.assertIn("is paused (the budget): wb run resume", schedule.held_why(r))
+        r.set_status(phase="running", why="")
+        self.assertEqual(schedule.held_why(r), f"run nightly-{day} is still going")
+
     def wait_ended(self, name):
         deadline = time.time() + 60
         while time.time() < deadline and runs.Run(name).status.get("phase") in runs.OPEN:
