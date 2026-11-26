@@ -35303,15 +35303,18 @@ class RealOpenCodePlugin(Base):
         # #1334's live acceptance: once a turn ended here, a `help` row in settings-changes.jsonl
         # is offered once, in the session the user last typed in, and the mark keeps a second
         # look from offering it again
-        from workbench import ocplugin
+        from workbench import chat, ocplugin
         home = self.root / "wb-state"
+        os.environ["WB_HOME"] = str(home)
+        # the prompt reaches the plugin's chat part too, whose `wb chat url` brings a chat server up
+        # while the chat is on (its default): one outlived this test (PR #1447's CI)
+        chat.set_on(False)
         self.conf.write_text(json.dumps({"enabled_providers": ["none-such"], "plugins": [{"package": str(ocplugin.DIR),
                                          "options": {"wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(home)}}}]}))
         url = self.serve(WB_HOME="")
         self.listed(url, ocplugin.PLUGIN_ID)
         sid = json.loads(self.ask(url, "api", "POST", "/api/session", "-d",
                                   json.dumps({"location": {"directory": str(self.project)}})))["data"]["id"]
-        os.environ["WB_HOME"] = str(home)
 
         def offers() -> list:
             got = []
