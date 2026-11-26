@@ -1509,9 +1509,80 @@ class RunsApi(Base):
         self.assertEqual(night.status["phase"], "running")
         self.assertEqual(self.notices("night"), [])
         self.assertEqual([r["kind"] for r in night.journal() if r.get("stage") == "find"],
-                         ["item", "retry", "item", "retry"])
+                         ["item", "retry"])                              # once a day (#1543)
         (it,) = runs.state(night)["find"]
         self.assertEqual(it.state, "pending")                            # tried again past midnight
+
+    def test_a_run_at_the_day_cap_starts_nothing_again_until_the_day_changes(self):
+        # #1543, 2026-11-26: each pass ran a refused wb start, journalled item and retry and wrote
+        # a spec, and the journal's write woke the driver at once (7 starts a second all night);
+        # at an item's checkpoint the cap never paused the run, which started paid items past midnight.
+        # And the band (#1543's second review, 2026-11-26): a day under the cap by less than the
+        # item's spec costs at the input price passed meter.refusal's FIRST_TOKENS while wb start,
+        # which counts the spec (runner.first_tokens), refused it: the spin again, until midnight
+        from workbench.watch import Watcher
+        m = models.lookup(SPEND_FLASH)
+        band, _ = self.start("band", "--budget-usd", "1", "--overnight")
+        spec = runs._spec_of(band, runs.stages(band.flow)[0], runs.state(band)["find"][0])
+        small, big = meter.request_floor(m), meter.request_floor(m, runner.first_tokens(prompt=spec))
+        self.assertLess(small, big)
+        under = 5 - (small + big) / 2
+        self.spent(under)                                                # in the band: only wb start refuses
+        store.tasks_dir().mkdir(parents=True, exist_ok=True)
+        with Watcher(band.dir, store.tasks_dir()) as w:
+            runs.tick(band)                                              # the one refused start
+            w.wait(0.05)
+            for _ in range(5):
+                self.assertTrue(runs.tick(band))
+                self.assertEqual(w.wait(0.2), [])                        # nothing written: the full wait
+        self.assertEqual([r["kind"] for r in band.journal() if r.get("stage") == "find"], ["item", "retry"])
+        self.assertEqual(len(list((band.dir / "specs").glob("find-*.md"))), 1)
+        self.assertEqual(band.status["phase"], "running")
+        self.spent(5.03 - under)                                         # today at the $5 cap
+        night, _ = self.start("capn", "--budget-usd", "1", "--overnight")
+        held, _ = self.start("capk", "--budget-usd", "1")
+        held.set_status(phase="checkpoint", cause="item", why="x")
+        for run in (night, held):
+            with Watcher(run.dir, store.tasks_dir()) as w:
+                runs.tick(run)                                           # the one refused start
+                w.wait(0.05)
+                for _ in range(5):
+                    self.assertTrue(runs.tick(run))
+                    self.assertEqual(w.wait(0.2), [])                    # nothing written: the full wait
+            self.assertEqual([r["kind"] for r in run.journal() if r.get("stage") == "find"], ["item", "retry"])
+            self.assertEqual(len(list((run.dir / "specs").glob("find-*.md"))), 1)
+        self.assertEqual(night.status["phase"], "running")
+        self.assertEqual((held.status["phase"], held.status["cause"]), ("paused", "item"))
+        self.assertIn(meter.RESETS, held.status["why"])
+        self.assertIn("is paused: paused: significant role: API spend today is", self.notices("capk")[-1]["text"])
+        with mock.patch.object(meter, "day", return_value="2099-01-01"):  # past midnight
+            runs.tick(night)
+            runs.tick(held)
+        self.assertEqual([r["kind"] for r in night.journal() if r.get("stage") == "find"],
+                         ["item", "retry", "item", "retry"])            # the overnight run tries again
+        self.assertEqual([r["kind"] for r in held.journal() if r.get("stage") == "find"], ["item", "retry"])
+        self.assertEqual(held.status["phase"], "paused")                 # nothing until wb run resume
+
+    def test_a_run_paused_at_the_day_cap_starts_its_item_once_resumed_on_the_gpu_or_a_free_model(self):
+        # #1543's review, 2026-11-26: _cap_held held on the journal's retry row alone, so a run
+        # paused at the cap whose role the pause's advice moved to the GPU (or a free model)
+        # paused again at once on `wb run resume`, with the old line, until midnight
+        self.spent(5.03)                                                 # today at the $5 cap
+        for name, switch in (("capg", lambda: (store.write_json(Path(os.environ["WB_ROUTES"]), {
+                                 "v": 1, "day_usd": 5, "roles": {"significant": {"via": "gpu"}}}),
+                                 meter._CAP.clear())),
+                             ("capf", lambda: self.roles(SPEND_FREE, 5))):
+            self.roles(SPEND_FLASH, 5)
+            run, _ = self.start(name, "--budget-usd", "1")
+            runs.tick(run)
+            self.assertEqual(run.status["phase"], "paused")
+            switch()
+            run.set_status(phase="running", why="")                     # what wb run resume does
+            runs.tick(run)
+            self.assertEqual(run.status["phase"], "running", run.status.get("why"))
+            self.assertEqual([(r["kind"], r.get("task")) for r in run.journal() if r.get("stage") == "find"],
+                             [("item", f"{name}-find-1"), ("retry", None), ("item", f"{name}-find-2")])
+            self.assertTrue(store.Task(f"{name}-find-2").exists)
 
     def test_any_other_exit_3_is_not_run_and_an_overnight_run_never_tries_it_again(self):
         # the review of #1278 (2026-11-25): "day cap" matched NO_PRICE, NO_CAP and UNREADABLE too,

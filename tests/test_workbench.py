@@ -22972,6 +22972,31 @@ class ScheduledRuns(Base):
             run_wb("schedule", "rm", "night")
             self.assertFalse((home / "Library/LaunchAgents/workbench.schedule.night.plist").exists())
 
+    def test_on_macos_a_repo_in_documents_is_noted_at_add_and_in_doctor_until_a_fire_runs(self):
+        # #1539, 2026-11-26: macOS privacy keeps a launchd job out of ~/Documents (GitHub Desktop's
+        # clone folder), so the schedule never fired, and wb said nothing at add, in doctor or list
+        from workbench import schedule
+        home = Path(self.tmp.name) / "home"
+        (home / "Documents").mkdir(parents=True)
+        self.repo = self.repo.rename(home / "Documents" / "proj")
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                mock.patch.object(Path, "home", return_value=home):
+            out = self.add()
+            note = (f"note: {os.path.realpath(self.repo)} is in ~/Documents: macOS privacy keeps the timer's "
+                    f"fire out, so it never runs (wb schedule run from Terminal still does): give "
+                    f"{os.path.realpath(sys.executable)} Full Disk Access (System Settings, Privacy & "
+                    f"Security), or move it out of ~/Documents")
+            self.assertIn(note, out)
+            self.assertIn("scheduled night", out)                      # a note, never a refusal
+            ((ok, said),) = schedule.doctor_lines()
+            self.assertFalse(ok)
+            self.assertIn("is in ~/Documents: macOS privacy keeps the timer's fire out", said)
+            self.assertEqual(self.fire(), 0)                            # it got in: granted
+            ((ok, said),) = schedule.doctor_lines()
+            self.assertTrue(ok, said)
+        with mock.patch.object(Path, "home", return_value=home):       # never off macOS
+            self.assertIsNone(schedule.protected(self.repo))
+
     def test_a_fire_runs_claude_headless_on_the_backlog_and_records_the_run(self):
         from workbench import schedule
         self.add()
@@ -23080,6 +23105,30 @@ class ScheduledRuns(Base):
         self.assertEqual(self.fire(), 0)
         self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
         self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_a_key_stored_after_wb_schedule_adds_note_lets_the_next_fire_run(self):
+        # #1538, 2026-11-26: the note said `opencode auth login xenv` stores the key, but the
+        # fire's cached lookup kept hosted.json's env row, so every fire skipped on advice followed
+        from workbench import models, schedule
+        catalog = Path(self.tmp.name) / "catalog.json"
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", {"type": "env", "name": "XENV_API_KEY"})]}))
+        os.environ.update(WB_FAKE_CATALOG=str(catalog), WB_FAKE_API="xenv=env", XENV_API_KEY="xenv-not-a-real-key")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"significant": {
+            "via": "api", "api": "xenv/grok-9"}}}))
+        self.assertEqual(models.hosted(fresh=True)["xenv/grok-9"].key, "env:XENV_API_KEY")
+        self.assertIn("`opencode auth login xenv` stores it, else such a fire is skipped", self.add())
+        # the user stores it, and the timer's environment has no variable: auth list shows the stored key
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", STORED)]}))
+        os.environ.pop("XENV_API_KEY")
+        os.environ.pop("WB_FAKE_API")
+        models._AUTH_FRESH.clear()                                     # a fire is a process of its own
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "env:XENV_API_KEY")  # no fresh read
+        self.assertIsNone(schedule.spend_skip())
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "stored")   # written back
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
 
     def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
         # the review of #1204: every fire on a date was batch night-<date>, so a second one took

@@ -378,6 +378,33 @@ def wsl_idle_note() -> str | None:
     return WSL_IDLE if hardware.system() == "wsl" else None
 
 
+# macOS privacy (TCC) keeps a launchd job out of these unless its program has Full Disk Access or
+# a Files and Folders grant, which Terminal's own covers for a hand run: a schedule on a repo in
+# ~/Documents (GitHub Desktop's default) passed wb schedule run, then never fired, nothing saying
+# why (#1539, 2026-11-26). A note, never a refusal: the user may have granted it already.
+PROTECTED = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents", "Library/CloudStorage")
+
+
+def protected(path) -> str | None:
+    """The macOS-protected folder ``path`` is in, as `~/Documents`; None off macOS."""
+    if not _macos() or not path:
+        return None
+    home, p = Path(os.path.realpath(Path.home())), Path(os.path.realpath(path))
+    return next((f"~/{d}" for d in PROTECTED if p.is_relative_to(home / d)), None)
+
+
+def privacy_note(s: dict) -> str | None:
+    """wb schedule add's and wb doctor's: what of a schedule (its repo, backlog, wb) is in a
+    protected folder, and the fix; None when nothing is, or off macOS."""
+    hits = [(p, f) for p in (s.get("repo"), s.get("file"), s.get("wb")) if (f := protected(p))]
+    if not hits:
+        return None
+    where = ", ".join(f"{p} is in {f}" for p, f in hits)
+    return (f"{where}: macOS privacy keeps the timer's fire out, so it never runs (wb schedule run from "
+            f"Terminal still does): give {os.path.realpath(sys.executable)} Full Disk Access (System "
+            f"Settings, Privacy & Security), or move it out of {hits[0][1]}")
+
+
 # --- The commands --------------------------------------------------------------------------------
 
 def _flow_check(name: str, flow_name: str, params: list[str], budget: float | None, top: Path) -> tuple[dict, list[str]]:
@@ -459,6 +486,8 @@ def add(name: str, file: str | None, repo: str, at: str, turns: int | None = Non
         out.append(f"note: {note}")
     out += [f"note: {n}" for n in _env_key_notes()]
     if note := wsl_idle_note():
+        out.append(f"note: {note}")
+    if note := privacy_note(s):
         out.append(f"note: {note}")
     return out
 
@@ -583,6 +612,11 @@ def _env_key_skip(role: str, m) -> str | None:
     them (#1495, 2026-11-26)."""
     from . import keyhole
     if m is None or not str(m.key).startswith("env:") or not (why := models.env_why(m.provider, m.key[4:])):
+        return None
+    # `auth list` again: a key stored since (`opencode auth login`, as add's note advised) left
+    # hosted.json's env row in place until its TTL, so every fire skipped on advice already
+    # followed (#1538, 2026-11-26); _fresh_key writes the new source back for the pane and Settings
+    if models.key_runs(m.provider, models._fresh_key(m)[0]):
         return None
     if models._env_unseen(m.key):
         return (f"{role} role: its key is ${m.key[4:]}, which this fire's environment lacks (wb writes "
@@ -817,6 +851,9 @@ def doctor_lines() -> list[tuple[bool, str]]:
             gaps.append(f"its wb is gone ({where}): wb schedule rm {name}, then add")
         if not all(p.exists() for p in unit_files(name)):
             gaps.append("its unit is gone (wb schedule rm, then add)")
+        # until a fire has run: one launchd kept out writes no row (#1539); a hand run's row clears it too
+        if not any(r.get("outcome") != "error" for r in rows) and (note := privacy_note(s)):
+            gaps.append(note)
         out.append((not gaps, f"schedule {name} ({(s.get('at') or {}).get('said')}): last {last}"
                     + (f"; {'; '.join(gaps)}" if gaps else "")))
     return out
