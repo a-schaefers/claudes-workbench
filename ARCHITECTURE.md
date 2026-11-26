@@ -9163,7 +9163,11 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       notices.ts wakes it for them, #1493; no bench replay; `notes.md`, `coding.json`, `workflows.json`) at a
       prompt (waited for at most `REFRESH_WAIT_MS` 3 s, `within`), a switch of agent (the event, which
       names a session switched to the Workbench agent before any hook has, or
-      the `context` hook seeing a new one) and each idle look; `sync` lists the session's entries
+      the `context` hook seeing a new one), each idle look, and before each wake notices.ts sends
+      (`beforeWake`, at most `REFRESH_WAIT_MS`, by each upkeep of the process that knows the
+      session, else the first: they are on `globalThis`, as the notices' lane is): OpenCode runs no
+      `prompt` hook for a synthetic message, so a review's wake once came with the last idle look's
+      `workbench` entry, the task still running, and the driver said so and ended its turn (#1545); `sync` lists the session's entries
       once, then puts each block whose text differs and removes each of `OURS` it shouldn't have
       (another plugin's keys are never touched), one refresh at a time per session. Unlike the
       mod's once-per-conversation `web-chat` block, the entry follows away: a prompt the user typed
@@ -9537,7 +9541,8 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   one host. A session new here (its first execution, a new typed one) has notify.jsonl read again.
 - **Delivery** (each due notice's `noticePlan`, `busy` the session's execution under way): `wake`:
   `wb ack <task> <ts>` (exit 3: another server or `wb wait` took it; any other failure: tried again
-  at the next look), then `session.synthetic` `{sessionID, id: noticeId(task, kind, ts), text,
+  at the next look), then (the session's upkeep entries read again first, `beforeWake`: its turn
+  gets no `prompt` hook, #1545) `session.synthetic` `{sessionID, id: noticeId(task, kind, ts), text,
   description: "Workbench: <task> <headline>", metadata: {source: "workbench.notice", task, kind,
   ts, title}, delivery: "queue"}`, which opens a turn on an idle session; refused, `wb ack <task>
   <prev> --if <ts>` puts the mark back and the net tries again after a minute (`dropped`). `steer`
