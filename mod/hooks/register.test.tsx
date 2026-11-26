@@ -5651,7 +5651,7 @@ test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block
   expect(block?.text).toContain('run a substantive request as a deep workflow on their agents')  // #1278
   expect(block?.text).toContain('start it once with `wb run start`')
   // the mod wakes Claude for no run row yet: a background wb wait is the wake (the review of #1278)
-  expect(block?.text).toContain('wait for its notices with `wb wait <run>` in the background')
+  expect(block?.text).toContain("then end your turn: its notices (a checkpoint, a pause, the end) wake you as a task's do")
   expect(block?.text).toContain('Never fan out by starting several tasks at once yourself')
   expect(block?.text).toContain('merge logic first, then tests, then UI or docs')
   await clock.advance(31_000)
