@@ -7500,6 +7500,8 @@ def cmd_chat(a):
             ok, claim = chat.hold(a.id, a.pid or 0, a.busy, waiting=waiting)
         except ValueError as e:
             die(f"wb chat listener: {e}")
+        if not ok and claim is None:  # switched off (#1480): `wb chat on` turns it on
+            die("the web chat is off: `wb chat on` turns it on")
         if not ok:
             die(f"standing by: {(claim or {}).get('tool') or 'claude'} listens in {(claim or {}).get('cwd', '?')}")
         print("listening")

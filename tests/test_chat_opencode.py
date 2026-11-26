@@ -102,6 +102,19 @@ class OpenCodeChat(Base):
                          {"session": "claude-key", "cwd": "/c", "pid": ME, "start": "1"})  # gone
         self.assertEqual(run_wb("chat", "listener", "ses_a", "--pid", str(ME)).strip(), "listening")
 
+    def test_a_server_cannot_take_the_chat_while_it_is_switched_off(self):
+        # #1480 (2026-11-26): the plugin's poll took the claim `wb chat off` had emptied again on a
+        # check cached for a minute, and /api/health said OpenCode listened while nothing delivered
+        chat.set_on(False)
+        self.assertEqual(chat.hold("ses_x", ME), (False, None))
+        self.assertFalse((chat.chat_dir() / "listener.json").exists())
+        self.assertIsNone(chat.listener())                             # what /api/health reads
+        self.assertIn("the web chat is off", fails("chat", "listener", "ses_x", "--pid", str(ME)))
+        self.assertIsNone(chat.listener())
+        chat.set_on(True)
+        self.assertTrue(chat.hold("ses_x", ME)[0])
+        self.assertEqual(chat.listener()["session"], "ses_x")
+
     def test_the_listening_sessions_reply_threads_onto_its_message_and_another_sessions_goes_to_the_user(self):
         self.claim()
         m = self.user_message()

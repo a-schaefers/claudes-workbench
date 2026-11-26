@@ -1787,7 +1787,7 @@ def hold(session: str, pid: int, busy: bool = False, cwd: str | None = None,
     move it to another of its sessions (the user typed there). Written only on a change: every
     write wakes the page's streams. ``waiting``: the dialog up in its terminal, the plugin's
     waitingFact `{kind, tool, since, what?}` (#1355, the page's state line); ValueError for one of
-    another shape."""
+    another shape. (False, None) while the chat is switched off: nothing written (#1480)."""
     if not store.SESSION_RE.fullmatch(session or "") or not isinstance(pid, int) or pid <= 0:
         raise ValueError("a session id and a server pid")
     if waiting is not None and not (isinstance(waiting, dict) and waiting.get("kind") in WAIT_KINDS
@@ -1797,6 +1797,11 @@ def hold(session: str, pid: int, busy: bool = False, cwd: str | None = None,
                                     and isinstance(waiting.get("what", ""), str)):
         raise ValueError("waiting is {kind, tool, since, what?}")
     with store.locked(chat_dir() / "listener.lock"):
+        # Off, nothing delivers: the plugin's on is cached a minute, and its poll took the claim
+        # `wb chat off` had emptied again, so /api/health said OpenCode listened and ask_workbench
+        # waited its whole hour for nothing (#1480, 2026-11-26). Turned on, its check takes it.
+        if not is_on():
+            return False, None
         cur = listener()
         if cur and not (cur.get("tool") == "opencode" and cur.get("pid") == pid
                         and cur.get("machine") in (None, store.machine())):
