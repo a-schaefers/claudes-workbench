@@ -282,7 +282,7 @@ def ensure(root: Path = ROOT, into: str | None = None, network: bool = True, say
 
 def tables_values() -> dict:
     """What Kernel.Tables copies from workbench's Python, in field order: the phase sets
-    (store.py), the opening of ask_mcp.NO_ANSWER (how the mod tells a timed-out question from an
+    (store.py; OPEN_ORDER as it stands, the others sorted), the opening of ask_mcp.NO_ANSWER (how the mod tells a timed-out question from an
     answered one), how long a chat listener counts as there (chat.LISTENING_FOR, in ms) and the
     opening of the mod's wakes (spend.WAKE_OPENING, which spend.WAKE matches)."""
     if str(ROOT) not in sys.path:
@@ -293,10 +293,40 @@ def tables_values() -> dict:
         "needsClaude": sorted(store.NEEDS_CLAUDE),
         "parks": sorted(store.PARKS),
         "closed": sorted(store.CLOSED),
+        "working": sorted(store.WORKING),
+        "stopped": sorted(store.STOPPED),
+        "openOrder": list(store.OPEN_ORDER),  # in its order: the order a tally reads
         "noAnswer": ask_mcp.NO_ANSWER.split(". ", 1)[0] + ".",
         "chatStaleMs": float(chat.LISTENING_FOR * 1000),
         "wakeOpening": spend.WAKE_OPENING,
     }
+
+
+def owns_twin(*, session: str, ids: list, driver: str, host: str, gone: bool, cwd: str, repo: str,
+              subdir: str, here: str, home: str, fold: bool) -> dict:
+    """Kernel.Owner's owns as wb judges it, the Python twin its goldens hold (#1325's M2):
+    cli._scope on one task with these keys, from a session with these `ids` in `here`, with the
+    owner's death (`_owner_gone`), the home directory and case folding (`store.folds_case`) given
+    rather than read. `claims`: the same, the owner gone. A host names the task's driver as
+    store.driver_of does, so `driver` is `opencode`, `claude` with a session, or none without."""
+    from types import SimpleNamespace
+    from unittest import mock
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from workbench import cli, store
+    spec = {k: v for k, v in (("session", session), ("cwd", cwd), ("repo", repo), ("subdir", subdir)) if v}
+    if driver == "opencode":
+        spec["driver"] = {"tool": "opencode"}
+    task = SimpleNamespace(spec=spec, name="twin")
+
+    def judge(dead: bool) -> bool:
+        with mock.patch.object(cli, "_owner_gone", lambda _spec: dead), \
+                mock.patch.object(store, "folds_case", lambda _p: fold), \
+                mock.patch.object(store, "driver_fill", lambda _t: None), \
+                mock.patch.object(Path, "home", lambda: Path(home)):
+            mine, _ = cli._scope([task], here or None, set(ids) or None, None if host == "claude" else host)
+        return bool(mine)
+    return {"mine": judge(gone), "claims": judge(True)}
 
 
 def purs_string(s: str) -> str:
@@ -761,7 +791,15 @@ def budget_errors(root: Path = ROOT, bundle: bytes | None = None) -> list[str]:
 
 
 GOLDEN_FN = re.compile(r"""\bfn:\s*['"](\w+)['"]""")
-KERNEL_IMPORT = re.compile(r"""(?:\bfrom|\bimport)\s*\(?\s*['"](?:[^'"]*/)?kernel(?:\.js)?['"]""")
+KERNEL_IMPORT = re.compile(r"""(?:\bfrom|\bimport|\brequire)\s*\(?\s*['"](?:[^'"]*/)?kernel(?:\.js)?['"]""")
+# Every source a host may hold: an import from any of them counts (#1356's review: .mts, .cts,
+# .cjs and .jsx were not scanned, nor require())
+HOST_SUFFIXES = (".ts", ".tsx", ".js", ".mjs", ".mts", ".cts", ".cjs", ".jsx")
+# core.ts's untyped `kernel` record (every export by name) taken by name, or core.ts whole
+# (`import * as`, `require`), which reaches it too
+CORE_RECORD = re.compile(
+    r"""(?:\b(?:import|export)\s*(?:type\s*)?\{[^}]*\bkernel\b[^}]*\}\s*from|\bimport\s*\*\s*as\s*[\w$]+\s*from|\brequire\s*\()"""
+    r"""\s*['"](?:[^'"]*/)?core(?:\.js|\.ts)?['"]""")
 HOST_DIRS = ("mod", "opencode-plugin", "workbench/chat_static")
 DEFINES = r"(?m)^\s*(?:export )?(?:async )?(?:function|const|let|var|class) {name}\b"
 
@@ -779,7 +817,7 @@ def kernel_importers(root: Path = ROOT) -> list[str]:
     found = []
     for d in HOST_DIRS:
         for f in sorted((root / d).rglob("*")):
-            if f.suffix in (".ts", ".tsx", ".js", ".mjs") and f.name not in ("kernel.js", "kernel.d.ts") \
+            if f.suffix in HOST_SUFFIXES and f.name not in ("kernel.js", "kernel.d.ts") \
                     and "node_modules" not in f.parts and KERNEL_IMPORT.search(f.read_text(encoding="utf-8", errors="replace")):
                 found.append(rel(f, root))
     return found
@@ -807,26 +845,59 @@ def replaced_still_defined(root: Path = ROOT) -> list[str]:
     return out
 
 
+def _host_files(root: Path, d: str):
+    for f in sorted((root / d).rglob("*")):
+        if f.is_file() and f.suffix in HOST_SUFFIXES and "node_modules" not in f.parts:
+            yield f
+
+
+def _is_test(f: Path, root: Path) -> bool:
+    """A test or a golden: they spell phases and read the kernel's every export, as they must."""
+    r = rel(f, root)
+    return ".test." in f.name or r.startswith(("mod/hooks/golden/", "opencode-plugin/test/"))
+
+
 def phase_literals(root: Path = ROOT) -> list[str]:
-    """Phases spelled out in opencode-plugin/: it reads them from core.ts, never a copy of its own."""
+    """Phases spelled out where the hosts keep a copy of a phase set. In opencode-plugin/ any phase
+    at all: it reads them from core.ts. In mod/hooks (its tests, goldens and the bundle aside),
+    two phases on one line, or in one bracketed list across lines: a set of phases, which the
+    kernel's tables and phaseOf hold (#1325's M1). One phase alone there is a phase's own words or
+    glyph, which rendering keeps in TypeScript."""
     v = tables_values()
     phases = sorted({*v["active"], *v["needsClaude"], *v["closed"]})
     pat = re.compile(r"""['"`](%s)['"`]""" % "|".join(map(re.escape, phases)))
     out = []
-    for f in sorted((root / "opencode-plugin").rglob("*.ts")):
-        if "node_modules" in f.parts:
-            continue
+    for f in _host_files(root, "opencode-plugin"):
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             if pat.search(line):
                 out.append(f"{rel(f, root)}:{n}")
+    for f in _host_files(root, "mod/hooks"):
+        if _is_test(f, root) or f.name in ("kernel.js", "kernel.d.ts"):
+            continue
+        text = f.read_text(encoding="utf-8")
+        found = {n for n, line in enumerate(text.splitlines(), 1) if len(set(pat.findall(line))) > 1}
+        for m in re.finditer(r"\[[^\[\]]*\]", text):
+            if len(set(pat.findall(m.group(0)))) > 1:
+                found.add(text.count("\n", 0, m.start()) + 1)
+        out += [f"{rel(f, root)}:{n}" for n in sorted(found)]
     return out
+
+
+def core_record_importers(root: Path = ROOT) -> list[str]:
+    """Host files outside the tests and goldens that take core.ts's untyped `kernel` record: the
+    hosts use its typed names, so a call the kernel's types don't hold fails the check, never a
+    run (#1356's review)."""
+    return [rel(f, root) for d in HOST_DIRS for f in _host_files(root, d)
+            if not _is_test(f, root) and f.name != "core.ts"
+            and CORE_RECORD.search(f.read_text(encoding="utf-8", errors="replace"))]
 
 
 def offline_errors(root: Path = ROOT) -> list[str]:
     """What holds without the toolchain (tests/test_kernel.py runs it in `python3 -m unittest`):
     the lint of kernel/src, Tables against the Python, the banners' digests, the bundle's scan, one
     set of exports in BOUNDARY.md, the bundle, the d.ts and the goldens, one importer, no replaced
-    name left, no phase literal in the plugin, the budgets. Each line names its fix."""
+    name left, no phase literal in the plugin nor a phase set in the mod, core.ts's untyped record
+    only in tests and goldens, the budgets. Each line names its fix."""
     p, pin, errors = paths(root), load_pin(root), lint_sources(root)
     fix = "run python3 scripts/kernel.py build"
     if not tables(root, check=True):
@@ -867,7 +938,9 @@ def offline_errors(root: Path = ROOT) -> list[str]:
     if others:
         errors.append(f"{', '.join(others)} imports kernel.js: only mod/hooks/core.ts does (kernel/BOUNDARY.md, *Membrane*)")
     errors += [f"{item} is still defined: the move that replaces it deletes it" for item in replaced_still_defined(root)]
-    errors += [f"{where}: a phase literal; the plugin reads phases from core.ts" for where in phase_literals(root)]
+    errors += [f"{where}: a phase literal; the hosts read phases and their sets from core.ts" for where in phase_literals(root)]
+    errors += [f"{f} imports core.ts's untyped kernel record: only tests and goldens do; take the typed names"
+               for f in core_record_importers(root)]
     errors += budget_errors(root)
     return errors
 

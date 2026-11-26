@@ -52,6 +52,13 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}\Z")
 ACTIVE = {"queued", "running", "testing", "asking"}
 NEEDS_CLAUDE = {"review", "stuck", "failed", "asking"}
 CLOSED = {"accepted", "discarded"}
+# A round under way: the phases where its clock, its context and its estimate mean something
+WORKING = ("running", "testing", "asking")
+# Stopped short of a review: Claude steers it next (wb resume continues one)
+STOPPED = ("stuck", "failed")
+# The open phases in the order a tally of them reads, the work under way first: the mod's pane
+# header and status line count by it, through the kernel's openCounts (#1325)
+OPEN_ORDER = ("running", "testing", "asking", "queued", "review", "stuck", "failed")
 # a run item's notices that still go to Claude (#1278): an ask_reviewer question needs an answer
 # only Claude has, and a check-in is the user's own request
 RUN_GLOBAL = ("question", "checkin")

@@ -1314,7 +1314,7 @@ def active_so_far(task: store.Task, now: float | None = None) -> float:
     step's, router.score): status `active_s` (the rounds so far, written as each ends) less
     `step_active_s` (the earlier steps': wb next, #815) plus the round under way, whole."""
     st, now = task.status, now or time.time()
-    running = st.get("round_started_at") if st.get("phase") in ("running", "testing", "asking") else None
+    running = st.get("round_started_at") if st.get("phase") in store.WORKING else None
     return float(st.get("active_s") or 0) - float(st.get("step_active_s") or 0) + \
         (max(0.0, now - running) if running else 0.0)
 

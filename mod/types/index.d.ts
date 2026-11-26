@@ -28,6 +28,9 @@ export type WbTask = {
   subdir: string
   /** the Claude Code session `wb start` ran in ('' by hand, or before 0.90): whose task it is */
   session: string
+  /** its driver as store.driver_of names it (`opencode`, `claude`, '' for none): a session never
+   * adopts another driver's task by directory (#1309, the kernel's owns) */
+  driver?: string
   /** the Claude Code process it ran in (0 when unknown): once gone, the directory rule adopts it */
   claude_pid: number
   /** when that process started (task.json `claude_start`, '' when unknown): a recycled pid isn't it */

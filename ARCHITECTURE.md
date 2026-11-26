@@ -152,7 +152,10 @@ task (1–5 cents at $0.30/kWh) against ~25 cents of Claude tokens saved.
 ```
 
 **Phases** (`store.py`): `ACTIVE` = queued, running, testing, asking; `NEEDS_CLAUDE` = review,
-stuck, failed, asking; `CLOSED` = accepted, discarded.
+stuck, failed, asking; `CLOSED` = accepted, discarded; `WORKING` = running, testing, asking (a round
+under way: its clock, context and estimate mean something); `STOPPED` = stuck, failed; `OPEN_ORDER`,
+every open phase in the order a tally of them reads (running, testing, asking, queued, review,
+stuck, failed: the mod's pane header and status line, through the kernel's `openCounts`).
 
 | Phase | Set by |
 |---|---|
@@ -3690,12 +3693,12 @@ by `wb ack <task> <prev> --if <ts>` (`cli.release_ack`), only while the mark is 
 Two live sessions in one repo keep their own; a task with a `session` but no `claude_pid` stays its
 session's. One without a `session` goes by
 directory: its `repo` is or is inside the session's directory, or the session's directory is inside
-the task's spot (`repo`/`subdir`, else a `cwd` inside the repo, else the repo: `spotOf`, `_scope`;
+the task's spot (`repo`/`subdir`, else a `cwd` inside the repo, else the repo: the kernel's `owns`, `_scope`;
 #695), or its `cwd` is or is inside the session's directory; by whole components of real paths,
 case-folded where the file system ignores case (`mem.fold`, `store.folds_case`: any component of the path found
 in its parent with its case swapped, WSL2's `/mnt/c` too, #1217; 2026-11-19 audit). A
 session in `~` or `/` claims none by directory, but for a gone session's task whose `cwd` is
-exactly there (`ranHere`, `_scope`: plain `claude` restarted in `~` after a `wb start --repo
+exactly there (`owns`, `_scope`: plain `claude` restarted in `~` after a `wb start --repo
 ~/proj` there was woken for none, #1403); a task with neither key is everyone's. Another
 session's notice is at most toasted. `wb status`, a bare `wait`, and `stop`/`takeover`/`resume
 --all` from Claude Code's Bash take the caller's scope (`cli._caller`: `CLAUDE_CODE_SESSION_ID`,
@@ -7422,8 +7425,8 @@ imports from the module's own files pass too). The helpers type `$` as `any`, so
 literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`, `PATH` (`findWb`, `onPath`), `CLAUDE_CODE_PLUGIN_CACHE_DIR`.
 
 **State.** Seven `$.state` atoms survive a module reload; one read under an old shape tag is absent,
-so change the tag when its type changes: `tasks` (`tasks-11`, WbTask[]: name, phase, round, model,
-label, via, role, provider, routed (#1016), tests, last, createdAt, updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid,
+so change the tag when its type changes: `tasks` (`tasks-12`, WbTask[]: name, phase, round, model,
+label, via, role, provider, routed (#1016), tests, last, createdAt, updatedAt, tokens, recent, repo, cwd, subdir, session, driver (#1309), claude_pid,
 claude_start, backlog, parked, allowed, and the Tasks view's (#1048, `viewFacts`): group, cards, tools, tokOut, ctxUsed,
 window, freshAt, autoFixes, autoFixMax, roundFor, reviews, steps, activeS, roundStartedAt, typicalMin, typicalN, lateMin,
 spend, est: the spend at catalog prices, #1135), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
@@ -7449,7 +7452,7 @@ PATH only, #1190), else `wb` by name; PATH is read, never tried, so no wb runs a
 reloads); `mem.cwd`, `mem.home` (which
 session-less tasks are `mine`); `mem.ids`. Workbench mode comes back when `$.store` `modes` holds
 one of those ids (`modeKept`; `keepMode` writes every id when the mode turns on and a /clear's new
-id while on, #840, drops the process's ids when off, ages entries out at `MODES_KEEP_MS` 30 days;
+id while on, #840, drops the process's ids when off, ages entries out at 30 days: the kernel's `modesPlan`;
 #689: `claude --continue` came back with the mode off), and on a successful `wb adopt` of a task
 still delegated (`delegatedWork`: running, or waiting on Claude, not parked or `taken_over`, #834).
 It registers the commands, runs `wb setup` when `skills/workbench/SKILL.md` isn't there: for a
@@ -7510,7 +7513,8 @@ weekly check, the update check beside it; then `deliver`, `rewake`, `listen`, `r
 not a subagent's or another plugin's, which no `turn.complete` would clear), cleared only by the
 main loop's `turn.complete`.
 
-**Waking** (`deliver`). Only when notify.jsonl's size or mtime changed, Claude is busy, or a wake
+**Waking** (`deliver`; its decisions are the kernel's `noticesDue` and `noticePlan`, *The kernel*,
+which the OpenCode plugin's notices follow too). Only when notify.jsonl's size or mtime changed, Claude is busy, or a wake
 was held (rows cached in `mem.notifyRows`, #921). Per task, the newest notify row under an hour old
 and every question row past `acked`; still true when a check-in and the task is
 queued/running/testing, a question while the phase is `asking` and `ask/<id>.json` has no
@@ -7527,8 +7531,8 @@ paragraph (#1322). HEADLINE and NEXT are at the top of register.tsx; a question'
 <n> --id <id>`, and only a notice opening `PERMISSION to ` (`PERMISSION`, ask_mcp.notice's openings)
 adds the `wb allow` paragraph (#1322: every question carried it). A dropped submit (`{drop}`) puts `acked` back if unchanged, records `mem.dropped`,
 toasts once. With `wake` off it is only toasted and `acked` isn't written, so `wb wait` still gets
-it. `rewake`: idle, wake on, a `mine` task waiting on Claude whose status changed between
-`REWAKE_MS` 60 s and `REWAKE_MAX_MS` 12 h ago, whose news Claude hasn't had and whose wake wasn't
+it. `rewake` (the kernel's `rewakePlan`): idle, wake on, a `mine` task waiting on Claude whose status changed between
+60 s and 12 h ago, whose news Claude hasn't had and whose wake wasn't
 dropped in the last minute, gets `acked = now` and a prompt with `wb report <n>` and its newest
 notice's headline and next step (`headlineOf`, `nextOf`, deliver's; that notice one of a batch:
 its own `BATCH_NEXT`; none in `mem.notifyRows`, or of another kind than the phase: `HEADLINE` and
@@ -7583,7 +7587,7 @@ once). None without a person.
 
 **The rules said later** (#540). A block can't be added after the first message, so a session that
 entered the mode later got no notes, no wake-off note, no coding rule. `mem.said` (`Said`, set by
-`prompt.context`) records what was told; `unsaid` returns what is missing and counts it said (the
+`prompt.context`) records what was told; `unsaid` returns what is missing and counts it said (the kernel's `tellPlan`, which picks `prompt.context`'s blocks too; the
 notes once, the wake-off note once, the coding rule whenever the mode differs; CODING_DECIDE on a
 return to "Let Claude decide"; the workflows rule whenever it differs, WORKFLOWS_OFF on a return to off). `/workbench` appends them to its text and sets `mem.skillTurn`, so a
 `prompt.context` in that turn leaves them out (a compaction or the turn's end clears it). Every poll runs `sayRules`: unsaid rules go in as a
@@ -7594,12 +7598,14 @@ one: it rides on each wake (`awayToo`).
 load) appends KEEP_ON_COMPACT: keep the user's goals and decisions, the tasks and what each needs,
 what was accepted, merged or discarded; drop finished tasks' diffs, reports, transcripts. At a task
 boundary in the mode (a task of the last open set gone, Claude idle, none waiting on Claude) it
-compacts once usage reaches `WB_COMPACT_AT`% (default `COMPACT_AT` 0.5; 0 off) of the auto-compact
-threshold (or the window), with no toast of its own (Claude Code shows the compaction, #1322).
+compacts once usage reaches `WB_COMPACT_AT`% (default half; 0 off) of the auto-compact
+threshold (or the window), with no toast of its own (Claude Code shows the compaction, #1322): the
+kernel's `compactPlan` judges the boundary and the usage, the mod reads them and compacts.
 
 **Status line and pane.** `⚒ wb · <name> <phase> r<round>` for queued/running/testing, `<name>
 asks`, `<N> awaiting review`, `<N> stuck`, `<N> failed` (each counted apart: one review and one stuck
-task read `2 awaiting review`, #1048; not parked: `waitsOnClaude`, #541; `mine` only, #693), joined by
+task read `2 awaiting review`, #1048; not parked: `phaseOf`'s `waits`, #541; `mine` only, #693; tallied by the
+kernel's `openCounts`, as the pane's group header is), joined by
 ` · `; `⚒ wb · workbench mode` with nothing listed. The pane: the task list (*The Tasks view*, below);
 the followed task's transcript (lines cut to `LINE_CHARS` 2000,
 within `HISTORY_CHARS` 60,000: Claude Code drops pane text past 100,000), following the newest
@@ -7745,7 +7751,7 @@ replaced answered the dialog from the page.
 on (another project's session spent the offer, #919; such a session leaves scout.json alone), once
 `wb events` said hello, Claude idle `SCOUT_QUIET_MS` (a minute) after a main-loop turn (raised at
 once, it buried Claude's question), quiet (`quietForJobs`: no task anywhere active, none of this
-session's unparked ones waiting on Claude within `REWAKE_MAX_MS`, #541), once per load, when
+session's unparked ones waiting on Claude within rewake's 12 hours, `rewakePlan`'s `recent`, #541), once per load, when
 scout.json's `done_at` is 7+ days old and no `offered_at` since it fell due: it writes `offered_at` and
 toasts `SCOUT_DUE` (`workbench: the weekly model check is due: /workbench-models`), at most once a due
 period. It submitted SCOUT_NOTE as a turn of its own, about 650 tokens, again daily until done
@@ -7900,31 +7906,91 @@ are written once in PureScript under `kernel/src` and compiled into one committe
 entry test, `## Exports` (each export's module, decision, what it `replaces`, its consumers), the
 rulings (one gate classifier over a parsed command comes in, by the owner's ruling of 2026-11-25,
 with the parsing left to each host, and so do the coding gate's rules; wording, formatting and parsing stay in TypeScript; effects,
-rendering, locale and telemetry never go in), `## Budget` (12 exports, 65,536 bytes, 1,200 source lines and 350 per
+rendering, locale and telemetry never go in), `## Budget` (16 exports, 65,536 bytes, 1,200 source lines and 350 per
 module with Tables aside, `core.ts` 250 lines), the wire types (`Number`, `String`, `Boolean`,
 `Array`, closed records; every field present, `-1` and `""` for none, an unknown tag the safe
 answer), the denied imports and the move protocol. Today it holds `tables`, which `register.tsx`
-(`ACTIVE`, `NEEDS`, `PARKS`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING`) and `tasks.ts` (`CLOSED`)
-read through `core.ts`, their hand copies deleted; `phaseOf`, with no caller yet: #1325's M1
-moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks onto it; the gate
-classifier `gateOf`, which every Bash and Monitor gate in `register.tsx` reads (`delegates`, `runs`,
-`upstreamAim`, `sendQuestion`, `routeCalls`, `writesTo`), its hand copies deleted (#1325, after
-#1364); and the coding gate's rules, `codingGate` and `editTools` (`codingRefusal`, `callRows`).
+(`ACTIVE`, `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING`) and `tasks.ts` (`CLOSED`)
+read through `core.ts`, their hand copies deleted; `phaseOf` and `openCounts` (#1325's M1: `register.tsx`'s
+`RUNNING`/`waitsOnClaude` and `tasks.ts`'s `WORKING`/`COUNTED` deleted); `owns` and `awayNow` (M2:
+`register.tsx`'s `parts`, `within`, `spotOf`, `near`, `ranHere` and `AWAY_MS` deleted, its `mine`,
+`claim` and `awayNow` adapters gathering the facts); `noticesDue`, `noticePlan` and `rewakePlan`
+(M3 and M4: `deliver`'s and `rewake`'s decisions, `REWAKE_MAX_MS` deleted; the host keeps the reads,
+`wb ack`, the submits and the words); and by the owner's ruling (2026-11-25) the mode machine,
+`tellPlan`, `modesPlan` and `compactPlan` (`unsaid`'s and `prompt.context`'s choice of what to
+say, `keepMode`'s record, the boundary compaction: `COMPACT_AT` and `MODES_KEEP_MS` deleted; the
+words, `KEEP_ON_COMPACT` among them, and `firstTask`, a parse, stay in the host). `taskParts`
+stays out (rendering). The gate classifier `gateOf`, which every Bash and Monitor gate in
+`register.tsx` reads (`delegates`, `runs`, `upstreamAim`, `sendQuestion`, `routeCalls`,
+`writesTo`), its hand copies deleted (#1325, after #1364); and the coding gate's rules,
+`codingGate` and `editTools` (`codingRefusal`, `callRows`).
 
 - **The membrane**: `mod/hooks/core.ts`, the one importer of `./kernel.js` (with its generated
-  `kernel.d.ts`), exports `kernel` (every export by name, for the goldens), the sets `ACTIVE`,
-  `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING`, `phaseOf`,
+  `kernel.d.ts`), exports `kernel` (every export by name, untyped, for the goldens: only tests,
+  `*.test.*`, and `golden/` import it), the sets `ACTIVE`, `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`,
+  `CHAT_STALE_MS`, `WAKE_OPENING`, and `phaseOf`, `openCounts(tasks)`, `owns(facts)`,
+  `awayNow(webAt, now, tasks)`, `noticesDue(rows, startedAt, now)`, `noticePlan(facts)`,
+  `rewakePlan(facts)`, `tellPlan(facts)`, `modesPlan(modes, ids, now, on)`, `compactPlan(facts)`,
   `gateOf(words, writes = [])` (its `gate` typed `GateName`), `codingGate` (its `verdict` typed) and
-  `editFields(host)` (`editTools`' rows for `claude-code` or `opencode`, as a tool-to-field map). It
-  maps and decides nothing.
+  `editFields(host)` (`editTools`' rows for `claude-code` or `opencode`, as a tool-to-field map),
+  typed from `kernel.d.ts`. It maps (a phase to a string, a mark to a boolean) and decides nothing.
 - **`Kernel.Tables`** (`kernel/src/Kernel/Tables.purs`) is generated by `scripts/kernel.py tables`
-  from wb's Python: `sorted()` of `store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS` and `CLOSED`,
+  from wb's Python: `sorted()` of `store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `WORKING` and
+  `STOPPED`, `store.OPEN_ORDER` in its own order (`openOrder`),
   `ask_mcp.NO_ANSWER`'s first sentence, `chat.LISTENING_FOR * 1000`, `spend.WAKE_OPENING` (`[workbench]
   Task`, from which `spend.WAKE` is built). Python stays the source.
-- **`phaseOf({phase, parked})`** → `{active, running, needsClaude, waits, closed}`: `running` is
-  active and not needing Claude (the mod's `RUNNING`, `queued` included), `waits` needs Claude and
-  isn't parked, a mark counting only in `PARKS` (`store.parked`, #698); a phase no table names is
+- **`phaseOf({phase, parked})`** → `{active, running, working, needsClaude, waits, stopped, done,
+  closed}`: `running` is active and not needing Claude (the status line's, `queued` included),
+  `working` a round under way (`store.WORKING`: the pane's clock, context bar and estimate),
+  `waits` needs Claude and isn't parked, a mark counting only in `PARKS` (`store.parked`, #698),
+  `stopped` stuck or failed (`store.STOPPED`), `done` a review or closed; a phase no table names is
   none of them.
+- **`openCounts({tasks})`** → `{counts: [{phase, n, waiting, active, stopped}], done}`: a row for
+  each open phase that has a task, in `store.OPEN_ORDER`, `waiting` those not parked; `done` the
+  tasks done. The pane's group header (`tasks.ts`: `2 running · 1 stuck`, `1/3 done`) and the
+  status line (`register.tsx`'s `taskParts`: `<N> awaiting review`, `<N> stuck`) draw from it.
+- **`owns({session, ids, driver, host, gone, cwd, repo, subdir, here, home, fold})`** → `{mine,
+  claims}`: whose task it is (*Waking Claude, exactly once*), `claims` the same with its session gone (what
+  `claim` may `wb adopt`). The host gathers the facts (the mod: `mem.ids`, `mem.deadPids`, its
+  directory, `mem.fold`, the task's driver as `store.driver_of` names it); paths compare by whole
+  components, lower case under `fold`. Its twin is `cli._scope` (`kernel.owns_twin` patches
+  `_owner_gone`, `store.folds_case`, `Path.home`), which stays the lock.
+- **`noticesDue({rows, startedAt, now})`** → `{due: [{task, picks}], noticed: [{task, ts}]}`: from
+  notify.jsonl's rows (`{task, kind, ts, tasks}`), per task in the order they first come due its
+  every question and its newest notice, none older than an hour before the later of the load's
+  start and now (`picks`: row indices); `noticed`, each task's newest notice however old, a
+  batch's for each task it names (`mem.noticed`, rewake's mark).
+- **`noticePlan({kind, hasId, phase, questionOpen, ts, acked, own, wake, busy, toasted, heldAsk})`**
+  → `{current, toast, act}`: still true (a check-in while running, queued included; a question
+  while asking and, with an id, still open; else the phase its kind names), toasted once, and
+  `act`: `skip` (acked), `none` (another session's, or wakes off: the toast only), `steer` (a
+  question into the busy turn), `hold` (anything else true while busy), `wake`, `ack` (no longer
+  true), `missed` (a held question whose task is open: said if it timed out, #542).
+- **`rewakePlan({phase, parked, mine, updatedAt, now, busy, wake, dropped, acked, seen, marked})`**
+  → `{recent, candidate, due, kind}`: `recent` this session's waiting on Claude within 12 h (the
+  weekly jobs' gate too); `candidate` idle, wakes on, a minute or more since it changed and since a
+  dropped wake; `due` a candidate whose `acked` is below its newest notice (`seen` this load, -1
+  none; the task's `noticed`, 0 none), or with none below `updated_at`; `kind` a question while it
+  asks, else the phase. The host reads `acked` and `noticed` only for a candidate.
+- **`tellPlan({first, want, was, known, any, delegating, away})`** → `{say, said}`: what to tell a
+  conversation of the rules (`Said`: `{notes, wakeOff, coding, routes, workflows}`). `first` (its
+  first message, again after a compaction or /clear): the blocks, in order `mode` (delegating),
+  `coding` (not `decide`), `notes`, `workflows` (on), `away`, `wakeOff`, `routes`, leaving out what
+  /workbench's message said (`was`, when `known`, #540), and `said` is `want`. Midway: `notes`,
+  `wakeOff`, `coding`, `routes` (`routesChanged` once a summary was said), `workflows`, the last
+  three only while delegating or with a task open (`any`); notes and the wake-off note once.
+- **`modesPlan({modes, ids, now, on})`** → `{kept, modes}`: `$.store`'s `modes` (`[{id, at}]`):
+  whether one of this process's ids is in the mode (#689), and the record to write: none 30 days
+  old, the process's own dropped, then, turning it on, each id at `now`.
+- **`compactPlan({on, was, open, boundary, busy, waiting, percentSet, percent, tokens, window,
+  autoCompact, threshold})`** → `{boundary, check, compact}`: a task boundary (one of `was`, the
+  session's open tasks at the last look, not in `open`; only in the mode) marked, `check` (read
+  the usage now: idle, none waiting on Claude; the mark then cleared), `compact` (the usage read:
+  `tokens` at `percent`, `WB_COMPACT_AT`, or half, of the engine's auto-compact `threshold` when
+  `autoCompact`, else of `window`; 0 never).
+- **`awayNow({webAt, now, tasks})`** → whether the user is away: the web chat used within six hours
+  (`webAt` ms, 0 for none), or one of the session's tasks (`mine`) active or waiting on Claude
+  unparked since (#110, #1402).
 - **`gateOf({words, writes})`** (`Kernel.Gate`): one simple command, as the host's parser read it
   (its words, quotes undone; `writes`, the files its redirects write), → `{at, word, gate, delegates,
   args, dirs, writes, send}`. `at`: the command's own word, past `VAR=x`, the reserved words (`if`,
@@ -7978,10 +8044,23 @@ classifier `gateOf`, which every Bash and Monitor gate in `register.tsx` reads (
   budget) compiled with `kernel/src` in a temp directory, bundled to `test/props.js` beside a copy
   of `kernel/test/props.test.ts`, and run under Bun (`bun test`, else `BUN_BE_BUN=1 opencode test`;
   neither: refused by name, never skipped): a Park-Miller generator (Schrage's method, Int only),
-  seeds `[20261124, 1, 2]`, 1,000 facts each, within 10 s, holding that closed and active share no
+  seeds `[20261124, 1, 2]`, 1,000 cases each, within 10 s, holding that closed and active share no
   phase, that active and needsClaude share only `asking`, that a parked mark counts only in phases
-  needing Claude, and that `phaseOf` round-trips (each flag says which of wb's sets the phase is in;
-  a phase none names, a near miss or a stranger, is none of them). A failure names its seed and case.
+  needing Claude, that `openOrder` names every open phase once, that `phaseOf` round-trips (each
+  flag says which of wb's sets the phase is in; a phase none names, a near miss or a stranger, is
+  none of them), that `openCounts` tallies what each task's `phaseOf` says, that `owns` gives a
+  session its own id's tasks, never a live session's nor another driver's by directory, nothing in
+  `~` or `/` by directory but where `wb start` ran, `/x/ab` never inside `/x/a`, that `awayNow`
+  holds for six hours, then while one of the session's tasks is open, that `noticesDue` picks only
+  a task's own rows within the hour, in order, its questions and one newest notice, `noticed` never
+  behind a notice, that `noticePlan` delivers a notice at most once while it is true (acked: skipped,
+  untoasted; only a true one of this session's with wakes on wakes or steers; none mid-turn but a
+  question steered), that `rewakePlan` is due only for a candidate, never busy, too soon, past
+  12 h or twice, that `tellPlan` is idempotent (told again what it was told, it says nothing and
+  the record stands; notes and the wake-off note, once said, stay said; out of the mode with
+  nothing open no other rule moves), that `modesPlan` keeps nothing 30 days old and this process's
+  ids exactly when on, and that `compactPlan` never checks out of the mode, busy or with a task
+  waiting, nor compacts unchecked or off. A failure names its seed and case.
   `check`: the offline checks below, two builds byte-equal to each other and to the commit, the props.
   `relock`: spago 1.0.4 from npm (no install scripts) into the cache re-locks `spago.lock` from
   `spago.yaml` in a scratch copy; only a new package needs it, and npm.
@@ -7990,8 +8069,12 @@ classifier `gateOf`, which every Bash and Monitor gate in `register.tsx` reads (
   free of `import(`, `require(`, `process.`, `globalThis`, clocks, `Math.random`, `console.`,
   timers, `Intl.`, locale calls, `eval(`, `new Function`, `fetch(`, `Bun.`, `Deno.`; one set of
   exports across BOUNDARY.md, the bundle, the d.ts and the goldens; one importer across `mod/`,
-  `opencode-plugin/` and `workbench/chat_static/`; no `replaces` name still defined; no phase
-  literal in `opencode-plugin/`; the budgets. So a change to a value Tables copies fails the
+  `opencode-plugin/` and `workbench/chat_static/` (every `.ts`, `.tsx`, `.js`, `.mjs`, `.mts`, `.cts`,
+  `.cjs` and `.jsx`, `import`, `from` and `require(`); `core.ts`'s untyped `kernel` record taken
+  only by tests and goldens (`kernel.core_record_importers`); no `replaces` name still defined; no phase
+  literal in `opencode-plugin/`, and no phase set in `mod/hooks` outside its tests and goldens (two
+  phases on a line or in one bracketed list: `kernel.phase_literals`; one phase alone is its own
+  words or glyph); the budgets. So a change to a value Tables copies fails the
   suite until `python3 scripts/kernel.py build` (the toolchain once, with the network).
 - **The goldens** (`mod/hooks/golden/`): one file per module, `export default {module, cases}
   satisfies Golden`, each case `{fn, in, out, why, twin?}` (`in: null`: a value export), listed in
@@ -8002,7 +8085,7 @@ classifier `gateOf`, which every Bash and Monitor gate in `register.tsx` reads (
   the Python that judges the same (`kernel.<name>`: `scripts/kernel.py`'s; `<mod>.<name>`:
   workbench's): `tests/test_kernel.py`'s `Twins` reads the goldens through Bun and calls each twin
   with the case's `in` as keyword arguments (none for a value export), so the goldens and wb agree;
-  `tables`' twin is `kernel.tables_values`. Without Bun (neither `bun` nor `opencode`) Twins skips.
+  `tables`' twin is `kernel.tables_values`, `owns`' `kernel.owns_twin` (`cli._scope` on one task). Without Bun (neither `bun` nor `opencode`) Twins skips.
 - **`wb patch`**: `.gitattributes` marks `kernel.js` `-merge -diff`, `kernel.d.ts` and
   `Tables.purs` `-merge`, all `linguist-generated`: a rebase that meets one stops with `wb
   update`'s message; take either side, then `build`. `wb patch upstream` names `python3
@@ -8879,7 +8962,7 @@ mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_BIN` 
 
 **task.json** (by `wb start`; `wb next --test` rewrites `test_cmd`, `wb relocate` `repo`, `git_common`, `cwd`):
 `name`, `repo`, `git_common` (the repo's git dir, real path: `gitops.repo_of` finds the repo once `repo` is gone),
-`cwd` (where `wb start` ran), `session` (`CLAUDE_CODE_SESSION_ID`, else an OpenCode driver's `OPENCODE_SESSION_ID`, `store.opencode_session`; with `cwd`/`repo`, whose task it is), `driver` (an OpenCode driver's task only, #1309: `{tool: "opencode", machine, pid?, start?, store?, seen?, model?, variant?}`, `store.driver_record`: at `wb start` or `wb adopt`, the server `wb` ran under, else one whose heartbeat listed the session, its start as wb read it, its beat's `store`, when the session was last known there (`seen`), the model and variant from that beat; with no beat then, filled in by the first scope check whose fresh beat lists the session, `store.driver_fill`; none on a Claude Code task, whose task.json is as before 2.2: `store.driver_of`), `claude_pid` (`CLAUDE_PID`: once gone,
+`cwd` (where `wb start` ran), `session` (`CLAUDE_CODE_SESSION_ID`, else an OpenCode driver's `OPENCODE_SESSION_ID`, `store.opencode_session`; with `cwd`/`repo`, whose task it is), `driver` (an OpenCode driver's task only, #1309: `{tool: "opencode", machine, pid?, start?, store?, seen?, model?, variant?}`, `store.driver_record`: at `wb start` or `wb adopt`, the server `wb` ran under, else one whose heartbeat listed the session, its start as wb read it, its beat's `store`, when the session was last known there (`seen`), the model and variant from that beat; with no beat then, filled in by the first scope check whose fresh beat lists the session, `store.driver_fill`; none on a Claude Code task, whose task.json is as before 2.2: `store.driver_of`; the mod reads `driver.tool` so the kernel's `owns` never adopts another driver's task by directory), `claude_pid` (`CLAUDE_PID`: once gone,
 the directory rule adopts the task), `claude_start` (`models._started`, against a recycled pid), `claude_machine` (a process on another
 machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: two machines adopted each other's tasks,
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
@@ -9374,7 +9457,8 @@ round-tripping a `coding` change and its settings-changes.jsonl row, probe turne
 `Bundle`, `Tables`, `Imports`, `Build` (the wire types), `Toolchain` (a bad hash, a link, a path escape refused by name),
 `Props` (`kernel.py props`: Bun, else OpenCode's, else refused by name; `check` runs them), `Twins` (each golden's
 Python twin, the goldens read through Bun) and `Checker`, which breaks a copy of the tree each way a check must catch,
-a hand copy of a table back in `register.tsx` or `tasks.ts` among them); `test_workflows.py` (the merge gate in plain text: every action pinned to a commit with its version,
+a hand copy of a table or a phase set back in `register.tsx` or `tasks.ts`, a `require`, `.mts`, `.cts`, `.cjs` or `.jsx`
+importer of the kernel and a host file taking `core.ts`'s untyped record among them); `test_workflows.py` (the merge gate in plain text: every action pinned to a commit with its version,
 every workflow its own permissions, `check` never path-filtered and required from GitHub Actions, green only when every
 `suite` shard, `mod`, `kernel` and `opencode-plugin` are, the `kernel` job's steps in order, the `opencode-plugin` job's (#1328: OpenCode, then `patches.PLUGIN_TESTS`' two), the macOS nightly's kernel `check` on shard 1 and `opencode.yml`'s Bun goldens, the shards dealing each test once, the ruleset without bypass, the plugin without
 `version`, `owner-merge.yml` approving only the owner's pull requests without running their code); `test_docs.py`
@@ -9907,12 +9991,17 @@ doc needs its own `!/` line).
 - **`models.BOX_QUIET`, `BOX_WAIT`** (a wb remote box's turns) → OpenCode's 2-minute background move (`BG_GRACE`), which
   bounds the gap between a round's requests, and `router.ROUND_DEFAULT_S`;
   `wb start`'s note; `media.turns` (`box_quiet`).
-- **A value `Kernel.Tables` copies** (`store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `ask_mcp.NO_ANSWER`'s opening,
+- **A value `Kernel.Tables` copies** (`store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `WORKING`, `STOPPED`, `OPEN_ORDER`, `ask_mcp.NO_ANSWER`'s opening,
   `chat.LISTENING_FOR`, `spend.WAKE_OPENING`) → `python3 scripts/kernel.py build` (Tables.purs, `kernel.js`, `kernel.d.ts`) and
   `mod/hooks/golden/tables.ts`, in the same commit; `tests/test_kernel.py` fails until then (`Tables`, and `Twins` for
   the golden). The mod reads them only through `core.ts` (`ACTIVE`, `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`,
-  `CHAT_STALE_MS`, `WAKE_OPENING`), so no hand copy is kept equal: a copy back in `register.tsx` or `tasks.ts` fails
-  `tests/test_kernel.py` (BOUNDARY.md's `replaces`). **A kernel export** →
+  `CHAT_STALE_MS`, `WAKE_OPENING`, `phaseOf`, `openCounts`), so no hand copy is kept equal: a copy back in `register.tsx`
+  or `tasks.ts` fails `tests/test_kernel.py` (BOUNDARY.md's `replaces`, and a phase set: `kernel.phase_literals`).
+  **`store.OPEN_ORDER`** → the pane's header order and the status line's (`openCounts`); `tasks.test.ts`'s headers.
+  **Kernel.Notice's hour and minute** (`noticesDue`'s hour, `rewakePlan`'s minute and 12 hours) → the mod's
+  `OLDEST_WAKE_MS` (a web settings row that old is no news) and `REWAKE_MS` (a failed chat send or queued prompt
+  tried again), kept equal by hand.
+  **A kernel export** →
   its row in `kernel/BOUNDARY.md`'s `## Exports`, its golden file in `golden/index.ts`, a build; **a denied import** →
   BOUNDARY.md's list and `kernel.DENIED`; **a budget** → BOUNDARY.md's `## Budget` only. **`kernel/toolchain.json`
   or `spago.lock`** → `fetch`, `build` (the banner's inputs) and CI's cache key.
@@ -10105,7 +10194,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126); a role's
   **`thinking_review`** (#1059) → `routes.role_thinks` (`REVIEW_ONLY`), the mod's `thinkingSaid`
   (`REVIEW_ONLY`), `routesSummary`, `routesValid` and `readRoutes`' all-default check.
-- **A `$.state` atom's type** → its tag (`tasks-11`, `live-1`, `chat-5`, `sessions-1`, `pane-2`, `said-3`,
+- **A `$.state` atom's type** → its tag (`tasks-12`, `live-1`, `chat-5`, `sessions-1`, `pane-2`, `said-3`,
   `splash-1`).
 - **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → the mod's `WbChat.link`, `LINK_STATES`, `linkOf`,
   modeline.ts's words per state. **settings-changes.jsonl's row** (the web app's Settings) → `settingsTurns`,
@@ -10133,9 +10222,11 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (#1135); the `kind` default (`gpu`) →
   `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`). `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
   table and the round report's `agent tokens` (an API task's) together.
-- **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
-  `scope()` passes every id. An OpenCode task's `session` with no `claude_pid` is what keeps the unchanged mod's `mine`
-  off it (`store.driver_record`); a `driver` key on a Claude task, or a `claude_pid` on an OpenCode one, breaks that.
+- **Which session a task is** → the kernel's `owns` (the mod's `mine` and `claim` gather its facts) and `cli._scope`:
+  the same rule, the home-or-`/` exception and the driver rule included, held by `mod/hooks/golden/owner.ts` on both
+  (its Python twin `kernel.owns_twin`); `scope()` passes every id. The mod passes a task's driver as `store.driver_of`
+  names it (task.json `driver.tool`), so another driver's task is never adopted by directory; an OpenCode task's
+  `session` with no `claude_pid` keeps it off `mine` by id too (`store.driver_record`).
 - **The heartbeat** (`drivers/opencode-<machine_tag>-<pid>.json`: the name, its keys, `store` and its `sessions` being every
   session in it, `ts` the listing's start, `used`, `store.HEARTBEAT_FRESH` against the plugin's `BEAT_MS`) → the OpenCode plugin's
   `driver.ts` (`beatOf`, `beatOnce`), which writes it through `wb driver beat` (`driver.write_beat`; a beat naming a `store` with a
@@ -10143,7 +10234,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   OpenCode's `cli/src/database-path.ts`, `parseRef` ↔ `routes.driver_ref` ↔ OpenCode's `Model.Ref.parse`, `store.driver_models`
   (#1317), and `store.beat_of`, `store.beat_path`,
   `store.heartbeats`, `store.driver_server`, `store.driver_record` and `store.driver_fill` (task.json `driver.store`, `seen`, `pid`).
-- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `OUTSIDE_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `OUTSIDE_REMEDY` ↔ `privacy.since_start_line`, #1232; a question notice's `PERMISSION to ` opening ↔ the mod's `PERMISSION`; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy or none, when `OUTSIDE_NEXT`'s carry on is it, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
+- **A notice kind or its text** → the kernel's `noticePlan` (`question`, `checkin` and a phase's own name: when one is still true) and `rewakePlan`'s `kind`; the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `OUTSIDE_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `OUTSIDE_REMEDY` ↔ `privacy.since_start_line`, #1232; a question notice's `PERMISSION to ` opening ↔ the mod's `PERMISSION`; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy or none, when `OUTSIDE_NEXT`'s carry on is it, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
   old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal, `cli._gpu_holders`,
@@ -10197,7 +10288,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **A Claude row's session** (`cli._chat_writer`: `session`, `claude_pid`, `claude_start`, `claude_machine`, as
   task.json's) → the mod's `answersTo` and `listen` (whose a user's message is, #1096), `ELSEWHERE_NOTE` ↔ reference/driving.md.
 - **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`, `Handler._desk`, `reportActive`;
-  `chat.went_away`, `chat.back`, the OpenCode plugin's) → `awayNow` ↔ `chat.away` (`AWAY_FOR` ↔ the mod's `AWAY_MS`, the open-task rule),
+  `chat.went_away`, `chat.back`, the OpenCode plugin's) → `awayNow` (the kernel's, `Kernel.Away`; the mod's is an adapter)
+  ↔ `chat.away` (`AWAY_FOR` ↔ the kernel's `awayMs`, the open-task rule),
   AWAY_NOTE, `#away-when`, *The web chat*.
 - **The web chat on OpenCode** (#1319): an OpenCode listener.json (`tool: "opencode"`, `chat.hold`) → `chat.listener`
   (`_server_listens`, `store.beat_of`), the mod's `claimStands` (its pid and `start`, which it judges as any claim's), `chat.ts`'s
