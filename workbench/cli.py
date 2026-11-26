@@ -3128,11 +3128,15 @@ OPENCODE_WAY_BACK = "; /sessions goes back to the OpenCode session one is open i
 
 
 def _elsewhere_line(others, kind) -> str:
-    """wb status's `open elsewhere` line; from an OpenCode driver, with OPENCODE_WAY_BACK when an
-    OpenCode session holds one of them."""
+    """wb status's `open elsewhere` lines; from an OpenCode driver, the live sessions' line ends with
+    OPENCODE_WAY_BACK when a live OpenCode session holds one of them. A gone session's task has its
+    own line and `wb adopt` instead, so the way back never follows that line (both on one merge,
+    2026-11-26: #1482's gone lines, #1498's way back)."""
     line = _others_line(others, "open elsewhere")
-    if line and kind == "opencode" and any(store.driver_of(t.spec) == "opencode" for t in others):
-        line += OPENCODE_WAY_BACK
+    live = [t for t in others if not (t.spec.get("session") and _owner_gone(t.spec))]
+    if line and kind == "opencode" and any(store.driver_of(t.spec) == "opencode" for t in live):
+        first, nl, rest = line.partition("\n")              # the live line comes first
+        line = first + OPENCODE_WAY_BACK + nl + rest
     return line
 
 
