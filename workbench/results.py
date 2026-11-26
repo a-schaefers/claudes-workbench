@@ -191,7 +191,23 @@ def _with_route(task: store.Task, row: dict) -> dict:
         row.pop("gpu_wh", None)
         row.pop("remote_gpu", None)
         row["api"] = api_usage(task)
+    elif spec.get("fallback") and (paid := fallback_paid(task)) is not None:
+        row["fallback_paid"] = paid
     return row
+
+
+def fallback_paid(task: store.Task) -> dict | None:
+    """What a task moved to its role's GPU fallback (#1196) paid on its API model first, for its
+    row's `fallback_paid`: {cost, prices, provider}, from the day ledger (keyed by task; nothing
+    updates the status meter past the move), or None when it booked no dollars. The row is the GPU
+    model's (`kind` gpu, no `api`), so wb accept said no "paid" and wb savings and Stats left the
+    money out (#1523, 2026-11-26)."""
+    rows = [r for r in meter._task_rows(task.name) if r["usd"]]
+    if not (cost := round(sum(r["usd"] for r in rows), 6)):
+        return None
+    first = str(task.spec.get("fallback_from") or "")
+    return {"cost": cost, "prices": meter.basis(meter.row_basis(r) for r in rows),
+            "provider": first.split("/", 1)[0] if "/" in first else str(rows[0].get("provider") or "?")}
 
 
 def _num(v) -> bool:

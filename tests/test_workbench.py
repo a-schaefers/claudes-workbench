@@ -48261,6 +48261,28 @@ class ApiStats(Base):
         gpu = results.record(store.Task(self.api_task("t-gpu", via=None).name), "discarded")
         self.assertEqual((gpu["kind"], "api" in gpu), ("gpu", False))
 
+    def test_a_task_moved_to_its_gpu_fallback_keeps_what_its_api_rounds_paid(self):
+        # #1523 (2026-11-26): task.json as runner._fallback_move leaves it (routes.fallback_routed's
+        # `via: gpu`) made the row a GPU one with no money: wb accept said no "paid", and wb savings
+        # and Stats left out the $0.42 the ledger and the day cap had counted
+        from workbench import results, savings, spend
+        now = store.now()
+        moved = {"via": "gpu", "model": "ollama/mimo", "fallback": True, "fallback_from": "deepseek/deepseek-flash"}
+        t = self.api_task("t-fbpaid", {"api": {"usd": 0.42}}, **moved)
+        self.booked(0.30, now - 60, task="t-fbpaid")
+        self.booked(0.12, now - 30, task="t-fbpaid")
+        bare = self.api_task("t-fbfree", **moved)                   # moved before it paid anything
+        with mock.patch.object(spend, "usage_by_step", return_value=(self.USAGE, [])):
+            row, free = results.record(t, "accepted"), results.record(bare, "accepted")
+        self.assertEqual((row["kind"], "api" in row), ("gpu", False))  # the GPU model's, as before
+        self.assertEqual(row["fallback_paid"], {"cost": 0.42, "prices": "catalog", "provider": "deepseek"})
+        self.assertEqual(savings.paid(row), "paid ≈$0.42 (before the GPU fallback)")
+        a = savings.api_totals([row])
+        self.assertEqual((a["tasks"], a["cost"], a["by_provider"]["deepseek"]["cost"]), (1, 0.42, 0.42))
+        self.assertEqual(a["claude"], 0)                               # the GPU score's, not the API side's
+        self.assertNotIn("fallback_paid", free)
+        self.assertEqual((savings.paid(free), savings.api_totals([free])["tasks"]), ("", 0))
+
     def test_a_task_with_two_sessions_records_the_sum_of_both_sessions_cost(self):
         from workbench import results
         os.environ["FAKE_COST"] = "0.21"
