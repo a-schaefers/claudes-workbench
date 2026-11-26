@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { callFile, callRows, calls, denied, rowText, tasksNamed } from '../calls.ts'
+import { callFile, callRows, calls, Declines, denied, rowText, tasksNamed } from '../calls.ts'
 
 // The OpenCode driver's own calls in a task's worktree, kept in rules/<task>/claude-calls/ for wb
 // accept (#1331, 2026-11-25), under OpenCode's own Bun.
@@ -66,6 +66,58 @@ test('the server part\'s hooks keep a driver\'s worktree edit in the task\'s cla
     await hooks['execute.before']!({ tool: 'edit', sessionID: 's', id: 'call_2', input: { path: '/repo/x.py' } })
     expect(existsSync(join(home, 'rules', 't1', 'claude-calls', name!))).toBe(true)
     expect((readdirSync(dir)).length).toBe(1)        // a call elsewhere: no row
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a declined permission ends its call denied, though OpenCode fires no execute.after for it', () => {
+  const d = new Declines()
+  expect(d.event({ type: 'permission.asked', data: { id: 'per_1', source: { type: 'tool', messageID: 'm', id: 'call_1' } } })).toBeUndefined()
+  expect(d.event({ type: 'permission.asked', data: { id: 'per_2', source: { type: 'tool', messageID: 'm', id: 'call_2' } } })).toBeUndefined()
+  expect(d.event({ type: 'permission.replied', data: { sessionID: 's', requestID: 'per_1', reply: 'reject' } })).toBe('call_1')
+  expect(d.event({ type: 'permission.replied', data: { sessionID: 's', requestID: 'per_2', reply: 'once' } })).toBeUndefined()
+  expect(d.event({ type: 'permission.replied', data: { sessionID: 's', requestID: 'per_9', reply: 'reject' } })).toBeUndefined()
+})
+
+test('the server part writes a declined edit\'s row denied from the bus, not left begun', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'wb-calls-'))
+  try {
+    mkdirSync(join(home, 'tasks', 't1', 'worktree'), { recursive: true })
+    writeFileSync(join(home, 'tasks', 't1', 'task.json'), '{}')
+    const hooks: Record<string, (e: Record<string, unknown>) => unknown> = {}
+    const queue: { type: string; data?: Record<string, unknown> }[] = []
+    let wake: (() => void) | undefined
+    const push = (e: { type: string; data?: Record<string, unknown> }) => { queue.push(e); wake?.() }
+    const ctx = {
+      options: { env: { WB_HOME: home } },
+      session: { get: async () => ({ location: { directory: '/repo' } }) },
+      tool: { hook: async (name: string, cb: (e: Record<string, unknown>) => unknown) => { hooks[name] = cb } },
+      event: {
+        subscribe: () => ({
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              while (!queue.length) await new Promise<void>(r => { wake = r })
+              return { done: false, value: queue.shift()! }
+            },
+            return: async () => ({ done: true, value: undefined }),
+          }),
+        }),
+      },
+    }
+    const stop = await calls(ctx as never)
+    const file = join(home, 'tasks', 't1', 'worktree', 'a.py')
+    await hooks['execute.before']!({ tool: 'edit', sessionID: 's', id: 'call_1', input: { path: file } })
+    const dir = join(home, 'rules', 't1', 'claude-calls')
+    const [name] = readdirSync(dir)
+    const row = () => JSON.parse(readFileSync(join(dir, name!), 'utf8'))
+    expect(row().end).toBe(null)
+    push({ type: 'permission.asked', data: { id: 'per_1', sessionID: 's', source: { type: 'tool', messageID: 'm', id: 'call_1' } } })
+    push({ type: 'permission.replied', data: { sessionID: 's', requestID: 'per_1', reply: 'reject' } })
+    for (let i = 0; i < 50 && row().denied !== true; i++) await new Promise<void>(r => setTimeout(() => r(), 5))
+    expect([row().denied, typeof row().end]).toEqual([true, 'number'])
+    push({ type: 'permission.asked', data: {} })   // the loop still turns; nothing to end
+    await stop?.()
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

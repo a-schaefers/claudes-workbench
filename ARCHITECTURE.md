@@ -8152,7 +8152,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   - `consent.ts` (#1314): what Claude Code's mod gates, gated in OpenCode, for every model the
     server runs (the driver, a subagent, another plugin's call). Its parts:
     - **The tools**, in the namespace `workbench` (`ctx.tool.transform`; OpenCode names them
-      `workbench_<name>`): `workbench_route {args}`, `workbench_start {args}`,
+      `workbench_<name>`; its one description, `wb.ts`'s `NAMESPACE_DESCRIPTION`, is the chat's too,
+      as the last part to declare it wins): `workbench_route {args}`, `workbench_start {args}`,
       `workbench_settings_set {key, value}` and `workbench_patch_send {slug, title, body_file,
       draft?, anyway?}`. Each runs wb (`runner`: the plugin's wb, `findWb`, in the session's
       directory, with `OPENCODE_SESSION_ID` the calling session's and `CLAUDECODE`,
@@ -8212,7 +8213,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     the mod's rule (`callRows`, `tasksNamed`, `callFile`, `rowText`): `execute.before` writes a
     row begun for an `edit`, `write` or `patch` of a file in `tasks/<t>/` or a `shell` command run
     in or naming one, of a task with a task.json; `execute.after` writes it over (`end`), or
-    `denied` when the tool's error is a permission's (`Permission.*`). `wb accept` reads them as
+    `denied` when the tool's error is a permission's (`Permission.*`: a deny rule, the gates'
+    own). A plain decline fires no `execute.after` (2.4.1 turns `Permission.DeclinedError` into a
+    defect), so `Declines` reads the bus: `permission.asked` names its call (`source.id`) and a
+    `permission.replied` of `reject` writes that call's row `denied`. `wb accept` reads them as
     the mod's (*The runner, inside*).
   - `rpc.ts`: the contract `Workbench` (`id: "workbench"`), JSON Schema, no validator package:
     `status` → `{wb, found, from: options|package|PATH|none, home}`. Called over HTTP as `POST
@@ -8363,7 +8367,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   forms by the server's id with a yes, a no, a cancel, another session's reply and no TUI, each
   tool's dry run, form, approval file and call, the coding gate's verdicts and its one form, the
   local_only throws, the TUI half, the wiring), `calls.test.ts` (the rows, their tasks, begun, over
-  and denied, through the hooks), and
+  and denied, through the hooks, a decline's row denied from the bus), and
   `opencode-plugin/test/plugin.test.ts` (`BUN_BE_BUN=1 opencode test opencode-plugin/test`:
   both parts' shape and id, nothing touched under `WB_TASK` (a proxy context that records every
   access, the list asserted empty: a throw alone was swallowed by `tui.ts`'s own `catch`, so its

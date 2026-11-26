@@ -63,3 +63,7 @@ export function wbHome(env: Record<string, string | undefined>, cwd: string = pr
   const expanded = v === '~' ? home : v.startsWith('~/') ? join(home, v.slice(2)) : v
   return resolve(cwd, expanded)
 }
+
+// The one description of the `workbench` tool namespace: chat.ts and consent.ts both declare it,
+// and OpenCode keeps the last call's, so each must say the same (the consent review, 2026-11-25).
+export const NAMESPACE_DESCRIPTION = 'Workbench: delegated coding tasks, the roles, and its web chat'

@@ -36,7 +36,7 @@ import {
   APPROVAL_OWN, NOT_EDITED, ONLY, ROUTES_EDIT, allowances, codingMode, editedText, guarded, localOnlyPatchRefusal,
   localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, type Classify, type Coding, type Env, type Places,
 } from './gates.ts'
-import { findWb, wbEnv } from './wb.ts'
+import { findWb, NAMESPACE_DESCRIPTION, wbEnv } from './wb.ts'
 import { simpleWords } from './words.ts'
 
 export const NAMESPACE = 'workbench'
@@ -617,7 +617,7 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
   })
   const d: Deps = { run, git, asker, home: () => place().home, dir, read: readText }
   await c.tool.transform(editor => {
-    editor.namespace({ name: NAMESPACE, description: 'Workbench: delegated coding tasks, the roles, and its web chat' })
+    editor.namespace({ name: NAMESPACE, description: NAMESPACE_DESCRIPTION })
     for (const t of tools(d)) editor.add(t)
   })
   const gates = new Gates({

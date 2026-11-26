@@ -102,6 +102,32 @@ interface CallsContext {
     hook(name: 'execute.before', cb: (e: { tool: string; sessionID: string; id: string; input: unknown }) => unknown): Promise<unknown>
     hook(name: 'execute.after', cb: (e: { tool: string; sessionID: string; id: string; status: string; error?: unknown }) => unknown): Promise<unknown>
   }
+  readonly event?: { subscribe(options?: { types?: string[] }): AsyncIterable<{ type: string; data?: Row }> }
+}
+
+// The calls a declined permission ended. OpenCode fires no execute.after for a plain decline
+// (core/src/permission.ts turns Permission.DeclinedError into a defect, and tool.ts's executeTool
+// triggers execute.after only for a Tool.Error), so the bus says it instead: `permission.asked`
+// names the call it asks for (`source.id`, the call id execute.before saw), and a
+// `permission.replied` of `reject` for that request ends it denied (the consent review,
+// 2026-11-25: a declined edit stayed begun for CALL_RUNS and counted as the driver's hand edit).
+export class Declines {
+  private readonly asked = new Map<string, string>()
+  // the call a permission event ends denied, if any
+  event(e: { type: string; data?: Row }): string | undefined {
+    const d = e.data ?? {}
+    const request = String(d.id ?? d.requestID ?? '')
+    if (!request) return undefined
+    if (e.type === 'permission.asked') {
+      const source = d.source as { type?: unknown; id?: unknown } | undefined
+      if (source?.type === 'tool' && typeof source.id === 'string') this.asked.set(request, source.id)
+      return undefined
+    }
+    if (e.type !== 'permission.replied') return undefined
+    const call = this.asked.get(request)
+    this.asked.delete(request)
+    return d.reply === 'reject' ? call : undefined
+  }
 }
 
 const realOf = (p: string) => {
@@ -150,7 +176,26 @@ export async function calls(ctx: ServerContext): Promise<(() => Promise<void>) |
     running.delete(String(e.id))
     note(k, e.status === 'error' && denied(e.error) ? 'denied' : 'over')
   })
+  // a declined call's row ends here, as no execute.after comes for it
+  const declines = new Declines()
+  const stream = c.event?.subscribe({ types: ['permission.asked', 'permission.replied'] })[Symbol.asyncIterator]()
+  let open = true
+  if (stream) {
+    void (async () => {
+      while (open) {
+        const next = await stream.next().catch(() => ({ done: true as const, value: undefined }))
+        if (next.done) break
+        const call = declines.event(next.value)
+        const k = call === undefined ? undefined : running.get(call)
+        if (!k || call === undefined) continue
+        running.delete(call)
+        note(k, 'denied')
+      }
+    })()
+  }
   return async () => {
+    open = false
+    await stream?.return?.(undefined).catch(() => {})
     for (const k of running.values()) note(k, 'over')
     running.clear()
   }
