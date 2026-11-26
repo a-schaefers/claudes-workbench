@@ -1371,6 +1371,8 @@ const QUIT_NOTE = (out: string, ok: boolean) =>
   `${out}\nWorkbench mode is off: from now on work directly, without delegating. Don't finish, ` +
   `restart or clean up any of the stopped work unless they ask; real tasks keep their ` +
   `worktrees (\`wb status --all\`). Tasks left alone belong to another session.`
+// a hand-back that took nothing over (#1550): how the user hands Claude one parked task
+const HAND_ONE = 'To hand a parked task to Claude, ask for it by name (`wb takeover <name>`; `wb status --all` lists them).'
 const DONE_NOTE = (out: string) =>
   `[workbench] The user ran /${HAND_BACK}: this session's agents were stopped and their tasks ` +
   `handed to you (\`wb takeover --all\`):\n${out}\n\nLeave workbench mode and finish the work ` +
@@ -3522,6 +3524,9 @@ export const register: Register = (on, options) => {
       $.ui.toast(`workbench: wb takeover --all failed: ${brief(out)}`)
       return { text: `wb takeover --all failed; the agents may still be running (wb status):\n${out}` }
     }
+    // exit 0 with none taken over (each one parked by an earlier quit, or none open) is no turn
+    // either: DONE_NOTE told Claude to finish tasks still parked (#1550, 2026-11-26)
+    if (!/^took over /m.test(out)) return { text: `Nothing was handed over to Claude. ${out}\n${HAND_ONE}` }
     if (!ok) $.ui.toast(`workbench: some tasks weren't taken over: ${brief(out)}`)
     mem.queued.push(DONE_NOTE(out)) // a command may not start a turn itself: the next poll does
     return { text: `Agents stopped; Claude is taking over. ${out}` }

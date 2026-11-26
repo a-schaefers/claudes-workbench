@@ -72,7 +72,8 @@ def parked(st: dict) -> bool:
     against the quit (#541). A task waiting on Claude when the quit came (review, stuck, failed:
     `--park-waiting`) is parked as it stands: only the running ones were, and a review stayed in
     the status line and every new conversation's pick-up block (#698). spawn_runner and a named
-    takeover clear the mark (`wb takeover --all`, the hand-back, leaves it: #1540); any other
+    takeover clear the mark (`wb takeover --all`, the hand-back, leaves it, #1540, but for the
+    tasks the latest quit just parked: cli._just_parked, #1550); any other
     phase isn't parked."""
     return st.get("phase") in PARKS and bool(st.get("parked"))
 
