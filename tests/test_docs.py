@@ -238,6 +238,17 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn("`wb answer <name> --file <path>`, which sends the file's contents", bullet)
         self.assertIn("Path(a.file).read_text(", (ROOT / "workbench/cli.py").read_text())   # cmd_answer's
 
+    def test_the_skills_deep_workflows_say_what_ultracode_with_deepcode_does_and_fix_through_fix(self):
+        # the review of #1278 (2026-11-25): the issue says that with both words in one prompt
+        # Claude follows each in its own scope, and its plan's §6 that Claude's Workflow then only
+        # reviews and that findings are fixed through the `fix` flow; the skill said neither
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        deep = " ".join(section(skill, "### Deep workflows").split())
+        self.assertIn("With `ultracode` and `deepcode` in one prompt, follow each in its own scope", deep)
+        self.assertIn("your own Workflow (ultracode's) only reviews what the run returns", deep)
+        self.assertIn("fixed through the `fix` flow", deep)
+        self.assertTrue((ROOT / "agent/flows/fix.json").is_file())
+
     def test_the_macos_ollama_install_puts_the_window_in_the_model_not_a_launchctl_setenv(self):
         # #1195's review (2026-11-24): `launchctl setenv OLLAMA_CONTEXT_LENGTH` is lost at logout or
         # reboot; Ollama then served its 4K default and short_window failed every GPU task

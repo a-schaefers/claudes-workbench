@@ -27,9 +27,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
-from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, ocplugin, optimize, patches, progress, results, router, routes, savings, scan, skills,
-               stats, store, transcript, tuning, verify, webpush)
+from . import (__version__, ask_mcp, audio, bench, cards, chat, context, gitops, hardware, images, lane, lessons,
+               media, models, ocplugin, optimize, patches, progress, results, router, routes, runs, savings, scan,
+               skills, stats, store, transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from . import keyhole
@@ -87,10 +87,37 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 """
 WRITING = "writing"  # the prose role (#1025; the roles: #1014)
 
+# A report task's protocol (#1278): it reads and returns one object, never a diff. Its fold, its
+# first two bullets' shape, the `{spec}` and ask_reviewer bullets and the `Lesson: <the rule, and
+# why>` line are PROTOCOL's word for word (bench.FOLD, transcript's fold, runner.outline_section,
+# lessons.LESSON read them); its last bullet ends with the object, not a summary of files
+# changed: that bullet cost 1-2K characters of prose before each object (#1278's study,
+# 2026-11-25). "(workbench report protocol)" is how tests/fake_opencode.py knows one.
+REPORT_PROTOCOL = """
+
+---
+How to work (workbench report protocol):
+- You are in a git worktree on branch {branch}, read-only to you, and git is read-only too: this
+  is a report task, you read and report and change nothing. To run anything, copy what it needs
+  under $TMPDIR first.
+{test_line}{experiment_protocol}- This step's full text, this message as it was sent, is saved in `{spec}`. If your
+  session is compacted and only a summary of the task is left, read that file again before
+  you go on; don't ask for it.
+- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
+question(s) for this task). Otherwise make reasonable choices and say what you assumed.
+- End with your result, one JSON object matching the schema in `{schema}`: call the
+  `submit_result` tool with the whole object, once; if you can't call it, end your last message
+  with the object, nothing after it. If you hit something the next agent would trip on too,
+  add a line `Lesson: <the rule, and why>` before the object.
+"""
+
 
 def protocol_for(spec: dict) -> str:
-    """The protocol a task's prompts end with: WRITING_PROTOCOL for the writing role, else
-    PROTOCOL. ``spec``: task.json, or what wb start is about to write there."""
+    """The protocol a task's prompts end with: REPORT_PROTOCOL for a report task (#1278),
+    WRITING_PROTOCOL for the writing role, else PROTOCOL. ``spec``: task.json, or what wb start is
+    about to write there."""
+    if spec.get("report"):
+        return REPORT_PROTOCOL
     return WRITING_PROTOCOL if spec.get("role") == WRITING else PROTOCOL
 
 
@@ -563,21 +590,36 @@ _owner = store.owner
 def _restart_notice(task: store.Task) -> None:
     """One notice for the tasks one restart interrupted in task's session (its others reaped
     here, quietly), raised on the first started, the rest acknowledged with it: the mod woke
-    Claude once per task (#544)."""
+    Claude once per task (#544). A run's items are a batch of their own (_batch_key)."""
+    key = _batch_key(task)
     batch = [t for t in store.all_tasks() if t.name == task.name or (
-        _owner(t) == _owner(task) and t.status.get("phase") in LIVE
+        _batch_key(t) == key and t.status.get("phase") in LIVE
         and _restarted(t.status) and reap(t, quiet=True))]
     ts = store.now()
+    run = runs.Run(key[1]) if key[1] else None
+    if run is not None:
+        runs.reap(run, quiet=True)  # its driver died in the restart too: this notice says so
     # the batch by name: `wb resume --all --repo <cwd>` resumed nothing for a session in ~ (a
     # broad directory claims no task) and, in a repo two sessions share, the other's tasks too (#692)
+    then = (f". wb run resume {run.name} continues its run, them first"
+            if run is not None and run.exists and not runs._ended(run) else f". wb resume {' '.join(t.name for t in batch)} continues them in the order they were "
+            "started (one that never ran a round starts it again)")
     row = batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
                                f"{len(batch)} tasks were {RESTARTED.replace('it)', 'them)')}: "
-                               + ", ".join(t.name for t in batch))
-                    + f". wb resume {' '.join(t.name for t in batch)}"
-                    + " continues them in the order they were started (one that never ran a "
-                    "round starts it again)", round=batch[0].status.get("round"), ts=ts,
-                    tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
+                               + ", ".join(t.name for t in batch)) + then,
+                          round=batch[0].status.get("round"), ts=ts,
+                          tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
     store.ack_batch(batch, row, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
+
+
+def _batch_key(t) -> tuple:
+    """Which one-notice batch a stopped task joins: its owner's (store.owner), and a run's items
+    (task.json `run`, #1278) apart from the user's own. One batch held both, as a run's driver
+    inherits the session and the directory: led by a run item, its notice went to the run's
+    notify.jsonl and the user's own tasks were acknowledged with it, Claude never told of them
+    (the review of #1278, 2026-11-25)."""
+    run = t.spec.get("run")
+    return _owner(t), run if isinstance(run, str) and runs.RUN_RE.match(run) else None
 
 
 def _whose(t) -> str:
@@ -590,8 +632,13 @@ def _stop_for_update(tasks) -> str:
     """`wb update --stop`: every running agent stopped, each task left stuck with UPDATE_STOP and
     a notice per owner (store.owner, as a restart's batch) naming `wb resume`, so each session,
     this one or another, is woken to continue its own. `wb stop --all` parked them and
-    acknowledged their news: another session's Claude waited for a wake that never came (#694)."""
+    acknowledged their news: another session's Claude waited for a wake that never came (#694).
+    A run's items (#1278): its driver stopped first, so it neither takes them as null nor resumes
+    them under the update, and their batch apart from the user's own (_batch_key)."""
     stopped = []
+    for name in dict.fromkeys(k for t in tasks if (k := _batch_key(t)[1])):
+        if runs.Run(name).open():
+            runs.stop(runs.Run(name), UPDATE_STOP, items=False)
     for t in tasks:
         with store.locked(runner.lock_file(t.name, "cmd")):
             if t.status.get("phase") in store.CLOSED or (t.status.get("pid") and store.elsewhere(
@@ -606,13 +653,16 @@ def _stop_for_update(tasks) -> str:
             stopped.append(t)
     groups: dict = {}
     for t in stopped:
-        groups.setdefault(store.owner(t), []).append(t)
-    for batch in groups.values():
+        groups.setdefault(_batch_key(t), []).append(t)
+    for (_, run), batch in groups.items():
         names, ts = [t.name for t in batch], store.now()
         row = batch[0].notify("stuck", (f"task {names[0]}: {UPDATE_STOP}" if len(batch) == 1 else
                                   f"{len(batch)} tasks were {UPDATE_STOP}: " + ", ".join(names))
-                        + f". wb resume {' '.join(names)} continues "
-                        + ("it" if len(batch) == 1 else "them") + " in a fresh session",
+                        + (f". wb run resume {run} continues its run, "
+                           + ("it" if len(batch) == 1 else "them") + " first"
+                           if run and runs.Run(run).exists and not runs._ended(runs.Run(run))
+                           else f". wb resume {' '.join(names)} continues "
+                           + ("it" if len(batch) == 1 else "them") + " in a fresh session"),
                         round=batch[0].status.get("round"), ts=ts, tasks=names, cause="update")
         store.ack_batch(batch, row, ts)  # had with the first's notice, as a restart's batch (#544)
     return "stopped for the update: " + (", ".join(f"{t.name} ({_whose(t)})" for t in stopped)
@@ -1507,6 +1557,62 @@ def auto_fix(a, m: models.Model) -> int:
 GROUP_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}\Z")  # a task name's characters, up to 32
 
 
+SCHEMA_FILE = "schema.json"  # a report task's schema, in rules/<task>/ (the lane reads it, #1278)
+REPORT_TOOLS = ("read", "none")
+
+
+def _report_args(a) -> tuple:
+    """--report, --card, --schema and --tools (#1278), checked before anything is made: (the card
+    or None, None for a code task or {schema, schema_name, tools}). A card's role, skills and
+    question budget stand in for --role, --skill and --ask-budget not given."""
+    card = None
+    if getattr(a, "card", None):
+        try:
+            card = cards.load(a.card)
+        except RuntimeError as e:
+            die(str(e))
+        if a.role is None and a.size is None and card.role:
+            a.role = card.role
+        a.skill = list(dict.fromkeys([*(a.skill or []), *card.skills]))
+        _say(cards.said_dropped(card))
+    report = bool(getattr(a, "report", False))
+    if card and card.report and not report:
+        die(f"card {card.name} is a report card (tools {card.tools}): start it with --report")
+    if card and not card.report and report:
+        die(f"card {card.name} is a code card (tools code): start it without --report")
+    if not report:
+        for flag, v in (("--schema", getattr(a, "schema", None)), ("--tools", getattr(a, "tools", None))):
+            if v:
+                die(f"{flag} goes with --report")
+        return card, None
+    if a.test:
+        die("a report task runs no acceptance command: its result is checked against its schema; "
+            "drop --test")
+    name = getattr(a, "schema", None) or (card.schema if card else None)
+    if not name:
+        die("a report task names its result's schema: --schema FILE or a shipped name "
+            f"({', '.join(sorted(p.stem for p in cards.SCHEMAS.glob('*.json')))}), or a --card that names one")
+    try:
+        doc = cards.load_schema(name)
+    except RuntimeError as e:
+        die(str(e))
+    return card, {"schema": doc, "schema_name": name,
+                  "tools": getattr(a, "tools", None) or (card.tools if card else "read")}
+
+
+def _run_item(a) -> None:
+    """--run, --stage and --item (#1278): a run's item, which only the run's driver starts. Its
+    notices go to the run (store.Task.notify), never to Claude, while the run is open."""
+    given = [f for f, v in (("--run", getattr(a, "run", None)), ("--stage", getattr(a, "stage", None)),
+                            ("--item", getattr(a, "item", None))) if v is not None]
+    if not given:
+        return
+    if len(given) != 3:
+        die("--run, --stage and --item go together: a run's driver starts its items (wb run start)")
+    if not runs.RUN_RE.match(a.run) or not (runs.run_dir(a.run) / "run.json").is_file():
+        die(f"no run {a.run!r}: wb run start makes one")
+
+
 def _check_group(group: str | None) -> None:
     """--group: the tasks one request fanned out to, which the pane draws under one header. Given
     by Claude, never guessed from names: a shared prefix joined unrelated tasks (fix-crash,
@@ -1669,8 +1775,9 @@ def after_time(text: str, now: float | None = None) -> float:
     raise argparse.ArgumentTypeError(f"{text!r}: no such time ahead")  # never: tomorrow's is
 
 
-def _start_refusals(a, dry: bool = False) -> tuple[Path, str, tuple[int, int] | None]:
-    """wb start's refusals before a model is picked, and (its repo, the spec, OpenCode's version).
+def _start_refusals(a, dry: bool = False) -> tuple[Path, str, tuple[int, int] | None, "cards.Card | None", dict | None]:
+    """wb start's refusals before a model is picked, and (its repo, the spec, OpenCode's version,
+    and _report_args' card and report, #1278).
     The dry run behind the start dialog (`_route_start`, ``dry``) runs them too: it put a dialog
     up for a start under a taken or malformed name, from a missing spec or outside a repo, which
     wb start then refused, and the retry asked again (#1395, 2026-11-25)."""
@@ -1681,10 +1788,14 @@ def _start_refusals(a, dry: bool = False) -> tuple[Path, str, tuple[int, int] | 
     if a.backlog and (why := _backlog_done(a.backlog)):
         die(why)
     _check_group(getattr(a, "group", None))
+    card, report = _report_args(a)  # #1278: before anything is read or made
+    _run_item(a)
     task = store.Task(a.name)
     if task.exists:  # discarding never frees a name, so the refusal doesn't suggest it (the audit)
         die(f"task {a.name!r} exists ({task.status.get('phase')}): task names are never reused, "
             "pick a new one")
+    if (runs.run_dir(a.name) / "run.json").exists() or (runs.runs_dir() / runs.ARCHIVE / a.name).exists():
+        die(f"a run is named {a.name!r}: a task takes a name of its own")  # #1278: either way
     try:
         repo = gitops.toplevel(Path(a.repo).resolve())
     except gitops.GitError as e:  # git's own reason when it isn't "not a repo": dubious ownership
@@ -1715,13 +1826,13 @@ def _start_refusals(a, dry: bool = False) -> tuple[Path, str, tuple[int, int] | 
             f"{runner.OPENCODE_GET}", 3)
     if store.noexec():  # every git call the agent makes would exit 126 (#851)
         die(noexec_line())
-    return repo, spec_text, have
+    return repo, spec_text, have, card, report
 
 
 def cmd_start(a):
     if getattr(a, "after", None):  # held until then: the GPU's or a slot's room now says nothing
         a.queue = True
-    repo, spec_text, have = _start_refusals(a)
+    repo, spec_text, have, card, report = _start_refusals(a)
     shown = _images_given(getattr(a, "image", None))  # #1199, before anything is written
     task = store.Task(a.name)
     handed = _skill_names(a.skill)
@@ -1839,7 +1950,8 @@ def cmd_start(a):
                                            "start": models._started(os.getpid()),
                                            "machine": store.machine()})  # whose pid (#876)
     subs = gitops.fill_submodules(repo, base, wt, dry=True)
-    budget = a.ask_budget
+    # a card's own question budget (0 for a report card) unless --ask-budget says (#1278)
+    budget = a.ask_budget if a.ask_budget is not None else card.ask if card and card.ask is not None else 2
     # round 1's prompt before task.json: a write that fails leaves a dead start for gc, not a
     # task with no status (#873)
     exps = context.task_experiments()  # what this task's agent has: the prompt says it too
@@ -1853,11 +1965,12 @@ def cmd_start(a):
         exps, off = {**exps, "probe": False}, {"probe": no_probe[0]}
     elif exps.get("probe"):
         probe = {"probe_files": no_probe[1]}  # the long files the spec names, in probe's languages
-    prompt = spec_text.rstrip() + protocol_for({"role": role}).format(branch=gitops.branch_name(a.name),
-                                                  test_line=test_line(a.test), budget=budget,
-                                                  experiment_protocol=context.experiment_protocol(
-                                                      experiments=exps),
-                                                  spec=task.round_dir(1) / "prompt.md")
+    if report:  # the lane reads rules/<task>/, the ask server too (submit_result's inputSchema)
+        store.write_json(context.rules_dir(task) / SCHEMA_FILE, report["schema"])
+    prompt = spec_text.rstrip() + protocol_for({"role": role, "report": bool(report)}).format(
+        branch=gitops.branch_name(a.name), test_line=test_line(a.test), budget=budget,
+        experiment_protocol=context.experiment_protocol(experiments=exps),
+        spec=task.round_dir(1) / "prompt.md", schema=context.rules_dir(task) / SCHEMA_FILE)
     task.round_dir(1).mkdir(parents=True)
     task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     pictures = _keep_images(task, shown, 1)  # before task.json too: a dead start's, for gc
@@ -1897,17 +2010,22 @@ def cmd_start(a):
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
         **({"not_before": round(at)} if (at := getattr(a, "after", None)) else {}),  # runner.hold (#1204)
         **({"group": g} if (g := getattr(a, "group", None)) else {}),  # one request's fan-out (#1048)
+        # a report task (#1278): its schema's name, its tools, its card; a run's item
+        **({"report": True, "schema": report["schema_name"], "tools": report["tools"]} if report else {}),
+        **({"card": cards.dumps(card)} if card else {}),
+        **{k: v for k in ("run", "stage", "item") if (v := getattr(a, k, None)) is not None},
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
         **({"no_base_check": True} if a.no_base_check else {}),
         **({"unload_for_tests": True} if getattr(a, "unload_for_tests", False) else {}),
         **({"sign": False} if a.no_sign else {}),
         **({"subdir": sub} if sub else {}),
-        "auto_fix": (fixes := auto_fix(a, m)), "ask_budget": budget, "ask_timeout": a.ask_timeout,
+        # a report runs no tests: nothing to fix, and no self-review of a diff it hasn't (#1278)
+        "auto_fix": (fixes := 0 if report else auto_fix(a, m)), "ask_budget": budget, "ask_timeout": a.ask_timeout,
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
         # (a nudge, a full window, handovers, a cut base check) still wake
-        "checkin": a.checkin or 0, "self_review": self_review(a.self_review, role),
+        "checkin": a.checkin or 0, "self_review": False if report else self_review(a.self_review, role),
         "experiments": exps,  # what this task's agent has: wb experiment
         **probe,  # the long files its spec names, with probe on
         **({"experiments_off": off} if off else {}),  # set, but off for this task, and why
@@ -1936,6 +2054,11 @@ def cmd_start(a):
     spawn_runner(task)
     print(f"started {a.name} on {f'{m.id} (API)' if api else m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {fixes}" if a.test else ""))
+    if report:  # #1278
+        print(f"report: one object, checked against {report['schema_name']}; tools {report['tools']}"
+              + (f"; card {card.name}" if card else "") + f"; wb accept {a.name} keeps it, no commit")
+    elif card:
+        print(f"card: {card.name} (its role's text after the handbook)")
     if mcp:  # each server's tools go into every request: prefill on the GPU (#1202)
         print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\"): each server's tools go into every "
               "request")
@@ -2343,6 +2466,9 @@ def cmd_next(a):
     reap(task)
     _local_only_since(task)  # #1021
     spec, st = task.spec, task.status
+    if spec.get("report"):  # #1278: no diff, so no step to commit
+        die(f"{a.name} is a report task: it has no next step (wb feedback asks it again, wb accept "
+            "keeps its result)")
     if st.get("phase") != "review":
         die(f"{a.name} is {st.get('phase')}; wb next follows an approved step under review")
     if why := _accepting(task):  # (#878)
@@ -2406,6 +2532,7 @@ def cmd_next(a):
         "The next step:\n\n"
         + nxt.rstrip()
         + protocol_for(spec).format(branch=spec["branch"], test_line=test_line(test), budget=budget,
+                                    schema=context.rules_dir(task) / SCHEMA_FILE,
                           experiment_protocol=context.experiment_protocol(task),
                           spec=task.round_dir(n) / "prompt.md"),
         encoding="utf-8")
@@ -2574,6 +2701,10 @@ def claim_ack(task, ts: float) -> bool:
 def cmd_ack(a):
     """The mod's acknowledgement before a wake (claim_ack): exit 3 when another session or a
     wb wait took this notice first."""
+    if getattr(a, "run", False):
+        if a.if_ts is not None:
+            die("--if goes with a task's notice")
+        return runs.cmd_ack(a)
     task = need(a.name)
     if a.if_ts is not None:  # a rollback: only over this session's own mark (#786)
         if not release_ack(task, a.ts, a.if_ts):
@@ -2689,6 +2820,8 @@ def cmd_wait(a):
     path = store.home() / "notify.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
+    if a.name and not store.Task(a.name).exists and runs.Run(a.name).exists:
+        return _wait_run(a, deadline)
     watcher = Watcher(store.home(), *([need(a.name).dir] if a.name else []))
     if a.name and (a.repo or a.session or a.all_sessions or getattr(a, "backlog", None)):
         die("--repo, --session, --all-sessions and --backlog go with a bare wb wait")
@@ -2698,6 +2831,13 @@ def cmd_wait(a):
         for t in [need(a.name)] if a.name else store.all_tasks():
             if t.status.get("phase") in LIVE:
                 reap(t)  # a dead runner's task becomes failed, with the notice this wait delivers
+        if not a.name and not batch:  # a run's notice (#1278), the caller's runs only
+            scope = {r.name for r in runs._runs_in_scope(a)}
+            for n in scope:
+                runs.reap(runs.Run(n))
+            if row := runs.due(None, scope):
+                print(runs.wait_line(row))
+                return
         rows = store.notices()
         # a bare wait takes only the caller's tasks (_caller): one in another session's terminal
         # acknowledged a notice its owner's mod then never woke for (#696)
@@ -2744,13 +2884,34 @@ def cmd_wait(a):
                     print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
                     return
         elif not any(t.status.get("phase") not in store.CLOSED and t.name not in theirs
-                     for t in store.all_tasks()):
+                     for t in store.all_tasks()) and (batch or not any(
+                         r.open() for r in runs._runs_in_scope(a))):
             die("no open tasks to wait for (wb status --all)"
                 + (f" in backlog {batch}" if batch else
                    " in this session (--all-sessions waits on every session's)" if theirs else ""), 2)
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
+        watcher.wait(min(60.0, deadline - time.time()) if deadline else 60.0)
+
+
+def _wait_run(a, deadline) -> None:
+    """wb wait <run> (#1278): its next notice, claimed; exit 2 once it is closed or times out."""
+    run = runs.Run(a.name)
+    watcher = Watcher(store.home(), run.dir)
+    while True:
+        runs.reap(run)
+        if row := runs.due(a.name):
+            print(runs.wait_line(row))
+            return
+        phase = run.status.get("phase")
+        if phase == "closed":
+            die(f"run {a.name} is closed", 2)
+        if phase not in runs.OPEN:
+            print(f"[{phase}] run {a.name} (already delivered once)\n{run.status.get('why') or ''}")
+            return
+        if deadline and time.time() > deadline:
+            die("timed out waiting", 2)
         watcher.wait(min(60.0, deadline - time.time()) if deadline else 60.0)
 
 
@@ -2927,6 +3088,8 @@ def cmd_status(a):
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
         _say(parked_line)
         _say(_others_line(others, "open elsewhere"))
+        if not a.name:
+            _run_lines(a)
         return
     print(f"{'task':22} {'phase':9} {'rnd':>3} {'via':3} {'model':24} {'age':>5} {'idle':>5}  last")
     for t in tasks:
@@ -2941,12 +3104,23 @@ def cmd_status(a):
         print(f"{t.name:22} {phase:9} {st.get('round', 1):>3} {via:3} {short:24} "
               f"{ago(sp.get('created_at')):>5} {ago(st.get('updated_at')):>5}  "
               f"{(on + (st.get('last') or ''))[:70]}")
+    if not a.name:
+        _run_lines(a)
     if a.name and tasks[0].worktree.is_dir():
         print(f"worktree: {tasks[0].worktree}")
     if a.name and (line := use_line(tasks[0])):
         print(line)
     _say(parked_line)
     _say(_others_line(others, "open elsewhere"))
+
+
+def _run_lines(a) -> None:
+    """wb status's line per run in the caller's scope, under its items (#1278); a dead driver
+    reaped first (runs.reap: one run_stopped)."""
+    for r in runs._runs_in_scope(a):
+        if r.status.get("phase") != "closed" or a.all:
+            runs.reap(r)
+            print(runs.status_line(r.name))
 
 
 def cmd_log(a):
@@ -3099,8 +3273,11 @@ def cmd_stop(a):
                 driver = bench.stop_driver()
             except RuntimeError as e:  # another machine's run: that one's to stop there, and the
                 far = str(e)           # bail-out died before stopping any task here (#876 review)
+        # each run's driver next (#1278), so it starts no item; its items stop with the rest
+        drivers = [f"wb run {r.name}" for r in runs._runs_in_scope(a)
+                   if r.open() and runs.stop(r, "stopped with every agent (wb stop --all)", items=False) is not None]
         mine, others = _scope(_open_tasks(), *_caller(a))
-        stopped = ([f"wb bench (pid {driver})"] if driver else []) + stop_everything(mine)
+        stopped = ([f"wb bench (pid {driver})"] if driver else []) + drivers + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
         _say(far and f"left running: {far}")
@@ -3912,7 +4089,7 @@ def _route_start(a) -> None:
     # aren't the JSON the mod parses. Round 1's input as wb start reckons it (#1173): stdin's is
     # read by wb start alone
     with redirect_stdout(io.StringIO()):
-        repo, spec_text, _ = _start_refusals(ns, dry=True)
+        repo, spec_text, *_ = _start_refusals(ns, dry=True)
     sub = _package(repo, Path(ns.repo).resolve(), ns.base)
     # a local-only spot's refusal in place of a dialog line (#1021): never ask the user to
     # approve a start wb start refuses
@@ -4385,9 +4562,12 @@ def cmd_coding(a):
 # once, each on its own role's model. The user's choice, beside `wb coding`'s and kept as it is
 # (`$WB_HOME/workflows.json`); off (no saved choice) is one task at a time, as before there was a
 # choice. Nothing runs that couldn't anyway: the GPU lease and the provider slots still decide.
-WORKFLOWS = {"off": ("Off", "Claude runs one task at a time."),
-             "on": ("On", "Claude may split a request into tasks that run at once, each on its own "
-                          "role's model; the GPUs and the provider slots decide what runs together.")}
+# #1278 named it deepmode: on, a substantive request runs as a deep workflow (wb run), as the word
+# `deepcode` asks for one request; the hosts read the same file and runs.DEEPCODE_RULE
+WORKFLOWS = {"off": ("Off", "Claude runs one task at a time; deepcode asks for a deep workflow once."),
+             "on": ("On", "substantive requests run as deep workflows (wb run) on the user's agents, each "
+                          "item on its role's model; the GPUs, the provider slots and the day cap decide.")}
+WORKFLOWS_LABEL = "Dynamic workflows (deepmode)"
 
 
 def workflows_mode() -> str:
@@ -4397,11 +4577,21 @@ def workflows_mode() -> str:
 
 
 def cmd_workflows(a):
-    """Show or set Dynamic workflows (#1041); the mod reads workflows.json back."""
+    """Show or set Dynamic workflows (deepmode, #1041, #1278); the mod reads workflows.json back."""
+    if getattr(a, "rule", False):
+        if a.state:
+            die("--rule prints the deepcode rule; set deepmode without it")
+        print(runs.DEEPCODE_RULE)
+        return
     if a.state:
         store.write_json(store.home() / "workflows.json", {"mode": a.state, "ts": store.now()})
     label, why = WORKFLOWS[workflows_mode()]
-    print(f"Dynamic workflows: {label}{' (default)' if label == 'Off' else ''}. {why}")
+    print(f"{WORKFLOWS_LABEL}: {label}{' (default)' if label == 'Off' else ''}. {why}")
+
+
+def cmd_run(a):
+    """wb run (#1278): runs.py's commands."""
+    runs.COMMANDS[a.run_cmd](a)
 
 
 @one_at_a_time
@@ -4533,6 +4723,10 @@ def cmd_accept(a):
         die(f"{a.name} is already {st.get('phase')}")
     if st.get("phase") != "review" and not a.force:
         die(f"{a.name} is {st.get('phase')}, not waiting for review (--force accepts anyway)")
+    if spec.get("report"):  # #1278: its result kept, nothing committed
+        return _accept_report(task, a)
+    if not a.message:  # optional in the parser for a report task's sake (#1278)
+        die(f"wb accept {a.name} -m \"<commit subject>\": the commit needs its subject")
     repo = _repo(task)  # moved: said before anything is stopped or changed (#498)
     # A doomed accept once stopped the runner first, then died on "nothing to commit", leaving
     # the task running with no runner (the 2026-11-16 audit): check before stopping anything,
@@ -4708,6 +4902,34 @@ def cmd_accept(a):
     _say(lessons.nudge(task, "accepted"))
     if refused:  # accepted, not merged: a script or Claude reading 0 went on as if main had it
         sys.exit(NOT_MERGED)  # (#247, the audit of 1.2)
+
+
+def _accept_report(task: store.Task, a) -> None:
+    """wb accept of a report task (#1278): its result kept (tasks/<task>/result.json), nothing
+    committed. Its worktree goes, and its branch, which holds no commit of its own; its results row
+    is `reported` and marked `report`, which store.results leaves out of the router's, the
+    slices', the tuning's and the skills' evidence: a report is no coding step."""
+    if not (task.dir / runner.RESULT).is_file() and not a.force:
+        die(f"{a.name} has no valid result to keep (wb report {a.name}); wb feedback asks again, "
+            f"wb discard drops it")
+    _stop_runner(task)
+    repo = gitops.repo_of(task.spec)
+    if warn := gitops.remove_worktree(repo, task.worktree):
+        print(f"wb: {warn}", file=sys.stderr)
+    context.drop_runtime_dir(task)
+    context.drop_opencode_scratch(task)
+    branch = task.spec["branch"]
+    tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False).strip() \
+        if repo.is_dir() else ""
+    gone = bool(tip) and tip == task.spec.get("base") and gitops.delete_branch(repo, a.name, at=tip)
+    task.set_status(phase="accepted", last="report kept", pid=None,
+                    unrecorded={"outcome": "reported", "step": None, "extra": {}})
+    row = results.record(task, "reported")
+    task.set_status(unrecorded=None)
+    _ack_all(task)
+    _closed(task)
+    print(f"accepted {a.name}: its report is kept ({task.dir / runner.RESULT}), nothing committed"
+          + (f"; branch {branch} deleted" if gone else "") + (f" · {p}" if (p := savings.paid(row)) else ""))
 
 
 def _gained_work(task: store.Task, repo: Path, commit: str) -> bool:
@@ -4911,7 +5133,8 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
     rules of closed or vanished tasks, stale runtime directories, and with ``branches`` the
     delegate branches of tasks accepted and merged (wb gc), and the web chat's uploads past
     ``days`` once their message is read. The counts of each."""
-    out = {"archived": len(store.archive(days)), "notices": _rotate_notices(days)}
+    out = {"archived": len(store.archive(days)), "notices": _rotate_notices(days),
+           "runs": runs.archive(days)}
     rules = store.home() / "rules"
     out["rules"] = 0
     for d in sorted(rules.iterdir()) if rules.is_dir() else []:
@@ -5010,6 +5233,9 @@ def _rotate_notices(days: float) -> int:
             return True  # no notice at all (store.notices skips it)
         if r["ts"] > cutoff:
             return False
+        if "task" not in r and isinstance(r.get("run"), str) and store.NAME_RE.match(r["run"]):
+            run = runs.Run(r["run"])  # #1278: a run's notice, handled once taken or its run closed
+            return not run.exists or run.status.get("phase") == "closed" or r["ts"] <= run.acked
         if not (isinstance(r.get("task"), str) and store.NAME_RE.match(r["task"])):
             return True
         t = store.Task(r["task"])
@@ -5122,7 +5348,7 @@ def _released_refs() -> int:
 def cmd_gc(a):
     """Tidy what history leaves behind (gc); wb accept and discard run it once a day too."""
     out = gc(a.days, branches=True)
-    print(f"archived {out['archived']} task(s) closed over {a.days:g} days ago; moved "
+    print(f"archived {out['archived']} task(s) and {out['runs']} run(s) closed over {a.days:g} days ago; moved "
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
           f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
           f"{out['starts']} half-made start(s), {out['uploads']} web chat upload(s), "
@@ -8718,7 +8944,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--auto-fix", type=int, default=None,
                    help="rounds that send failing tests back without waking Claude (default 2 "
                    "on the GPU, 1 on API)")
-    s.add_argument("--ask-budget", type=int, default=2)
+    s.add_argument("--ask-budget", type=int, default=None,
+                   help="questions the agent may ask (default 2; a --card's own, 0 for a report card)")
     s.add_argument("--ask-timeout", type=int, default=1200)
     s.add_argument("--round-timeout", type=int, help="seconds a round may run (default 2400, "
                    "longer for a model measured slow on this machine)")
@@ -8776,6 +9003,18 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--sibling", action="append", metavar="PATH",
                    help="let the agent read a directory around the repo at the same relative "
                    "path: NAME or ../NAME beside it, ../../shared/lib further up (repeatable)")
+    s.add_argument("--report", action="store_true",
+                   help="a report task (#1278): read-only, no diff; it returns one JSON object, "
+                   "checked against --schema, and wb accept keeps it without a commit")
+    s.add_argument("--card", metavar="NAME", help="a role card (agent/roles, $WB_ROLES): its "
+                   "instructions, schema, tools, steps, skills and role")
+    s.add_argument("--schema", metavar="FILE|NAME", help="with --report: the result's JSON Schema "
+                   "(a file, or a shipped name: findings, verdict, judgments, review, triage)")
+    s.add_argument("--tools", choices=REPORT_TOOLS, help="with --report: read (the default: read "
+                   "and run in a scratch copy, never edit) or none (no tools: text in, object out)")
+    s.add_argument("--run", metavar="RUN", help=argparse.SUPPRESS)  # the run's driver's (wb run)
+    s.add_argument("--stage", metavar="ID", help=argparse.SUPPRESS)
+    s.add_argument("--item", metavar="KEY", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_start)
 
     s = sub.add_parser("feedback", help="send review feedback for another round")
@@ -9022,10 +9261,68 @@ def parser() -> argparse.ArgumentParser:
                    "(e.g. the next try still gets the units wrong)")
     s.add_argument("--did", help="used: what Claude changed under the allowance")
     s.set_defaults(f=cmd_coding)
-    s = sub.add_parser("workflows", help="Dynamic workflows: whether Claude may run several tasks "
-                       "at once for one request: show, or set on or off (the default)")
-    s.add_argument("state", nargs="?", choices=["on", "off"])
-    s.set_defaults(f=cmd_workflows)
+    for word in ("deepmode", "workflows"):  # workflows: the name before #1278
+        s = sub.add_parser(word, help="Dynamic workflows (deepmode): whether substantive requests run as "
+                           "deep workflows (wb run): show, or set on or off (the default)"
+                           if word == "deepmode" else "the same as wb deepmode")
+        s.add_argument("state", nargs="?", choices=["on", "off"])
+        s.add_argument("--rule", action="store_true", help="the rule a host adds when the user types deepcode")
+        s.set_defaults(f=cmd_workflows)
+    s = sub.add_parser("run", help="deep workflows (#1278): a flow's items as tasks on the user's agents, "
+                       "driven in the background; Claude is woken at checkpoints and the end")
+    rs = s.add_subparsers(dest="run_cmd", required=True)
+    x = rs.add_parser("start", help="start a run of a flow (once: its notices wake Claude)")
+    x.add_argument("name", help="the run's name: lowercase, digits, hyphens, at most 24")
+    x.add_argument("--flow", help="a flow's name (wb run flows)")
+    x.add_argument("--plan", metavar="FILE", help="a flow file Claude wrote or read")
+    x.add_argument("--param", action="append", metavar="K=V", help="a flow param (repeatable)")
+    x.add_argument("--repo", metavar="DIR", help="default: the current directory")
+    x.add_argument("--base", metavar="REF", help="the commit every item starts from (default HEAD)")
+    x.add_argument("--budget-usd", type=float, metavar="USD", help="the run's dollars (default: the "
+                   "flow's, else what today's cap leaves)")
+    x.add_argument("--budget-min", type=float, metavar="MIN", help="the run's GPU minutes")
+    x.add_argument("--overnight", action="store_true", help="go on past the day cap's midnight (needs --budget-usd)")
+    x.add_argument("--context", help="text every item's {context} carries (4 KB)")
+    x.add_argument("--context-file", metavar="FILE", help="the same, from a file")
+    x.add_argument("--trial", action="store_true", help="its items are trials: kept from the learners")
+    x.add_argument("--no-claude-md", action="store_true", help="for a repo without a committed CLAUDE.md")
+    x = rs.add_parser("status", help="each open run, or one: its phase, stages and spend")
+    x.add_argument("name", nargs="?"); x.add_argument("--all", action="store_true", help="closed runs too")
+    x.add_argument("--json", action="store_true")
+    x.add_argument("--repo", metavar="DIR", help=argparse.SUPPRESS)
+    x.add_argument("--session", action="append", metavar="ID", help=argparse.SUPPRESS)
+    x.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
+    x = rs.add_parser("report", help="what a run's items returned: every item accounted for")
+    x.add_argument("name"); x.add_argument("--stage", help="one stage's results (a checkpoint's merge)")
+    x.add_argument("--json", action="store_true")
+    x = rs.add_parser("stop", help="stop a run and its running items; done work is kept")
+    x.add_argument("name")
+    x = rs.add_parser("resume", help="go on with a stopped, paused or checkpointed run")
+    x.add_argument("name")
+    x = rs.add_parser("amend", help="change a run's budget or skip a stage")
+    x.add_argument("name")
+    x.add_argument("--budget-usd", type=float, metavar="USD")
+    x.add_argument("--budget-min", type=float, metavar="MIN")
+    x.add_argument("--overnight", action=argparse.BooleanOptionalAction, default=None)
+    x.add_argument("--skip", action="append", metavar="STAGE", help="a stage not to run (repeatable)")
+    x = rs.add_parser("feed", help="a claude checkpoint's merge: the list its next stage takes")
+    x.add_argument("name"); x.add_argument("stage")
+    x.add_argument("--file", required=True, metavar="FILE", help="a JSON list (- for stdin)")
+    x = rs.add_parser("close", help="close a run once each code item is accepted or discarded")
+    x.add_argument("name")
+    x = rs.add_parser("flows", help="the flows a run can take: yours, the shipped ones, a repo's")
+    x.add_argument("--repo", metavar="DIR")
+    s.set_defaults(f=cmd_run)
+    s = sub.add_parser("flow", help="deep workflows' flows (#1278): import a slash command's file as one")
+    fs = s.add_subparsers(dest="flow_cmd", required=True)
+    x = fs.add_parser("import", help="a command's Markdown (its prompt, $ARGUMENTS as each item) as a flow "
+                      "of yours: one task per item of --param items")
+    x.add_argument("file", help="the command's .md (Claude Code's .claude/commands/, OpenCode's command/)")
+    x.add_argument("--name", help="the flow's name (default: the file's)")
+    x.add_argument("--card", help="a role card for its stage (default: a code task)")
+    x.add_argument("--out", metavar="FILE", help="where to write it (default: $WB_FLOWS/<name>.json)")
+    x.add_argument("--force", action="store_true", help="replace a flow file already there")
+    s.set_defaults(f=runs.cmd_flow_import)
     s = sub.add_parser("route", help="the roles: which model each kind of work goes to (show, or "
                        "change one on the user's yes)")
     s.add_argument("what", nargs="?", metavar="role|all|cap|busy",
@@ -9100,8 +9397,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.add_argument("--backlog", metavar="NAME", help="with --all: only that backlog's")
     s.set_defaults(f=cmd_resume)
-    s = sub.add_parser("accept", help="commit the work on its branch and close the task")
-    s.add_argument("name"); s.add_argument("--message", "-m", required=True)
+    s = sub.add_parser("accept", help="commit the work on its branch and close the task (a report "
+                       "task: keep its result, no commit)")
+    s.add_argument("name"); s.add_argument("--message", "-m", help="the commit's subject (none for a report task)")
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")
     s.add_argument("--merge-as", choices=context.MERGE_AS, help="how --merge lands (implies "
                    "it): a merge commit (the default, or commands.json repos' merge), fast-forward "
@@ -9186,6 +9484,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("ack", help="the mod's: take a task's notice before waking Claude "
                        "(exit 3 when taken already)")
     s.add_argument("name"); s.add_argument("ts", type=float)
+    s.add_argument("--run", action="store_true", help="name is a run: take its notice (#1278)")
     s.add_argument("--if", dest="if_ts", type=float, metavar="TS",
                    help="move the mark back to ts, only while it is still TS (a dropped wake's rollback)")
     s.set_defaults(f=cmd_ack)

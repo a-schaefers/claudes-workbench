@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "name": "build",
+  "description": "One change: a builder writes it with its test, a reviewer reads the diff and sends up to 2 refixes, then Claude reviews it",
+  "params": {"request": "string"},
+  "stages": [
+    {"id": "code", "card": "build", "items": ["the request"],
+     "prompt": "{params.request}\n\n{context}"},
+    {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 2},
+     "prompt": "Review this change against what it was asked to do.\n\nAsked:\n{params.request}\n\nThe change:\n{diff}"},
+    {"id": "claude", "final": true, "from": "review"}
+  ]
+}

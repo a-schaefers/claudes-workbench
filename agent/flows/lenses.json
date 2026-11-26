@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "name": "lenses",
+  "description": "Finders read one target through a lens each, blind judges apply the bar to the findings in batches, Claude decides",
+  "params": {"target": "string"},
+  "stages": [
+    {"id": "find", "card": "find",
+     "items": ["correctness: wrong results, lost data", "failure paths: errors, timeouts, partial writes",
+               "security: what an untrusted input reaches", "tests: what nothing checks"],
+     "prompt": "Read {params.target} through one lens only: {item}\n\n{context}"},
+    {"id": "judge", "card": "judge", "from": "find", "split": "findings", "flow": "barrier", "batch": 6,
+     "prompt": "Judge each of these findings against the bar:\n\n{item}"},
+    {"id": "claude", "final": true, "from": "judge"}
+  ]
+}
