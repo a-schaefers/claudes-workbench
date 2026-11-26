@@ -1215,6 +1215,15 @@ def attempt_label(key: str) -> str:
     return "a" + key.rsplit("#a", 1)[1] if "#a" in key else key
 
 
+def _task_diff(t: store.Task) -> str:
+    """A code item's change since its base as wb accept --include commits it: the gitignored files
+    the coder wrote too (runner.ignored_to_commit), as the review notice and wb diff show them. The
+    reviewer's {diff} and the chooser's {diffs} left a lib/util.py out, judged on part of the change
+    (#1547, 2026-11-26)."""
+    from . import runner
+    return gitops.diff(t.worktree, t.spec["base"], force=runner.ignored_to_commit(t))
+
+
 def _diffs_of(run: Run, stage: dict, it: Item) -> str:
     """{diffs}: each attempt's change at the item, labelled a1..aN with its task and tests, the
     green ones alone when two or more are (said), each cut to its share of CUTS["diff"]. best-of
@@ -1226,7 +1235,7 @@ def _diffs_of(run: Run, stage: dict, it: Item) -> str:
     parts = []
     for lab, t, ok in rows:
         try:
-            d = gitops.diff(t.worktree, t.spec["base"]) if t.worktree.is_dir() else ""
+            d = _task_diff(t) if t.worktree.is_dir() else ""
         except (gitops.GitError, KeyError) as e:
             d = f"(no diff: {e})"
         d = d if len(d) <= share else d[:share] + f"\n[… {len(d) - share:,} characters cut]"
@@ -1284,7 +1293,7 @@ def _spec_of(run: Run, stage: dict, it: Item) -> str:
         t = store.Task(it.input["task"])
         if "{diff}" in prompt:
             try:
-                diff = gitops.diff(t.worktree, t.spec["base"]) if t.exists and t.worktree.is_dir() else ""
+                diff = _task_diff(t) if t.exists and t.worktree.is_dir() else ""
             except (gitops.GitError, KeyError) as e:
                 diff = f"(no diff: {e})"
             diff = f"```diff\n{diff}\n```" if diff else "(no changes)"
@@ -2351,9 +2360,26 @@ def _ack_run(run: Run) -> None:
         run.claim_ack(max(r["ts"] for r in rows))
 
 
+def awaiting_feed(run: Run) -> dict | None:
+    """The `claude` stage whose inputs are all in, whose checkpoint tick has raised (its notice
+    row journalled) and that Claude hasn't fed yet, or None. Unraised, it sits under an item's
+    checkpoint, and only the resume lets tick raise it (#1510): #1546's refusal took that resume
+    too, exit 1, and the merge was never raised (#1546's review, 2026-11-26)."""
+    st = state(run)
+    complete = st.get("_complete") or {}
+    raised = {r.get("stage") for r in run.journal() if r.get("kind") == "notice" and r.get("stage")}
+    return next((s for s in stages(run.flow) if s.get("claude") and complete.get(s.get("from"))
+                 and st.get(s["id"]) is None and s["id"] in raised), None)
+
+
 def cmd_resume(a) -> None:
     run = need(a.name)
     reap(run)
+    # at a claude stage only its feed goes on: a resume set the run running, acked the checkpoint
+    # tick raises once, and left it with nothing due, every later scheduled fire skipped (#1546)
+    if not _ended(run) and (s := awaiting_feed(run)):
+        _die(f"run {run.name} waits for Claude's merge at stage {s['id']}: wb run report {run.name} --stage "
+             f"{s['from']}, then wb run feed {run.name} {s['id']} --file <list.json> (a resume can't go on)")
     phase = run.status.get("phase")
     if phase == "running" and driver_alive(run):
         print(f"run {run.name} is running")
