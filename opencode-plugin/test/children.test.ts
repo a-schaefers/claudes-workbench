@@ -4,9 +4,14 @@ import {
 } from '../children.ts'
 import { Children, importerOf, TRIES, type ChildClient } from '../children-tui.ts'
 import type { PaneTask } from '../pane.ts'
+import * as core from '../../mod/hooks/core.ts'
 
 // #1331: a task's agent sessions as child sessions of its lead, at the lead's location (the
 // host-shape decision on #1296, critics 1 and 2): the membrane's info, only the export's messages.
+
+// phases from core.ts, never spelled here (kernel.py's phase-literal check)
+const RUNNING = [...core.ACTIVE].find(p => core.phaseOf({ phase: p, parked: false }).running)!
+const STOPPED = [...core.NEEDS].find(p => !core.ACTIVE.has(p) && core.phaseOf({ phase: p, parked: false }).waits)!
 
 const LEAD = { id: 'ses_lead', projectID: 'prj_1', location: { directory: '/home/u/repo' } }
 const msg = (id: string, type: string, created = 1000, extra: object = {}) => ({ id, type, time: { created }, ...extra })
@@ -106,7 +111,7 @@ function fakeServer(sessions: Record<string, object>) {
   return { client, importer, log, sessions }
 }
 const task = (over: Partial<PaneTask> = {}): PaneTask => ({
-  name: 't-one', phase: 'review', round: 1, model: '', label: '', via: 'gpu', role: '', provider: '', tests: null,
+  name: 't-one', phase: STOPPED, round: 1, model: '', label: '', via: 'gpu', role: '', provider: '', tests: null,
   last: '', createdAt: 0, updatedAt: 1, recent: [], parked: false, session: 'ses_lead', driver: 'opencode',
   cwd: '', repo: '', subdir: '', ...over,
 } as PaneTask)
@@ -121,7 +126,7 @@ test('a stopped task\'s sessions are imported once, a running one\'s never, and 
     return { task: name, sessions: [{ session: 'ses_old', current: false, messages: [msg('msg_0', 'user')] },
       { session: 'ses_agent1', current: true, messages: msgs }] }
   }, () => 9000)
-  await c.sync([task({ phase: 'running' })])
+  await c.sync([task({ phase: RUNNING })])
   expect(asked).toEqual([])                      // the panel's tail while it runs
   await c.sync([task()])
   expect(srv.log.filter(l => l.startsWith('import'))).toEqual(['import ses_old 1', 'import ses_agent1 2'])
@@ -130,7 +135,7 @@ test('a stopped task\'s sessions are imported once, a running one\'s never, and 
   await c.sync([task()])                          // the same stop: not looked at again
   expect(asked).toEqual(['t-one'])
   // feedback: it runs again in the same session, and stops with more of it
-  await c.sync([task({ phase: 'running', updatedAt: 2 })])
+  await c.sync([task({ phase: RUNNING, updatedAt: 2 })])
   msgs = [...msgs, msg('msg_5', 'user'), msg('msg_6', 'assistant')]
   srv.log.length = 0
   await c.sync([task({ round: 2, updatedAt: 3 })])
