@@ -9552,6 +9552,25 @@ class Steering(Base):
         run_wb("takeover", "t-rev")                            # picked up: Claude's again
         self.assertFalse(store.parked(store.Task("t-rev").status))
 
+    def test_the_hand_back_leaves_a_task_an_earlier_quit_parked_for_the_user(self):
+        # #1540 (the 2.2 bar, 2026-11-26): wb takeover --all (the hand-back) took over the tasks
+        # an earlier /workbench-quit had parked too, and the driver was told to finish and accept
+        # each one without asking
+        self.start("t-old", "ok", "--test", TEST_CMD)
+        wait_phase("t-old", {"review"})
+        run_wb("stop", "--all", "--park-waiting", "--repo", os.getcwd())
+        self.start("t-new", "slow")
+        self.wait_session("t-new")
+        out = run_wb("takeover", "--all", "--user")
+        self.assertRegex(out, r"(?m)^took over t-new")          # the mod's and plugin's turn
+        self.assertNotIn("took over t-old", out)
+        self.assertIn("left parked by an earlier quit (leave them unless the user asks): "
+                      "t-old", out)
+        st = store.Task("t-old").status
+        self.assertTrue(store.parked(st))
+        self.assertFalse(st.get("taken_over"))
+        self.assertTrue(store.Task("t-new").status["taken_over"])
+
     def test_wb_doctor_names_the_tasks_left_waiting_on_claude_for_days(self):
         # #541: a task left stuck, failed or in review for weeks was named nowhere
         self.start("t-idle", "ok")
@@ -9615,7 +9634,9 @@ class Steering(Base):
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         self.assertEqual(store.Task("t-mine").status["phase"], "stuck")
         out = run_wb("takeover", "--all", "--repo", here)
-        self.assertIn("took over t-mine", out)
+        # the quit parked it: the hand-back leaves it so (#1540)
+        self.assertIn("left parked by an earlier quit (leave them unless the user asks): "
+                      "t-mine", out)
         self.assertIn("left alone (other sessions'): t-theirs", out)
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         with self.assertRaises(SystemExit):
