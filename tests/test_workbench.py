@@ -30788,6 +30788,21 @@ class WebChat(Base):
             (d / "app.js").write_text((d / "app.js").read_text() + "\n")
             self.assertNotEqual(chat.build(), first)
 
+    def test_the_build_counts_only_the_served_files_and_the_typescript_is_never_served(self):
+        # #1323: the scripts are built from chat_static/src/*.ts, committed beside the page; the
+        # sources and their tsconfigs aren't the page's, so an edit there alone reloads no phone
+        chat, d = self.chat, Path(self.tmp.name) / "static"
+        shutil.copytree(chat.STATIC, d)
+        with mock.patch.object(chat, "STATIC", d):
+            first = chat.build()
+            (d / "src" / "app.ts").write_text((d / "src" / "app.ts").read_text() + "\n")
+            (d / "src" / "tsconfig.json").write_text("{}\n")
+            (d / "tsconfig.json").write_text("{}\n")   # one beside the page is no page file either
+            self.assertEqual(chat.build(), first)
+        for path in ("/src/app.ts", "/src/tsconfig.json", "/src", "/app.ts"):
+            self.assertEqual(self.call(path)[0], 404, path)
+        self.assertEqual(self.call("/app.js")[0], 200)
+
     def test_a_retried_send_lands_once(self):
         tok = self.chat.token()
         a = self.call("/api/send", {"text": "hi", "cid": "c-1"}, token=tok)[1]
@@ -35085,6 +35100,33 @@ class RealOpenCodePlugin(Base):
                                   "-d", '{"input":{}}'))
         self.assertEqual(got["output"], {"wb": str(ROOT / "bin" / "wb"), "found": True,
                                          "from": "options", "home": str(home)})
+
+    def test_the_plugins_server_part_beats_every_session_of_its_store_through_wb(self):
+        # #1316: the heartbeat's writer, the format #1309 read and nothing wrote: a real server
+        # lists its store's sessions and `wb driver beat` writes them, its store named; and the
+        # driver RPC answers wb driver --json for a session
+        from workbench import ocplugin
+        home = self.root / "wb-state"
+        self.conf.write_text(json.dumps({"plugins": [{"package": str(ocplugin.DIR), "options": {
+            "wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(home)}}}]}))
+        url = self.serve(WB_HOME="")
+        self.listed(url, ocplugin.PLUGIN_ID)
+        made = self.ask(url, "api", "POST", "/api/session", "-d",
+                        json.dumps({"location": {"directory": str(self.project)}}))
+        sid = json.loads(made)["data"]["id"]
+        os.environ["WB_HOME"] = str(home)
+        end = time.monotonic() + 120                    # the next beat lists it: 30 s apart
+        while not (beats := [hb for hb in store.heartbeats() if sid in hb["sessions"]]):
+            self.assertLess(time.monotonic(), end, list((home / store.DRIVERS).glob("*")))
+            time.sleep(0.5)
+        hb = beats[0]
+        self.assertEqual(hb["store"], str(self.root / "xdg" / "data" / "opencode" / "opencode.db"))
+        self.assertEqual(hb["sessions"][sid].get("dir"), str(self.project))
+        self.assertEqual(hb["machine"], store.machine())
+        self.assertEqual(store.driver_state(sid), "live")
+        got = json.loads(self.ask(url, "api", "POST", "/api/rpc/workbench-driver/driver",
+                                  "-d", json.dumps({"input": {"sessionID": sid}})))
+        self.assertEqual((got["output"]["tool"], got["output"]["session"]), ("opencode", sid), got)
 
     def test_a_real_opencode_loads_wb_setup_opencodes_copy_and_never_the_clones_live_edits(self):
         # #1321's finding 16: OpenCode watches a configured local plugin and reloads it on every
@@ -40752,6 +40794,44 @@ class Routes(Base):
         self.assertTrue(self.path.is_symlink())
         self.assertEqual(json.loads(target.read_text())["day_usd"], 5)
 
+    def test_the_driver_pin_is_set_shown_and_taken_off_an_api_one_from_a_model_on_the_dialogs_yes(self):
+        # #1316: routes.json's top-level `driver`, the standing default the OpenCode plugin's
+        # /workbench applies to its session; not a fourth role, so no role moves around it
+        self.assertNotIn("driver", routes.read())                 # none: each session's own
+        self.assertEqual(json.loads(self.route("driver", "--json")[1]), {"driver": "session"})
+        code, out, _ = self.route("driver", "ollama/qwen3.8-27b")  # a GPU model: no yes needed
+        self.assertEqual((code, out), (0, f"changed: driver: ollama/qwen3.8-27b (GPU): {routes.DRIVER_APPLIED}\n"))
+        self.assertEqual(self.doc()["driver"], "ollama/qwen3.8-27b")
+        self.assertEqual(routes.read()["roles"], routes.normalize({})["roles"])
+        self.assertIn(f"driver ollama/qwen3.8-27b ({routes.DRIVER_APPLIED})", self.route()[1])
+        self.assertTrue(self.route("driver", "ollama/qwen3.8-27b")[1].startswith("unchanged: "))
+        # an API driver from a model's call: the session's conversation goes to its provider
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        asked = self.dry("driver", "deepseek/deepseek-flash#high")
+        self.assertEqual((asked["gate"], asked["approval"]["argv"]),
+                         (True, ["route", "driver", "deepseek/deepseek-flash#high"]))
+        self.assertIn("deepseek/deepseek-flash#high (API, DeepSeek)", asked["change"])
+        self.assertEqual(self.route("driver", "deepseek/deepseek-flash#high")[0], 3)
+        self.assertEqual(self.doc()["driver"], "ollama/qwen3.8-27b")  # refused: nothing written
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("driver", "deepseek/deepseek-flash#high")[0], 0)
+        self.assertEqual(self.doc()["driver"], "deepseek/deepseek-flash#high")
+        self.assertFalse(self.dry("driver", "session")["gate"])   # taking it off needs no yes
+        self.assertEqual(self.route("driver", "session")[0], 0)
+        self.assertNotIn("driver", self.doc())
+        # an id OpenCode wouldn't parse is refused
+        self.assertEqual(self.route("driver", "nomodel")[0], 3)
+        self.assertEqual(self.route("driver", "x/y", "trivial")[0], 1)
+
+    def test_a_hand_edited_driver_pin_that_isnt_an_id_reads_as_no_pin_and_the_roles_still_read(self):
+        # the review of #1316 (2026-11-25): refused, it made routes.json unreadable, so every wb
+        # start exited 3, Claude Code's too, while the mod (which never reads `driver`) went on
+        self.path.write_text(json.dumps({"driver": "x#y/z", "day_usd": 4}))
+        doc = routes.read()
+        self.assertNotIn("driver", doc)
+        self.assertEqual(doc["day_usd"], 4)
+        self.assertEqual(json.loads(self.route("driver", "--json")[1]), {"driver": "session"})
+
 
 class OpenCodeDriver(Base):
     """The OpenCode driver's identity (#1309, 2.2): OPENCODE_SESSION_ID, which the workbench
@@ -41249,6 +41329,88 @@ class OpenCodeDriver(Base):
         self.assertEqual(held, [waiter.pid])
         service.kill(); service.wait()
         self.assertEqual(waiter.wait(timeout=20), 0)              # let go once the service exits
+
+    def beat_in(self, doc) -> tuple:
+        """wb driver beat with ``doc`` on stdin: (exit code, stdout, stderr)."""
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(doc))):
+            return self.wb("driver", "beat")
+
+    def test_wb_driver_beat_writes_the_plugins_heartbeat_for_its_own_server_and_no_other(self):
+        # #1316: the plugin's server part hands its listing to wb, which writes the beat store.py
+        # reads (no writer existed: #1309 read a format nothing wrote). Its pid must be a server
+        # this wb runs under: never a beat for another process, which would make its sessions live
+        now = time.time()
+        doc = {"pid": os.getpid(), "store": self.db, "ts": now, "sessions": {
+            "ses_a": {"model": "ollama/qwen3.8-27b", "variant": "high", "dir": self.here, "used": now},
+            "ses_b": {"model": "no model at all", "dir": "relative/dir", "used": now},  # odd fields go
+            "ses_c": {"dir": self.here, "used": now},       # no model: no `used` either
+            "bad id!": {"model": "ollama/x"}}}
+        self.assertEqual(self.beat_in(doc), (0, "", ""))
+        got = store.read_json(store.beat_path(os.getpid()))
+        self.assertEqual(got, {"tool": "opencode", "pid": os.getpid(), "machine": store.machine(),
+                               "store": self.db, "ts": now, "sessions": {
+                                   "ses_a": {"model": "ollama/qwen3.8-27b", "variant": "high",
+                                             "dir": self.here, "used": now},
+                                   "ses_b": {}, "ses_c": {"dir": self.here}}})
+        self.assertEqual([hb["pid"] for hb in store.heartbeats()], [os.getpid()])
+        self.assertEqual(store.driver_state("ses_a", self.server()), "live")
+        self.assertEqual(store.driver_models(), {"ollama/qwen3.8-27b"})
+        # a process this wb doesn't run under: refused, nothing written
+        other = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        code, _, err = self.beat_in({**doc, "pid": other.pid})
+        self.assertNotEqual(code, 0)
+        self.assertIn("isn't an OpenCode server this wb runs under", err)
+        self.assertFalse(store.beat_path(other.pid).exists())
+        for bad in ({**doc, "ts": "now"}, {**doc, "sessions": []}, [doc]):
+            self.assertNotEqual(self.beat_in(bad)[0], 0, bad)
+        # a listing that couldn't take the whole store names none: it can say live, never gone
+        self.assertEqual(self.beat_in({**doc, "store": "relative.db"})[0], 0)
+        self.assertNotIn("store", store.read_json(store.beat_path(os.getpid())))
+
+    def test_wb_driver_says_the_sessions_driver_and_each_of_its_notes_once(self):
+        # #1316: the driver is the session's own, wb says what it is and its notes, each once
+        # (--once, the plugin's /workbench), never as a refusal; under Claude Code it is fixed
+        from workbench import driver
+        self.path.write_text(json.dumps({"day_usd": 5, "roles": {
+            "trivial": {"via": "api", "api": "deepseek/deepseek-flash"}}}))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {self.here: {"local_only": True}}}))
+        now = time.time()
+        store.write_json(store.beat_path(os.getpid()), {
+            "tool": "opencode", "pid": os.getpid(), "ts": now, "store": self.db, "sessions": {
+                "ses_1": {"model": "deepseek/deepseek-flash", "variant": "fast", "dir": self.here, "used": now}}})
+        code, out, err = self.wb("driver", "--session", "ses_1", "--json", "--once")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual((d["tool"], d["label"], d["kind"], d["pin"]),
+                         ("opencode", "deepseek/deepseek-flash#fast", "api", "session"))
+        keys = [n["key"] for n in d["notes"]]
+        self.assertEqual(keys, ["own:deepseek/deepseek-flash", f"local:deepseek/deepseek-flash:{self.here}"])
+        self.assertIn("is also the agents' model (trivial): its review isn't independent", d["notes"][0]["text"])
+        self.assertIn("keeps API models off the agents only", d["notes"][1]["text"])
+        # once: the second --once says none, a plain read says them all
+        self.assertEqual(json.loads(self.wb("driver", "--session", "ses_1", "--json", "--once")[1])["notes"], [])
+        self.assertEqual(len(json.loads(self.wb("driver", "--session", "ses_1", "--json")[1])["notes"]), 2)
+        # the caller's own session, from its tool or shell
+        os.environ["OPENCODE_SESSION_ID"] = "ses_1"
+        self.assertTrue(self.wb("driver")[1].startswith("driver: deepseek/deepseek-flash#fast (API) · session ses_1\n"))
+        del os.environ["OPENCODE_SESSION_ID"]
+        # a terminal: every session that drove lately, and the pin
+        out = self.wb("driver")[1]
+        self.assertIn("session ses_1", out)
+        self.assertIn("pin: none (each session's own /models", out)
+        # wb doctor says the first note every time
+        self.assertEqual(len(driver.doctor_lines()), 1)
+        self.assertIn("(session ses_1) is also the agents' model (trivial)", driver.doctor_lines()[0])
+        # a small window: the procedure alone takes much of it
+        small = driver.notes("p/m", mock.Mock(config={"limit": {"context": 32768}}), "unknown", None)
+        self.assertEqual([n["key"] for n in small], ["small:p/m"])
+        self.assertIn("has a 32K window", small[0]["text"])
+        self.assertEqual(driver.notes("p/m", mock.Mock(config={"limit": {"context": 262144}}), "unknown", None), [])
+        # Claude Code's driver: Claude Code, fixed
+        os.environ["CLAUDECODE"] = "1"
+        self.assertEqual(self.wb("driver")[1], f"driver: {driver.CLAUDE_CODE}\n")
 
 
 class _ApiTask:

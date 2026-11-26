@@ -156,12 +156,15 @@ the code around your change.
   `tests/fake_opencode.py` in the same commit, and do one real run (CLAUDE.md, *Checks before
   committing*), or say in the pull request that you couldn't.
 - **The web chat** (`chat.py`, `webpush.py`, `chat_static/`): also the browser test,
-  `PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs`, in WebKit and Chromium.
+  `PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mts`, in WebKit and Chromium. Its
+  scripts are TypeScript in `chat_static/src/`: edit them there and run `python3 scripts/web.py build`
+  (it fetches the pinned TypeScript once, by hash; no npm or Node needed), then commit the `.ts` and the
+  `.js` it writes together. Never edit a generated `.js`, and add no hand-written JavaScript anywhere.
 - **The kernel, without its toolchain** (`kernel/`; its contract `kernel/BOUNDARY.md`): a
   TypeScript, Python or docs change needs no toolchain. The committed `mod/hooks/kernel.js` is what
   the mod loads, and `python3 -m unittest` (`tests/test_kernel.py`) checks it offline, each failure
   naming its fix. A change to a Python value the kernel's Tables copies (`store.ACTIVE`,
-  `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `ask_mcp.NO_ANSWER`, `chat.LISTENING_FOR`,
+  `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `WORKING`, `STOPPED`, `OPEN_ORDER`, `ask_mcp.NO_ANSWER`, `chat.LISTENING_FOR`,
   `spend.WAKE_OPENING`) fails the suite until `python3 scripts/kernel.py build`, with
   `mod/hooks/golden/tables.ts` changed to match. A change to `kernel/src` needs the toolchain once:
   `build` fetches the pinned purs and esbuild by hash (network; Linux, WSL2 or macOS, x64 or arm64)

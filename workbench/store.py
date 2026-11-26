@@ -52,6 +52,13 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}\Z")
 ACTIVE = {"queued", "running", "testing", "asking"}
 NEEDS_CLAUDE = {"review", "stuck", "failed", "asking"}
 CLOSED = {"accepted", "discarded"}
+# A round under way: the phases where its clock, its context and its estimate mean something
+WORKING = ("running", "testing", "asking")
+# Stopped short of a review: Claude steers it next (wb resume continues one)
+STOPPED = ("stuck", "failed")
+# The open phases in the order a tally of them reads, the work under way first: the mod's pane
+# header and status line count by it, through the kernel's openCounts (#1325)
+OPEN_ORDER = ("running", "testing", "asking", "queued", "review", "stuck", "failed")
 # a run item's notices that still go to Claude (#1278): an ask_reviewer question needs an answer
 # only Claude has, and a check-in is the user's own request
 RUN_GLOBAL = ("question", "checkin")
@@ -625,6 +632,34 @@ def driver_fill(task) -> None:
             write_json(task.dir / "task.json", spec)
     except BlockingIOError:
         pass
+
+
+# A local driver on the GPU (#1317): the runner's free_gpu unloads every model but the task's,
+# those beside it and keep_loaded's, so a driver on this GPU was evicted at each round, and its
+# next turn reloaded it and evicted the agent's. A session whose last model request (the beat's
+# `used`, the plugin's `model.request` hook) is this recent counts as driving: Ollama keeps a
+# model 5 minutes by default and wb's own loads 30, so an idle afternoon session doesn't pin VRAM.
+DRIVER_HOLD = 1800  # seconds
+
+
+def driver_models(session: str | None = None) -> set[str]:
+    """The models this machine's live OpenCode sessions drive with (#1317): each session row of
+    a fresh beat of a running server whose `used` (its last model request) is within DRIVER_HOLD,
+    by its OpenCode id (`provider/model`, as discover() names a GPU one; an API one never
+    matches a GPU model). models.keep_loaded adds them, so no coding round unloads them, and the
+    GPU lease counts the memory of those resident (models.driver_holders). ``session``: that
+    session's alone (wb start's note on a task that waits for its own driver's model)."""
+    now, out = time.time(), set()
+    for hb in heartbeats():
+        if not _beating(hb):
+            continue
+        for sid, row in hb["sessions"].items():
+            used = row.get("used") if isinstance(row, dict) else None
+            if isinstance(used, (int, float)) and not isinstance(used, bool) and math.isfinite(used) \
+                    and now - used <= DRIVER_HOLD and isinstance(row.get("model"), str) and row["model"] \
+                    and session in (None, sid):
+                out.add(row["model"])
+    return out
 
 
 def driver_of(spec: dict) -> str | None:

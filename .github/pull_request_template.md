@@ -21,7 +21,7 @@ Closes #
 - [ ] the same on Python 3.11
 - [ ] `claude plugin validate mod && claude plugin test mod` (the change touches `mod/`), or not needed
 - [ ] `BUN_BE_BUN=1 opencode test opencode-plugin/test && BUN_BE_BUN=1 opencode check -p opencode-plugin` (the change touches `opencode-plugin/` or the mod's core it imports), or not needed
-- [ ] `tests/e2e_chat.mjs` in WebKit and Chromium (the change touches `chat.py`, `webpush.py` or `chat_static/`), or not needed
+- [ ] `tests/e2e_chat.mts` in WebKit and Chromium (the change touches `chat.py`, `webpush.py` or `chat_static/`), or not needed
 
 Skipped:
 

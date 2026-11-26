@@ -22,7 +22,7 @@ def expected(key: str, value) -> list[str]:
              "workflows": ["workflows", value],
              "progress": ["progress", value], "splash": ["splash", value],
              "probe": ["experiment", "probe", value], "optimize": ["optimize", "start"],
-             "cap": ["route", "cap", value]}
+             "cap": ["route", "cap", value], "driver": ["route", "driver", value]}
     if key in fixed:
         return fixed[key]
     return {"role": ["route", rest, value], "gpu": ["route", rest, "--gpu", value],
@@ -91,6 +91,29 @@ class Settings(Rows):
         self.assertTrue(by["api-trivial"]["other"])
         self.assertEqual(by["api-trivial"]["value"], "deepseek/deepseek-flash")
         self.assertEqual(by["role-trivial"]["says"], "Trivial coding runs on this machine's GPU.")
+
+    def test_the_driver_row_reads_claude_code_fixed_without_the_opencode_plugin_and_takes_any_id_with_it(self):
+        # #1316: the OpenCode path's standing driver (routes.json `driver`, wb route driver),
+        # each session's own /models by default; Claude Code's driver is Claude Code
+        from workbench import ocplugin
+        by = {r["key"]: r for r in settings.rows()}
+        self.assertEqual((by["driver"]["kind"], by["driver"]["text"]), ("info", settings.DRIVER_CLAUDE))
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf.write_text(json.dumps({**json.loads(conf.read_text()), "plugins": [str(ocplugin.DIR)]}))
+        settings.drop()
+        row = {r["key"]: r for r in settings.rows()}["driver"]
+        self.assertEqual((row["kind"], row["group"], row["value"], row["other"]), ("choice", "shared", "session", True))
+        values = [c["value"] for c in row["choices"]]
+        self.assertEqual(values[0], "session")
+        self.assertIn("deepseek/deepseek-flash", values)              # the catalog's
+        self.assertIn("ollama/qwen3.8-27b", values)                   # discover()'s
+        api = next(c for c in row["choices"] if c["value"] == "deepseek/deepseek-flash")
+        self.assertIn("your code in it, goes to DeepSeek", api["says"])
+        log = self.fake_wb()
+        self.assertTrue(settings.apply("driver", "deepseek/deepseek-flash#high")["ok"])  # any id, a variant too
+        self.assertEqual(json.loads(log.read_text().splitlines()[-1]), ["route", "driver", "deepseek/deepseek-flash#high"])
+        with self.assertRaises(ValueError):
+            settings.apply("driver", "--help")
 
     def test_each_choice_applied_runs_the_panes_wb_call(self):
         log = self.fake_wb()

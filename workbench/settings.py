@@ -40,7 +40,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import chat, cli, context, progress, routes, savings, store
+from . import chat, cli, context, driver, ocplugin, progress, routes, savings, store
 
 GROUPS = ("shared", "gpu", "api", "terminal", "experimental")  # display order
 KINDS = ("choice", "number", "info", "action", "note")
@@ -280,6 +280,47 @@ def _progress_stops(after) -> list:
                            f"A task past {after:g} min of active work gets a check and one recommendation, waking Claude.")]
 
 
+# The driver row (#1316): the standing default routes.json's `driver` holds, which the OpenCode
+# plugin's /workbench applies to its session; each session's own /models is the default. Claude
+# Code's driver is Claude Code: the row reads so where the OpenCode plugin isn't installed.
+DRIVER_SESSION = (routes.DRIVER_SESSION, "Each session's own (default)",
+                  "Each OpenCode session's driver is the model you pick in its /models; Workbench pins "
+                  f"none. Under Claude Code the driver is {driver.CLAUDE_CODE}.")
+DRIVER_CLAUDE = (f"{driver.CLAUDE_CODE}: Claude has the final say. Workbench inside OpenCode lets you "
+                 "pick the driver from its /models.")
+
+
+def _opencode_path() -> bool:
+    """Whether the OpenCode plugin is installed (ocplugin.installs): the OpenCode path, whose
+    driver the user picks. A config that can't be read counts as not: the row then only reads."""
+    try:
+        return any(f["kind"] != "off" for f in ocplugin.installs())
+    except (RuntimeError, OSError):
+        return False
+
+
+def _driver_row(r: dict, m: dict | None) -> dict:
+    """The Driver row: an `other` choice (any OpenCode id, `#variant` allowed) of each session's
+    own, the GPU models, then API models as the API rows list them; else, without the OpenCode
+    plugin, an info row reading Claude Code (fixed)."""
+    if not _opencode_path():
+        return _info("driver", "shared", "Driver", DRIVER_CLAUDE)
+    pin = r.get("driver") or routes.DRIVER_SESSION
+    stops = [DRIVER_SESSION]
+    for g in (m or {}).get("gpu") or []:
+        stops.append((g["id"], f"{g.get('label') or g['id']}{_window(g.get('window'))} · GPU",
+                      f"/workbench in OpenCode switches its session to {g['id']}, on this machine's GPU."))
+    api = {x["id"]: x for x in (m or {}).get("api") or [] if isinstance(x, dict) and x.get("id")}
+    for mid, label, _ in _api_stops("The driver", m, "", []):
+        x = api.get(mid) or {}
+        who = x.get("provider_name") or x.get("provider") or mid.split("/", 1)[0]
+        stops.append((mid, label, f"/workbench in OpenCode switches its session to {mid}; that "
+                                  f"conversation, your code in it, goes to {who}."))
+    if pin not in {v for v, _, _ in stops}:
+        stops.append((pin, pin, f"/workbench in OpenCode switches its session to {pin}."))
+    return _choice("driver", "shared", "Driver", stops, pin, other=True)
+
+
 def _probe_row() -> dict:
     """Agent code navigation, as wb says it now (`wb experiment probe`'s line): working, with
     probe's version, or on but not set up, which carries the help note."""
@@ -350,6 +391,8 @@ def _build() -> dict:
         for name, label, row in roles:
             out.append(_choice(f"role-{name}", "shared", label,
                                _role_stops(label, row.get("api"), api_name.get(row.get("api"))), row.get("via") or "gpu"))
+    if r is not None:
+        out.append(_driver_row(r, m))
     out.append(_choice("coding", "shared", "Claude coding", CODING, cli.coding_mode()))
     out.append(_choice("workflows", "shared", "Dynamic workflows", WORKFLOWS, cli.workflows_mode()))
     if r is not None:
@@ -493,6 +536,8 @@ def _argv(row: dict, value) -> list[str]:
         return ["experiment", "probe", value]
     if key == "optimize":
         return ["optimize", "start"]
+    if key == "driver":
+        return ["route", "driver", value]
     if head == "role":
         return ["route", rest, value]
     if head == "gpu":

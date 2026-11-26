@@ -1,20 +1,23 @@
 // The web chat end to end, in real browsers (WebKit as an iPhone, Chromium as a Pixel and at a
 // desktop's 1280×800): the page, the real `wb chat serve`, and `wb chat` on the Claude side.
-// Run: node tests/e2e_chat.mjs
+// Run: node tests/e2e_chat.mts (Node runs it as it is: its types are stripped, #1323)
 // Needs Playwright: PLAYWRIGHT=/path/to/node_modules/playwright (it isn't a workbench dependency).
 import { spawn, execFileSync } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, readdirSync, existsSync, rmSync, statSync, utimesSync, chmodSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer, connect as dial } from 'node:net'
+import type { Socket } from 'node:net'
 import { runInNewContext } from 'node:vm'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import * as statsView from './e2e_stats.mjs'
-import * as settingsView from './e2e_settings.mjs'
+import * as statsView from './e2e_stats.mts'
+import * as settingsView from './e2e_settings.mts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
+// untyped: Playwright isn't a dependency, and its types come with it
+const pw: any = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
 // The user's roles, OpenCode config and OpenCode stay out too (#1286): the Settings rows run `wb
 // route --json` and `wb models --json`, and the user's catalog, read in the background into this
@@ -29,14 +32,14 @@ const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(
 // a system Chromium when there is one (CHROMIUM names another), else Playwright's own
 const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
 const PORT = Number(process.env.WB_E2E_PORT || 13371)
-const wb = (...args) => execFileSync(join(ROOT, 'bin', 'wb'), args, { env, encoding: 'utf8' })
-const sleep = ms => new Promise(r => setTimeout(r, ms))
+const wb = (...args: string[]) => execFileSync(join(ROOT, 'bin', 'wb'), args, { env, encoding: 'utf8' })
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 // a phone is one of Playwright's devices; the desktop, Chromium at 1280×800 (#1284)
 const DESKTOP = 'Desktop 1280×800'
-const devices = { [DESKTOP]: { viewport: { width: 1280, height: 800 } } }
-const ctxFor = device => device ? (devices[device] || pw.devices[device]) : {}
+const devices: Record<string, object> = { [DESKTOP]: { viewport: { width: 1280, height: 800 } } }
+const ctxFor = (device?: string) => device ? (devices[device] || pw.devices[device]) : {}
 
-let server
+let server!: ChildProcess  // started by run() before any use
 function startServer() {
   server = spawn(join(ROOT, 'bin', 'wb'), ['chat', 'serve', '--port', String(PORT), '--bind', '127.0.0.1'],
     { env, stdio: 'ignore' })
@@ -47,18 +50,18 @@ async function stopServer() {
 }
 const messages = () => existsSync(join(home, 'state/chat/messages.jsonl'))
   ? readFileSync(join(home, 'state/chat/messages.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : []
-const listen = busy => writeFileSync(join(home, 'state/chat/listener.json'),
+const listen = (busy: boolean) => writeFileSync(join(home, 'state/chat/listener.json'),
   JSON.stringify({ session: 's1', cwd: '/home/u/project', pid: process.pid, busy }))
 
 let failed = 0
-async function check(name, fn) {
+async function check(name: string, fn: () => Promise<unknown>) {
   try { await fn(); console.log('ok   ' + name) }
-  catch (e) { failed++; console.log('FAIL ' + name + '\n     ' + String(e.message || e).split('\n')[0]) }
+  catch (e) { failed++; console.log('FAIL ' + name + '\n     ' + String((e as Error).message || e).split('\n')[0]) }
 }
 // Every wait is on its condition, never a fixed sleep, and generous: CI's runners are slow at
 // random, and a different check failed each run (#1223). A sleep below is a claim that something
 // does not happen, or a span the page's own clock must pass.
-const until = async (fn, ms = 20000) => {
+const until = async (fn: () => unknown, ms = 20000) => {
   const end = Date.now() + ms
   for (;;) {
     try { if (await fn()) return } catch {}
@@ -67,7 +70,7 @@ const until = async (fn, ms = 20000) => {
   }
 }
 
-async function run(engine, device) {
+async function run(engine: string, device?: string) {
   console.log(`\n== ${engine}${device ? ' as ' + device : ''}`)
   const desktop = device === DESKTOP
   wb('chat', 'log')  // makes the chat directory
@@ -95,12 +98,12 @@ async function run(engine, device) {
       return hold ? new Promise(r => setTimeout(r, 1500)).then(() => real(u, o)) : real(u, o)
     }
   })
-  const errors = []
+  const errors: string[] = []
   // WebKit reports a same-origin fetch that a reload cut off as "Fetch API cannot load … due to
   // access control checks", a console message Playwright hands over as a page error (a pair's
   // images asked for as the page unloaded, #1223). Every fetch here is same-origin, so no access
   // control applies: that wording is only the cut-off load, never the page's script
-  const onError = e => { if (!/^(\w*Error: )?Fetch API cannot load .+ due to access control checks\.?$/.test(String(e))) errors.push(String(e)) }
+  const onError = (e: unknown) => { if (!/^(\w*Error: )?Fetch API cannot load .+ due to access control checks\.?$/.test(String(e))) errors.push(String(e)) }
   page.on('pageerror', onError)
 
   await check('opens with the key, keeps it, drops it from the address', async () => {
@@ -140,8 +143,8 @@ async function run(engine, device) {
   })
   await check('where storage throws, the hint still shows and dismisses, and the page still works', async () => {
     const p = await ctx.newPage()
-    const errs = []
-    p.on('pageerror', e => errs.push(String(e)))
+    const errs: string[] = []
+    p.on('pageerror', (e: unknown) => errs.push(String(e)))
     await p.addInitScript(() => {
       for (const f of ['getItem', 'setItem', 'removeItem', 'key']) Storage.prototype[f] = () => { throw new DOMException('denied', 'SecurityError') }
     })
@@ -178,14 +181,14 @@ async function run(engine, device) {
       window.copied = []
       document.execCommand = (cmd, ...rest) => {
         const el = document.activeElement
-        if (cmd === 'copy') window.copied.push(el && el.value !== undefined ? el.value.slice(el.selectionStart, el.selectionEnd) : String(getSelection()))
+        if (cmd === 'copy') window.copied.push(el && (el as HTMLInputElement).value !== undefined ? (el as HTMLInputElement).value.slice((el as HTMLInputElement).selectionStart!, (el as HTMLInputElement).selectionEnd!) : String(getSelection()))
         return real(cmd, ...rest)
       }
       // what the button said, once it changed: a state event redraws the row (and the button) at
       // once. Read 50 ms after the tap, a slow runner's copy had not answered yet (#1223)
       window.said = []
       addEventListener('click', e => {
-        const t = e.target, was = t.textContent
+        const t = e.target as HTMLElement, was = t.textContent
         if (t.tagName !== 'BUTTON') return
         const seen = new MutationObserver(() => { if (t.textContent !== was) { seen.disconnect(); window.said.push(t.textContent) } })
         seen.observe(t, { childList: true, characterData: true, subtree: true })
@@ -226,7 +229,7 @@ async function run(engine, device) {
   await check('while the computer can\'t be reached the header says so, never listening, and says listening again once it is back (#1415)', async () => {
     // #1415 (2026-11-25): the banner said "Can't reach the computer", the header under it "Claude ·
     // listening in …" with its green dot, the whole time
-    const said = () => page.evaluate(() => ({ text: document.getElementById('presence-text').textContent, cls: document.getElementById('presence').className }))
+    const said = () => page.evaluate(() => ({ text: document.getElementById('presence-text')!.textContent, cls: document.getElementById('presence')!.className }))
     await stopServer()
     try {
       await until(async () => { const s = await said(); return s.text === 'computer unreachable · messages wait' && !/listening|working/.test(s.cls) })
@@ -245,7 +248,7 @@ async function run(engine, device) {
     // a localhost install beside the tailnet's left two apps of one name (2026-11-18)
     if (await page.locator('link[rel=manifest]').count()) throw new Error('a manifest over http://localhost')
     const sec = await browser.newContext(ctxFor(device))
-    await sec.route('https://chat.test/**', async r => {  // an https origin, served by the real server
+    await sec.route('https://chat.test/**', async (r: any) => {  // an https origin, served by the real server
       const url = r.request().url().replace('https://chat.test/', base)
       if (url.includes('/api/')) return r.abort()
       await r.fulfill({ response: await r.fetch({ url }) })
@@ -257,7 +260,7 @@ async function run(engine, device) {
   })
   // Playwright's WebKit doesn't route a page's requests once a service worker is registered
   if (engine === 'chromium') await check('a reload whose state is slow to come shows the last thread, connecting', async () => {
-    await ctx.route('**/api/**', r => r.abort())
+    await ctx.route('**/api/**', (r: any) => r.abort())
     await page.reload()
     await until(async () => (await page.locator('.row').count()) === 4)
     if (!(await page.textContent('#presence-text')).includes('connecting')) throw new Error(await page.textContent('#presence-text'))
@@ -269,10 +272,10 @@ async function run(engine, device) {
     // time and `copy`, and a reply's reveal each growing fragment, for a screen reader to read out
     await page.evaluate(() => {
       window._metas = []
-      new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1 && n.closest('.meta')) window._metas.push(n.textContent) })
-        .observe(document.getElementById('thread'), { childList: true, subtree: true })
+      new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1 && (n as Element).closest('.meta')) window._metas.push(n.textContent) })
+        .observe(document.getElementById('thread')!, { childList: true, subtree: true })
     })
-    if (await page.evaluate(() => !!document.getElementById('thread').closest('[aria-live]'))) throw new Error('the thread is in a live region')
+    if (await page.evaluate(() => !!document.getElementById('thread')!.closest('[aria-live]'))) throw new Error('the thread is in a live region')
     listen(true)                                           // the presence alone changes
     await until(async () => (await page.textContent('#presence-text')).includes('working in'))
     listen(false)
@@ -294,13 +297,13 @@ async function run(engine, device) {
     listen(false)
     await until(async () => (await page.textContent('#presence-text')).includes('listening in'))
     if (!(await on())) throw new Error('the focus went to ' + await page.evaluate(() => document.activeElement && document.activeElement.tagName))
-    await page.evaluate(() => document.activeElement.blur())
+    await page.evaluate(() => (document.activeElement as HTMLElement).blur())
   })
   await check('the message box, focused, shows a ring at 3:1 or more against the page (#1411)', async () => {
     // #1411 (2026-11-25): outline none, and the border's tint alone, 1.6:1 against the unfocused one
     await page.focus('#input')
     const got = await page.locator('#input').evaluate(settingsView.ringContrast, true)
-    await page.evaluate(() => document.getElementById('input').blur())
+    await page.evaluate(() => document.getElementById('input')!.blur())
     if (!got.visible || got.ratio < 3) throw new Error(JSON.stringify(got))
   })
   await check("a reply's lead-in line, its bullets with no blank line between and a line after them show as a paragraph, a list and a paragraph (#1416)", async () => {
@@ -309,14 +312,14 @@ async function run(engine, device) {
     wb('chat', 'reply', '--text', 'Two tasks done, one failed:\n- **config-loader** waits\n- **parser-fix** failed\nBoth wait for you.')
     const bubble = page.locator('.row.claude .bubble').last()
     await until(async () => (await bubble.textContent()).includes('Both wait for you.') && !(await bubble.getAttribute('class')).includes('flowing'))
-    const got = await bubble.evaluate(b => ({ kids: [...b.children].map(c => c.tagName).join(), items: [...b.querySelectorAll('li')].map(l => l.textContent),
+    const got = await bubble.evaluate((b: HTMLElement) => ({ kids: [...b.children].map(c => c.tagName).join(), items: [...b.querySelectorAll('li')].map(l => l.textContent),
       dashes: [...b.querySelectorAll('p')].some(p => /(^|\n)- /.test(p.innerText)) }))
     if (got.kids !== 'P,UL,P' || got.items.join('|') !== 'config-loader waits|parser-fix failed' || got.dashes) throw new Error(JSON.stringify(got))
   })
   // the shell's views (#1284): a tap on the nav (the rail on a desktop), then the body shows it
-  const goTo = async name => {
+  const goTo = async (name: string) => {
     await page.click(`#tabbar .tab[data-view="${name}"]`)
-    await until(() => page.evaluate(n => document.body.dataset.view === n, name))
+    await until(() => page.evaluate((n: string) => document.body.dataset.view === n, name))
   }
   await check('Settings holds what the gear\'s sheet did, as cards, and no way to answer Claude\'s prompts from here (#1350)', async () => {
     await goTo('stats')                                    // What it saved went to Stats (#1284)
@@ -324,7 +327,7 @@ async function run(engine, device) {
     await goTo('settings')
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
-    const heads = await page.$$eval('#settings .card h3', h => h.map(x => x.textContent).join(' | '))
+    const heads = await page.$$eval('#settings .card h3', (h: Element[]) => h.map(x => x.textContent).join(' | '))
     if (heads !== 'While away | Notifications | Install the app | This chat | This device') throw new Error(heads)
     if (await page.locator('[data-away]').count()) throw new Error('"Let Claude go ahead" is back')
     const r = await fetch(base + 'api/prefs', { method: 'POST', headers: { Authorization: 'Bearer ' + token,
@@ -349,7 +352,7 @@ async function run(engine, device) {
     // #959: only a message sent here made the user away, so a phone picked up after the terminal
     // got none of the prompts. Using the page now counts; a background tab or one beside the terminal doesn't
     const at = () => existsSync(join(home, 'state/chat/page.json')) ? JSON.parse(readFileSync(join(home, 'state/chat/page.json'), 'utf8')).at : 0
-    const show = h => page.evaluate(h => {
+    const show = (h: boolean) => page.evaluate((h: boolean) => {
       Object.defineProperty(document, 'hidden', { value: h, configurable: true })
       document.dispatchEvent(new Event('visibilitychange'))
     }, h)
@@ -382,7 +385,7 @@ async function run(engine, device) {
       writeFileSync(join(home, 'state/chat/switch.json'), JSON.stringify({ on: false, v: 2 }))
       // the document's own hidden again: left at false, the reload's own visibilitychange read
       // as visible and dialled the stream from a page being unloaded (a WebKit page error)
-      await page.evaluate(() => { delete document.hidden; if (document._hasFocus) document.hasFocus = document._hasFocus })
+      await page.evaluate(() => { delete (document as any).hidden; if (document._hasFocus) document.hasFocus = document._hasFocus })
     }
   })
   await check('a failed activity post is not tried again on a timer, only on the next use (the #959 review)', async () => {
@@ -429,7 +432,7 @@ async function run(engine, device) {
       await sleep(1500)                                          // a claim that none was made
       if ((await posted()).length) throw new Error('posted from ' + (await posted()).join())
       await goTo('chat')                                         // the chat shown: in use
-      await until(async () => { const p = await posted(); return p.length && p.every(v => v === 'chat') })
+      await until(async () => { const p = await posted(); return p.length && p.every((v: string) => v === 'chat') })
     } finally {
       await page.evaluate(() => { window.fetch = window._fetch })
     }
@@ -494,6 +497,10 @@ async function run(engine, device) {
     await until(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())))
     await until(() => page.evaluate(async () => (await (await caches.open('wb-chat')).match('/key')) !== undefined))
     if (!(await page.textContent('#app')).includes('installs from the https address')) throw new Error('install offered over http')
+    // its command as code, never its backticks as text (#1323)
+    const cmd = await page.$$eval('#app code', (c: Element[]) => c.map(x => x.textContent))
+    if (JSON.stringify(cmd) !== '["tailscale serve --bg 1337"]' || (await page.textContent('#app')).includes('`'))
+      throw new Error('the install card: ' + await page.textContent('#app'))
     const notify = await page.textContent('#notify')
     if (engine === 'webkit' ? !notify.includes('installed app') : !(await page.locator('#push').count())) throw new Error('notifications: ' + notify)
     await goTo('chat')
@@ -503,7 +510,7 @@ async function run(engine, device) {
   if (desktop) return finish()   // the desktop: the shell and its views; the thread's checks are the phones'
   await check('what the page showed on screen is reported, so it is not pushed', async () => {
     await page.locator('.thread').click({ position: { x: 5, y: 5 } })  // in use: touched just now
-    const shown = JSON.parse(readFileSync(join(home, 'state/chat/messages.jsonl'), 'utf8').trim().split('\n').filter(l => l.includes('"claude"')).at(-1)).id
+    const shown = JSON.parse(readFileSync(join(home, 'state/chat/messages.jsonl'), 'utf8').trim().split('\n').filter(l => l.includes('"claude"')).at(-1)!).id
     await until(() => existsSync(join(home, 'state/chat/seen.jsonl')) && readFileSync(join(home, 'state/chat/seen.jsonl'), 'utf8').includes(shown))
   })
   await check("a page on screen but not in use doesn't stop the push, and reports it once it is used", async () => {
@@ -537,7 +544,7 @@ async function run(engine, device) {
   await check('back on screen after the line died in its sleep: a new message shows at once, and on a push', async () => {
     // the owner, 2026-11-20: the push came at once, the open app showed the message 10 to 30 s
     // later. A proxy whose old connections go silent, as a phone's do after a sleep, new ones fine
-    const socks = new Set()
+    const socks = new Set<{ c: Socket; up: Socket; dead: boolean }>()
     const proxy = createServer(c => {
       const up = dial(PORT, '127.0.0.1'), s = { c, up, dead: false }
       socks.add(s)
@@ -545,19 +552,19 @@ async function run(engine, device) {
       up.on('data', d => { if (!s.dead) c.write(d) })
       for (const x of [c, up]) x.on('error', () => {}).on('close', () => { c.destroy(); up.destroy(); socks.delete(s) })
     })
-    await new Promise(r => proxy.listen(PORT + 7, '127.0.0.1', r))
+    await new Promise<void>(r => proxy.listen(PORT + 7, '127.0.0.1', r))
     const p = await ctx.newPage()
     p.on('pageerror', onError)
-    const hide = h => p.evaluate(h => {
+    const hide = (h: boolean) => p.evaluate((h: boolean) => {
       Object.defineProperty(document, 'hidden', { value: h, configurable: true })
       document.dispatchEvent(new Event('visibilitychange'))
     }, h)
     try {
       await p.goto(`http://localhost:${PORT + 7}/#token=${token}`)
       await until(async () => (await p.textContent('#presence-text')).includes('listening'))
-      for (const [n, wake] of [[1, () => hide(false)],
+      for (const [n, wake] of [[1, () => hide(false)] as const,
                                [2, () => p.evaluate(() => navigator.serviceWorker.dispatchEvent(
-                                 new MessageEvent('message', { data: { kind: 'push' } })))]]) {
+                                 new MessageEvent('message', { data: { kind: 'push' } })))] as const]) {
         for (const s of socks) s.dead = true                 // the sleep: the line goes silent
         if (n === 1) await hide(true)
         await sleep(n === 1 ? 4000 : 1000)
@@ -602,8 +609,8 @@ async function run(engine, device) {
     // 25 open tasks were 22 lines of "Running: …" on an iPhone, the queued read as running, and
     // the thread a 36 px sliver; a task wb stop --all parked stays off it (chat.open_tasks); one
     // asking waits on Claude, never counted running (the #1097 review)
-    const made = []
-    const task = (name, phase, i, status = {}) => {
+    const made: string[] = []
+    const task = (name: string, phase: string, i: number, status = {}) => {
       const t = join(home, 'state/tasks', name)
       mkdirSync(t, { recursive: true }); made.push(t)
       writeFileSync(join(t, 'task.json'), JSON.stringify({ name, created_at: Date.now() / 1000 + i,
@@ -619,8 +626,8 @@ async function run(engine, device) {
       const text = await page.textContent('#tasks')
       if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('; backlog-step-05 (asking) · '))
         throw new Error('the strip says: ' + text)
-      const got = await page.evaluate(() => ({ strip: document.getElementById('tasks').getBoundingClientRect().height,
-        thread: document.getElementById('scroll').getBoundingClientRect().height, height: innerHeight, line: parseFloat(getComputedStyle(document.getElementById('tasks')).lineHeight) || 18 }))
+      const got = await page.evaluate(() => ({ strip: document.getElementById('tasks')!.getBoundingClientRect().height,
+        thread: document.getElementById('scroll')!.getBoundingClientRect().height, height: innerHeight, line: parseFloat(getComputedStyle(document.getElementById('tasks')!).lineHeight) || 18 }))
       if (got.strip > got.line * 3 + 16) throw new Error(`the strip is ${got.strip} px tall`)
       if (got.thread < got.height * 0.4) throw new Error(`the thread has ${got.thread} of ${got.height} px`)
     } finally { for (const t of made) rmSync(t, { recursive: true, force: true }) }
@@ -631,7 +638,7 @@ async function run(engine, device) {
     // the report, diff and log are agent-written: drawn as text, never markup, on a page that
     // answers Claude Code's dialogs
     const repo = join(home, 'sheet-repo'), t = join(home, 'state/tasks/fix-sheet')
-    const git = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { encoding: 'utf8' })
+    const git = (...a: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { encoding: 'utf8' })
     mkdirSync(repo, { recursive: true }); git('init', '-q', '-b', 'main')
     writeFileSync(join(repo, 'README.md'), 'hello\n'); git('add', '.'); git('commit', '-qm', 'init')
     const base = git('rev-parse', 'HEAD').trim()
@@ -670,7 +677,7 @@ async function run(engine, device) {
       await page.click('#send')
       await until(() => { const r = messages().at(-1); return r && r.text === 'is it on track?' && r.about })
       if (JSON.stringify(messages().at(-1).about) !== JSON.stringify({ task: 'fix-sheet' })) throw new Error(JSON.stringify(messages().at(-1).about))
-      await until(async () => (await page.$$eval('.about-tag', x => x.at(-1)?.textContent)) === 'About fix-sheet')
+      await until(async () => (await page.$$eval('.about-tag', (x: Element[]) => x.at(-1)?.textContent)) === 'About fix-sheet')
     } finally {
       rmSync(t, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true })
     }
@@ -681,19 +688,19 @@ async function run(engine, device) {
     const d = join(home, 'state/tasks/fix-nav/shots/1')
     mkdirSync(d, { recursive: true })
     for (const side of ['base', 'candidate']) copyFileSync(join(ROOT, 'workbench/chat_static/icon-192.png'), join(d, side + '.png'))
-    const of = side => ({ rev: side === 'base' ? '1a2b3c4d5e6f' : '9f8e7d6c5b4a', image: join(d, side + '.png') })
+    const of = (side: string) => ({ rev: side === 'base' ? '1a2b3c4d5e6f' : '9f8e7d6c5b4a', image: join(d, side + '.png') })
     writeFileSync(join(d, 'shots.json'), JSON.stringify({ step: 1, round: 2, viewport: '390x844', base: of('base'), candidate: of('candidate') }))
     const shots = { task: 'fix-nav', n: 1, step: 1, round: 2, viewport: '390x844',
       base: { rev: '1a2b3c4d5e6f', image: true }, candidate: { rev: '9f8e7d6c5b4a', image: true } }
     appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'shots-1', ts: Date.now() / 1000, from: 'claude',
       text: 'screenshots of fix-nav. Reply here to send feedback on it.', shots }) + '\n')
     await page.reload()
-    await until(async () => (await page.$$eval('.shots img', im => im.filter(i => i.complete && i.naturalWidth > 0).length)) === 2)
-    const caps = await page.$$eval('.shots figcaption', c => c.map(x => x.textContent))
+    await until(async () => (await page.$$eval('.shots img', (im: HTMLImageElement[]) => im.filter(i => i.complete && i.naturalWidth > 0).length)) === 2)
+    const caps = await page.$$eval('.shots figcaption', (c: Element[]) => c.map(x => x.textContent))
     if (caps.join('|') !== 'Base · 1a2b3c4d5e|Candidate · 9f8e7d6c5b') throw new Error(caps.join('|'))
     const said = await page.textContent('.shots-of')
     if (!said.includes('fix-nav · step 1 · round 2 · 390x844')) throw new Error(said)
-    const [a, b] = await page.$$eval('.shots figure', f => f.map(x => x.getBoundingClientRect().toJSON()))
+    const [a, b] = await page.$$eval('.shots figure', (f: Element[]) => f.map(x => x.getBoundingClientRect().toJSON()))
     if (!(b.top >= a.bottom)) throw new Error('side by side on a phone')
     const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
     if (!width) throw new Error('the page scrolls sideways')
@@ -708,7 +715,7 @@ async function run(engine, device) {
     const r = messages().at(-1)
     if (JSON.stringify(r.about) !== JSON.stringify({ task: 'fix-nav', n: 1, step: 1, round: 2 })) throw new Error(JSON.stringify(r.about))
     if (!(await page.locator('#about').isHidden())) throw new Error('still replying about them')
-    await until(async () => (await page.$$eval('.about-tag', t => t.at(-1)?.textContent)) === 'About fix-nav, step 1')
+    await until(async () => (await page.$$eval('.about-tag', (t: Element[]) => t.at(-1)?.textContent)) === 'About fix-nav, step 1')
   })
   await check('a pair whose screenshots were dropped with its archived task says they expired, not that they failed (#821)', async () => {
     const d = join(home, 'state/tasks/fix-old/shots/1')
@@ -720,13 +727,13 @@ async function run(engine, device) {
     appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'shots-old', ts: Date.now() / 1000, from: 'claude',
       text: 'screenshots of fix-old.', shots: pair }) + '\n')
     await page.reload()
-    const expired = async () => (await page.$$eval('.shots .missing', m => m.map(x => x.textContent)))
-      .filter(t => t.includes('This screenshot has expired')).length
+    const expired = async () => (await page.$$eval('.shots .missing', (m: Element[]) => m.map(x => x.textContent)))
+      .filter((t: string) => t.includes('This screenshot has expired')).length
     await until(async () => (await expired()) === 2)
   })
   await check("wb audio's shortlist: each take plays from its blob, with its checks, and Keep sends the pick (#397)", async () => {
     const d = join(home, 'takes'); mkdirSync(d, { recursive: true })
-    const wav = (secs, rate = 8000) => {  // a 440 Hz tone, 16-bit mono PCM
+    const wav = (secs: number, rate = 8000) => {  // a 440 Hz tone, 16-bit mono PCM
       const n = secs * rate, b = Buffer.alloc(44 + 2 * n)
       b.write('RIFF', 0); b.writeUInt32LE(36 + 2 * n, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16)
       b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(rate, 24); b.writeUInt32LE(2 * rate, 28)
@@ -743,10 +750,10 @@ async function run(engine, device) {
     })
     wb('chat', 'listen', ...clips, '--text', 'Two takes of the door. Take 1 has the cleaner tail.')
     await until(async () => (await page.locator('.take audio').count()) === 2)
-    await until(async () => (await page.$$eval('.take audio', a => a.filter(x => x.src.startsWith('blob:') && x.readyState >= 1).length)) === 2)
-    const secs = await page.$$eval('.take audio', a => a.map(x => Math.round(x.duration)))
+    await until(async () => (await page.$$eval('.take audio', (a: HTMLAudioElement[]) => a.filter(x => x.src.startsWith('blob:') && x.readyState >= 1).length)) === 2)
+    const secs = await page.$$eval('.take audio', (a: HTMLAudioElement[]) => a.map(x => Math.round(x.duration)))
     if (secs.join(',') !== '1,2') throw new Error('durations ' + secs.join(','))
-    const caps = await page.$$eval('.take figcaption', c => c.map(x => x.textContent))
+    const caps = await page.$$eval('.take figcaption', (c: Element[]) => c.map(x => x.textContent))
     if (caps.join('|') !== 'Take 1 · a-door-slam-1.wav|Take 2 · a-door-slam-2.wav') throw new Error(caps.join('|'))
     const line = await page.locator('.take .take-line').first().textContent()
     if (!line.includes('1.0 s · peak -12.3 dBFS')) throw new Error(line)
@@ -761,13 +768,13 @@ async function run(engine, device) {
     if (r.text !== 'Keep take 2: a-door-slam-2.wav' || r.about.n !== 2 || r.about.path !== clips[1]) throw new Error(JSON.stringify(r))
     if ((await page.inputValue('#input')) !== 'a draft kept as it was') throw new Error('the draft was touched')
     await page.fill('#input', '')
-    await until(async () => (await page.$$eval('.about-tag', t => t.at(-1)?.textContent)) === 'Kept take 2 · a-door-slam-2.wav')
+    await until(async () => (await page.$$eval('.about-tag', (t: Element[]) => t.at(-1)?.textContent)) === 'Kept take 2 · a-door-slam-2.wav')
   })
   // the phone keyboard (2026-11-19): no browser here can raise one, so the touches are made by hand
-  const touches = (moves, on = 'main') => page.evaluate(([moves, on]) => {
-    const el = document.querySelector(on), r = el.getBoundingClientRect()
-    const at = (y, x = r.left + r.width / 2) => new Touch({ identifier: 1, target: el, clientX: x, clientY: y, screenX: x, screenY: y })
-    const fire = (type, t) => el.dispatchEvent(new TouchEvent(type, { bubbles: true, touches: t ? [t] : [], changedTouches: [t || at(moves.at(-1))] }))
+  const touches = (moves: number[], on = 'main') => page.evaluate(([moves, on]: [number[], string]) => {
+    const el = document.querySelector(on)!, r = el.getBoundingClientRect()
+    const at = (y: number, x = r.left + r.width / 2) => new Touch({ identifier: 1, target: el, clientX: x, clientY: y, screenX: x, screenY: y })
+    const fire = (type: string, t?: Touch) => el.dispatchEvent(new TouchEvent(type, { bubbles: true, touches: t ? [t] : [], changedTouches: [t || at(moves.at(-1)!)] }))
     fire('touchstart', at(moves[0]))
     for (const y of moves.slice(1)) fire('touchmove', at(y))
     fire('touchend')
@@ -788,13 +795,13 @@ async function run(engine, device) {
   await check('once the keyboard is down the composer is back at the foot, the page unscrolled', async () => {
     await page.focus('#input')
     await page.evaluate(() => { document.body.style.transform = 'translateY(300px)'; document.body.style.height = '400px' })
-    await page.evaluate(() => document.getElementById('input').blur())
+    await page.evaluate(() => document.getElementById('input')!.blur())
     // the page fits again on a ladder of timers up to 1.2 s: waited for, not slept past (#1223)
     const at = () => page.evaluate(() => ({ t: document.body.style.transform, h: document.body.style.height,
-      foot: Math.round(document.getElementById('composer').getBoundingClientRect().bottom), vh: innerHeight, y: scrollY,
-      nav: document.getElementById('tabbar').getBoundingClientRect().toJSON() }))
+      foot: Math.round(document.getElementById('composer')!.getBoundingClientRect().bottom), vh: innerHeight, y: scrollY,
+      nav: document.getElementById('tabbar')!.getBoundingClientRect().toJSON() }))
     // the composer on the bar, the bar at the foot (#1284)
-    const down = a => !a.t && !a.h && !a.y && Math.abs(a.foot - a.nav.top) <= 2 && Math.abs(a.nav.bottom - a.vh) <= 2
+    const down = (a: any) => !a.t && !a.h && !a.y && Math.abs(a.foot - a.nav.top) <= 2 && Math.abs(a.nav.bottom - a.vh) <= 2
     await until(async () => down(await at())).catch(async () => { throw new Error(JSON.stringify(await at())) })
   })
   await check('two tabs offline, both closed, reopened: each message lands exactly once', async () => {
@@ -857,7 +864,7 @@ async function run(engine, device) {
     // #264 (the audit of 1.2): the server logged it once and answered the retry, but the page
     // cleared an outbox item only from the newest 200 in the snapshot, so it stayed pending
     let lost = false
-    await page.route('**/api/send', async route => {
+    await page.route('**/api/send', async (route: any) => {
       if (lost) return route.continue()
       lost = true
       await route.fetch()                                   // the server takes it,
@@ -889,7 +896,7 @@ async function run(engine, device) {
     const foreign = [{ body: '' }, { contentType: 'text/html', body: '<html>Welcome to the Wi-Fi</html>' },
       { contentType: 'application/json', body: JSON.stringify({ message: { cid: 'someone-else', text: 'not yours' } }) }]
     let n = 0
-    await q.route('**/api/send', route => n < foreign.length ? route.fulfill({ status: 200, ...foreign[n++] }) : route.continue())
+    await q.route('**/api/send', (route: any) => n < foreign.length ? route.fulfill({ status: 200, ...foreign[n++] }) : route.continue())
     try {
       const text = 'held through a captive portal'
       await q.fill('#input', text)
@@ -912,7 +919,7 @@ async function run(engine, device) {
     // came held flush, and every later send, until the page was reloaded. A proxy that answers
     // the first send's headers and one byte, then holds the line
     let stalled = 0
-    const socks = new Set()
+    const socks = new Set<{ c: Socket; up: Socket; held: boolean }>()
     const proxy = createServer(c => {
       const up = dial(PORT, '127.0.0.1'), s = { c, up, held: false }
       socks.add(s)
@@ -926,7 +933,7 @@ async function run(engine, device) {
       up.on('data', d => { if (!s.held) c.write(d) })
       for (const x of [c, up]) x.on('error', () => {}).on('close', () => { c.destroy(); up.destroy(); socks.delete(s) })
     })
-    await new Promise(r => proxy.listen(PORT + 8, '127.0.0.1', r))
+    await new Promise<void>(r => proxy.listen(PORT + 8, '127.0.0.1', r))
     const p = await ctx.newPage()
     p.on('pageerror', onError)
     try {
@@ -962,7 +969,7 @@ async function run(engine, device) {
       await t.goto(base + '#token=' + token)
       await until(async () => await t.locator('#input').isEditable())
       let throttled = 0
-      await t.route('**/api/send', route => throttled++ ? route.continue()
+      await t.route('**/api/send', (route: any) => throttled++ ? route.continue()
         : route.fulfill({ status: 429, headers: { 'Retry-After': '1' }, contentType: 'text/plain', body: 'slow down' }))
       await t.fill('#input', 'throttled once')
       await t.click('#send')
@@ -971,7 +978,7 @@ async function run(engine, device) {
       await until(async () => (await t.locator('.row.user.pending').count()) === 0)
       if (await t.locator('.row.user.failed').count()) throw new Error('marked not sent')
       await t.unroute('**/api/send')
-      await t.route('**/api/send', route => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'bad request' }) }))
+      await t.route('**/api/send', (route: any) => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'bad request' }) }))
       await t.fill('#input', 'refused for good')
       await t.click('#send')
       const row = t.locator('.row.user.failed', { hasText: 'refused for good' })
@@ -988,9 +995,10 @@ async function run(engine, device) {
     // snapshot in that time aborted every reply, and a held message, cleared only by its reply,
     // stayed in the box for good. A proxy that relays each send's reply a twelfth every 1.5 s
     let sends = 0
-    const socks = new Set()
+    type Paced = { c: Socket; up: Socket; slow: boolean; buf: Buffer; pacer: ReturnType<typeof setInterval> | 0; upClosed?: boolean }
+    const socks = new Set<Paced>()
     const proxy = createServer(c => {
-      const up = dial(PORT, '127.0.0.1'), s = { c, up, slow: false, buf: Buffer.alloc(0), pacer: 0 }
+      const up = dial(PORT, '127.0.0.1'), s: Paced = { c, up, slow: false, buf: Buffer.alloc(0), pacer: 0 }
       socks.add(s)
       c.on('data', d => {
         if (d.toString('latin1').startsWith('POST /api/send')) { sends++; s.slow = true }
@@ -1002,7 +1010,7 @@ async function run(engine, device) {
         if (s.pacer) return
         const cut = s.buf.indexOf('\r\n\r\n')
         if (cut < 0) return
-        const length = Number(/content-length:\s*(\d+)/i.exec(s.buf.subarray(0, cut).toString('latin1'))[1])
+        const length = Number(/content-length:\s*(\d+)/i.exec(s.buf.subarray(0, cut).toString('latin1'))![1])
         c.write(s.buf.subarray(0, cut + 4)); s.buf = s.buf.subarray(cut + 4)
         const piece = Math.ceil(length / 12)
         let left = length
@@ -1022,7 +1030,7 @@ async function run(engine, device) {
       up.on('error', () => {}).on('close', () => { s.upClosed = true; if (!s.pacer) c.destroy() })
       c.on('error', () => {}).on('close', () => { clearInterval(s.pacer); up.destroy(); socks.delete(s) })
     })
-    await new Promise(r => proxy.listen(PORT + 9, '127.0.0.1', r))
+    await new Promise<void>(r => proxy.listen(PORT + 9, '127.0.0.1', r))
     const p = await ctx.newPage()
     p.on('pageerror', onError)
     try {
@@ -1114,7 +1122,7 @@ async function run(engine, device) {
   await check('a photo attached, the page reloaded before sending: the chip is back, nothing uploaded twice; one message with one path reaches Claude', async () => {
     // #623, the owner (2026-11-20): never a file uploaded twice by a refresh
     const puts = []
-    const count = r => { if (r.method() === 'PUT' && r.url().includes('/api/upload/')) puts.push(r.url()) }
+    const count = (r: any) => { if (r.method() === 'PUT' && r.url().includes('/api/upload/')) puts.push(r.url()) }
     page.on('request', count)
     const png = readFileSync(join(ROOT, 'workbench/chat_static/icon-192.png'))
     const uploads = () => existsSync(join(home, 'state/chat/uploads')) ? readdirSync(join(home, 'state/chat/uploads')) : []
@@ -1124,7 +1132,7 @@ async function run(engine, device) {
     await page.fill('#input', 'what is this?')
     await page.reload()
     await until(async () => (await page.locator('#tray .att.done').count()) === 1)
-    await until(() => page.$eval('#tray .face', i => i.complete && i.naturalWidth > 0))
+    await until(() => page.$eval('#tray .face', (i: HTMLImageElement) => i.complete && i.naturalWidth > 0))
     if ((await page.inputValue('#input')) !== 'what is this?') throw new Error('the words were lost')
     if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('the page scrolls sideways')
     await sleep(1000)
@@ -1140,7 +1148,7 @@ async function run(engine, device) {
     if (!readFileSync(got[0].files[0].path).equals(png)) throw new Error('not the bytes sent')
     if (puts.length !== 1) throw new Error(`uploaded ${puts.length} times`)
     page.off('request', count)
-    await until(() => page.$eval('.row.user .files .pic img', i => i.complete && i.naturalWidth > 0))
+    await until(() => page.$eval('.row.user .files .pic img', (i: HTMLImageElement) => i.complete && i.naturalWidth > 0))
     await page.click('.row.user .files .pic')
     await until(async () => (await page.locator('.viewer img').count()) === 1)
     await page.click('.viewer')
@@ -1155,10 +1163,10 @@ async function run(engine, device) {
     for (let i = 0; i < 60; i++) appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: `fill-${i}`,
       ts: now + i / 100, from: 'claude', text: `filler reply ${i}\n\n` + 'a line of words to make it tall\n'.repeat(4) }) + '\n')
     const gets = []
-    const count = r => { if (r.url().includes('/api/file/')) gets.push(r.url()) }
+    const count = (r: any) => { if (r.url().includes('/api/file/')) gets.push(r.url()) }
     page.on('request', count)
     // the server's thread held back, so the saved one is on screen for many frames, not one or none
-    const hold = on => page.evaluate(on => on ? sessionStorage.setItem('e2e-hold', '1') : sessionStorage.removeItem('e2e-hold'), on)
+    const hold = (on: boolean) => page.evaluate((on: boolean) => on ? sessionStorage.setItem('e2e-hold', '1') : sessionStorage.removeItem('e2e-hold'), on)
     await hold(true)
     try {
       await page.reload()  // rows written behind the server's back: a load shows them (and keeps them)
@@ -1170,9 +1178,9 @@ async function run(engine, device) {
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('filler reply 59'))
       await sleep(1500)
       if (gets.length) throw new Error(`fetched ${gets.length} photo(s) far above the view`)
-      await page.$eval('.row.user .files', f => f.scrollIntoView())
+      await page.$eval('.row.user .files', (f: Element) => f.scrollIntoView())
       await until(() => gets.length === 1)
-      await until(() => page.$eval('.row.user .files .pic img', i => i.complete && i.naturalWidth > 0))
+      await until(() => page.$eval('.row.user .files .pic img', (i: HTMLImageElement) => i.complete && i.naturalWidth > 0))
     } finally { page.off('request', count); await hold(false) }
   })
   await check('a file over the limit is refused on its chip, and ✕ drops it', async () => {
@@ -1192,8 +1200,8 @@ async function run(engine, device) {
     await p.addInitScript(() => {
       window.live = new Set()
       const make = URL.createObjectURL, drop = URL.revokeObjectURL
-      URL.createObjectURL = b => { const u = make(b); if (b instanceof File) window.live.add(u); return u }  // a picked file's, not the thread's
-      URL.revokeObjectURL = u => { window.live.delete(u); drop(u) }
+      URL.createObjectURL = (b: Blob | MediaSource) => { const u = make(b); if (b instanceof File) window.live.add(u); return u }  // a picked file's, not the thread's
+      URL.revokeObjectURL = (u: string) => { window.live.delete(u); drop(u) }
     })
     try {
       await p.goto(base)
@@ -1201,7 +1209,7 @@ async function run(engine, device) {
       const png = readFileSync(join(ROOT, 'workbench/chat_static/icon-192.png'))
       for (let i = 0; i < 4; i++) {
         await p.setInputFiles('#pick', { name: `p${i}.png`, mimeType: 'image/png', buffer: Buffer.concat([png, Buffer.from([i])]) })
-        await until(() => p.$eval('#tray .face', img => img.complete && img.naturalWidth > 0))
+        await until(() => p.$eval('#tray .face', (img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
         await p.click('#tray .att .x')
         await until(async () => await p.locator('#tray').isHidden())
       }
@@ -1212,7 +1220,7 @@ async function run(engine, device) {
     // #742 (the 2026-11-21 audit): a full disk or a name it can't save answered 500 or 507 to
     // every try, and the page re-sent the whole file forever, saying only "waiting for the connection"
     const puts = []
-    const count = r => { if (r.method() === 'PUT' && r.url().includes('/api/upload/')) puts.push(r.url()) }
+    const count = (r: any) => { if (r.method() === 'PUT' && r.url().includes('/api/upload/')) puts.push(r.url()) }
     page.on('request', count)
     const root = join(home, 'state/chat/uploads')
     mkdirSync(root, { recursive: true })
@@ -1227,7 +1235,7 @@ async function run(engine, device) {
     } finally { chmodSync(root, 0o700); page.off('request', count) }
     if (engine === 'webkit') return  // its routing doesn't see an XHR's PUT; Chromium checks the rest
     const flaky = []
-    await page.route('**/api/upload/*', route => {
+    await page.route('**/api/upload/*', (route: any) => {
       if (route.request().method() !== 'PUT') return route.continue()
       flaky.push(route.request().url())
       return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'not saved: Input/output error' }) })
@@ -1269,7 +1277,7 @@ async function run(engine, device) {
   })
   await check("another agent's message shows with its name, and Claude's reply to it, named and never counted unread, comes back through /api/wait (#1042, #1128)", async () => {
     const agent = wb('chat', 'token', 'add', `e2e-${engine}`).trim()
-    const api = (path, body) => fetch(base + path.slice(1), { method: body ? 'POST' : 'GET',
+    const api = (path: string, body?: object): Promise<[number, any]> => fetch(base + path.slice(1), { method: body ? 'POST' : 'GET',
       headers: { Authorization: `Bearer ${agent}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined }).then(async r => [r.status, await r.json()])
     const [code, sent] = await api('/api/send', { text: 'review the parser change' })
@@ -1280,12 +1288,12 @@ async function run(engine, device) {
     if ((await row.locator('.meta').textContent()).includes('send again')) throw new Error('offered to the user to send')
     wb('chat', 'reply', '--to', sent.message.id, '--text', 'Reviewed: two nits.')
     const [, got] = await api(`/api/wait?after=${sent.message.id}&timeout=5`)
-    if (got.replies.map(r => r.text).join() !== 'Reviewed: two nits.') throw new Error(JSON.stringify(got))
+    if (got.replies.map((r: any) => r.text).join() !== 'Reviewed: two nits.') throw new Error(JSON.stringify(got))
     if ((await api('/api/settings', { key: 'coding', value: 'ask' }))[0] !== 403) throw new Error('an agent changed the settings')
     // its view is its own conversation: none of the user's messages, no settings
     const [, st] = await api('/api/state')
     if (st.push || st.savings) throw new Error('an agent read the user\'s state: ' + Object.keys(st))
-    if (st.messages.some(m => m.from === 'user')) throw new Error('an agent read the user\'s messages')
+    if (st.messages.some((m: any) => m.from === 'user')) throw new Error('an agent read the user\'s messages')
     // #1128: Claude's reply to the agent alone read as one to the user, and counted in the tab's
     // unread while the page was hidden; it names the agent, and only a reply to the user counts
     const reply = page.locator('.row.claude').last()
@@ -1301,7 +1309,7 @@ async function run(engine, device) {
       await until(async () => await page.title() === '(1) Workbench')
       if ((await page.locator('.row.claude .meta').last().textContent()).includes(' to ')) throw new Error('the user\'s reply named an addressee')
     } finally {
-      await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')) })
+      await page.evaluate(() => { delete (document as any).hidden; document.dispatchEvent(new Event('visibilitychange')) })
     }
     await until(async () => await page.title() === 'Workbench')
   })
@@ -1315,19 +1323,20 @@ async function run(engine, device) {
     // a stand-in microphone and recorder: Playwright's browsers have no microphone to grant
     const recorder = () => {
       Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) } })
-      window.MediaRecorder = class {
-        static isTypeSupported(t) { return t === 'audio/webm' }
-        constructor(stream, o) { this.mimeType = (o && o.mimeType) || '' }
+      ;(window as any).MediaRecorder = class {
+        [k: string]: any
+        static isTypeSupported(t: string) { return t === 'audio/webm' }
+        constructor(stream: unknown, o?: { mimeType?: string }) { this.mimeType = (o && o.mimeType) || '' }
         start() {}
         stop() { this.ondataavailable({ data: new Blob(['\x1aE\xdf\xa3 a recorded clip'], { type: this.mimeType }) }); this.onstop() }
       }
     }
-    const say = async pg => {  // a tap to record, a tap to stop
+    const say = async (pg: any) => {  // a tap to record, a tap to stop
       await pg.click('#mic')
       await until(async () => await pg.getAttribute('#mic', 'aria-label') === 'Stop recording')
       await pg.click('#mic')
     }
-    const waiting = pg => pg.evaluate(() => JSON.parse(localStorage.getItem('wb-chat-dictate') || '[]').length)
+    const waiting = (pg: any) => pg.evaluate(() => JSON.parse(localStorage.getItem('wb-chat-dictate') || '[]').length)
     await p.addInitScript(recorder)
     await q.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { get: () => false, configurable: true }))
     try {
@@ -1359,7 +1368,7 @@ async function run(engine, device) {
         await sleep(1500)  // asked again meanwhile, and still kept
         if (await waiting(p) !== 1 || await p.inputValue('#input')) throw new Error('heard while the GPU was a task\'s')
       } finally { task.stdin.end() }
-      await new Promise(r => task.exitCode !== null ? r() : task.once('exit', r))
+      await new Promise<void>(r => task.exitCode !== null ? r() : task.once('exit', () => r()))
       await until(async () => (await p.inputValue('#input')) === 'Run the tests again.', 40000)  // BACKOFF's steps
       await until(async () => await p.getAttribute('#mic', 'aria-label') === 'Dictate')
       if (await waiting(p)) throw new Error('the clip is still waiting')
@@ -1370,10 +1379,10 @@ async function run(engine, device) {
       const vc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
       try {
         const v = await vc.newPage()
-        v.on('pageerror', e => errors.push(String(e)))
+        v.on('pageerror', (e: unknown) => errors.push(String(e)))
         await v.addInitScript(recorder)
         let asked = 0
-        await v.route('**/api/transcribe/**', route => ++asked === 1
+        await v.route('**/api/transcribe/**', (route: any) => ++asked === 1
           ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }) : route.continue())
         await v.goto(base + '#token=' + token)
         await until(async () => await v.locator('#mic').isVisible())
@@ -1411,22 +1420,22 @@ async function run(engine, device) {
   }
 
   // The shell (#1284): the nav, the views by the hash, the Chat tab's badge, the nav and the
-  // keyboard, window.WB; then each view's own checks (e2e_stats.mjs, e2e_settings.mjs)
+  // keyboard, window.WB; then each view's own checks (e2e_stats.mts, e2e_settings.mts)
   async function shell() {
     await check(desktop ? 'a left rail of Chat, Stats and Settings, the chat a centred column; no gear'
                         : 'three tabs at the foot, Chat, Stats and Settings, under the composer; no gear', async () => {
       await goTo('chat')
       if (await page.locator('#gear').count()) throw new Error('the gear is still there')
       const g = await page.evaluate(() => {
-        const r = s => document.querySelector(s).getBoundingClientRect().toJSON()
+        const r = (s: string) => document.querySelector(s)!.getBoundingClientRect().toJSON()
         return { nav: r('#tabbar'), chat: r('#view-chat'), composer: r('#composer'), thread: r('#thread'), w: innerWidth, h: innerHeight,
-          tabs: [...document.querySelectorAll('#tabbar .tab')].map(b => ({ view: b.dataset.view, label: b.querySelector('.tab-lbl').textContent,
+          tabs: [...document.querySelectorAll<HTMLElement>('#tabbar .tab')].map(b => ({ view: b.dataset.view, label: b.querySelector('.tab-lbl')!.textContent,
             icon: !!b.querySelector('svg'), w: b.getBoundingClientRect().width, current: b.getAttribute('aria-current') })) }
       })
       const say = () => JSON.stringify(g)
-      if (g.tabs.map(t => `${t.view}:${t.label}:${t.icon}`).join() !== 'chat:Chat:true,stats:Stats:true,settings:Settings:true') throw new Error(say())
-      if (g.tabs.map(t => t.current).join() !== 'true,,') throw new Error('the current tab: ' + say())
-      const near = (a, b) => Math.abs(a - b) <= 2
+      if (g.tabs.map((t: any) => `${t.view}:${t.label}:${t.icon}`).join() !== 'chat:Chat:true,stats:Stats:true,settings:Settings:true') throw new Error(say())
+      if (g.tabs.map((t: any) => t.current).join() !== 'true,,') throw new Error('the current tab: ' + say())
+      const near = (a: number, b: number) => Math.abs(a - b) <= 2
       if (desktop) {
         if (!near(g.nav.left, 0) || !near(g.nav.width, 76) || !near(g.nav.top, 0) || !near(g.nav.height, g.h)) throw new Error('the rail: ' + say())
         if (g.chat.left < g.nav.right - 1) throw new Error('the chat under the rail: ' + say())
@@ -1434,7 +1443,7 @@ async function run(engine, device) {
       } else {
         if (!near(g.nav.left, 0) || !near(g.nav.width, g.w) || !near(g.nav.bottom, g.h) || g.nav.height < 56) throw new Error('the bar: ' + say())
         if (!near(g.composer.bottom, g.nav.top)) throw new Error('the composer is not on the bar: ' + say())
-        if (g.tabs.some(t => !near(t.w, g.w / 3))) throw new Error('unequal tabs: ' + say())
+        if (g.tabs.some((t: any) => !near(t.w, g.w / 3))) throw new Error('unequal tabs: ' + say())
       }
     })
     if (desktop) await check('an iPhone held sideways, its notch on the left: the rail takes the inset beside its 76 px, each tab wide enough for its label, and the views pad for it no more (#1413)', async () => {
@@ -1444,16 +1453,16 @@ async function run(engine, device) {
       const css = readFileSync(join(ROOT, 'workbench/chat_static/app.css'), 'utf8')
         .replace(/env\(safe-area-inset-(left|right)\)/g, '59px').replace(/env\(safe-area-inset-bottom\)/g, '21px').replace(/env\(safe-area-inset-top\)/g, '0px')
       const sc = await browser.newContext({ viewport: { width: 844, height: 390 }, serviceWorkers: 'block' })
-      await sc.route('**/app.css', r => r.fulfill({ contentType: 'text/css', body: css }))
+      await sc.route('**/app.css', (r: any) => r.fulfill({ contentType: 'text/css', body: css }))
       const p = await sc.newPage()
       try {
         await p.goto(base + '#token=' + token)
         await until(async () => await p.evaluate(() => getComputedStyle(document.body).display === 'grid'))
-        const g = await p.evaluate(() => ({ rail: document.getElementById('tabbar').getBoundingClientRect().right,
+        const g = await p.evaluate(() => ({ rail: document.getElementById('tabbar')!.getBoundingClientRect().right,
           tabs: [...document.querySelectorAll('#tabbar .tab')].map(t => { const l = t.querySelector('.tab-lbl')
-            return { w: Math.round(t.getBoundingClientRect().width), cut: l.scrollWidth > l.clientWidth, icon: t.querySelector('svg').getBoundingClientRect().right } }),
-          pads: ['.top', '#thread', '#composer'].map(s => getComputedStyle(document.querySelector(s)).paddingLeft) }))
-        if (g.tabs.some(t => t.w < 44 || t.cut || t.icon > g.rail) || g.pads.join() !== '16px,16px,12px') throw new Error(JSON.stringify(g))
+            return { w: Math.round(t.getBoundingClientRect().width), cut: l!.scrollWidth > l!.clientWidth, icon: t.querySelector('svg')!.getBoundingClientRect().right } }),
+          pads: ['.top', '#thread', '#composer'].map(s => getComputedStyle(document.querySelector(s)!).paddingLeft) }))
+        if (g.tabs.some((t: any) => t.w < 44 || t.cut || t.icon > g.rail) || g.pads.join() !== '16px,16px,12px') throw new Error(JSON.stringify(g))
       } finally { await sc.close() }
     })
     await check('the card views\' styles stay out of the chat: a plan card\'s text and code, and the intro\'s code, as before', async () => {
@@ -1462,10 +1471,10 @@ async function run(engine, device) {
       const got = await page.evaluate(() => {
         const row = document.createElement('div'); row.className = 'row ask'
         row.innerHTML = '<div class="card"><div class="plan"><p>Plan <code>x</code></p></div></div>'
-        document.getElementById('thread').append(row)
-        const cs = s => getComputedStyle(row.querySelector(s)), ip = document.querySelector('#intro p')
+        document.getElementById('thread')!.append(row)
+        const cs = (s: string) => getComputedStyle(row.querySelector(s)!), ip = document.querySelector('#intro p')!
         const out = { card: cs('.card').fontSize, p: cs('p').fontSize, margins: cs('p').marginTop + ' ' + cs('p').marginBottom,
-          code: cs('code').fontSize, intro: getComputedStyle(ip).fontSize, introCode: getComputedStyle(ip.querySelector('code')).fontSize }
+          code: cs('code').fontSize, intro: getComputedStyle(ip).fontSize, introCode: getComputedStyle(ip.querySelector('code')!).fontSize }
         row.remove()
         return out
       })
@@ -1473,16 +1482,16 @@ async function run(engine, device) {
     })
     if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px', async () => {
       await goTo('settings')
-      const got = await page.evaluate(() => ({ w: document.querySelector('#view-settings .view-in').getBoundingClientRect().width,
-        cols: getComputedStyle(document.getElementById('settings')).gridTemplateColumns.split(' ').length }))
+      const got = await page.evaluate(() => ({ w: document.querySelector('#view-settings .view-in')!.getBoundingClientRect().width,
+        cols: getComputedStyle(document.getElementById('settings')!).gridTemplateColumns.split(' ').length }))
       if (got.w > 1041 || got.cols !== 2) throw new Error(JSON.stringify(got))
       await goTo('chat')
     })
     await check('the hash picks the view, Back walks back through them, anything else is the chat, and a notification\'s click opens it', async () => {
       const at = () => page.evaluate(() => ({ view: document.body.dataset.view, hash: location.hash,
-        shown: ['chat', 'stats', 'settings'].filter(v => getComputedStyle(document.getElementById('view-' + v)).display !== 'none'),
-        current: [...document.querySelectorAll('#tabbar .tab[aria-current="true"]')].map(b => b.dataset.view) }))
-      const is = async v => until(async () => { const a = await at(); return a.view === v && a.shown.join() === v && a.current.join() === v })
+        shown: ['chat', 'stats', 'settings'].filter(v => getComputedStyle(document.getElementById('view-' + v)!).display !== 'none'),
+        current: [...document.querySelectorAll<HTMLElement>('#tabbar .tab[aria-current="true"]')].map(b => b.dataset.view) }))
+      const is = async (v: string) => until(async () => { const a = await at(); return a.view === v && a.shown.join() === v && a.current.join() === v })
         .catch(async () => { throw new Error(JSON.stringify(await at())) })
       await goTo('stats'); await is('stats')
       if ((await at()).hash !== '#stats') throw new Error(JSON.stringify(await at()))
@@ -1501,7 +1510,7 @@ async function run(engine, device) {
     })
     await check('the Chat tab counts what Claude sends and the lines that it waits in the terminal while another view is shown, and clears on Chat', async () => {
       const badge = () => page.evaluate(() => {
-        const b = document.querySelector('#tabbar .tab-badge'), t = b.closest('.tab')
+        const b = document.querySelector<HTMLElement>('#tabbar .tab-badge')!, t = b.closest('.tab')!
         return { n: b.hidden ? '' : b.textContent, label: t.getAttribute('aria-label') }
       })
       await goTo('stats')
@@ -1524,14 +1533,14 @@ async function run(engine, device) {
     })
     if (!desktop) await check('the bar steps aside while the keyboard is up, so the composer sits on the keyboard', async () => {
       // no browser here raises a keyboard: the visual viewport made short by hand, as one does
-      const kb = up => page.evaluate(up => {
+      const kb = (up: boolean) => page.evaluate((up: boolean) => {
         const vv = visualViewport
-        if (up) { const h = innerHeight - 300; Object.defineProperty(vv, 'height', { get: () => h, configurable: true }) }
-        else delete vv.height
-        vv.dispatchEvent(new Event('resize'))
+        if (up) { const h = innerHeight - 300; Object.defineProperty(vv!, 'height', { get: () => h, configurable: true }) }
+        else delete (vv as any).height
+        vv!.dispatchEvent(new Event('resize'))
       }, up)
       const at = () => page.evaluate(() => ({ kb: document.body.classList.contains('kb-open'), h: innerHeight - 300,
-        nav: getComputedStyle(document.getElementById('tabbar')).display, foot: document.getElementById('composer').getBoundingClientRect().bottom }))
+        nav: getComputedStyle(document.getElementById('tabbar')!).display, foot: document.getElementById('composer')!.getBoundingClientRect().bottom }))
       try {
         await kb(true)
         await until(async () => { const a = await at(); return a.kb && a.nav === 'none' && Math.abs(a.foot - a.h) <= 2 })
@@ -1545,22 +1554,22 @@ async function run(engine, device) {
       // the bar stayed between the composer and the keyboard. The page made short, as it does
       const vp = page.viewportSize()
       const at = () => page.evaluate(() => ({ kb: document.body.classList.contains('kb-open'), h: innerHeight,
-        nav: getComputedStyle(document.getElementById('tabbar')).display, foot: document.getElementById('composer').getBoundingClientRect().bottom }))
+        nav: getComputedStyle(document.getElementById('tabbar')!).display, foot: document.getElementById('composer')!.getBoundingClientRect().bottom }))
       await page.focus('#input')
       try {
         await page.setViewportSize({ width: vp.width, height: vp.height - 300 })
         await until(async () => { const a = await at(); return a.kb && a.nav === 'none' && Math.abs(a.foot - a.h) <= 2 })
           .catch(async () => { throw new Error(JSON.stringify(await at())) })
       } finally { await page.setViewportSize(vp) }
-      await page.evaluate(() => document.getElementById('input').blur())
+      await page.evaluate(() => document.getElementById('input')!.blur())
       await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
     })
     await check('window.WB gives the views the key, the API, the view and its changes, the state and a toast', async () => {
       const got = await page.evaluate(async () => {
-        const seen = []
+        const seen: string[] = []
         window._states = 0
-        WB.on('view', v => seen.push(v))
-        WB.on('state', s => { if (Array.isArray(s.messages)) window._states++ })
+        WB.on('view', (v: string) => seen.push(v))
+        WB.on('state', (s: any) => { if (Array.isArray(s.messages)) window._states++ })
         const keys = Object.keys(WB).sort().join()
         const r = await WB.api('/api/state'), state = await r.json()
         const p = await WB.api('/api/seen', { method: 'POST', body: { ids: [] } })   // a JSON body, its type set
@@ -1568,7 +1577,7 @@ async function run(engine, device) {
         location.hash = 'settings'
         for (let i = 0; i < 100 && WB.current() !== 'settings'; i++) await new Promise(r => setTimeout(r, 50))
         WB.toast('Saved.')
-        const t = document.getElementById('toast')
+        const t = document.getElementById('toast')!
         return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, timed: [q.status, JSON.stringify(await q.json())], cur: WB.current(), seen,
           token: WB.token().length > 20, toast: !t.hidden && t.textContent }
       })
@@ -1587,9 +1596,9 @@ async function run(engine, device) {
 }
 
 // The worker's notification text, run in node against a given state (no browser shows a push)
-async function swSays(state) {
-  const ctx = { self: { addEventListener() {} }, caches: { open: async () => ({ match: async () => null }) },
-    fetch: async url => { if (url !== '/api/latest') throw new Error('fetched ' + url); return { ok: true, json: async () => state } }, Date, Math, String }
+async function swSays(state: object) {
+  const ctx: any = { self: { addEventListener() {} }, caches: { open: async () => ({ match: async () => null }) },
+    fetch: async (url: string) => { if (url !== '/api/latest') throw new Error('fetched ' + url); return { ok: true, json: async () => state } }, Date, Math, String }
   runInNewContext(readFileSync(join(ROOT, 'workbench/chat_static/sw.js'), 'utf8'), ctx)
   return ctx.what()
 }
@@ -1603,13 +1612,13 @@ await check('a push for a prompt waiting in the terminal says so, with the comma
 })
 
 await check("a notification's click brings the thread: the open page told to show Chat, else a new one at #chat (#1284)", async () => {
-  const on = {}, sent = [], opened = []
+  const on: Record<string, (e: any) => void> = {}, sent: unknown[] = [], opened: string[] = []
   let focused = 0
-  const ctx = { self: { addEventListener: (ev, fn) => { on[ev] = fn }, location: { origin: 'http://x' },
-    clients: { matchAll: async () => wins, openWindow: async u => { opened.push(u) } } }, caches: {}, URL, Date, Math, String }
-  let wins = [{ url: 'http://x/#stats', postMessage: m => sent.push(m), focus: async () => { focused++ } }]
+  const ctx = { self: { addEventListener: (ev: string, fn: (e: any) => void) => { on[ev] = fn }, location: { origin: 'http://x' },
+    clients: { matchAll: async () => wins, openWindow: async (u: string) => { opened.push(u) } } }, caches: {}, URL, Date, Math, String }
+  let wins = [{ url: 'http://x/#stats', postMessage: (m: unknown) => sent.push(m), focus: async () => { focused++ } }]
   runInNewContext(readFileSync(join(ROOT, 'workbench/chat_static/sw.js'), 'utf8'), ctx)
-  const click = async () => { let p; on.notificationclick({ notification: { close() {} }, waitUntil: x => { p = x } }); await p }
+  const click = async () => { let p; on.notificationclick({ notification: { close() {} }, waitUntil: (x: unknown) => { p = x } }); await p }
   await click()
   if (JSON.stringify(sent) !== '[{"kind":"view","view":"chat"}]' || focused !== 1 || opened.length) throw new Error(JSON.stringify({ sent, focused, opened }))
   wins = []

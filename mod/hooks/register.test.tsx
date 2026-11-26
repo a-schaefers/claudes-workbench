@@ -5679,7 +5679,7 @@ test('#1016: Agents set in routes.json reaches the conversation, and a value wb 
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
 })
 
-test('#1016: an API task\'s row names API and its provider before the model, the live view its routed line, and tasks is tasks-11', async ($, on) => {
+test('#1016: an API task\'s row names API and its provider before the model, the live view its routed line, and tasks is tasks-12', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   task(files, 'fix-api', 'running', { model: 'deepseek/deepseek-flash', model_label: 'DeepSeek (API)', via: 'api',
@@ -5711,7 +5711,7 @@ test('#1016: an API task\'s row names API and its provider before the model, the
   await ui.unmount()
   expect(sets.length).toBeGreaterThan(0)
   const last = sets.at(-1)
-  expect(last.shape).toBe('tasks-11')  // #1135 added est
+  expect(last.shape).toBe('tasks-12')  // #1135 added est, #1309 driver
   const api = last.value.find((t: WbTask) => t.name === 'fix-api')
   expect([api.via, api.role, api.provider, api.routed]).toEqual(['api', 'trivial', 'DeepSeek',
     'API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off'])

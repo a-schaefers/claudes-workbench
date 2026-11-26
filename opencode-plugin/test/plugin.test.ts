@@ -43,7 +43,7 @@ test('under WB_TASK neither part does anything at all (#1363)', async () => {
   }
 })
 
-test('the server part registers the status method, and the Workbench agent and its skills (#1335)', async () => {
+test('the server part registers the status method, the Workbench agent and its skills (#1335), and the driver\'s (#1316)', async () => {
   const was = process.env.WB_TASK
   delete process.env.WB_TASK
   const registered: string[] = []
@@ -64,8 +64,9 @@ test('the server part registers the status method, and the Workbench agent and i
   } finally {
     if (was !== undefined) process.env.WB_TASK = was
   }
-  expect(registered).toEqual(['workbench', 'status', 'status', 'skill.transform', 'agent.transform', 'session.hook'])
-  // one cleanup for every part's stop (the agent's event stream among them)
+  expect(registered).toEqual(['workbench', 'status', 'status', 'skill.transform', 'agent.transform', 'session.hook',
+    'session.hook', 'workbench-driver', 'driver', 'pin', 'driver', 'pin'])  // the driver's model.request hook
+  // one cleanup for every part's stop (the agent's event stream and the driver's beat among them)
   expect(typeof stop).toBe('function')
   await (stop as () => Promise<void>)()
 })
