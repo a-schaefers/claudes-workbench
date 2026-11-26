@@ -24610,7 +24610,8 @@ class Setup(Base):
         # #1321's finding 16: the entry named the clone's live opencode-plugin/, which OpenCode
         # watches and reloads on every change, so each save ran uncommitted (a patch under test
         # with it). It loads a copy of HEAD's, per tree; refresh (wb update's) moves it to a new
-        # commit's when opencode-plugin/ changed, keeping the one before
+        # commit's when opencode-plugin/ changed, keeping the one before. And #1321's finding 14:
+        # setup records the clone, as wb patch init's
         from workbench import ocplugin
         home = self.opencode_home()
         clone, git = plugin_repo(Path(self.tmp.name) / "clone")
@@ -24630,6 +24631,7 @@ class Setup(Base):
             self.assertEqual((first / "server.ts").read_text(), (clone / "opencode-plugin/server.ts").read_text())
             self.assertFalse((first / "test").exists())                    # the tests stay home
             self.assertEqual(ocplugin.copy_info(first), {"commit": head(), "tree": tree(), "clone": str(clone)})
+            self.assertEqual(store.read_json(store.home() / "patches.json")["source"], str(clone))
             self.assertTrue(ocplugin.loaded_from())
             conf = Path(os.environ["WB_OPENCODE_CONFIG"])
             kept = conf.read_text()
@@ -26022,6 +26024,49 @@ class LocalPatches(Base):
         self.assertTrue(list((store.home() / "rescued").iterdir()))       # and a copy kept
         self.assertEqual(store.read_json(store.home() / "patches.json"),  # for the mod (#1005)
                          {"source": str(dest), "upstream": None})
+
+    def test_patch_init_moves_opencodes_plugin_to_the_new_clone_too(self):
+        # #1321's finding N2: init re-linked Claude Code's side alone, so an OpenCode plugin set up
+        # from the marketplace clone ran its wb from the directory Claude Code deletes at the
+        # switch. The new clone's wb setup --opencode runs after Claude Code's steps; without such
+        # an entry it doesn't (the test above)
+        from workbench import ocplugin
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf.write_text(json.dumps({**json.loads(conf.read_text()), "plugins": [
+            {"package": ocplugin.GIT_SPEC, "options": {"wb": str(self.market / "bin/wb")}}]}))
+        dest = Path(self.tmp.name) / "source"
+        out = self.wb("patch", "init", "--dir", str(dest))
+        self.assertIn(f"workbench runs from {dest} now", out)
+        self.assertIn("OpenCode loads its plugin from it too", out)
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         [f"plugin marketplace add {dest}", f"{dest}/bin/wb setup --force",
+                          "plugin update workbench@workbench", f"{dest}/bin/wb setup --opencode --no-service"])
+
+    def test_patch_init_reuses_the_clone_wb_setup_opencode_recorded_never_a_second_one(self):
+        # #1321's finding 14: wb setup --opencode's clone (patches.json's source) was passed over
+        # for ~/.local/share/workbench/source, the user's patches split between two clones. One of
+        # another origin, or gone, is passed over as before
+        os.environ["HOME"] = str(Path(self.tmp.name) / "home")    # where the default would go
+        mine = Path(self.tmp.name) / "oc-clone"
+        self.g(Path(self.tmp.name), "clone", "-q", str(self.origin), str(mine))
+        self.ident(mine)
+        noted = store.home() / "patches.json"
+        noted.write_text(json.dumps({"source": str(mine), "upstream": None}))
+        default = Path.home() / ".local/share/workbench/source"
+        other = Path(self.tmp.name) / "other"
+        self.g(Path(self.tmp.name), "clone", "-q", str(self.repo), str(other))
+        self.g(other, "remote", "set-url", "origin", "https://example.invalid/other.git")
+        for src in (other, Path(self.tmp.name) / "gone"):
+            noted.write_text(json.dumps({"source": str(src)}))
+            self.assertEqual(patches.source_dir(None, self.market), default, src)
+        noted.write_text(json.dumps({"source": str(mine)}))
+        self.assertEqual(patches.source_dir(None, self.market), mine)
+        self.assertEqual(patches.source_dir(str(other), self.market), other)   # --dir first
+        self.assertEqual(patches.source_dir(), default)                        # no clone to compare
+        out = self.wb("patch", "init")
+        self.assertIn(f"workbench runs from {mine} now, branch local tracking origin/main", out)
+        self.assertFalse(default.exists())
+        self.assertEqual(self.g(mine, "branch", "--show-current"), "local")
 
     def test_patch_init_refuses_a_directory_that_is_not_a_clone_of_the_same_origin(self):
         dest = Path(self.tmp.name) / "taken"

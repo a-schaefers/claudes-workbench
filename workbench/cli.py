@@ -7382,6 +7382,11 @@ def cmd_setup(a):
         except RuntimeError as e:  # own_config's refusal: the change, to make by hand
             bad = True
             print(f"BAD {e}")
+        try:  # the clone holding this user's patches, as wb patch init's is: a later init from a
+            # marketplace install reuses it, never a second clone splitting them (#1321's finding 14)
+            patches.note_install(PKG_ROOT)
+        except (gitops.GitError, OSError):
+            pass
     old = context.claude_home() / "skills/delegate"  # /delegate became /workbench (2026-11-17)
     if old.is_symlink() and not old.exists() and os.readlink(old).rstrip("/").endswith("skill/delegate"):
         old.unlink()
@@ -8039,7 +8044,7 @@ def cmd_patch(a):
         live = [t for t in store.all_tasks() if runner_alive(t)]
         if live:  # it moves the code, the git shim and the lane out from under them
             die(f"tasks are running ({_running(live, a)}): run wb patch init when they finish")
-        patches.init(PKG_ROOT, patches.source_dir(a.dir))
+        patches.init(PKG_ROOT, patches.source_dir(a.dir, PKG_ROOT))
     elif a.action == "list":
         patches.list_patches(PKG_ROOT, kind)
     elif a.action == "drop":
