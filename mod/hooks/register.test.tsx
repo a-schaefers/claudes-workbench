@@ -4311,7 +4311,8 @@ const GIT_LOG = '/test/git-log'  // what upstreamWorld's `git -C <dir> log` prin
 function upstreamWorld(on: any, files: Record<string, string>) {
   const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[],
     toasts: [] as string[], chats: [] as string[][],   // chats: wb chat's calls, the line for an away user
-    push: '' as string, ghs: [] as string[][] }        // what `gh api repos/<slug>` says of .permissions.push, and its calls
+    push: '' as string, ghs: [] as string[][],         // what `gh api repos/<slug>` says of .permissions.push, and its calls
+    pushBy: {} as Record<string, string> }             // a slug's own answer, over push
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
   const origins: Record<string, string> = {
     [SOURCE]: `https://github.com/${SLUG}.git`,
@@ -4334,7 +4335,8 @@ function upstreamWorld(on: any, files: Record<string, string>) {
     if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
     if (e.argv[0] === 'gh' && e.argv[1] === 'api') {
       w.ghs.push(e.argv)
-      return { value: { exitCode: w.push ? 0 : 1, stdout: w.push ? `${w.push}\n` : '', stderr: w.push ? '' : 'gh: not logged in' } }
+      const said = w.pushBy[String(e.argv[2]).replace(/^repos\//, '')] ?? w.push
+      return { value: { exitCode: said ? 0 : 1, stdout: said ? `${said}\n` : '', stderr: said ? '' : 'gh: not logged in' } }
     }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
@@ -4461,14 +4463,38 @@ test('upstream\'s maintainer\'s own Claude is never asked to write to it, even f
   for (const command of ['gh issue comment 5 --body x', 'gh issue reopen 5', 'git push', `gh pr create --repo ${SLUG} --fill`])
     expect([command, await bash(command)]).toEqual([command, undefined])
   expect(w.asked).toEqual([])
-  // gh asked once for the session, of the upstream
-  expect(w.ghs).toEqual([['gh', 'api', `repos/${SLUG}`, '--jq', '.permissions.push']])
+  // gh asked once for the session, of each name upstream answers to (#1549)
+  expect(w.ghs).toEqual([['gh', 'api', `repos/${SLUG}`, '--jq', '.permissions.push'],
+    ['gh', 'api', 'repos/a-schaefers/claudes-workbench', '--jq', '.permissions.push']])
   const mcp = await $.tool.call({ tool: 'mcp__github__add_issue_comment', owner: 'a-schaefers', repo: 'workbench', body: 'x' } as any) as any
   expect(mcp?.deny).toBeUndefined()
   // wb patch send checks the dialog's yes itself (send-ok.json): still asked
   files['/home/u/pr.md'] = 'body'
   expect(await bash('wb patch send fix --title "t" --body-file /home/u/pr.md')).toContain('not sent')
   expect(w.asked.length).toBe(1)
+  await clock.advance(1000)
+})
+
+test('#1549: a user whose patches.json upstream is their own fork is still asked before a gh or MCP write to the maintainer\'s repository', async ($, on) => {
+  // 2026-11-26: a contributor's clone of their fork records it as upstream (patches.note_install),
+  // and they can push to it: the exemption asked gh of that slug alone, so their Claude's writes to
+  // a-schaefers/workbench from any other directory went out with no dialog
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: 'someuser/workbench' })
+  w.pushBy = { 'someuser/workbench': 'true', [SLUG]: 'false', 'a-schaefers/claudes-workbench': 'false' }
+  w.cwd = '/home/u/project'
+  await $.session.start({ cwd: w.cwd, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const bash = async (command: string) => ((await $.tool.call({ tool: 'Bash', command } as any)) as any).deny as string | undefined
+  expect(await bash(`gh issue create --repo ${SLUG} --title t --body b`)).toContain('not sent')
+  expect(w.asked.length).toBe(1)
+  const mcp = await $.tool.call({ tool: 'mcp__github__create_issue', owner: 'a-schaefers', repo: 'workbench', title: 't' } as any) as any
+  expect(mcp?.deny).toContain('not sent')
+  expect(w.asked.length).toBe(2)
+  expect(w.ghs.map(a => a[2])).toContain(`repos/${SLUG}`)
   await clock.advance(1000)
 })
 

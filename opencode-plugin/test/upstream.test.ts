@@ -157,7 +157,7 @@ test('upstream\'s maintainer\'s own driver is never asked to write to it, and a 
     expect(await up.refusal(t.shell('gh issue comment 5 --repo a-schaefers/workbench --body x'))).toBe('')
     expect(await up.refusal({ tool: 'github_add_issue_comment', sessionID: 'ses_1', id: 'c2',
       input: { owner: 'a-schaefers', repo: 'workbench', body: 'x' } })).toBe('')
-    expect([t.asked, ghs]).toEqual([[], ['a-schaefers/workbench']])
+    expect([t.asked, ghs]).toEqual([[], ['a-schaefers/workbench', 'a-schaefers/claudes-workbench']]) // each name (#1549)
     // wb patch send goes through its tool, as before
     expect(await up.refusal(t.shell('wb patch send fix --title t --body-file b.md'))).toBe(SEND_VIA_TOOL)
     // one who can't push: asked; gh asked again only past PUSH_RECHECK_MS
@@ -175,5 +175,23 @@ test('upstream\'s maintainer\'s own driver is never asked to write to it, and a 
     const failing = new Upstream({ ...(t.up as unknown as { d: ConstructorParameters<typeof Upstream>[0] }).d,
       canPush: async () => { throw new Error('no gh') } })
     expect(await failing.refusal(t.shell('git push', fix))).toBe(NOT_SENT)
+  } finally { t.done() }
+})
+
+test('#1549: a user whose patches.json upstream is their own fork is still asked before a gh or MCP write to the maintainer\'s repository', async () => {
+  // 2026-11-26: a contributor's clone of their fork records it as upstream (patches.note_install),
+  // and they can push to it: the exemption asked gh of that slug alone, so their driver's writes to
+  // a-schaefers/workbench from any other directory went out unasked
+  const t = setup('no')
+  try {
+    writeFileSync(join(t.root, 'patches.json'), JSON.stringify({ upstream: 'alice/workbench' }))
+    const ghs: string[] = []
+    const up = new Upstream({ ...(t.up as unknown as { d: ConstructorParameters<typeof Upstream>[0] }).d,
+      canPush: async slug => { ghs.push(slug); return slug === 'alice/workbench' } })
+    expect(await up.refusal(t.shell('gh issue create --repo a-schaefers/workbench --title t --body b'))).toBe(NOT_SENT)
+    expect(await up.refusal({ tool: 'github_create_issue', sessionID: 'ses_1', id: 'c2',
+      input: { owner: 'a-schaefers', repo: 'workbench', title: 't' } })).toBe(NOT_SENT)
+    expect(t.asked.length).toBe(2)
+    expect(ghs.includes('a-schaefers/workbench')).toBe(true)
   } finally { t.done() }
 })

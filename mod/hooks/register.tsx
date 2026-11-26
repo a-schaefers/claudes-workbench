@@ -716,6 +716,16 @@ async function canPush($: any, slug: string): Promise<boolean> {
   return ok
 }
 
+// Whether the user can push to every name upstream answers to (gatedWhere's slugs: patches.json's
+// upstream, UPSTREAM, its former names), in order, stopping at the first no. patches.json's
+// upstream alone is a contributor's own fork when their clone tracks it, and they can push to
+// that: their Claude's gh and MCP writes to the maintainer's repository went out unasked (#1549,
+// 2026-11-26). A former name redirects, so gh answers it as it does UPSTREAM.
+async function canPushAll($: any, slugs: string[]): Promise<boolean> {
+  for (const slug of slugs) if (!await canPush($, slug)) return false
+  return slugs.length > 0
+}
+
 // What the gate reads each time: patches.json's clone and upstream, the gated directories
 type Gate = { home: string; cwd: string; slug: string; slugs: string[]; dirs: string[]; plugins: string[] }
 async function gateConf($: any): Promise<Gate> {
@@ -854,7 +864,7 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
   if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slugs)) return ''
   if (aim.why === 'slug' && await developerClone($, aim.at, g.slugs, [...g.dirs, ...g.plugins])) return ''
   // the maintainer's own: never asked, but `wb patch send`, whose yes it checks (send-ok.json)
-  if (aim.why !== 'send' && await canPush($, g.slug)) return ''
+  if (aim.why !== 'send' && await canPushAll($, g.slugs)) return ''
   const q = await sendQuestion($, command, g.slug, aim, g.home)
   if ('deny' in q) return q.deny
   const no = await askToSend($, q.question)
@@ -869,7 +879,7 @@ async function mcpRefusal($: any, tool: string, input: Row): Promise<string> {
   const g = await gateConf($)
   if (!mcpAimsUpstream(tool, input, g.slugs)) return ''
   if (await developerClone($, g.cwd, g.slugs, [...g.dirs, ...g.plugins])) return ''
-  if (await canPush($, g.slug)) return ''
+  if (await canPushAll($, g.slugs)) return ''
   return askToSend($, `Claude wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shownInput(input)} — Send it?`)
 }
 
