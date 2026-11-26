@@ -8790,8 +8790,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     Claude in Claude Code). `mine(task, here)`: the kernel's `owns` with `host: "opencode"`, the
     session's id and directory; `scoped`: every open task while the session is on the Workbench
     agent, else only its own. `footer`: `⚒ wb · 1 running · 1 review …` (`openCounts`, a stopped
-    count in the error colour), only in the mode or with an open task of its own: the footer item
-    replaces the mod's minimize strip (#1332). `sidebar`: `Workbench (1 running, 1 review)` cut to
+    count in the error colour; a parked task left out, as the strip's `taskParts` leaves it out:
+    it kept `⚒ wb · 2 review` after `/workbench-quit`, #1516), only in the mode or with an open
+    task of its own: the footer item replaces the mod's minimize strip (#1332). `sidebar`: `Workbench (1 running, 1 review)` cut to
     the sidebar's width, then each task's one-line row (`taskLines` compact). `panelRows`: the
     Tasks view's rows (`taskLines`, `compactWanted` for the panel's height), each with its task and
     whether it is its first line. `driverRow`: the driver row (*The driver*; `MODELS`, `CHANGE`).

@@ -234,6 +234,13 @@ test('the footer item counts the open tasks by phase, a stopped one in error, an
   expect(runs.find(r => r.text === '1 stuck')!.fg).toBe('error')
 })
 
+test('the footer item leaves out the tasks /workbench-quit parked, as Claude Code\'s strip does (#1516)', () => {
+  const parked = (name: string) => task(name, REVIEW, { parked: true })
+  expect(footer([parked('a'), parked('b')], false)).toBe(null)
+  expect(footer([parked('a'), task('b', RUNNING)], false)!.map(r => r.text).join('')).toBe('⚒ wb · 1 running')
+  expect(footer([parked('a')], true)!.map(r => r.text)).toEqual(['⚒ wb'])  // the mode still shows its mark
+})
+
 test('the sidebar section heads its tasks with their counts and gives each line its task', () => {
   expect(sidebar([], 40, NOW, '✻', '')).toBe(null)
   const s = sidebar([task('fix-it', RUNNING), task('docs', REVIEW, { tests: 'pass' })], 40, NOW, '✻', '')!

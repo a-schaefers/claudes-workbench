@@ -106,9 +106,12 @@ export const scoped = (tasks: readonly PaneTask[], here: Here, mode: boolean): P
 
 /** The footer's status item, in place of Claude Code's strip (#1332): `⚒ wb` and the open
  * tasks' counts by phase (the kernel's openCounts, a stopped one in error), while there is
- * something to bring back (the mode, or a task of this session's). null: nothing to show. */
+ * something to bring back (the mode, or a task of this session's). A parked task waits for no
+ * one and is left out, as the strip leaves it out (the mod's taskParts): after /workbench-quit
+ * the footer said `⚒ wb · 2 review` for the tasks it parked (#1516, 2026-11-26). null: nothing
+ * to show. */
 export function footer(tasks: readonly PaneTask[], mode: boolean): Run[] | null {
-  const open = tasks.filter(t => !CLOSED.has(t.phase))
+  const open = tasks.filter(t => !CLOSED.has(t.phase) && !t.parked)
   if (!mode && !open.length) return null
   const runs: Run[] = [{ text: `${MARK} wb`, fg: 'accent', bold: true }]
   for (const c of openCounts(open).counts) {
