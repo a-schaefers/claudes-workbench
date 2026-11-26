@@ -27,8 +27,11 @@ json|file|runs}`; `runs` is an earlier run's final results), `budget_usd`, `budg
   when two or more are); the `choose` card returns `{best, ranking, why}`.
 - `refix`: on a report over a code stage, `{"path": "must_fix", "max": 1|2}`: a non-empty list
   goes back to the coder as `wb feedback`, then the change is reviewed again.
+- `escalate: [roles]`: on a code stage: an item stuck or failed, or with its review's asks left
+  past refix's max, is tried again from the base on the next role (`<key>#e1`, …); the attempt
+  before is kept. Shipped as `fix-escalate` (trivial, then significant).
 - `on_failure`: `checkpoint` stops the run for you when an item ends with no result; a code item
-  stuck or failed always does.
+  stuck or failed always does (with `escalate`, only once its last role has).
 - `"claude": true` with `from`: a checkpoint of yours. You merge, then `wb run feed`.
 - `max_items` (200): past it, items are `not_run`, named in the report.
 

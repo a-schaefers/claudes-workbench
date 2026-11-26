@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "name": "fix-escalate",
+  "description": "fix, cheapest first: each finding's fixer on the trivial role, and one stuck, failed or with its reviewer's asks left after 2 refixes is tried again from the base on the significant role; Claude is asked only when that fails too",
+  "params": {"findings": "list"},
+  "stages": [
+    {"id": "code", "card": "fix", "role": "trivial", "escalate": ["significant"], "items": "{params.findings}",
+     "prompt": "Fix this finding, with a regression test that fails before the fix:\n\n{item}\n\n{context}"},
+    {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 2},
+     "prompt": "Review this fix. The finding it fixes:\n{item}\n\nThe coder's report:\n{report}\n\nThe change:\n{diff}"},
+    {"id": "claude", "final": true, "from": "review"}
+  ]
+}

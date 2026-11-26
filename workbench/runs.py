@@ -45,8 +45,9 @@ STAGE_RE = re.compile(r"^[a-z][a-z0-9]{0,7}\Z")
 FLOW_KEYS = ("v", "name", "description", "params", "budget_usd", "budget_min", "context", "stages")
 STAGE_KEYS = ("id", "card", "kind", "role", "items", "from", "split", "keep", "flow", "batch",
               "attempts", "schema", "tools", "skills", "ask", "setup", "test", "refix", "on_failure",
-              "max_items", "claude", "final", "prompt", "compare")
+              "max_items", "claude", "final", "prompt", "compare", "escalate")
 PARAM_TYPES = ("string", "int", "list", "json", "file", "runs")
+ESCALATE_MAX = 3       # a code stage's `escalate` roles, at most
 MAX_ITEMS = 200        # a stage's items, at most (`max_items`): the rest not_run, named (no silent caps)
 ATTEMPTS_MAX = 5
 REFIX_MAX = 2
@@ -285,6 +286,13 @@ def validate(flow) -> list[str]:
             errs.append(f"{where}: compare is a report stage over a code stage with attempts of 2 or more")
         if compare and any(k in s for k in ("split", "batch", "attempts", "refix")):
             errs.append(f"{where}: a compare stage takes each item's attempts whole: no split, batch, attempts or refix")
+        esc = s.get("escalate")
+        if esc is not None:
+            if not (isinstance(esc, list) and 1 <= len(esc) <= ESCALATE_MAX and all(r in routes.ROLES for r in esc)
+                    and len(set(esc)) == len(esc)):
+                errs.append(f"{where}: escalate is a list of 1 to {ESCALATE_MAX} distinct roles ({', '.join(routes.ROLES)})")
+            elif not code or s.get("claude"):
+                errs.append(f"{where}: escalate goes on a code stage")
         refix = s.get("refix")
         if refix is not None:
             if not (isinstance(refix, dict) and isinstance(refix.get("path"), str) and set(refix) <= {"path", "max"}
@@ -632,6 +640,7 @@ def state(run: Run) -> dict:
     final = {}     # (stage, key) -> (state, why)
     refixes: dict = {}  # (stage, src key) -> [refix rows]
     fed = {}
+    escalated = set()  # (code stage, key): a review's asks left past refix's max sent it on (_take)
     for r in rows:
         k = (r.get("stage"), r.get("key"))
         if r.get("kind") == "item":
@@ -646,6 +655,8 @@ def state(run: Run) -> dict:
             refixes.setdefault((r.get("stage"), r.get("src")), []).append(r)
         elif r.get("kind") == "fed":
             fed[r.get("stage")] = r
+        elif r.get("kind") == "escalate":  # the trigger; "escalated" is the next role's start
+            escalated.add((r.get("stage"), r.get("key")))
     skipped = set(spec.get("skip") or ())
     out: dict = {}
     complete: dict = {}
@@ -723,8 +734,11 @@ def state(run: Run) -> dict:
                 groups[f"b{i // batch + 1}"] = [(k, member(k, v)) for k, v, _ in inputs[i:i + batch]]
             inputs = [(key, [v for _, v in ms], None) for key, ms in groups.items()]
         cap = int(s.get("max_items") or MAX_ITEMS)
+        esc = (s.get("escalate") or []) if is_code(s) else []
         items = []
-        for idx, (key, v, src) in enumerate(inputs):
+        idx = -1
+        while (idx := idx + 1) < len(inputs):
+            key, v, src = inputs[idx]
             it = Item(sid, key, v, src=src, members=groups.get(key))
             row = started.get((sid, key))
             if row:
@@ -738,13 +752,17 @@ def state(run: Run) -> dict:
             elif s.get("compare") and len(it.members or ()) < 2:
                 it.state, it.why = "not_run", (f"{len(it.members or ())} of its attempts reached review: "
                                                "nothing to compare (wb run report names the rest)")
-            elif idx >= cap:
+            elif idx >= cap and "#e" not in key:
                 it.state, it.why = "not_run", f"past the stage's max_items ({cap})"
             elif v is WAITING:
                 it.state, it.input = "waiting", None
             elif it.task:
                 it.state, it.why, it.output = _live(s, it)
             items.append(it)
+            # stuck, failed, or its review's asks left past refix's max: the next role tries it
+            # from the base (#1134's study: escalating attempts across roles)
+            if esc and escalation(key) < len(esc) and (it.state == "null" or (sid, key) in escalated):
+                inputs.append((escalation_key(key, escalation(key) + 1), v, src))
         out[sid] = items
         complete[sid] = ready and ("items" in s or complete.get(s.get("from"), False)) \
             and all(i.state not in ("pending", "running", "waiting") for i in items)
@@ -799,10 +817,27 @@ def _last_line(r: subprocess.CompletedProcess) -> str:
     return (lines[-1] if lines else f"exit {r.returncode}").removeprefix("wb: ")[:300]
 
 
-def stage_model(stage: dict):
-    """The API model a stage's role runs on now, or None for the GPU (or a roles file that can't
-    be read: wb start says why for each item)."""
-    role = stage_role(stage)
+def escalation(key: str) -> int:
+    """An item's escalation: `1#e2` is the stage's second escalate role's try, `1` none."""
+    m = re.search(r"#e(\d+)\Z", key)
+    return int(m.group(1)) if m else 0
+
+
+def escalation_key(key: str, k: int) -> str:
+    return re.sub(r"#e\d+\Z", "", key) + f"#e{k}"
+
+
+def item_role(stage: dict, it: "Item | None" = None) -> str:
+    """The role an item runs on: its stage's, or for an escalation its escalate role."""
+    k = escalation(it.key) if it is not None else 0
+    esc = stage.get("escalate") or []
+    return esc[k - 1] if 0 < k <= len(esc) and esc[k - 1] in routes.ROLES else stage_role(stage)
+
+
+def stage_model(stage: dict, it: "Item | None" = None):
+    """The API model a stage's role (an item's, item_role) runs on now, or None for the GPU (or a
+    roles file that can't be read: wb start says why for each item)."""
+    role = item_role(stage, it)
     try:
         doc = routes.read()
     except routes.RoutesError:
@@ -947,7 +982,7 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     path = specs / f"{stage['id']}-{n}.md"
     path.write_text(_spec_of(run, stage, it), encoding="utf-8")
     argv = ["start", name, "--spec", str(path), "--repo", spec["repo"], "--base", spec["base"],
-            "--role", stage_role(stage), "--queue", "--group", run.name, "--run", run.name,
+            "--role", item_role(stage, it), "--queue", "--group", run.name, "--run", run.name,
             "--stage", stage["id"], "--item", it.key, "--checkin", "0"]
     if stage.get("card"):
         argv += ["--card", stage["card"]]
@@ -1019,7 +1054,16 @@ def _take(run: Run, stage: dict, it: Item) -> None:
             src_item = next((i for i in _src_items(run, stage) if i.key == it.src), None)
             fixes = [r for r in run.journal() if r.get("kind") == "refix" and r.get("stage") == stage["id"]
                      and r.get("src") == it.src]
-            if isinstance(asks, list) and asks and src_item and len(fixes) < int(refix.get("max", 1)):
+            src_stage = stage_by(run.flow, stage.get("from")) or {}
+            if isinstance(asks, list) and asks and src_item and len(fixes) >= int(refix.get("max", 1)) \
+                    and escalation(it.src) < len(src_stage.get("escalate") or []):
+                # past refix's max with asks left: the next role tries it from the base, this
+                # attempt kept for Claude (its task stays in review)
+                run.log(kind="escalate", stage=src_stage["id"], key=it.src, task=src_item.task,
+                        why=f"{len(asks)} ask(s) left after {len(fixes)} refix(es)")
+                state, why = "superseded", (f"escalated: {len(asks)} ask(s) of {src_item.task} left after "
+                                            f"{len(fixes)} refix(es)")
+            elif isinstance(asks, list) and asks and src_item and len(fixes) < int(refix.get("max", 1)):
                 code = store.Task(src_item.task)
                 text = ("A reviewer read your change and asks for these before Claude reviews it:\n"
                         + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(asks))
@@ -1240,6 +1284,7 @@ def tick(run: Run) -> bool:
             if it.task in held:
                 continue
             if is_code(s) and it.state == "null" and s.get("on_failure", "checkpoint") == "checkpoint" \
+                    and escalation(it.key) >= len(s.get("escalate") or []) \
                     and not any(r.get("kind") == "notice" and r.get("item") == it.task for r in run.journal()):
                 run.log(kind="notice", notice="run_checkpoint", item=it.task)
                 _checkpoint(run, f"{it.task} ({s['id']} {it.key}) is {store.Task(it.task).status.get('phase')}: "
@@ -1248,10 +1293,10 @@ def tick(run: Run) -> bool:
         for s in stages(flow):
             if s.get("final") or s.get("claude"):
                 continue
-            m = stage_model(s)
             for it in st.get(s["id"]) or ():
                 if it.state != "pending" or run.status.get("phase") != "running":
                     continue
+                m = stage_model(s, it)
                 if it.task and store.Task(it.task).exists:  # started, its runner not up yet
                     continue
                 if _room(run, s, st, m):
@@ -1264,6 +1309,10 @@ def tick(run: Run) -> bool:
                     break
                 n = 1 + max([r.get("n") or 0 for r in run.journal() if r.get("kind") == "item"
                              and r.get("stage") == s["id"]] or [0])
+                if (k := escalation(it.key)) and not any(r.get("kind") == "escalated" and r.get("stage") == s["id"]
+                                                         and r.get("key") == it.key for r in run.journal()):
+                    prev = escalation_key(it.key, k - 1) if k > 1 else re.sub(r"#e\d+\Z", "", it.key)
+                    run.log(kind="escalated", stage=s["id"], key=it.key, after=prev, role=item_role(s, it))
                 got, why = _start(run, s, it, n)
                 if got in ("not_run", "null"):
                     run.log(kind=got, stage=s["id"], key=it.key, why=why)
@@ -1666,9 +1715,13 @@ def cmd_start(a) -> None:
         _die(f"no commit {a.base or 'HEAD'} in {repo}")
     said: list[str] = []
     for s in stages(flow):  # an API role with no cap is refused before any file is written
-        m = stage_model(s) if not (s.get("final") or s.get("claude")) else None
-        if m is not None and not (meter.is_plan(m) or meter.is_free(m)) and meter.cap() is None:
-            _die(f"stage {s['id']} runs on {m.id} (role {stage_role(s)}), and {meter.no_cap()}")
+        if s.get("final") or s.get("claude"):
+            continue
+        for k in range(len(s.get("escalate") or []) + 1):  # its escalate roles' too
+            probe = Item(s["id"], "1" + (f"#e{k}" if k else ""), None)
+            m = stage_model(s, probe)
+            if m is not None and not (meter.is_plan(m) or meter.is_free(m)) and meter.cap() is None:
+                _die(f"stage {s['id']} runs on {m.id} (role {item_role(s, probe)}), and {meter.no_cap()}")
     usd_, mins = _budget(flow, a, said)
     ctx = a.context or ""
     if a.context_file:
@@ -1700,6 +1753,7 @@ def cmd_start(a) -> None:
     run.log(kind="start", flow=flow["name"], flow_sha=spec["flow_sha"])
     pid = spawn(run)
     roles = ", ".join(dict.fromkeys(f"{s['id']} {stage_role(s)}" + (" (API)" if stage_model(s) else " (GPU)")
+                                    + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
                                     for s in stages(flow) if not (s.get("final") or s.get("claude"))))
     est = (meter.usd(est_usd) if est_usd is not None else "unpriced") + (f", GPU ~{est_min:g} min" if est_min else "")
     print(f"run {a.name}: flow {flow['name']} · {roles} · estimate {est}"

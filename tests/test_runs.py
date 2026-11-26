@@ -360,7 +360,7 @@ class Flows(Base):
 
     def test_every_shipped_flow_holds_and_ends_with_claude(self):
         names = [n for n, where, _ in runs.flow_names() if where == "shipped"]
-        self.assertEqual(sorted(names), ["audit", "best-of", "build", "fix", "lenses", "triage"])
+        self.assertEqual(sorted(names), ["audit", "best-of", "build", "fix", "fix-escalate", "lenses", "triage"])
         for n in names:
             flow = runs.load_flow(n)
             self.assertTrue(runs.stages(flow)[-1]["final"], n)
@@ -799,6 +799,65 @@ class Runs(Base):
                          [("bo-code-1", "review"), ("bo-code-2", "review"), ("bo-code-3", "review")])
         for n in (1, 2, 3):
             run_wb("discard", f"bo-code-{n}")
+
+    def test_an_item_stuck_on_its_role_is_tried_again_from_the_base_on_the_next_escalate_role_before_claude_is_asked(self):
+        # #1134's study: escalating attempts across roles; Claude checkpointed only when the last fails
+        flow = {"v": 1, "name": "esc", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "role": "trivial", "escalate": ["significant"], "items": ["the answer"],
+             "prompt": "Write the answer to answer.txt."},
+            {"id": "claude", "final": True, "from": "code"}]}
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"esc-code-1": "crash"})
+        out = run_wb("run", "start", "esc", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertIn("code trivial (GPU), then significant", out)
+        self.assertEqual(self.wait_run("esc", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        run = runs.Run("esc")
+        self.assertEqual(store.Task("esc-code-1").status["phase"] in ("failed", "stuck", "discarded"), True)
+        self.assertEqual((store.Task("esc-code-2").spec.get("role"), store.Task("esc-code-2").status["phase"]),
+                         ("significant", "review"))
+        self.assertEqual([(r["key"], r["after"], r["role"]) for r in run.journal() if r.get("kind") == "escalated"],
+                         [("1#e1", "1", "significant")])
+        self.assertFalse([r for r in run.journal() if r.get("notice") == "run_checkpoint"])  # Claude not asked
+        rep = runs.report_of("esc")
+        self.assertEqual([(c["key"], c["task"]) for c in rep["code"] if c.get("phase") == "review"], [("code:1#e1", "esc-code-2")])
+        run_wb("discard", "esc-code-2")
+
+    def test_asks_left_past_refix_max_escalate_with_the_attempt_kept_and_the_last_roles_failure_asks_claude(self):
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"fxe-code-2": "crash"})  # the significant role's
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        st = self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))
+        run = runs.Run("fxe")
+        self.assertEqual(st["phase"], "checkpoint", st)
+        self.assertIn("fxe-code-2 (code 1#e1) is ", st["why"])
+        (esc,) = [r for r in run.journal() if r.get("kind") == "escalate"]
+        self.assertEqual((esc["key"], esc["task"], esc["why"]), ("1", "fxe-code-1", "1 ask(s) left after 2 refix(es)"))
+        self.assertEqual([(r["key"], r["role"]) for r in run.journal() if r.get("kind") == "escalated"],
+                         [("1#e1", "significant")])
+        self.assertEqual((store.Task("fxe-code-1").spec.get("role"), store.Task("fxe-code-1").status["phase"]),
+                         ("trivial", "review"))                         # kept for Claude, never discarded
+        rep = runs.report_of("fxe")
+        self.assertIn("escalated: 1 ask(s) of fxe-code-1 left after 2 refix(es)", [x["why"] for x in rep["superseded"]])
+        run_wb("run", "stop", "fxe")
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
+    def test_an_items_role_follows_its_escalation_and_escalate_takes_distinct_roles(self):
+        st = [{"id": "code", "kind": "code", "items": ["x"], "escalate": ["significant", "writing"]},
+              {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 1},
+               "prompt": "{diff}"},
+              {"id": "claude", "final": True, "from": "review"}]
+        self.assertEqual(runs.validate({"v": 1, "name": "x", "stages": st}), [])
+        it = runs.Item("code", "1#e2", None)
+        self.assertEqual((runs.item_role(st[0], it), runs.item_role(st[0], runs.Item("code", "1#e1", None)),
+                          runs.item_role(st[0], runs.Item("code", "1", None))), ("writing", "significant", "significant"))
+        self.assertEqual((runs.escalation("1#a2#e2"), runs.escalation_key("1#a2#e1", 2), runs.escalation("1")),
+                         (2, "1#a2#e2", 0))
+        st[0]["escalate"] = ["significant", "significant"]
+        self.assertIn("escalate is a list of 1 to 3 distinct roles", self.errs(stages=st) if hasattr(self, "errs") else
+                      "; ".join(runs.validate({"v": 1, "name": "x", "stages": st})))
 
     def test_a_skipped_stage_and_items_past_max_items_are_not_run_and_named(self):
         flow = {"v": 1, "name": "cap", "params": {"areas": "list"}, "stages": [
