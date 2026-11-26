@@ -1646,6 +1646,18 @@ def _check_group(group: str | None) -> None:
         die("a group name is lowercase letters, digits and hyphens, at most 32")
 
 
+def _start_branch(a, repo: Path) -> str | None:
+    """The branch a task started from (task.json base_branch). A run's driver starts each item
+    with --base <sha>, which names none, so an item merged into whatever branch was checked out
+    by accept, a feature branch nobody chose (#1541, 2026-11-26): it takes the run's. A run.json
+    from before base_branch was recorded keeps the sha's None."""
+    if getattr(a, "run", None):
+        spec = runs.Run(a.run).spec
+        if "base_branch" in spec:
+            return spec["base_branch"]
+    return gitops.start_branch(repo, a.base)
+
+
 def _cant_run(m: models.Model, state: dict) -> str:
     """wb start's refusal of a model status() says can't run, with its next step."""
     fix = models.remedy(m, state)
@@ -2033,7 +2045,8 @@ def cmd_start(a):
         # (shells run in OpenCode's long-lived service), and `driver` saying whose it is
         **({"session": oc, "driver": store.driver_record(oc)}
            if not sid and (oc := store.opencode_session()) else {}),
-        "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
+        # where wb accept --merge lands; a run's item, the run's (#1541: its --base is a sha)
+        "base_branch": _start_branch(a, repo),
         # the weights behind the id: a record on other weights under it isn't this model's (#726)
         **({"weights_id": w} if (w := models.identity(m)) else {}),
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": models.task_label(m),
