@@ -8,17 +8,20 @@ openapi: 3.1.0
 info:
   title: workbench web chat API
   version: "1"
-  summary: The user's own local agents asking the user's own Claude Code session for help.
+  summary: The user's own local agents asking the user's own Workbench driver (Claude Code or OpenCode) for help.
   description: >-
     The HTTP API of `wb chat serve`: the chat page's, and local agents' (each with a token of its
     own, `wb chat token add <name>`). It is for the user's own agents on this machine talking to the
-    user's own Claude Code session: it listens on localhost by default, an agent token from any other
+    user's own driver, the Claude Code or OpenCode session in workbench mode that listens (the same
+    API for both; `driver` on the listener and on each reply says which): it listens on localhost
+    by default, an agent token from any other
     address is refused (`not_local`), and it is no model endpoint. Every path is served under
     `/api/v1/` and, for the page and clients older than workbench 2.1, under `/api/` too, by the
     same handler. `info.version` is the API's version, `api` in /health and /state. Nobody listening
     is not an error: `/health` says `listening: false` and a sent message waits (unread past 6 hours,
-    a wait on it is `410 expired`). The terms for automated use of Claude differ by how Claude Code
-    is signed in (https://www.anthropic.com/legal): each user decides for their own setup.
+    a wait on it is `410 expired`). With Claude Code as the driver, the terms for automated use of
+    Claude differ by how Claude Code is signed in (https://www.anthropic.com/legal), and with
+    OpenCode, its model provider's terms apply: each user decides for their own setup.
   license:
     name: MIT
 servers:
@@ -36,7 +39,7 @@ paths:
     get:
       operationId: health
       tags: [agent, user]
-      summary: Is a Claude Code session listening? An agent's first call.
+      summary: Is a driver (Claude Code or OpenCode) listening, and which? An agent's first call.
       responses:
         "200":
           description: the API's version, and whether a session in workbench mode listens with the chat on
@@ -91,10 +94,10 @@ paths:
     get:
       operationId: wait
       tags: [agent, user]
-      summary: A long poll for Claude's replies after a message.
+      summary: A long poll for the driver's replies after a message.
       description: >-
         Returns at the first reply, once `done` (with `until=done`), when nobody listens, at the
-        timeout, or when Claude comes to wait on the user. A wait cut by the server restarting (a
+        timeout, or when the driver comes to wait on the user. A wait cut by the server restarting (a
         reset, or 502 to 504 from a proxy) is asked again with the same `after`.
       parameters:
         - name: after
@@ -143,7 +146,7 @@ paths:
     post:
       operationId: send
       tags: [agent, user]
-      summary: Send one message to Claude.
+      summary: Send one message to the driver.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -293,7 +296,7 @@ paths:
       summary: What a push notification shows.
       responses:
         "200":
-          description: Claude's last message for the user, or an open notice
+          description: the driver's last message for the user, or an open notice
           content:
             application/json:
               schema:
@@ -490,7 +493,7 @@ paths:
                   type: [string, number, "null"]
       responses:
         "200":
-          description: "done: wb's line, the rows after, and help when the value needs Claude's help to work"
+          description: "done: wb's line, the rows after, and help when the value needs the driver's help to work"
           content:
             application/json:
               schema:
@@ -794,7 +797,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Expired:
-      description: a message never passed to Claude, unread past 6 hours (send it again), or a screenshot pruned with its task (expired)
+      description: a message never passed to the driver, unread past 6 hours (send it again), or a screenshot pruned with its task (expired)
       content:
         application/json:
           schema:
@@ -889,7 +892,23 @@ components:
           description: this API's version
         listening:
           type: boolean
-          description: a Claude Code session in workbench mode, with the web chat on, is listening
+          description: a driver (a Claude Code or OpenCode session in workbench mode, with the web chat on) is listening
+        driver:
+          $ref: "#/components/schemas/Driver"
+    Driver:
+      type: object
+      description: >-
+        Which driver (workbench 2.2): on /health only while one listens, on the listener, and on
+        each reply as its writer. Absent from a chat before 2.2.
+      required: [tool]
+      properties:
+        tool:
+          type: string
+          enum: [claude, opencode]
+          description: claude is Claude Code, opencode is OpenCode
+        model:
+          type: string
+          description: "OpenCode's model for that session, <provider>/<id>, when its server says"
     Listener:
       type: [object, "null"]
       description: the listening session, or null when nobody listens
@@ -908,6 +927,8 @@ components:
           type: integer
         busy:
           type: boolean
+        driver:
+          $ref: "#/components/schemas/Driver"
     Upload:
       type: object
       required: [id, name, size, type, path]
@@ -936,7 +957,7 @@ components:
           type: string
         from:
           type: string
-          description: user, claude, notice, or an agent's name (with role agent)
+          description: user, claude (the driver's reply, whichever driver wrote it), notice, or an agent's name (with role agent)
         role:
           type: string
           enum: [agent]
@@ -950,19 +971,21 @@ components:
           type: object
         received:
           type: [object, "null"]
-          description: Claude's receipt of a message to it
+          description: the driver's receipt of a message to it
         expired:
           type: boolean
         re:
           type: array
-          description: on Claude's reply, the message ids it answers
+          description: on the driver's reply, the message ids it answers
           items:
             type: string
         to:
           type: array
-          description: on Claude's reply, whose those messages are (absent means the user's)
+          description: on the driver's reply, whose those messages are (absent means the user's)
           items:
             type: string
+        driver:
+          $ref: "#/components/schemas/Driver"
       additionalProperties: true
     SettingRow:
       type: object
@@ -985,7 +1008,7 @@ components:
     State:
       type: object
       description: >-
-        The state the page draws; an agent's view holds only api, messages (its own and Claude's
+        The state the page draws; an agent's view holds only api, messages (its own and the driver's
         rows to it), listener, uploads, expire and now.
       required: [api, messages, listener]
       properties:
@@ -1024,7 +1047,7 @@ components:
       properties:
         replies:
           type: array
-          description: Claude's rows after `after` that are for the caller
+          description: the driver's rows after `after` that are for the caller
           items:
             $ref: "#/components/schemas/Message"
         done:
@@ -1034,7 +1057,7 @@ components:
           $ref: "#/components/schemas/Listener"
         waiting_on_user:
           type: boolean
-          description: Claude is paused on the user's yes, not stuck
+          description: the driver is paused on the user's yes, not stuck
     SendRequest:
       type: object
       properties:

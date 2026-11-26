@@ -102,7 +102,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
-- `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API (`ask_claude.py`; `mcp_server.py`, the same over MCP, loopback only). `mod/`: the plugin (`hooks/register.tsx`, with
+- `skill/workbench/`: the `/workbench` procedure; `skill/agents/ask-workbench/`: other agents' skill for the chat's API, either driver (`ask_workbench.py`; `mcp_server.py`, the same over MCP, loopback only; `claude-workbench/`, its old path, forwards). `mod/`: the plugin (`hooks/register.tsx`, with
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `kernel/`: the PureScript kernel (`BOUNDARY.md`, its contract), built by `scripts/kernel.py` (its toolchain
   fetched by hash into `~/.cache/workbench/kernel`) into the committed `mod/hooks/kernel.js`, imported only by
