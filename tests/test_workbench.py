@@ -34814,6 +34814,54 @@ class RealOpenCodePlugin(Base):
         self.listed(url, ocplugin.PLUGIN_ID)
         self.assertTrue((self.project / f"canary-{ocplugin.PLUGIN_ID}").exists())
 
+    def test_the_workbench_agent_gets_the_opencode_rendering_of_the_skill_and_opencode_lists_one_workbench(self):
+        # #1335: the procedure on OpenCode is SKILL.md rendered for it (opencode-plugin/skill.ts):
+        # the Workbench agent's prompt, and the `workbench` skill. Two things seen live
+        # (2026-11-25): OpenCode 2.4.1 has no agent `instructions` (set, it reached no model), so
+        # the context hook adds it; and OpenCode applies ~/.claude/skills after every plugin, so
+        # Claude Code's copy, linked there by `wb setup`, replaced the plugin's until it
+        # registered again, last
+        from workbench import ocplugin
+        home = self.root / "home"
+        (home / ".claude/skills").mkdir(parents=True)
+        (home / ".claude/skills/workbench").symlink_to(ROOT / "skill/workbench")
+        os.environ["HOME"] = str(home)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = self.root / "requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out)])
+        self.addCleanup(lambda: (server.kill(), server.wait()))
+        self.conf.write_text(json.dumps({
+            "plugins": [{"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb")}}],
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 131072, "output": 1024}}}}}}))
+        url = self.serve()
+        self.listed(url, ocplugin.PLUGIN_ID)
+        end = time.monotonic() + 30
+        while True:                     # the activation's own skill update comes a moment later
+            skills = json.loads(self.ask(url, "api", "skill.list"))["data"]
+            ours = [s for s in skills if s["id"] == "workbench"]
+            if [s["path"] for s in ours] == ["skill://workbench/SKILL.md"] or time.monotonic() > end:
+                break
+            time.sleep(0.5)
+        self.assertEqual([s["path"] for s in ours], ["skill://workbench/SKILL.md"])
+        self.assertNotIn("run_in_background", ours[0]["content"])
+        self.assertFalse(ours[0]["autoinvoke"])
+        parts = sorted(s["id"] for s in skills if s["id"].startswith("workbench-"))
+        self.assertEqual(parts, sorted(f"workbench-{p.stem}" for p in (ROOT / "skill/workbench/reference").glob("*.md")))
+        for agent in ("workbench", "build"):
+            self.ask(url, "run", "--agent", agent, "-m", "cap/cap", "--format", "json", "say ok")
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        sent = [json.dumps(r["messages"]) for r in reqs if r.get("tools")]   # not the title requests
+        self.assertEqual(len(sent), 2, sent)
+        self.assertIn("You are the Workbench agent. Follow these instructions", sent[0])
+        self.assertIn("# /workbench \\u2014 an OpenCode agent writes, you review", sent[0])
+        self.assertNotIn("run_in_background", sent[0])
+        self.assertNotIn("an OpenCode agent writes", sent[1])        # Build's requests never carry it
+
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCodeSkillFiles(Base):

@@ -10,6 +10,7 @@
 import type { ServerContext, ServerPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
+import { registerAgent } from './agent.ts'
 
 export const ID = 'workbench'
 
@@ -23,7 +24,14 @@ const plugin: ServerPlugin = {
   id: ID,
   async setup(ctx) {
     if (process.env.WB_TASK) return
+    // each part's cleanup, run in reverse when OpenCode stops the plugin: a part adds its own line
+    const stops: Array<() => Promise<void> | void> = []
     await ctx.rpc.register(Workbench, { status: async () => status(ctx.options) })
+    const agent = await registerAgent(ctx).catch(() => undefined) // no skill/ to read: no agent, the rest stands
+    if (agent) stops.push(agent.stop)
+    return async () => {
+      for (const stop of stops.reverse()) await Promise.resolve().then(stop).catch(() => undefined)
+    }
   },
 }
 
