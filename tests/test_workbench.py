@@ -35918,6 +35918,32 @@ console.log(JSON.stringify({ failed }))
         sync()
         self.assertEqual(shown(), ["01", "03", "04"])
 
+    def test_a_session_opened_in_a_repo_subdirectory_runs_the_plugins_tools_there_and_never_below_it(self):
+        # #1485 (2026-11-26): a real OpenCode's session in <repo>/pkg/web says subpath "pkg/web" and
+        # location.directory "<repo>/pkg/web" already; the plugin joined the two, and every typed
+        # workbench_* tool ran wb from <repo>/pkg/web/pkg/web (ENOENT). Its session.get answer, as
+        # the tools' sessionDirs reads it, is the subdirectory itself
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        sub = self.project / "pkg" / "web"
+        sub.mkdir(parents=True)
+        url = self.serve()
+        end = time.monotonic() + 60
+        while True:                               # once the server answers
+            out = self.ask(url, "api", "POST", "/api/session", "-d", json.dumps({"location": {"directory": str(sub)}}))
+            if out.startswith("{") or time.monotonic() > end:
+                break
+            time.sleep(0.5)
+        made = json.loads(out)["data"]
+        self.assertEqual((made.get("subpath"), made["location"]["directory"]), ("pkg/web", str(sub)), made)
+        got = json.loads(self.ask(url, "api", "GET", f"/api/session/{made['id']}"))["data"]
+        script = ("const { sessionDirs } = await import(process.env.MOD)\n"
+                  "console.log(await sessionDirs({ session: { get: async () => JSON.parse(process.env.GOT) } })('s'))")
+        r = subprocess.run([shutil.which("opencode") or "opencode", "-e", script], capture_output=True, text=True,
+                           timeout=60, env={**os.environ, "BUN_BE_BUN": "1", "GOT": json.dumps(got),
+                                            "MOD": str(ROOT / "opencode-plugin" / "tools.ts")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[-1], str(sub))
+
     def test_wb_accept_tells_an_opencode_drivers_write_in_the_worktree_from_the_build_it_ran_there(self):
         # #1331's live acceptance: a real OpenCode driver's calls in a task's worktree are kept by
         # the plugin (calls.ts, execute.before/after) as claude-calls/ rows, so `wb accept` tells
@@ -41990,17 +42016,18 @@ class OpenCodeDriver(Base):
                 code = e.code
         return code, out.getvalue(), err.getvalue()
 
-    def beat(self, *sessions, ago=0.0, pid=None, **kw):
+    def beat(self, *sessions, ago=0.0, pid=None, parents=None, **kw):
         """The heartbeat the plugin's server part in server ``pid`` (default: this process, a server
         that runs) writes: these sessions, every one in its store (`store`, default the user's;
-        None: a beat that names none)."""
+        None: a beat that names none), a subagent's with its `parent` (``parents``)."""
         pid = pid or os.getpid()
         kw.setdefault("store", self.db)
         if kw["store"] is None:
             kw.pop("store")
         store.write_json(store.beat_path(pid), {
             "tool": "opencode", "pid": pid, "ts": time.time() - ago, **kw,
-            "sessions": {s: {"model": "deepseek/deepseek-flash", "variant": "fast", "dir": self.here}
+            "sessions": {s: {"model": "deepseek/deepseek-flash", "variant": "fast", "dir": self.here,
+                             **({"parent": parents[s]} if s in (parents or {}) else {})}
                          for s in sessions}})
 
     def task(self, name, phase="running", **spec):
@@ -42327,6 +42354,38 @@ class OpenCodeDriver(Base):
         self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)  # t-b's is ses_b's
         os.environ["OPENCODE_SESSION_ID"] = "ses_b"
         self.assertEqual(self.wb("wait", "--timeout", "1")[1], "[review] t-b\nt-b is ready\n")
+
+    def test_a_task_a_subagent_session_starts_is_its_leads_to_list_stop_and_wait_on(self):
+        # #1477 (2026-11-26): a subagent's session (OpenCode's task tool) has its own id, which its
+        # shell's wb start recorded: the lead's status said "open elsewhere", its /workbench-quit's
+        # wb stop --all left the task running and a bare wb wait never took its notice, while the
+        # plugin woke the lead for it. The beat names the subagent's parent, and its driver is the root
+        doc = {"pid": os.getpid(), "store": self.db, "ts": time.time(), "sessions": {
+            "ses_lead": {"dir": self.here}, "ses_kid": {"dir": self.here, "parent": "ses_lead"},
+            "ses_odd": {"parent": "not an id!"}}}
+        self.assertEqual(self.beat_in(doc), (0, "", ""))          # wb driver beat keeps the parent
+        self.assertEqual({s: r.get("parent") for s, r in store.read_json(store.beat_path(os.getpid()))["sessions"].items()},
+                         {"ses_lead": None, "ses_kid": "ses_lead", "ses_odd": None})
+        self.beat("ses_lead", "ses_kid", "ses_b", parents={"ses_kid": "ses_lead"})
+        os.environ["OPENCODE_SESSION_ID"] = "ses_kid"
+        self.assertEqual(store.opencode_session(), "ses_lead")
+        self.start("t-sub", "ok")
+        wait_phase("t-sub", {"review"})
+        self.assertEqual(store.Task("t-sub").spec["session"], "ses_lead")
+        # one recorded under the subagent's own id, before any beat named its parent
+        self.opencode_task("t-early", "ses_kid")
+        self.opencode_task("t-b", "ses_b")
+        os.environ["OPENCODE_SESSION_ID"] = "ses_lead"
+        self.assertEqual(cli._caller(argparse.Namespace())[1], ["ses_lead", "ses_kid"])
+        out = self.wb("status")[1]
+        self.assertIn("open elsewhere (other sessions'): t-b", out)
+        self.assertNotIn("t-sub", out.split("open elsewhere")[1])
+        self.assertNotIn("t-early", out.split("open elsewhere")[1])
+        self.assertIn("[review] t-sub", self.wb("wait", "--timeout", "1")[1])
+        out = self.wb("stop", "--all", "--park-waiting")[1]
+        self.assertIn("t-early", out.split("left running")[0])
+        self.assertIn("left running (other sessions'): t-b", out)
+        self.assertNotEqual(store.Task("t-early").status["phase"], "running")
 
     def test_wb_adopt_from_an_opencode_session_takes_a_gone_owners_task_and_refuses_a_live_ones(self):
         self.opencode_task("t-x", "ses_old")

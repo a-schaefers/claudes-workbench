@@ -27,6 +27,7 @@ export interface ModelRef { readonly id: string; readonly providerID: string; re
 // schema/src/session.ts `Session.Info`, the fields read here
 interface SessionInfo {
   readonly id: string
+  readonly parentID?: string                      // a subagent's session: its lead's
   readonly model?: ModelRef
   readonly location?: { readonly directory?: string }
   readonly time?: { readonly updated?: number }  // epoch ms
@@ -57,7 +58,7 @@ export interface DriverHost {
   }
 }
 
-export interface Row { model?: string; variant?: string; dir?: string; used?: number }
+export interface Row { model?: string; variant?: string; dir?: string; used?: number; parent?: string }
 export interface Beat { readonly pid: number; readonly store?: string; readonly ts: number; readonly sessions: Record<string, Row> }
 export interface Used { model: string; variant?: string; used: number }
 
@@ -137,8 +138,8 @@ export async function listAll(list: NonNullable<DriverHost['session']>['list'],
   return { rows, whole: first.length === 0 || (typeof oldest === 'number' && oldest < since) }
 }
 
-// The beat for one listing begun at ``ts`` (seconds): each session's selection and directory,
-// its last primary request's model and time over it
+// The beat for one listing begun at ``ts`` (seconds): each session's selection, directory and
+// parent, its last primary request's model and time over it
 export function beatOf(pid: number, store: string | undefined, ts: number, rows: readonly SessionInfo[],
                        used: ReadonlyMap<string, Used>): Beat {
   const sessions: Record<string, Row> = {}
@@ -151,6 +152,9 @@ export function beatOf(pid: number, store: string | undefined, ts: number, rows:
       if (v) row.variant = v
     }
     if (info.location?.directory) row.dir = info.location.directory
+    // a subagent's session names its lead: wb takes its calls for the lead's (store.opencode_root,
+    // #1477, 2026-11-26), as the wakes go to the root (notices.ts `root`)
+    if (typeof info.parentID === 'string' && info.parentID) row.parent = info.parentID
     const u = used.get(info.id)
     if (u) {
       row.model = u.model

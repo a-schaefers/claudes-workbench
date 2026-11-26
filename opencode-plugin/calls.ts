@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from '
 import { isAbsolute, join, resolve } from 'node:path'
 import type { ServerContext } from './host.d.ts'
 import { patchFiles, places, taskOfPath, type Env } from './gates.ts'
+import { dirOfSession } from './tools.ts'
 import { wbEnv } from './wb.ts'
 
 export type Row = Record<string, unknown>
@@ -151,8 +152,8 @@ export async function calls(ctx: ServerContext): Promise<(() => Promise<void>) |
   const running = new Map<string, { tasks: string[]; row: Row; at: number; name: string; home: string }>()
   const dirOf = async (sessionID: string) => {
     try {
-      const s = await sessions.get({ sessionID })
-      if (s.location?.directory) return s.subpath ? join(s.location.directory, s.subpath) : s.location.directory
+      const got = dirOfSession(await sessions.get({ sessionID }))
+      if (got) return got
     } catch { /* the plugin's location */ }
     return c.location?.directory ?? process.cwd()
   }

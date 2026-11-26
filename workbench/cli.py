@@ -3073,7 +3073,8 @@ def _caller(a) -> tuple:
     which the skill and the compaction note send Claude to, listed every session's open tasks
     as one, so one session could review, accept or discard another's (#693). From an OpenCode
     driver's tool or shell (store.opencode_session), that session's: its one id (an OpenCode
-    session keeps it) and the directory (#1309). The third value is the driver (_scope's `kind`):
+    session keeps it) and the directory (#1309), with every subagent session under it
+    (store.opencode_family, #1477). The third value is the driver (_scope's `kind`):
     `--session` given under an OpenCode driver is OpenCode's, else Claude Code's, as the mod's."""
     repo, sessions = getattr(a, "repo", None), getattr(a, "session", None)
     kind = "opencode" if store.caller_kind() == "opencode" else "claude"
@@ -3082,7 +3083,7 @@ def _caller(a) -> tuple:
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not sid:
         oc = store.opencode_session()
-        return (os.getcwd(), [oc], "opencode") if oc else (None, None, None)
+        return (os.getcwd(), store.opencode_family(oc), "opencode") if oc else (None, None, None)
     pid = os.environ.get("CLAUDE_PID", "")
     # this process's ids only: a dead one's under the same pid were taken for its own (#787)
     ids = list(dict.fromkeys([*(store.claude_sessions(pid, start=models._started(int(pid)))
