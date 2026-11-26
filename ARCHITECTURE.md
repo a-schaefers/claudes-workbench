@@ -9613,10 +9613,13 @@ batch, attempts or refix): one item per item of the code stage, once all its att
 attempts that reached review (fewer than two: `not_run`, nothing to compare). Its prompt's `{diffs}`
 (`runs._diffs_of`) carries each attempt's diff as `### a<k> (task <t>; tests passed|failed|no tests)`, each
 cut to its share of `CUTS['diff']`; only the green ones when two or more are, the rest named
-(`runs._attempts`); its schema `runs.compare_schema`: `best` and `ranking` one of the labels shown. The
-shipped best-of is code → review → choose (the `choose` card, `choice` schema `{best, ranking, why}`) →
-Claude, whose final row carries the pick and, as its trail, every attempt's task: nothing is discarded on
-the chooser's word (#1134's study: Claude read every review and most diffs, N times the handoff; SWE-agent's
+(`runs._attempts`); its schema `runs.compare_schema`: `best` and `ranking` one of the labels shown. When an
+earlier report stage reviews the same code stage, a compare item waits for its attempts' reviews too, and
+`{diffs}` carries each one's under its attempt, `Its review: {verdict, must_fix, summary}` (`runs._review_of`,
+cut at `REVIEW_CUT` 2,000; `Item.reviews`): best-of paid for three reviews that reached neither the chooser
+nor Claude (#1504). The shipped best-of is code → review → choose (the `choose` card, `choice` schema
+`{best, ranking, why}`) → Claude, whose final row carries the pick and, as its trail, every attempt's task,
+and whose report's `results` carry each review: nothing is discarded on the chooser's word (#1134's study: Claude read every review and most diffs, N times the handoff; SWE-agent's
 Chooser).
 **Escalation** (`escalate: [roles]` on a code stage, 1 to `ESCALATE_MAX` 3 distinct `routes.ROLES`): an item
 that ends null (stuck, failed, discarded), or whose review's asks are left once refix's `max` is spent (`_take`
@@ -9786,7 +9789,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb deepmode [on\|off]`, `wb workflows [on\|off]` | `--rule` (prints `runs.DEEPCODE_RULE`, the rule a host adds when the user types `deepcode`) | *Dynamic workflows (deepmode)* (#1041, #1278): `$WB_HOME/workflows.json`; off by default. One command under two names. |
 | `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--args TEXT` (a flow's slash command's line as typed: `runs.parse_args`, its one param whole, else `k=v` words), `--dry-run`, `--repo DIR` (.), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE`, `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param (a `choices` one not among them; a `files` one matching nothing committed at the base, or over `runs.FILES_MAX` 1,000), a stage on an API role with no day cap (`meter.no_cap`), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `stop: wb run stop <run>` and that its notices wake the session as a task's (without the mod or the plugin, `wb wait <run>` in the background). `--dry-run` (#1295) stops after the cap check and the budget, before any file: a line per stage (its card or code, role and side, where its items come from, those `unless_exists` skips), each items stage's first spec cut at `runs.DRY_SPEC_CUT` 1,500 characters, and the estimate (`runs.dry_run`); exit 0, or 1 on a refusal. |
 | `wb run status [<run>]` | `--all`, `--json`, `--all-sessions` (and, suppressed, `--repo DIR`, `--session ID`) | Reaps a dead driver (`runs.reap`: `stopped`, one `run_stopped`); a line per run in the caller's scope (`runs.status_line`). |
-| `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, filtered, superseded, null, not_run, pending, code, spend; every item accounted for. |
+| `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, results (each done item of a stage no later one reads, with its trail: best-of's reviews, #1504), filtered, superseded, null, not_run, pending, code, spend; every item accounted for. |
 | `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`); from the web app (`WB_ACTOR=web`, no model's variables) its why is `runs.WEB_STOP` and a `run_stopped` notice tells the run's session. Resume (refused closed or at `review`, `runs._ended`): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
 | `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items are `not_run`. |
 | `wb run feed <run> <stage> --file <json\|->` | | A `claude` checkpoint's merge: a JSON list, `inbox/<stage>-feed`; the run goes on. Refused on a closed run or one at `review`, before the inbox is written. |

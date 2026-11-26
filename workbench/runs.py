@@ -734,6 +734,7 @@ class Item:
     output: object = None
     src: str | None = None  # the key of the item it came from (the trail)
     members: list | None = None  # a batch's [(key, value)], each value carrying its key as `id`
+    reviews: dict | None = None  # a compare item's: each attempt's review, by its key (#1504)
 
 
 def member(key: str, v) -> dict:
@@ -916,6 +917,7 @@ def state(run: Run) -> dict:
             continue
         inputs: list = []
         groups: dict = {}  # a batch's or a compare item's members, by its key
+        reviewed: dict = {}  # a compare item's attempts' reviews, by its key
         if "items" in s:
             inputs = [(str(i + 1), v, None) for i, v in enumerate(_items_of(s, run, params))]
             ready = True
@@ -929,12 +931,23 @@ def state(run: Run) -> dict:
                 continue
             code_src = is_code(stage_by(flow, src) or {})
             if s.get("compare") and code_src:  # each item's attempts whole, once all of them ended
+                # and their reviews (an earlier report stage over the same code stage) too, which
+                # its {diffs} carries: best-of paid for a review per attempt that reached neither
+                # the chooser nor Claude (#1504, 2026-11-26)
+                revs = [out.get(r["id"]) for r in stages(flow) if r["id"] in out and r.get("from") == src
+                        and not (is_code(r) or r.get("compare") or r.get("final") or r.get("claude"))]
+                of: dict = {}
+                for r in revs:
+                    for i in r or ():
+                        of.setdefault(i.src, []).append(i)
                 by_item: dict = {}
                 for it in src_items:
                     by_item.setdefault(it.key.rsplit("#a", 1)[0], []).append(it)
                 for base, its in by_item.items():
-                    if all(i.state not in ("pending", "running", "waiting") for i in its):
+                    if all(i.state not in ("pending", "running", "waiting") for i in its) and None not in revs \
+                            and all(x.state not in ("pending", "running", "waiting") for i in its for x in of.get(i.key, ())):
                         groups[base] = [(i.key, i.output) for i in its if i.state == "done"]
+                        reviewed[base] = {i.key: x.output for i in its for x in of.get(i.key, ()) if x.state == "done"}
                         inputs.append((base, [v for _, v in groups[base]], None))
                 src_items = []
             for it in src_items:
@@ -980,7 +993,7 @@ def state(run: Run) -> dict:
         while (idx := idx + 1) < len(inputs):
             key, v, src = inputs[idx]
             one = re.sub(r"~r\d+", "", key)
-            it = Item(sid, key, v, src=src, members=groups.get(key))
+            it = Item(sid, key, v, src=src, members=groups.get(key), reviews=reviewed.get(key))
             row = started.get((sid, key))
             if row:
                 it.n, it.task = row.get("n"), row.get("task")
@@ -1147,6 +1160,7 @@ def _diffs_of(run: Run, stage: dict, it: Item) -> str:
     the handoff (#1134's study, SWE-agent's Chooser)."""
     rows, said = _attempts(it)
     share = CUTS["diff"] // max(1, len(rows))
+    reviews = {attempt_label(k): v for k, v in (it.reviews or {}).items()}
     parts = []
     for lab, t, ok in rows:
         try:
@@ -1155,8 +1169,20 @@ def _diffs_of(run: Run, stage: dict, it: Item) -> str:
             d = f"(no diff: {e})"
         d = d if len(d) <= share else d[:share] + f"\n[… {len(d) - share:,} characters cut]"
         state = "tests passed" if ok else "tests failed" if ok is False else "no tests"
-        parts.append(f"### {lab} (task {t.name}; {state})\n```diff\n{d or '(no changes)'}\n```")
+        parts.append(f"### {lab} (task {t.name}; {state})\n```diff\n{d or '(no changes)'}\n```"
+                     + (f"\nIts review: {_review_of(reviews[lab])}" if lab in reviews else ""))
     return said + "\n\n".join(parts)
+
+
+REVIEW_CUT = 2_000  # characters of an attempt's review a chooser's {diffs} carries
+
+
+def _review_of(v) -> str:
+    """An attempt's review as {diffs} carries it: its verdict, must_fix and summary (the review
+    schema's), else the whole result, as JSON (data), cut at REVIEW_CUT."""
+    shown = {k: v[k] for k in ("verdict", "must_fix", "summary") if k in v} if isinstance(v, dict) else {}
+    out = json.dumps(shown or v, ensure_ascii=False)
+    return out if len(out) <= REVIEW_CUT else out[:REVIEW_CUT] + f" [… {len(out) - REVIEW_CUT:,} characters cut]"
 
 
 def _attempts(it: Item) -> tuple[list, str]:
@@ -1718,9 +1744,11 @@ def reap(run: Run, quiet: bool = False) -> bool:
 # --- the report ----------------------------------------------------------------------------------
 
 def report_of(name: str) -> dict:
-    """{final: [{key, result, trail}], filtered: [{key, why, result}], null: [{key, why}], not_run:
-    [{key, why}], code: [{key, task, phase}], spend}: what the run's items returned, every item
-    accounted for (no silent caps). Agents' strings are data."""
+    """{final: [{key, result, trail}], results: [{key, result, trail}], filtered: [{key, why,
+    result}], null: [{key, why}], not_run: [{key, why}], code: [{key, task, phase}], spend}: what
+    the run's items returned, every item accounted for (no silent caps). `results`: the done items
+    of a stage no later one reads (best-of's reviews), which no report showed though each was
+    paid for (#1504, 2026-11-26). Agents' strings are data."""
     run = Run(name)
     if not run.exists:
         raise RuntimeError(f"no run {name!r} (wb run status lists them)")
@@ -1730,6 +1758,7 @@ def report_of(name: str) -> dict:
     sts = [s for s in stages(flow)]
     last = sts[-1]
     feeds = last.get("from") or next((s["id"] for s in reversed(sts[:-1])), None)
+    read = {s.get("from") for s in sts}
 
     def trail(it):
         """What ``it`` came from, nearest first: each item up the `from` chain; a batch's
@@ -1749,7 +1778,7 @@ def report_of(name: str) -> dict:
                 out.append({"stage": cur.stage, "key": cur.key, "result": cur.output})
         return out
     rep = {"run": name, "flow": flow.get("name"), "phase": run.status.get("phase"),
-           "final": [], "filtered": [], "superseded": [], "null": [], "not_run": [], "code": [], "pending": []}
+           "final": [], "results": [], "filtered": [], "superseded": [], "null": [], "not_run": [], "code": [], "pending": []}
     for s in sts:
         items = st.get(s["id"])
         if items is None and not s.get("final"):
@@ -1761,6 +1790,8 @@ def report_of(name: str) -> dict:
                 rep["code"].append({"key": k, "task": it.task, "phase": store.Task(it.task).status.get("phase")})
             if it.state == "done" and s["id"] == feeds and not is_code(s):
                 rep["final"].append({"key": k, "result": it.output, "trail": trail(it)})
+            elif it.state == "done" and s["id"] not in read and not (is_code(s) or s.get("claude")):
+                rep["results"].append({"key": k, "result": it.output, "trail": trail(it)})
             elif it.state == "filtered":
                 rep["filtered"].append({"key": k, "why": it.why, "result": it.output})
             elif it.state == "superseded":
@@ -1787,14 +1818,14 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
            + (f" · GPU {rep['spend']['gpu_min']:g} min" if rep["spend"].get("gpu_min") else "")]
     def js(v):
         return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-    for what in ("final", "filtered", "superseded", "null", "not_run", "pending"):
+    for what in ("final", "results", "filtered", "superseded", "null", "not_run", "pending"):
         rows = [r for r in rep[what] if stage is None or str(r.get("key", "")).startswith(f"{stage}:")
                 or r.get("stage") == stage]
         if not rows:
             continue
         out.append(f"{what} ({len(rows)}):")
         for r in rows:
-            if what == "final":
+            if what in ("final", "results"):
                 out.append(f"  {r['key']}: {js(r['result'])}" + (f"  ← {js([t['result'] for t in r['trail']])}"
                                                                 if r["trail"] else ""))
             elif what in ("filtered", "superseded"):
@@ -1807,7 +1838,7 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
     if stage is not None:  # a checkpoint's look at one stage: its every done item
         st = state(Run(rep["run"]))
         for it in st.get(stage) or ():
-            if it.state == "done" and not any(r["key"] == f"{stage}:{it.key}" for r in rep["final"]):
+            if it.state == "done" and not any(r["key"] == f"{stage}:{it.key}" for r in rep["final"] + rep["results"]):
                 out.append(f"  {stage}:{it.key}: {js(it.output)}")
     if rep["code"]:
         out.append("code (Claude's to review, accept or discard): "

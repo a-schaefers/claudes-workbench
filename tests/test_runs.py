@@ -991,11 +991,13 @@ class Runs(Base):
         self.assertEqual(rep["not_run"], [{"key": "judge:1.2", "why": "unjudged: judge:b1 returned nothing for it"}])
         self.assertIn("judge:1.2: unjudged", run_wb("run", "report", "bj"))
 
-    def test_best_of_has_a_chooser_read_every_attempts_diff_and_claude_gets_its_pick_with_the_attempts_kept(self):
+    def test_best_of_has_a_chooser_read_every_attempts_diff_and_review_and_claude_gets_its_pick_and_the_reviews(self):
         # best-of ran 3 builders and a reviewer per diff, and Claude read every review and most
         # diffs: N times the handoff (#1134's study); the chooser sees them side by side
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Pick the best attempt": {
-            "best": "a2", "ranking": ["a2", "a1", "a3"], "why": "a2 is the smallest"}})
+            "best": "a2", "ranking": ["a2", "a1", "a3"], "why": "a2 is the smallest"},
+            "Review this attempt": {"verdict": "changes", "must_fix": ["REVIEWER-ASK-XYZ in answer.txt"],
+                                    "nits": [], "summary": "close"}})
         run_wb("run", "start", "bo", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
                "--repo", str(self.repo))
         self.assertEqual(self.wait_run("bo", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
@@ -1004,6 +1006,16 @@ class Runs(Base):
         for a, n in (("a1", 1), ("a2", 2), ("a3", 3)):
             self.assertIn(f"### {a} (task bo-code-{n}; no tests)\n```diff\n", prompt)
         self.assertIn("+42", prompt)
+        # #1504 (2026-11-26): the three reviews were paid for and reached neither the chooser nor
+        # Claude: the chooser reads each under its attempt, and the report carries them
+        self.assertEqual(prompt.count('Its review: {"verdict": "changes", "must_fix": ["REVIEWER-ASK-XYZ in answer.txt"], '
+                                      '"summary": "close"}'), 3, prompt)
+        said = run_wb("run", "report", "bo")
+        self.assertIn("results (3):\n  review:1#a1: ", said)
+        self.assertEqual(said.count("REVIEWER-ASK-XYZ"), 3, said)
+        got = json.loads(run_wb("run", "report", "bo", "--json"))["results"]
+        self.assertEqual([(r["key"], r["result"]["must_fix"], r["trail"][0]["key"]) for r in got],
+                         [(f"review:1#a{n}", ["REVIEWER-ASK-XYZ in answer.txt"], f"1#a{n}") for n in (1, 2, 3)])
         sch = json.loads((runs.run_dir("bo") / "schemas" / f"choose-1.json").read_text())
         self.assertEqual(sch["properties"]["best"]["enum"], ["a1", "a2", "a3"])
         rep = runs.report_of("bo")
