@@ -92,6 +92,14 @@ and follows up, and it is told which driver answered. Its message is a teammate'
 your yes: spending, pushing or deleting still waits for you. The API:
 [docs/chat-api.md](docs/chat-api.md).
 
+**Can I have it in Claude Code and OpenCode at once?** Yes, both installed and `/workbench` open
+in each. They share one state directory: a task belongs to the session that started it, and only
+that session is woken for it. Either driver can accept a task you name. The GPU, the API slots and
+the day's spend cap are counted once for both. Each driver's yes in its consent dialog is its own,
+and the other driver's calls never use it up. Only the listening driver answers your phone.
+`wb doctor` lists each install and the `wb` it runs. More detail: ARCHITECTURE.md, *Both drivers
+on one machine*.
+
 ## Contributing
 
 Fixes are welcome: [CONTRIBUTING.md](CONTRIBUTING.md).

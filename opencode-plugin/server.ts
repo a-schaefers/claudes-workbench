@@ -9,6 +9,8 @@
 // second fence: set in every agent's environment, setup does nothing (#1363).
 import type { ServerContext, ServerPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
+import { calls } from './calls.ts'
+import { consent } from './consent.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
 
 export const ID = 'workbench'
@@ -24,6 +26,14 @@ const plugin: ServerPlugin = {
   async setup(ctx) {
     if (process.env.WB_TASK) return
     await ctx.rpc.register(Workbench, { status: async () => status(ctx.options) })
+    // each part's cleanup joins `stops`, and setup returns them together at its end
+    const stops: (() => Promise<void>)[] = []
+    // the consent gates first: their execute.before refusal comes before a call's row (#1314)
+    const stopConsent = await consent(ctx)
+    if (stopConsent) stops.push(stopConsent)
+    const stopCalls = await calls(ctx) // the driver's calls in claude-calls/ (#1331)
+    if (stopCalls) stops.push(stopCalls)
+    return async () => { for (const stop of stops.reverse()) await stop().catch(() => {}) }
   },
 }
 

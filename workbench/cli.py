@@ -3888,19 +3888,20 @@ HEALTH = ("out of credit", *TRANSIENT)  # passing states: a role may name it
 API_RUNS = True
 
 
-def gate_refusal(what: str, command: str) -> str:
+def gate_refusal(what: str, command: str, tool: str = "workbench_route") -> str:
     """The refusal under Claude Code when the mod's dialog approved none of this (#1014), as
     patches' for a send (#1005): nothing Claude can type is the user's yes. Under an OpenCode
-    driver (#1309) the same, naming the workbench plugin: nothing the driver types is either. In an
-    agent's shell (WB_TASK, #1310) no dialog is the agent's: its reviewer or the user decides."""
+    driver (#1309) the same, naming the workbench plugin's ``tool``, whose form asks the user
+    (#1314): nothing the driver types is either. In an agent's shell (WB_TASK, #1310) no dialog is
+    the agent's: its reviewer or the user decides."""
     if store.caller_kind() == "agent":
         return (f"in an agent's shell {what} only on the user's yes in the driver's dialog, and the "
                 f"user approved none for this change, so nothing changed. Ask the reviewer "
                 f"(ask_reviewer); or the user runs it in a terminal of their own: {command}")
     if store.caller_kind() == "opencode":
         return (f"in OpenCode {what} only through the workbench plugin's dialog, and the user "
-                f"approved none for this change, so nothing changed (is the plugin loaded?). Or "
-                f"the user runs it in a terminal of their own: {command}")
+                f"approved none for this change, so nothing changed (the plugin's {tool} tool asks "
+                f"them; is the plugin loaded?). Or the user runs it in a terminal of their own: {command}")
     return (f"in Claude Code {what} only through the workbench mod's dialog, and the user approved "
             f"none for this change, so nothing changed (is the mod loaded? wb doctor says). Or the "
             f"user runs it in a terminal of their own: {command}")
@@ -4056,7 +4057,7 @@ def start_gate(name: str, m: models.Model) -> None:
     if m.kind != "api" or not store.under_model():
         return
     if not routes.approved({"start": {"task": name, "model": m.id}, "change": start_line(name, m)}):
-        die(gate_refusal("an API model starts", f"wb start {name} … --model {m.id}"), 3)
+        die(gate_refusal("an API model starts", f"wb start {name} … --model {m.id}", "workbench_start"), 3)
 
 
 def _route_start(a) -> None:
