@@ -25467,7 +25467,7 @@ class Setup(Base):
             self.assertIn(f"ok  install: OpenCode's, at {pkg}: {said}\n", out)
             self.assertNotIn("git can't read", out)
             # Claude Code's wb link and skill aren't BAD here (#1321's finding 26), and wb setup
-            # is no answer: it refuses (below)
+            # is no answer: it links nothing (below)
             self.assertIn("--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below "
                           f"says which); for your own terminal, a clone's: git clone https://github.com/"
                           f"{ocplugin.REPO}, then bin/wb setup --opencode there", out)
@@ -25478,12 +25478,17 @@ class Setup(Base):
                 self.assertEqual(self.setup("list", cmd="patch")[0], 1)
             self.assertIn(f"wb patch works on a clone of workbench: this wb is OpenCode's install at {pkg}",
                           err.getvalue())
-            # nor links or options naming a directory OpenCode replaces on update, pinning an old wb
+            # nor links or options naming a directory OpenCode replaces on update, pinning an old wb;
+            # but First run's checklist, API keys line and all, which a refusal before it hid (#1496)
             before = Path(os.environ["WB_OPENCODE_CONFIG"]).read_text()
-            with contextlib.redirect_stderr(err):
-                self.assertEqual(self.setup("--opencode")[0], 1)
-                self.assertEqual(self.setup()[0], 1)
-            self.assertIn(f"wb setup links nothing to OpenCode's install at {pkg}", err.getvalue())
+            for args in (("--opencode",), (), ("--no-service",)):
+                code, out = self.setup(*args)
+                self.assertEqual(code, 0, out)
+                self.assertIn(f"--  wb setup links nothing to OpenCode's install at {pkg}", out)
+                self.assertIn("\nfirst run:\n", out)
+                self.assertIn("--  no API key connected (optional", out)  # step 3's tell, beside a stored key's step 2
+                self.assertNotIn("in Claude Code", out)
+                self.assertTrue(out.endswith("next: wb doctor\n"), out)
             self.assertFalse(os.path.lexists(home / ".local/bin/wb"))
             self.assertEqual(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text(), before)
         self.assertFalse(ocplugin.runs_from_cache())             # this clone isn't
@@ -25694,7 +25699,10 @@ class Setup(Base):
             lines = cli.first_run()
         self.assertTrue(lines[0].startswith("--  OpenCode isn't installed: install OpenCode 2.x"))
         self.assertIn("no model server answers here", lines[1])
-        self.assertIn("no local model registered yet: run /workbench", lines[2])
+        self.assertIn("no local model registered yet: run /workbench in Claude Code", lines[2])
+        with mock.patch.object(cli.models, "discover", return_value={}):   # OpenCode's own (#1496)
+            self.assertEqual(cli.first_run(host="opencode")[2], "--  no local model registered yet: run "
+                             "/workbench in OpenCode (the Workbench agent), and it picks one for this machine (wb scout)")
         for mid in cli.models.discover():
             self.assertNotIn(mid.split("/")[-1], tail + "\n".join(lines))  # names no model
 

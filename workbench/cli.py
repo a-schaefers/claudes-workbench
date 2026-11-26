@@ -7912,11 +7912,18 @@ def cmd_setup(a):
     ~/.claude/skills: #1296, row 8)."""
     if _install_kind() == "opencode":
         # a generation directory OpenCode replaces on its next update and later removes: links, a
-        # service unit and options naming it would outlive it, and pin the plugin to an old wb
-        die(f"wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
-            f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
-            f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
-            f"setup --opencode there")
+        # service unit and options naming it would outlive it, and pin the plugin to an old wb.
+        # The checklist still: refused before it, First run's step 1 failed on the main OpenCode
+        # install and its API keys line was never said (#1496, 2026-11-26)
+        print(f"--  wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
+              f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
+              f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
+              f"setup --opencode there")
+        print("first run:")
+        for line in first_run(host="opencode"):
+            print(line)
+        print("next: wb doctor")
+        sys.exit(0)
     links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb")]
     if not a.opencode:
         links.append((context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench"))
@@ -7974,7 +7981,7 @@ def cmd_setup(a):
     except (RuntimeError, OSError):
         pass
     print("first run:")  # what a working setup still needs, each with its fix (#111)
-    for line in first_run():
+    for line in first_run(host="opencode" if a.opencode else "claude-code"):
         print(line)
     if chat.is_on():  # where the web app is: setup printed no word of it (#1355)
         print("--  " + story.text("link.where", "opencode" if a.opencode else "claude-code"))
@@ -8098,11 +8105,13 @@ def api_key_lines(keys: dict | None) -> list[str]:
     return out + need
 
 
-def first_run() -> list[str]:
+def first_run(host: str = "claude-code") -> list[str]:
     """wb setup's checklist, one line each: OpenCode 2.x, a model server answering, a registered
     model, the API keys OpenCode holds (#1024), Landlock; a missing one says how to get it. It
     names no model: Claude picks one for this machine (wb scout), so a newer one slots in without a
-    code change. With an API key stored and no local model, the GPU lines read as optional."""
+    code change. With an API key stored and no local model, the GPU lines read as optional.
+    ``host``: "opencode" (wb setup --opencode, or from OpenCode's install) names /workbench in
+    OpenCode, not Claude Code (#1496)."""
     out = []
     good, said = _tool_version(runner.opencode_bin())
     major = re.search(r"(\d+)\.\d+", said) if good else None
@@ -8158,8 +8167,10 @@ def first_run() -> list[str]:
                    "(wb model add <p>/<m> --url <baseURL>)"
                    + (f"; {models.WSL_NAT}" if models.windows_host() else ""))
     out.append(f"ok  {len(found)} local model(s) registered" if found else NO_LOCAL_OPTIONAL if stored else
-               "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
-               "for this machine (wb scout)")
+               ("--  no local model registered yet: run /workbench in OpenCode (the Workbench agent), and "
+                "it picks one for this machine (wb scout)" if host == "opencode" else
+                "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
+                "for this machine (wb scout)"))
     # a provider of the user's that discovery passed over (another host, not opted in): its fix
     # here too, as wb doctor and wb models say it; wb setup said nothing of it (#1109, 2026-11-23).
     # One on a public host may be a hosted one added by hand: /connect too (#1109's review)
