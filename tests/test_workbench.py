@@ -30189,10 +30189,17 @@ class WebChat(Base):
         # the user's off is remembered across /workbench runs. On starts a server when none
         # answers; off stops only one wb started, and nobody listens.
         self.assertTrue(self.chat.is_on())                             # no switch.json: on
-        out = run_wb("chat", "on", "--port", str(self.port))           # one runs already: kept
+        # the phone's way in while it opens here alone (#1355), only with this OS's own tailscale
+        # CLI (#1524, 2026-11-26): the runner's PATH decides neither, so both are put here
+        from workbench import story
+        with mock.patch.object(self.chat, "tailscale_cli", lambda windows=False: "/opt/ts/tailscale"):
+            out = run_wb("chat", "on", "--port", str(self.port))       # one runs already: kept
         self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
-        from workbench import story  # and the phone's way in while it opens here alone (#1355)
         self.assertTrue(out.endswith(f"--  {story.text('link.reach')}\n"), out)
+        with mock.patch.object(self.chat, "tailscale_cli", lambda windows=False: None):
+            out = run_wb("chat", "on", "--port", str(self.port))
+        self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
+        self.assertNotIn(story.text("link.reach"), out)                # no tailscale here: no hint
         self.assertTrue(self.chat.is_on())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())
         store.write_json(self.chat.chat_dir() / "listener.json", {"session": "s", "pid": os.getpid()})
