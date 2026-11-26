@@ -4293,6 +4293,31 @@ class Lifecycle(Base):
                               capture_output=True, text=True).stdout.split()
         self.assertFalse([p for p in tree if p.startswith("dist/")], tree)
 
+    def test_an_opencode_drivers_rows_tell_its_build_from_its_hand_as_claude_codes_do(self):
+        # #1331 (2026-11-25): the OpenCode plugin keeps its driver's calls in claude-calls/ under
+        # OpenCode's own tool names (`shell`; `edit`, `write`, and `patch` with `paths`): read as the
+        # mod's, a build the driver ran is left out and a file its patch tool wrote is by hand
+        (self.repo / ".gitignore").write_text("out/\nlib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignores"], check=True)
+        self.start("t-oc", "ok", "--test", TEST_CMD)
+        wait_phase("t-oc", {"review"})
+        t = store.Task("t-oc")
+        d = context.rules_dir(t) / runner.CLAUDE_CALLS
+        d.mkdir(parents=True, exist_ok=True)
+        at = time.time()
+        (t.worktree / "out").mkdir()
+        (t.worktree / "out" / "notes.txt").write_text("x\n")                    # the build's, in the call
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "a.py").write_text("x = 1\n")                      # the patch tool's
+        end = time.time()
+        (d / f"{int(at * 1000)}-call_1.json").write_text(json.dumps(
+            {"tool": "shell", "command": "./make.sh", "cwd": str(t.worktree), "at": at, "end": end}))
+        (d / f"{int(at * 1000)}-call_2.json").write_text(json.dumps(
+            {"tool": "patch", "paths": [str(t.worktree / "lib" / "a.py")], "at": at, "end": end}))
+        self.assertEqual(runner.hand_wrote(t), ["lib/a.py"])
+        self.assertEqual(runner.hand_left(t), ["out/notes.txt"])
+
     def test_a_file_claude_writes_by_hand_beside_a_build_it_runs_is_still_refused(self):
         # #1211 (2026-11-24): telling a build's output from Claude's own files must never drop a
         # module Claude wrote (#1179): one its edit tools wrote while the build ran, one a command
@@ -26916,9 +26941,10 @@ class LocalPatches(Base):
         wt, body = self.prepared()
         self.to_fork()
         os.environ["OPENCODE_SESSION_ID"] = "ses_x"
-        ok = store.home() / "send-ok.json"
+        ok = store.home() / "send-ok.ses_x.json"            # its session's own (#1363)
         out = self.send(body)
         self.assertIn("in OpenCode wb patch send goes only through the workbench plugin's dialog", out)
+        self.assertIn("the plugin's workbench_patch_send tool asks them", out)
         self.assertIn(f'outside OpenCode: wb patch send fix-thing --title "Fix it" --body-file {body}', out)
         self.assertEqual(self.gh_argv(), [])
         self.assertFalse(self.sent())
@@ -41073,6 +41099,7 @@ class Routes(Base):
         self.assertIn("deepseek/deepseek-flash#high (API, DeepSeek)", asked["change"])
         self.assertEqual(self.route("driver", "deepseek/deepseek-flash#high")[0], 3)
         self.assertEqual(self.doc()["driver"], "ollama/qwen3.8-27b")  # refused: nothing written
+        self.ok = store.home() / "route-ok.ses_x.json"   # the plugin's yes is the session's own (#1363)
         self.approve(asked["approval"])
         self.assertEqual(self.route("driver", "deepseek/deepseek-flash#high")[0], 0)
         self.assertEqual(self.doc()["driver"], "deepseek/deepseek-flash#high")
@@ -41106,7 +41133,8 @@ class OpenCodeDriver(Base):
         super().setUp()
         self.catalog(ROUTES_CATALOG, ROUTES_AUTH)
         self.path = Path(os.environ["WB_ROUTES"])
-        self.ok = store.home() / "route-ok.json"
+        # the plugin's yes is its session's own file (store.approval_name, #1363): ses_x's here
+        self.ok = store.home() / "route-ok.ses_x.json"
         self.here = str(self.repo)
         self.db = str(Path(self.tmp.name) / "opencode.db")   # the user's OpenCode store
 
@@ -41174,9 +41202,9 @@ class OpenCodeDriver(Base):
         code, out, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.assertEqual((code, out), (3, ""))
         self.assertIn("in OpenCode a role changes only through the workbench plugin's dialog, and the user "
-                      "approved none for this change, so nothing changed (is the plugin loaded?). Or the user "
-                      "runs it in a terminal of their own: wb route trivial deepseek/deepseek-flash --day-usd 5",
-                      err)
+                      "approved none for this change, so nothing changed (the plugin's workbench_route tool "
+                      "asks them; is the plugin loaded?). Or the user runs it in a terminal of their own: wb "
+                      "route trivial deepseek/deepseek-flash --day-usd 5", err)
         self.assertFalse(self.path.exists())
         os.environ["OPENCODE_SESSION_ID"] = "not an id!"           # a malformed id is still gated
         self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 3)
@@ -41234,6 +41262,30 @@ class OpenCodeDriver(Base):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-1"
         self.assertEqual(cli._caller(argparse.Namespace())[1:], (["sess-1"], "claude"))
 
+    def test_one_drivers_yes_is_never_spent_by_the_other_drivers_call(self):
+        # #1363's matrix (2026-11-25): store.take_approval renamed route-ok.json away whether it
+        # matched or not, so a gated call of either driver, Claude Code's or OpenCode's, within
+        # seconds burned the other's yes unused. The plugin writes its session's own file
+        # (store.approval_name), which only that session's call takes
+        claude, mine, other = (store.home() / n for n in ("route-ok.json", "route-ok.ses_x.json",
+                                                          "route-ok.ses_y.json"))
+        for f in (claude, mine):
+            store.write_json(f, {"argv": ["route", "x"], "at": time.time()})
+        os.environ["OPENCODE_SESSION_ID"] = "ses_y"                        # another OpenCode session
+        self.assertIsNone(store.take_approval("route-ok.json", 120))
+        self.assertTrue(claude.exists() and mine.exists())
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        self.assertEqual(store.approval_name("send-ok.json"), "send-ok.ses_x.json")
+        self.assertEqual(store.take_approval("route-ok.json", 120)["argv"], ["route", "x"])
+        self.assertTrue(claude.exists())                                   # Claude Code's still there
+        self.assertFalse(mine.exists() or other.exists())
+        os.environ["OPENCODE_SESSION_ID"] = "../x"                         # malformed: no file is its yes
+        self.assertIsNone(store.approval_name("route-ok.json"))
+        self.assertIsNone(store.take_approval("route-ok.json", 120))
+        os.environ["CLAUDECODE"] = "1"                                     # Claude Code's call: its own file
+        self.assertEqual(store.take_approval("route-ok.json", 120)["argv"], ["route", "x"])
+        self.assertFalse(claude.exists())
+
     def test_an_agents_call_is_never_the_drivers_though_opencode_sets_its_session_id(self):
         # #1310: OpenCode re-sets OPENCODE_SESSION_ID in the agent's own shells, so WB_TASK outranks it
         # and its call is an agent's, gated as a model's (#1310's review, 2026-11-25: read as the
@@ -41254,6 +41306,7 @@ class OpenCodeDriver(Base):
             cli.start_gate("t-api", m)
         self.assertEqual(out.exception.code, 3)
         self.assertIn("in OpenCode an API model starts only through the workbench plugin's dialog", err.getvalue())
+        self.assertIn("the plugin's workbench_start tool asks them", err.getvalue())
         store.write_json(self.ok, {"start": {"task": "t-api", "model": "acme/coder-flash"},
                                    "change": cli.start_line("t-api", m), "at": time.time()})
         cli.start_gate("t-api", m)                                # the yes: passes, used once

@@ -3186,13 +3186,16 @@ def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
 # rules/<task>/claude-calls/<id>.json: the mod's row of each of Claude's own tool calls in the
 # task's worktree (a Bash command that names the task's directory or runs in it, an edit tool's
 # file there), {tool, at, end (epoch seconds; null while the call runs), command and cwd, or path,
-# denied (a call that never ran)} (#1211, #1272)
+# denied (a call that never ran)} (#1211, #1272); the OpenCode plugin's of its driver's calls the
+# same, by OpenCode's tool names (`shell`; `edit`, `write`, and `patch` with `paths`, the files
+# its patch text names: #1331)
 CLAUDE_CALLS = "claude-calls"
 # A row still running (end null) as wb reads it ends now, at most this long after it began: a
 # Bash call's limit in Claude Code is 10 minutes, and a session that died in a call never ends
 # its row (#1272)
 CALL_RUNS = 600.0
-CLAUDE_EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
+CLAUDE_EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit", "edit", "write", "patch")
+CLAUDE_SHELL_TOOLS = ("Bash", "shell")  # Claude Code's, OpenCode's (#1331)
 # A file's times may be whole seconds (HFS+, a FAT or 9p mount): what a call wrote can read up to
 # that much before the call began
 CALL_SLACK = 2.0
@@ -3229,7 +3232,12 @@ def _claude_edited(task: store.Task, calls: list[dict]) -> set[str]:
     root = os.path.realpath(task.worktree)
     out = set()
     for r in calls:
-        if r.get("tool") in CLAUDE_EDIT_TOOLS and isinstance(p := r.get("path"), str) and p:
+        if r.get("tool") not in CLAUDE_EDIT_TOOLS:
+            continue
+        paths = r.get("paths") if isinstance(r.get("paths"), list) else [r.get("path")]
+        for p in paths:
+            if not isinstance(p, str) or not p:
+                continue
             full = os.path.realpath(os.path.join(str(r.get("cwd") or root), p))
             if full.startswith(root + os.sep):
                 out.add(os.path.relpath(full, root))
@@ -3257,7 +3265,7 @@ def _claude_built(task: store.Task, calls: list[dict], since: float, kept: list[
     written by hand (#1211, 2026-11-24). A file changed while no command of Claude's ran stays
     Claude's: without the mod nothing is told apart, and dropping a hand-written file loses work
     while a false refusal costs a look."""
-    shells = [r for r in calls if r.get("tool") == "Bash" and isinstance(r.get("command"), str)
+    shells = [r for r in calls if r.get("tool") in CLAUDE_SHELL_TOOLS and isinstance(r.get("command"), str)
               and r["end"] >= since - CALL_SLACK]
     if not shells or not kept:
         return set()

@@ -18,7 +18,7 @@ import { execFile } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ServerContext } from './host.d.ts'
-import { findWb, wbEnv, wbHome } from './wb.ts'
+import { findWb, NAMESPACE_DESCRIPTION, wbEnv, wbHome } from './wb.ts'
 
 export const POLL_MS = 2_000          // a look at chat/open.json (a file read, no wb run)
 export const CHECK_MS = 60_000        // `wb chat url --json`: on or off, as the mod's CHAT_CHECK_MS
@@ -574,7 +574,7 @@ export async function chat(ctx: ServerContext): Promise<(() => Promise<void>) | 
   s.apis.push(sessions)
   l.sessions = s.apis[0]
   await c.tool.transform(editor => {
-    editor.namespace({ name: NAMESPACE, description: 'Workbench: delegated coding tasks, and its web chat' })
+    editor.namespace({ name: NAMESPACE, description: NAMESPACE_DESCRIPTION })
     editor.add(replyTool(l, run))
   })
   await sessions.hook('prompt', e => { void l.typed(e).catch(() => {}) })

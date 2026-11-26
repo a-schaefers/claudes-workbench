@@ -1473,9 +1473,9 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
                              f"{again}")
         if store.caller_kind() == "opencode":
             raise PatchError("in OpenCode wb patch send goes only through the workbench plugin's dialog, "
-                             "and the user approved none for this send, so nothing was sent (is the plugin "
-                             "installed and loaded?). Or the user runs it in a terminal of their own, "
-                             f"outside OpenCode: {again}")
+                             "and the user approved none for this send, so nothing was sent (the plugin's "
+                             "workbench_patch_send tool asks them; is the plugin installed and loaded?). Or the "
+                             f"user runs it in a terminal of their own, outside OpenCode: {again}")
         raise PatchError("in Claude Code wb patch send goes only through the workbench mod's dialog, and "
                          "the user approved none for this send, so nothing was sent (is the mod installed "
                          "and loaded? wb doctor says). Or the user runs it in a terminal of their own, "

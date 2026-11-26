@@ -8,6 +8,7 @@ import type { TuiContext, TuiPlugin } from './host.d.ts'
 import type { SplashHost } from './splash.tsx'
 import type { PaneHost } from './pane.tsx'
 import { Workbench, type Status } from './rpc.ts'
+import { consentTui } from './consent-tui.ts'
 import { noticesTui } from './notices-tui.ts'
 
 // where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
@@ -18,12 +19,14 @@ const plugin: TuiPlugin = {
   id: 'workbench',
   async setup(ctx) {
     if (process.env.WB_TASK) return
+    const stopConsent = consentTui(ctx) // the consent gates' forms (#1314)
     const stopNotices = noticesTui(ctx) // the notices' toasts and desktop notifications (#1313)
+    const stopAll = () => { stopConsent?.(); stopNotices() }
     let st: Status
     try {
       st = (await ctx.client.rpc(Workbench).status({})) as Status
     } catch {
-      return stopNotices // the server part isn't there (a server older than this TUI): nothing to say yet
+      return stopAll // the server part isn't there (a server older than this TUI): nothing to say yet
     }
     if (!st.found) {
       ctx.ui.toast.show({
@@ -43,9 +46,9 @@ const plugin: TuiPlugin = {
     try {
       const { mountPane } = await import('./pane.tsx')
       const stopPane = mountPane(ctx as TuiContext & SplashHost & PaneHost, st.home)
-      return () => { stopPane(); stopNotices() }
+      return () => { stopPane(); stopAll() }
     } catch {
-      return stopNotices // a TUI that can't load a plugin's OpenTUI views: the rest works without them
+      return stopAll // a TUI that can't load a plugin's OpenTUI views: the rest works without them
     }
   },
 }

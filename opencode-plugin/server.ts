@@ -9,7 +9,9 @@
 // second fence: set in every agent's environment, setup does nothing (#1363).
 import type { ServerContext, ServerPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
+import { calls } from './calls.ts'
 import { chat } from './chat.ts'
+import { consent } from './consent.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
 import { registerAgent } from './agent.ts'
 import { startDriver, type DriverHost } from './driver.ts'
@@ -39,6 +41,11 @@ const plugin: ServerPlugin = {
     const agent = await registerAgent(ctx).catch(() => undefined) // no skill/ to read: no agent, the rest stands
     if (agent) stops.push(async () => agent.stop())
     stops.push(await startDriver(ctx as ServerContext & DriverHost))  // the driver's heartbeat and RPC (#1316)
+    // the consent gates before the calls: their execute.before refusal comes before a call's row (#1314)
+    const stopConsent = await consent(ctx)
+    if (stopConsent) stops.push(stopConsent)
+    const stopCalls = await calls(ctx) // the driver's calls in claude-calls/ (#1331)
+    if (stopCalls) stops.push(stopCalls)
     const stopNotices = await notices(ctx) // the notices and the background jobs (#1313, #1334)
     if (stopNotices) stops.push(stopNotices)
     // the conversation's rules, what a compaction keeps, the boundary compaction; the commands (#1315)

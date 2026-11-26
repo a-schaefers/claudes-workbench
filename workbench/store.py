@@ -1005,13 +1005,34 @@ def edit_config(path: Path, read, change: str = ""):
         write_through(path, data, change)
 
 
+def approval_name(name: str) -> str | None:
+    """The file of the host's one-shot yes this caller takes (take_approval): ``name`` itself
+    (route-ok.json, send-ok.json: the Claude Code mod's, as before 2.2) for every caller but an
+    OpenCode driver, whose plugin writes `<stem>.<session>.json` for the session its form asked
+    in (route-ok.ses_x.json). With one shared file a gated call of either driver renamed the
+    other's yes away, unused, within seconds (#1363's matrix, 2026-11-25): one driver's yes
+    spent by the other's call. None for an OpenCode caller with no well-formed id: no file is
+    its yes (fail closed)."""
+    if caller_kind() != "opencode":
+        return name
+    sid = opencode_session()
+    if not sid:
+        return None
+    stem, _, ext = name.rpartition(".")
+    return f"{stem}.{sid}.{ext}"
+
+
 def take_approval(name: str, secs: float) -> dict | None:
     """$WB_HOME/<name>, the mod's dialog's one-shot yes (send-ok.json #1005, route-ok.json
     #1014), consumed: renamed away first, then read, so one call takes it whether it matches or
-    not and two calls can't both read it. None when missing, unreadable, or not written within
+    not and two calls can't both read it. An OpenCode driver's call takes its session's own
+    file instead (approval_name, #1363). None when missing, unreadable, or not written within
     ``secs`` (its `at`); the caller compares the rest."""
-    path = home() / name
-    claim = path.with_name(f".{name}.{os.getpid()}")
+    own = approval_name(name)
+    if own is None:
+        return None
+    path = home() / own
+    claim = path.with_name(f".{own}.{os.getpid()}")
     try:
         os.replace(path, claim)
     except OSError:
