@@ -430,7 +430,7 @@ open task"}`. Every answer is `{task, part, …, now}`:
   `provider_name`, `report` (the round's summary.md, or what stands instead, cut at 64 KB with
   `report_cut: true`) and `verify` (the regression check's lines, `[]` for none).
 - `diff`: against `base` (the task's base commit, or `HEAD` after `wb next`: the current step,
-  as `wb diff`): `stat` (`wb diff --stat`) and `files` (`[{path, added, deleted}]`, null counts
+  as `wb diff`, the gitignored files the agent wrote included): `stat` (`wb diff --stat`) and `files` (`[{path, added, deleted}]`, null counts
   for a binary file). With `full=1`, `diff` instead of the stat: the whole diff, or with
   `path=<one of files>` that file's (else 404 `no such file in the diff`), each line cut at
   2,000 characters (`lines_cut`: how many), or `diff: null` with `cut: true` past 256 KB. A task

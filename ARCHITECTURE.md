@@ -1317,8 +1317,8 @@ new files out, named ("left out of the review snapshot, too big to store each ro
 top-level directories with most new files while over `NEW_FILES_MAX`, then the biggest while the
 rest pass `SNAPSHOT_MAX` 32 MiB; the next review shows them again), built with `add -u` plus kept files by name: `add -A` filled the user's
 object store each round (#431). `wb
-verify` takes the tree accept would land (`landing=True`, #642). The snapshot and both diffs, and
-`wb diff`, hold the ignored files `--include` commits too (`runner.ignored_to_commit`: of
+verify` takes the tree accept would land (`landing=True`, #642). The snapshot and both diffs,
+`wb diff` and the web app's task sheet (`chat.task_diff`, #1548), hold the ignored files `--include` commits too (`runner.ignored_to_commit`: of
 `runner.accept_writes`, the agent's edit tools', its shell's and Claude's, what git ignores; added
 `add -f` in the scratch index, `force=` on `gitops.diff`, `snapshot_left` and `with_new_files`):
 without them an agent's feedback-round change to its `lib/util.py` read "the diff since your last
@@ -7317,7 +7317,8 @@ address (#534).
   --json`, which can start OpenCode. `summary` (`chat.task_summary`): phase, round, step, last,
   `created_at`/`updated_at`, model, via, provider_name, the round's report (`store.Task.report`, as
   `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`).
-  `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), `stat`
+  `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), with the
+  ignored files `--include` commits (`force=runner.ignored_to_commit`, as `wb diff`: #1548), `stat`
   and `files` (numstat); `full=1` the diff instead (`path=` one of `files`, `:(literal)`, else 404 "no
   such file in the diff"), each line cut at `transcript.JSON_LINE_CHARS` (`lines_cut`), `diff: null`
   and `cut` past `TASK_DIFF_CHARS` 256 KB (`gitops.diff`'s `limit`: never held whole); no worktree or
@@ -11761,7 +11762,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/src/app.ts`'s strip; **`wb status`, `report`, `diff` and
   `log`'s words** → the web chat's task sheet (`chat.task_summary`, `task_diff`, `task_log`; app.ts's `drawSummary`,
   `drawDiff`, `drawLog`), through the helpers both read: `store.Task.report`, `verify.report_lines`,
-  `gitops.diff_base`/`diff_tip`, `transcript.log_body`/`LOG_KINDS` (#1201); **the `routed` watch kind** → the mod's
+  `gitops.diff_base`/`diff_tip`, `runner.ignored_to_commit` (#1548), `transcript.log_body`/`LOG_KINDS` (#1201); **the `routed` watch kind** → the mod's
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126); a role's
