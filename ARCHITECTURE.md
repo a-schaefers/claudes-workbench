@@ -3758,6 +3758,8 @@ The wake is a compare-and-set: `wb ack <task> <ts>` raises `acked` under the `ac
 `ts` (`cli.claim_ack`, shared with `wb wait`); exit 3 wakes no one. An undelivered wake is released
 by `wb ack <task> <prev> --if <ts>` (`cli.release_ack`), only while the mark is still that `ts`
 (#786). A `wb` that can't run leaves the mod's own write, which only raises the mark (`raiseAck`).
+A run's own notices (`run`, no `task`: *Deep workflows*) take the same path through `deliverRuns`, with `--run`
+on each `wb ack`; read as a task named `''` before #1278's S9, they woke no one.
 Two live sessions in one repo keep their own; a task with a `session` but no `claude_pid` stays its
 session's. One without a `session` goes by
 directory: its `repo` is or is inside the session's directory, or the session's directory is inside
@@ -6358,9 +6360,9 @@ starts could not start anyway). **Off**: the skill's rule, one task at a time, a
 `/workbench`'s text when that comes first) while delegating or with a task open, as `wanted` reads;
 a change either way reaches the conversation as one `[workbench]` row (`sayRules`: the rule, or
 `WORKFLOWS_OFF`), however made. The rule (#1278): a substantive request is a deep workflow, the skill's *Deep
-workflows*: a flow picked (`wb run flows`) and said in at most three lines, `wb run start` once, then `wb wait
-<run>` in the background, again after each (the mod wakes Claude for no run row yet: told only "don't poll",
-Claude was never woken, the review of #1278); never several tasks Claude starts at once itself (the run's driver
+workflows*: a flow picked (`wb run flows`) and said in at most three lines, `wb run start` once, then the turn
+ends and the run's notices wake Claude as a task's do (the mod's `deliverRuns`, #1278's S9; before it the wake was
+a background `wb wait <run>`: told only "don't poll", Claude was never woken, the review of #1278); never several tasks Claude starts at once itself (the run's driver
 starts its items, each `--group <run>`: task.json `group`, #1048, the pane draws a group's tasks under one header;
 nothing is guessed from names, which would join `fix-crash` and `fix-menu`); each result reviewed on its own,
 merged logic first, then tests, then UI or docs. Each task runs on its own role's model;
@@ -7118,7 +7120,13 @@ address (#534).
   the queued, three at most, then `+N more`, and `.tasks` is clamped to three lines: a
   25-task backlog took the screen from the thread on a phone, the queued read as running (#1097); the
   stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
-  task's own status write; a tap on the strip opens the task sheet, `GET /api/task` below), now}`. `build`
+  task's own status write; a tap on the strip opens the task sheet, `GET /api/task` below), runs
+  (`chat.open_runs`, #1278's S12: `runs.snapshot(live=False)`'s rows without `session`, `cwd` or `alive`, a
+  `ps` each on macOS on every state built, `[{run, flow, phase, why, stages: {id: {done, running, null,
+  filtered, not_run}}, spent_usd, budget_usd, budget_min, gpu_min}]`
+  for each run not closed; the page's runs strip over the tasks', `.runs`, two lines at most: `Run: night
+  (audit) · running · find 1/3 · $0.25 of $2.00`, each stage's items done of all, `RUNS_SHOWN` 2 named and
+  `+N more`; a tap opens Settings at the `workflows` group; none for an agent's token), now}`. `build`
   (`chat.build`, a crc32 of the served page files' names, mtimes, sizes: `chat_static/`'s files with a
   `TYPES` suffix, never `src/`, #1323) makes a stale page reload.
 - `GET /api/shot?task=&n=&side=base|candidate`: a PNG, only for a task passing `store.NAME_RE`, an
@@ -7408,14 +7416,15 @@ still helps with one when the user asks (the owner, 2026-11-24). Every row the p
 entry in `workbench/settings.py`, under the pane's old key and making its old `wb` call, so a new
 setting touches only Python. The chat server draws from it (#1280); nothing in it serves HTTP.
 
-- `GROUPS` (`shared`, `gpu`, `api`, `setup`, `terminal`, `experimental`: display order), `KINDS`.
+- `GROUPS` (`shared`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental`: display order), `KINDS`.
 - `rows(fresh=False) -> list[dict]`: every row, kept `ROWS_CACHE_S` 10 s (`fresh` reads again);
   `reads(fresh=False)`, the same cache's `{routes, models}` (`wb route --json`, `wb models --json`,
   or None); `drop()` forgets it.
-- `apply(key, value, by="web") -> {ok, said, help?}`: `KeyError` for no such row, `ValueError` for
+- `apply(key, value, by="web") -> {ok, said, help?, detail?}`: `KeyError` for no such row, `ValueError` for
   a value it doesn't take (a read-only row, a value off its choices, a number not positive; nothing
   runs), or a `by` not in `BY` (`web`, `claude`). `said` is the child's last non-empty stdout line,
-  or its stderr's on failure.
+  or its stderr's on failure; a run's Summary's is its report's first line, and `detail` the report,
+  cut at `RUN_DETAIL_CHARS` 16,000.
 - `child_env(by="web")`: `os.environ` minus `chat.CLAUDE_VARS` (`CLAUDECODE`, `CLAUDE_PID`,
   `CLAUDE_CODE_SESSION_ID`, `OPENCODE_SESSION_ID`: the one list `chat.start` scrubs too), plus `WB_ACTOR=web` (`ACTOR`);
   `by="claude"` (`wb settings set`, #1287): the caller's own, minus `WB_ACTOR`, so wb gates the
@@ -7425,7 +7434,8 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   `wb settings set --dry-run` prints it, for the mod's dialog.
 - `record(before, key, value, done, by)`: the change's row of `settings-changes.jsonl` (`chat.admin_set`'s
   with `by` `web`, `wb settings set`'s with `store.caller_kind`'s), and chat/settings-rev.json's
-  stamp of it; None, nothing written, for a `choice` or `number` set to the value it had (#1355).
+  stamp of it; None, nothing written, for a `choice` or `number` set to the value it had (#1355), or a
+  key in `NOT_RECORDED` (`run-`: a run's Stop or Summary changes no setting; its Stop is a notice).
 - `changes(n)`, `changed()`, `rev()`: the newest changes (`{ts, key, label, from, to, by}`, newest
   first, never `said`), each key's newest within `CHANGED_FOR` (7 days; `rows()` puts it on its row as
   `changed`), and the stamp (*The Settings view (settings.ts)*, who changed what).
@@ -7451,7 +7461,7 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   conversation goes), the pin added when not listed; without it an info row, `Claude Code
   (fixed)` (`settings.DRIVER_CLAUDE`);
   `role-<significant|trivial|writing>` → `wb route <role> gpu|api`; `coding` → `wb coding
-  only|ask|decide`; `workflows` → `wb workflows on|off`; `cap` (number, usd) → `wb route cap <v>|off`;
+  only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`;
   `progress` → `wb progress on|off` (On names an `--after` threshold). No `record`, `live`,
   `every` or `price` row: #1322 took Stats recording, Live view, Live refresh and the electricity
   price from the pane's Settings (recording is always on; `wb stats set` and `wb savings --price`
@@ -7472,6 +7482,11 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   `setup-runs` (formatter, lsp, MCP servers), `setup-kept` (what is dropped or denied), each only
   when it has something but the first two, then `setup-size` (the prompt's tokens); a read that
   fails is one `setup-why` note.
+- *workflows* (#1278's S12): `workflows` → `wb workflows on|off`; `run-<run>`, an action per run not closed
+  (`runs.snapshot`), its text `settings.run_text` (flow, phase, `(no driver)` when open with none, each stage's
+  counts, spend of the budget, GPU minutes, why when not running), its choices `stop` (`RUN_STOP`, only while
+  open, `runs.OPEN`) → `wb run stop <run>` and `summary` (`RUN_SUMMARY`, the morning's look at an overnight run)
+  → `wb run report <run>`, the answer's `detail`; `flows` (info: the shipped and the user's flows, `FLOWS_SAY`).
 - *terminal*: `splash` → `wb splash on|off`. *experimental*: `probe` → `wb experiment probe on|off`.
 
 Dropped: the pane's web chat switch (the web app is always on) and Wake Claude (a plugin option, set
@@ -7569,8 +7584,9 @@ alone, and a generic renderer: a new setting touches only Python.
   own write (`by: "web"` while a POST waits or within 5 s of one). The first state only sets the
   mark. Last writer wins: no lock.
 - **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
-  order with their names: `shared` "Agents and roles", `gpu` "GPU", `api` "API", `terminal`
-  "Terminal", `experimental` "Experimental"; a group the table adds later follows, under its key. A
+  order with their names: `shared` "Agents and roles", `gpu` "GPU", `api` "API", `setup` "What your agents get",
+  `workflows` "Deep workflows", `terminal` "Terminal", `experimental` "Experimental"; a group the table adds later follows, under
+  its key. The runs strip's tap (app.ts, a `wb-settings-group` event) brings the `workflows` card into view. A
   `note` row is a muted line in its place, and the group's other rows are drawn beside it (with the
   routes unreadable, the shared group's note sits over Claude coding and the rest); a group with no
   rows has no card.
@@ -7586,7 +7602,8 @@ alone, and a generic renderer: a new setting touches only Python.
   - `number`: a text input (`inputmode=decimal`) with its unit (`usd` `$` … `/day`) and an Off
     button (`.set-off`, pressed while the value is null). Enter sends the value, blur a changed
     one; an empty box sends nothing, since Off is the button's.
-  - `action`: its `text`, then a button per choice, disabled while its click waits.
+  - `action`: its `text`, then a button per choice, disabled while its click waits; an answer's `detail`
+    (a run's Summary) under it as text alone (`pre.set-detail`, agent-written results among it), kept until a reload.
   - `info`: its `text` as a muted line.
 - **The owner's click is the yes** (the owner, 2026-11-24: "We trust Claude"; the server runs wb as
   the user, ungated, as at the terminal). No confirm step, no warning. A click sends even the value
@@ -9265,6 +9282,12 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   on the store, sends the same id, and OpenCode's inbox gives back the first admission
   (`session/inbox.ts` `reconcile`): a resend is idempotent and silent, never an error. `wb ack`
   stays the once-only guarantee.
+- **A run's own notices** (#1278's S9, `deliverRuns`, `parseRunLines`: rows with `run` and no `task`):
+  delivered to the session here that ran `wb run start` (run.json `session` with `session_kind`
+  `opencode`, judged as a task's), by core.ts's `runNoticesDue` and `runNoticePlan` (still true while
+  the run is in the row's `phase`), `wb ack <run> <ts> --run`, then a queued synthetic, `noticeId("run:<run>",
+  kind, ts)`, its text the row's whole, the toast `run <run> <RUN_HEADLINE>`; refused, `wb ack <run> <prev>
+  --run --if <ts>` and the next look tries again (no net for a run). *Deep workflows* has the row.
 - **The net** (`rewake`, the kernel's `rewakePlan`): a task of a session here waiting on its driver
   a minute after its last status change, its news never had (`acked` below its newest notice,
   this load's or its `noticed` mark, or with none below its change), wakes the idle session once:
@@ -9618,10 +9641,21 @@ The estimate: each card's `est` × `meter.price` for the stages whose items are 
 **Notices** (`runs.Run.notify`; *Waking Claude, exactly once*): `run_checkpoint`, `run_done`, `run_paused`,
 `run_stopped`, `run_failed`, each text the wake whole, opening `[workbench] Run `<run>` <headline>:`
 (`runs.HEADLINE`; the opening `spend.RUN_WAKE_OPENING`), which `spend.RUN_WAKE` charges to the run's tasks (its journal's, `runs.tasks_of`, archived
-too; never by the name's prefix, which charged a user's own `<run>-x`). `wb wait <run>` and `wb wait` take them
-(`runs.due`), `wb ack <run> <ts> --run` is a host's claim. The mod wakes Claude for no run row yet, so the skill
-and the mod's `WORKFLOWS_RULE` have Claude wait with `wb wait <run>` in the background, again after each
-(`wb run start` says so). A driver that died with the run open (a reboot, a kill) is found by `wb status`, `wb
+too; never by the name's prefix, which charged a user's own `<run>-x`). Each row is `{ts, run, kind, phase,
+text}`, no `task`: `phase` (`runs.NOTICE_PHASE`) is the run's phase it was raised in, and a notice is still true
+only while the run is in it (a pause since resumed, a checkpoint since fed, is acknowledged unsaid). Both hosts
+deliver them (#1278's S9) as a task's, to the session the run is `mine` to (run.json's `session` and
+`session_kind`, else by directory: a scheduled run's is the session near its repo; the kernel's `owns`), once,
+while still true: core.ts's `runNoticesDue` (the kernel's `noticesDue` over the run rows, keyed by run) and
+`runNoticePlan` (`noticePlan`, its kind the raised-in phase), the mod's `deliverRuns` (register.tsx) and the
+plugin's `NoticeLane.deliverRuns` (notices.ts), held through a busy turn, the text the wake whole, a toast
+`workbench: run <run> <RUN_HEADLINE>`. The claim is `wb ack <run> <ts> --run` (`Run.claim_ack`, the
+compare-and-set `wb wait` shares), and a dropped wake's rollback `wb ack <run> <prev> --run --if <ts>`
+(`Run.release_ack`); with no rewake for a run, the mod reads notify.jsonl again at its next poll. `wb wait <run>`
+and `wb wait` take them too (`runs.due`, skipping one no longer true): the skill's wait without the mod (or with
+the plugin's `wake` off), as `wb run start`'s last line says. The web app's Stop (`wb run stop` under
+`WB_ACTOR=web`, the Settings run row) stops the run as `runs.WEB_STOP` and raises a `run_stopped` for its
+session; Claude's own `wb run stop` raises none. A driver that died with the run open (a reboot, a kill) is found by `wb status`, `wb
 run status` or `wb wait` (`runs.reap`, after a 5 s grace): `stopped`, one `run_stopped`. A restart's or `wb update
 --stop`'s batch notice (`cli._restart_notice`, `_stop_for_update`) holds a run's items apart from the user's own
 tasks (`cli._batch_key`: the owner, and the run): one batch led by a run item went to the run and acknowledged
@@ -9641,10 +9675,11 @@ flow import X.md` (`runs.import_command`) writes a flow of yours (`$WB_FLOWS/<na
 over the list param `items` (a code stage, or `--card`'s), its prompt the command's body with `$ARGUMENTS` as
 `{item}` (appended when absent) and its own braces kept as text, `description` from the frontmatter; a positional
 `$1` is refused. **The host side**: the keywords, `/deepmode` and the flows' own slash commands are in both hosts (*The keywords*, under
-*Dynamic workflows (deepmode)*; the mod's `registerFlows`, the plugin's `flows.ts`); the mod's wake for a run row and the web chat's run strip and Settings rows are
-not made yet, but the mod's `WORKFLOWS_RULE`:
-`runs.keywords`, `tests/fixtures/keywords.json`, `runs.DEEPCODE_RULE` (`wb deepmode --rule`), the run rows and
-`wb top --json`'s `runs` are its seam.
+*Dynamic workflows (deepmode)*; the mod's `registerFlows`, the plugin's `flows.ts`), and so are the run notices'
+wake (above). The web app has the runs strip over the thread (`chat.open_runs` in the state, *The web chat*) and
+the Settings group `workflows` (*The admin table (settings.py)*): deepmode, a row per run not closed with its Stop
+and its Summary, and the flows. `runs.keywords`, `tests/fixtures/keywords.json`, `runs.DEEPCODE_RULE` (`wb
+deepmode --rule`), the run rows and `wb top --json`'s `runs` are the hosts' seam.
 
 ## Every `wb` command
 
@@ -9689,10 +9724,10 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb settings [set KEY VALUE \| offers]` | `--json`; `set`: `--dry-run`, `--json`; `offers`: `--if-due`, `--json` | The web app's Settings rows (*The admin table (settings.py)*, *Claude's writes*, #1287): every row by group with its choices (`cli.settings_lines`); `set` runs `settings.apply(by="claude")` (a role's row gated as `wb route` is, the mod's dialog reading `--dry-run --json`), prints wb's line and the row's `help`, appends to settings-changes.jsonl; exit 2 no such key or value, 3 wb refused. `offers` (#1334, the OpenCode plugin's, *Background jobs on OpenCode*): `settings.offers`, the settings-changes.jsonl rows `by: "web"` newer than settings-offered.json's mark and under `OFFER_MAX_AGE_S` (an hour) old, `{"offers": [{ts, key, label, text, toast}], "notes": [{ts, key, text}]}` (a row with `help` an offer, `change_said` and its help; the rest notes, but `SAID_ELSEWHERE`'s keys), plain the texts; `--if-due` records the newest as said under its lock. |
 | `wb experiment [<name> [on\|off]]` | | *Experiments* (`cli.experiment_lines`, `context.EXPERIMENTS`, use over `USE_RECENT` 5 rows, `cli.use_recent`); sets `experiments.json` for later tasks; old probe levels `context.OLD_LEVELS` mean on; `; on is recommended` while `context.PROBE_RECOMMENDED`. |
 | `wb deepmode [on\|off]`, `wb workflows [on\|off]` | `--rule` (prints `runs.DEEPCODE_RULE`, the rule a host adds when the user types `deepcode`) | *Dynamic workflows (deepmode)* (#1041, #1278): `$WB_HOME/workflows.json`; off by default. One command under two names. |
-| `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--args TEXT` (a flow's slash command's line as typed: `runs.parse_args`, its one param whole, else `k=v` words), `--dry-run`, `--repo DIR` (.), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE`, `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param (a `choices` one not among them; a `files` one matching nothing committed at the base, or over `runs.FILES_MAX` 1,000), a stage on an API role with no day cap (`meter.no_cap`), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `stop: wb run stop <run>` and to wait for its notices with `wb wait <run>` in the background. `--dry-run` (#1295) stops after the cap check and the budget, before any file: a line per stage (its card or code, role and side, where its items come from, those `unless_exists` skips), each items stage's first spec cut at `runs.DRY_SPEC_CUT` 1,500 characters, and the estimate (`runs.dry_run`); exit 0, or 1 on a refusal. |
+| `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--args TEXT` (a flow's slash command's line as typed: `runs.parse_args`, its one param whole, else `k=v` words), `--dry-run`, `--repo DIR` (.), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE`, `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param (a `choices` one not among them; a `files` one matching nothing committed at the base, or over `runs.FILES_MAX` 1,000), a stage on an API role with no day cap (`meter.no_cap`), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `stop: wb run stop <run>` and that its notices wake the session as a task's (without the mod or the plugin, `wb wait <run>` in the background). `--dry-run` (#1295) stops after the cap check and the budget, before any file: a line per stage (its card or code, role and side, where its items come from, those `unless_exists` skips), each items stage's first spec cut at `runs.DRY_SPEC_CUT` 1,500 characters, and the estimate (`runs.dry_run`); exit 0, or 1 on a refusal. |
 | `wb run status [<run>]` | `--all`, `--json`, `--all-sessions` (and, suppressed, `--repo DIR`, `--session ID`) | Reaps a dead driver (`runs.reap`: `stopped`, one `run_stopped`); a line per run in the caller's scope (`runs.status_line`). |
 | `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, filtered, superseded, null, not_run, pending, code, spend; every item accounted for. |
-| `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`). Resume (refused closed or at `review`, `runs._ended`): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
+| `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`); from the web app (`WB_ACTOR=web`, no model's variables) its why is `runs.WEB_STOP` and a `run_stopped` notice tells the run's session. Resume (refused closed or at `review`, `runs._ended`): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
 | `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items are `not_run`. |
 | `wb run feed <run> <stage> --file <json\|->` | | A `claude` checkpoint's merge: a JSON list, `inbox/<stage>-feed`; the run goes on. Refused on a closed run or one at `review`, before the inbox is written. |
 | `wb run close <run>` | | Refused while a code item is open (accept or discard it); stops the driver, discards report items never taken, writes `result.json`, phase `closed`. |
@@ -9716,7 +9751,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Watching
 | Command | Flags | What it does |
 |---|---|---|
-| `wb wait [<task>]` | `--timeout S` (0 none); unnamed: `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` (that batch's tasks alone, whichever session's: a scheduled run's headless Claude, which would otherwise take the repo's daytime tasks by directory, #1204) | Reaps, blocks (inotify), prints `[<kind>] <task>\n<text>`, claiming it (`cli.claim_ack`: one waiter or the mod wins, #696); skips notices no longer true. Named: closed exits 2; taken elsewhere "(already delivered once)"; no notice `[<phase>] <task> (no notice: <last>)`. Bare, no open task: exit 2. A run named (#1278, `cli._wait_run`): its next notice (`runs.due`), `[<kind>] run <run>`; unnamed, the caller's runs' notices (`runs._runs_in_scope`) come before its tasks'. |
+| `wb wait [<task>]` | `--timeout S` (0 none); unnamed: `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` (that batch's tasks alone, whichever session's: a scheduled run's headless Claude, which would otherwise take the repo's daytime tasks by directory, #1204) | Reaps, blocks (inotify), prints `[<kind>] <task>\n<text>`, claiming it (`cli.claim_ack`: one waiter or the mod wins, #696); skips notices no longer true. Named: closed exits 2; taken elsewhere "(already delivered once)"; no notice `[<phase>] <task> (no notice: <last>)`. Bare, no open task: exit 2. A run named (#1278, `cli._wait_run`): its next notice still true (`runs.due`), `[<kind>] run <run>`; unnamed, the caller's runs' notices (`runs._runs_in_scope`) come before its tasks'. |
 | `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` | Reaps. A line per open task; `?` when its runner died within `REAP_GRACE`; a `via` column (`gpu`, `api`) before the model, 24 wide (`cli.status_model`: an API task's `provider/model`, the provider never cut, a vendor segment between cut to `…/` and the model's own name, the id's last segment, kept, its end when it alone overflows, `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash` as `deepinfra/…ek-V4.1-Flash`: two models of one vendor read apart, #1117; a GPU task's last segment, #1016). Named: `worktree:`, `cli.use_line`, `experiments_off`. Parked tasks fold into one `parked by wb stop --all …` line without `--all` (#541); scoped, `open elsewhere (other sessions'): …`. Unnamed, a line per run in the scope after the tasks (`cli._run_lines`, `runs.status_line`), a dead driver reaped first. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden, the pane's), `--last N` (hidden), `--export` (hidden, the OpenCode plugin's child sessions) | `transcript.follow`; default the latest open task, never a bench replay (#555). The header's `routed:` line, and with `--json` a `routed` row after `meta` (`transcript.routed_text`, #1016). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The events, one line per `transcript.LOG_KINDS` kind (`EVENT_KINDS`, `text`, `tool`; `transcript.log_body`, which the web chat's task sheet shows too, #1201) (#861); `-n` counts printed lines, `step` rows dropped first (#861); `-f` follows until it needs Claude, reaping, flushing (#90, #545). |
@@ -9724,7 +9759,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb diff <task> [paths…]` | `--stat`, `--all` | Against the base or the last step (`--all`: the branch; `gitops.diff_base`, which the web chat's task sheet uses too, #1201), with the ignored files `--include` commits (`runner.ignored_to_commit`, #1259); worktree gone: the git command up to `tip` (`gitops.diff_tip`, #477). |
 | `wb top` | `--json`, `--every S` (0.2 to 3600; stats.json `every`, else 2) | GPUs, tasks, models, the lease queue, the runs not closed (`--json`'s `runs`). Never a model call, load or export. |
 | `wb adopt <task>` | `--session ID…` (required under Claude Code, exit 2 without; from an OpenCode driver `OPENCODE_SESSION_ID`), `--pid PID` (`CLAUDE_PID`, else wb's parent) | The mod's (#687): a task whose Claude Code process is gone becomes the claimer's (`session`, `claude_pid`, `claude_start`, `claude_machine`; an OpenCode task's `driver` dropped once its session is `gone`, which wb permits and the mod never asks for); exit 1 while it lives or ran elsewhere (#922). From an OpenCode driver without `--pid` (`cli._adopt_opencode`, #1309): the task becomes the session's (`session`, `driver`; the Claude keys dropped), from either driver, exit 1 while its owner isn't known gone (*The OpenCode driver*). |
-| `wb ack <task> <ts>` | `--if TS` (roll back an undelivered wake: `cli.release_ack`), `--run` (name is a run: its `acked`, `runs.Run.claim_ack`, #1278) | The mod's, before a wake (`cli.claim_ack`); exit 3 when taken first (#786). |
+| `wb ack <task> <ts>` | `--if TS` (roll back an undelivered wake: `cli.release_ack`; a run's, `runs.Run.release_ack`), `--run` (name is a run: its `acked`, `runs.Run.claim_ack`, #1278) | The mod's, before a wake (`cli.claim_ack`); exit 3 when taken first (#786). |
 | `wb events` | | `{"hello", "start", "parent", "parent_start", "machine"}` (`store.machine`, #922), then `{"changed": [paths]}` on `$WB_HOME` changes (not worktrees, rounds, closed tasks, rules, imports, media, bench, link targets, logs, locks, temp or dotfiles); reaps each minute; exits with its parent. The mod's ears. |
 
 ### Models, skills, lessons, notes
@@ -11101,7 +11136,7 @@ doc needs its own `!/` line).
   is the one each host names as acting next; modeline.ts's `modeline(link, cols, name)` (`MODELINE` by default,
   `Workbench` in OpenCode); the colour names `Part` uses → `pane-view.ts`'s `TOKEN`; `wb watch --json`'s and `wb diff`'s
   output → `pane.ts`'s `parseLines`, `diffLines`; the owner keys `owns` reads → `pane.ts`'s `PaneTask`.
-- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ `mod/hooks/keywords.ts` (both hosts' detection; the root package.json's `files` brings it to the OpenCode plugin, `opencode-plugin/test/deep.test.ts` reads the fixture); `runs.PLACES`' `{report}` ↔ the shipped build, fix and best-of reviews and the review card; `runs.compare_schema`'s `best` and `ranking` ↔ `agent/schemas/choice.json` and the choose card; `runs.answers_key` (an array of objects requiring `id`) ↔ judgments' and triage's schemas; an item key's suffixes (`#a<k>` attempts, `#e<k>` escalations, `~r<k>` refixes, `.<j>` splits) ↔ `runs.escalation`, the compare stage's grouping and `attempt_label`; `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip; `wb run flows --json` (`runs.flow_rows`) ↔ `mod/types/wire.d.ts`'s `FlowRow` ↔ `mod/hooks/flows.ts` (both hosts' flow commands; the root package.json's `files` and `opencode-plugin/package.json`'s `flows.ts`), `FLOW_NOTE`'s `--args` ↔ `runs.parse_args` ↔ `tests/fixtures/flow_args.json`; `runs.RESERVED_COMMANDS` ↔ the mod's and the plugin's own command names and both hosts' built-ins; `runs.PARAM_KEYS`, `FILE_KEYS`, `unless_exists` ↔ deep.md; a copy's `from` ↔ `runs.FLOW_KEYS`, `cards.KEYS` and `schema.load`'s drop; a flow schedule's run name `<name>-YYMMDD[-N]` ↔ `schedule.FLOW_NAME_MAX` and `runs.RUN_RE`.
+- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ `mod/hooks/keywords.ts` (both hosts' detection; the root package.json's `files` brings it to the OpenCode plugin, `opencode-plugin/test/deep.test.ts` reads the fixture); `runs.PLACES`' `{report}` ↔ the shipped build, fix and best-of reviews and the review card; `runs.compare_schema`'s `best` and `ranking` ↔ `agent/schemas/choice.json` and the choose card; `runs.answers_key` (an array of objects requiring `id`) ↔ judgments' and triage's schemas; an item key's suffixes (`#a<k>` attempts, `#e<k>` escalations, `~r<k>` refixes, `.<j>` splits) ↔ `runs.escalation`, the compare stage's grouping and `attempt_label`; `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` and the plugin's (upkeep.ts) ↔ SKILL.md's *Deep workflows* step 2 (end the turn: the notices wake; `wb wait <run>` without the mod, skill.ts's line for wakes off) ↔ `wb run start`'s last line; a run notice's row (`run`, no `task`, `phase` from `runs.NOTICE_PHASE`) ↔ core.ts's `runNoticesDue`/`runNoticePlan` ↔ the mod's `deliverRuns` and `RUN_HEADLINE` ↔ the plugin's `deliverRuns`, `parseRunLines`, `RUN_HEADLINE`, `RUN_NAME` (`runs.RUN_RE`) ↔ `runs.due`; `wb ack --run --if` ↔ both hosts' `release`; `runs.WEB_STOP` ↔ settings.py's `RUN_STOP` (said to the session); `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's run strip, and ↔ `chat.open_runs` (`RUN_FIELDS`) ↔ `mod/types/wire.d.ts`'s `OpenRun` ↔ app.ts's runs strip; settings.py's `run-<run>` rows (`stop` → `wb run stop`, `summary` → `wb run report`, `detail`) ↔ settings.ts's `pre.set-detail` ↔ docs/chat-api.md; `wb run flows --json` (`runs.flow_rows`) ↔ `mod/types/wire.d.ts`'s `FlowRow` ↔ `mod/hooks/flows.ts` (both hosts' flow commands; the root package.json's `files` and `opencode-plugin/package.json`'s `flows.ts`), `FLOW_NOTE`'s `--args` ↔ `runs.parse_args` ↔ `tests/fixtures/flow_args.json`; `runs.RESERVED_COMMANDS` ↔ the mod's and the plugin's own command names and both hosts' built-ins; `runs.PARAM_KEYS`, `FILE_KEYS`, `unless_exists` ↔ deep.md; a copy's `from` ↔ `runs.FLOW_KEYS`, `cards.KEYS` and `schema.load`'s drop; a flow schedule's run name `<name>-YYMMDD[-N]` ↔ `schedule.FLOW_NAME_MAX` and `runs.RUN_RE`.
 - **The wb the mod runs** (`findWb` in register.tsx: `WB_BIN`, `wb` on PATH, `~/.local/bin/wb`) → `cli.mod_wb`, what wb
   doctor says the mod runs, and wb setup's PATH note (#1200).
 - **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).

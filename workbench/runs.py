@@ -89,6 +89,12 @@ TICK_S = 30.0          # the driver's longest sleep: woken by its notices and th
 KINDS = ("run_checkpoint", "run_done", "run_paused", "run_stopped", "run_failed")
 HEADLINE = {"run_checkpoint": "needs Claude", "run_done": "is done", "run_paused": "is paused",
             "run_stopped": "stopped", "run_failed": "failed"}
+# The phase each notice is raised in, on the row as `phase`: the hosts deliver one only while the
+# run is still in it (a pause since resumed, a checkpoint since fed, is acknowledged unsaid), as a
+# task's notice is judged by the kernel's noticePlan, which the hosts call with it (#1278's S9)
+NOTICE_PHASE = {"run_checkpoint": "checkpoint", "run_done": "review", "run_paused": "paused",
+                "run_stopped": "stopped", "run_failed": "failed"}
+WEB_STOP = "stopped from the web app"  # wb run stop from the web app's Settings (settings.ACTOR web)
 ARCHIVE = ".archive"   # runs/.archive/<run>: closed runs wb gc moved there (names stay taken)
 
 
@@ -812,13 +818,24 @@ class Run:
             store.replace_bytes(self.dir / "acked", str(ts).encode())
             return True
 
+    def release_ack(self, back: float, mine: float) -> bool:
+        """The mark back to ``back`` only while it is still ``mine`` (wb ack --run <run> <back> --if
+        <mine>): a host's wake the engine dropped, as cli.release_ack is a task's (#786)."""
+        with store.locked(store.task_lock(self.name, "runack")):
+            if self.acked != mine:
+                return False
+            store.replace_bytes(self.dir / "acked", str(back).encode())
+            return True
+
     def notify(self, kind: str, text: str, **extra) -> dict:
-        """A run notice in the global notify.jsonl, `{ts, run, kind, text}`: the one wake Claude
-        gets for a run's checkpoint, pause, stop, failure or end, its text the wake whole (it opens
-        `[workbench] Run `<run>``, spend.RUN_WAKE's), so a host relays it as it is. Journaled too."""
+        """A run notice in the global notify.jsonl, `{ts, run, kind, phase, text}`: the one wake
+        Claude gets for a run's checkpoint, pause, stop, failure or end, its text the wake whole (it
+        opens `[workbench] Run `<run>``, spend.RUN_WAKE's), so a host relays it as it is; `phase`
+        (NOTICE_PHASE) the run's while it is still true. Journaled too."""
         text = f"{spend.RUN_WAKE_OPENING} `{self.name}` {HEADLINE[kind]}: {text}"
         row = store.append_jsonl(store.home() / "notify.jsonl",
-                                 {"ts": store.now(), "run": self.name, "kind": kind, "text": text, **extra},
+                                 {"ts": store.now(), "run": self.name, "kind": kind, "phase": NOTICE_PHASE[kind],
+                                  "text": text, **extra},
                                  after=self.acked)
         self.log(kind="notice", notice=kind, at=row["ts"])
         return row
@@ -1873,18 +1890,20 @@ def cmd_flow_import(a) -> None:
 
 # --- what wb top --json carries of the runs (#1278): the pane's and the web's seam -----------------
 
-def snapshot() -> list[dict]:
+def snapshot(live: bool = True) -> list[dict]:
     """Each run not closed, from its files alone (no state() rebuild, no reap: wb top ticks every
     2 s): `{run, flow, phase, why, alive, stages, spent_usd, budget_usd, budget_min, gpu_min,
-    session, cwd}`, by its start."""
+    session, cwd}`, by its start. ``live`` False: `alive` None, no driver asked after (a `ps`
+    each on macOS: the web's state is built on every change, chat.open_runs)."""
     out = []
     for name in all_runs():
         run = Run(name)
-        st, sp = run.status, run.spec
-        if st.get("phase") == "closed":
-            continue
+        st = run.status
+        if st.get("phase") == "closed":  # before run.json, which carries the whole flow: the web's
+            continue                     # state reads this on every change too (chat.open_runs)
+        sp = run.spec
         out.append({"run": name, "flow": sp.get("flow_name") or run.flow.get("name"), "phase": st.get("phase"),
-                    "why": st.get("why") or "", "alive": st.get("phase") in OPEN and driver_alive(run),
+                    "why": st.get("why") or "", "alive": st.get("phase") in OPEN and driver_alive(run) if live else None,
                     "stages": st.get("stages") or {}, "spent_usd": st.get("spent_usd") or 0.0,
                     "budget_usd": st.get("budget_usd"), "budget_min": sp.get("budget_min"),
                     "gpu_min": st.get("gpu_min") or 0.0, "session": sp.get("session"), "cwd": sp.get("cwd"),
@@ -2004,9 +2023,11 @@ def cmd_start(a) -> None:
           + (f" · budget {meter.usd(usd_)}" if usd_ is not None else "") + f" · driver pid {pid}")
     for line in said:
         print(line)
-    # the mod wakes Claude for no run row yet: wb wait in the background is the wake (#1278's review)
-    print(f"stop: wb run stop {a.name}. Wait for its notices (a checkpoint, a pause, the end) with "
-          f"wb wait {a.name} in the background, again after each: don't poll.")
+    # its notices wake the session that started it, through the mod or the OpenCode plugin, as a
+    # task's do (#1278's S9); with neither, wb wait in the background is the wake (#1278's review)
+    print(f"stop: wb run stop {a.name}. Its notices (a checkpoint, a pause, the end) wake this session as a "
+          f"task's do: end your turn; without the mod or the OpenCode plugin, wb wait {a.name} in the "
+          f"background, again after each. Don't poll.")
 
 
 def dry_run(name: str, flow: dict, params: dict, exists: dict, ctx: str, base: str, est: str,
@@ -2158,9 +2179,16 @@ def _stop_driver(run: Run) -> None:
 
 def cmd_stop(a) -> None:
     run = need(a.name)
-    stopped = stop(run, "stopped by Claude (wb run stop)")
+    # the web app's Stop (settings.py's run row): the user's, so the run's session hears of it as a
+    # notice (Claude's own stop is news to no one); a run-* row is no settings change (#1278's S12)
+    web = os.environ.get("WB_ACTOR") == "web" and store.caller_kind() == "terminal"
+    stopped = stop(run, WEB_STOP if web else "stopped by Claude (wb run stop)")
     if stopped is None:
         _die(f"run {run.name} is {run.status.get('phase')}, not running")
+    if web:
+        run.notify("run_stopped", f"{WEB_STOP}; done work is kept"
+                   + (f", and {len(stopped)} item(s) stopped" if stopped else "")
+                   + f". wb run report {run.name} says what is in; wb run resume {run.name} goes on, on the user's word")
     print(f"stopped {run.name}" + (f" and {len(stopped)} item(s): {', '.join(stopped)}" if stopped else "")
           + f". Done work is kept: wb run report {run.name}; wb run resume {run.name} goes on")
 
@@ -2313,6 +2341,11 @@ def cmd_flow_copy(a) -> None:
 
 def cmd_ack(a) -> None:
     run = need(a.name)
+    if getattr(a, "if_ts", None) is not None:  # a host's rollback, only over its own mark
+        if not run.release_ack(a.ts, a.if_ts):
+            _die(f"run {a.name}: acknowledged since", 3)
+        print(f"released run {a.name}")
+        return
     if not run.claim_ack(a.ts):
         _die(f"run {a.name}: already acknowledged", 3)
     print(f"acknowledged run {a.name}")
@@ -2343,12 +2376,16 @@ def wait_line(row: dict) -> str:
 
 
 def due(name: str | None, scope: set | None = None) -> dict | None:
-    """The newest run notice not yet taken (for run ``name``, or any in ``scope``), claimed."""
+    """The newest run notice not yet taken (for run ``name``, or any in ``scope``), claimed; one
+    no longer true (its `phase`, NOTICE_PHASE, isn't the run's now: a pause since resumed) is
+    skipped, as the hosts skip it."""
     rows = [r for r in store.notices(runs=True) if "task" not in r and (name is None or r["run"] == name)
             and (scope is None or r["run"] in scope)]
     for r in reversed(rows):
         run = Run(r["run"])
-        if run.exists and r["ts"] > run.acked and run.status.get("phase") != "closed" and run.claim_ack(r["ts"]):
+        phase = run.status.get("phase")
+        if run.exists and r["ts"] > run.acked and phase != "closed" and r.get("phase") in (None, phase) \
+                and run.claim_ack(r["ts"]):
             return r
     return None
 

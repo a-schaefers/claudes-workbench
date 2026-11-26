@@ -273,6 +273,60 @@ class Settings(Rows):
         self.assertNotIn("help", settings.apply("probe", "off"))
 
 
+class RunRows(Rows):
+    """The workflows group (#1278's S12): a row per run not closed, with its Stop and its Summary."""
+
+    def make_run(self, name, phase, **status):
+        from workbench import runs
+        d = runs.run_dir(name)
+        d.mkdir(parents=True)
+        store.write_json(d / "run.json", {"name": name, "flow_name": "audit", "flow": runs.load_flow("audit"),
+                                          "params": {"areas": ["a.py"]}, "created": time.time()})
+        runs.Run(name).set_status(phase=phase, why=status.pop("why", ""), **status)
+
+    def test_each_run_not_closed_has_its_row_with_stop_while_open_and_its_summary(self):
+        self.make_run("night", "running", stages={"find": {"done": 1, "running": 2, "null": 0}}, spent_usd=0.25, budget_usd=2.0)
+        self.make_run("held", "paused", why="paused at the day cap")
+        self.make_run("ended", "review")
+        self.make_run("gone", "closed")
+        by = {r["key"]: r for r in settings.rows()}
+        self.assertNotIn("run-gone", by)
+        night = by["run-night"]
+        self.assertEqual((night["group"], night["kind"], night["label"]), ("workflows", "action", "Run night"))
+        self.assertEqual(night["text"], "flow audit · running (no driver) · find: 1 done, 2 running · $0.25 of $2.00")
+        self.assertEqual([c["value"] for c in night["choices"]], ["stop", "summary"])
+        self.assertTrue(by["run-held"]["text"].endswith(". paused at the day cap"), by["run-held"]["text"])
+        self.assertEqual([c["value"] for c in by["run-ended"]["choices"]], ["summary"])  # at review: nothing to stop
+        self.assertEqual(by["workflows"]["group"], "workflows")                          # deepmode beside them
+        self.assertIn("audit", by["flows"]["text"])
+        log = self.fake_wb()
+        with mock.patch.object(settings, "drop", lambda: None):
+            self.assertTrue(settings.apply("run-night", "stop")["ok"])
+            self.assertTrue(settings.apply("run-night", "summary")["ok"])
+            with self.assertRaises(ValueError):
+                settings.apply("run-ended", "stop")
+        self.assertEqual([json.loads(x) for x in log.read_text().splitlines()],
+                         [["run", "stop", "night"], ["run", "report", "night"]])
+
+    def test_the_web_apps_stop_and_summary_run_wb_and_neither_is_recorded_as_a_change(self):
+        from workbench import chat, runs
+        self.make_run("night", "running")
+        before = next(r for r in settings.rows() if r["key"] == "run-night")
+        got = settings.apply("run-night", "summary")
+        self.assertTrue(got["ok"], got)
+        self.assertTrue(got["detail"].startswith("run night · flow audit · running"), got)
+        self.assertEqual(got["said"], got["detail"].splitlines()[0])
+        got = settings.apply("run-night", "stop")
+        self.assertTrue(got["ok"], got)
+        self.assertNotIn("detail", got)
+        self.assertEqual(runs.Run("night").status["why"], runs.WEB_STOP)       # wb ran as the web's
+        self.assertEqual([r["kind"] for r in store.notices(runs=True)], ["run_stopped"])
+        self.assertIsNone(settings.record(before, "run-night", "stop", got, "web"))
+        self.assertFalse(chat.changes_path().exists())
+        self.assertEqual([c["value"] for c in next(r for r in settings.rows() if r["key"] == "run-night")["choices"]],
+                         ["summary"])
+
+
 class ClaudeSets(Rows):
     """wb settings (#1287): Claude explains the rows and, on the user's clear ask and yes in the
     conversation, changes one through settings.apply, as the web app does; the owner, 2026-11-24:

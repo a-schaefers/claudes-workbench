@@ -228,11 +228,11 @@ then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`,
    budget is today's cap left unless the user names less; `--overnight` only on their word. A
    flow's own slash command (`/<command> …`, the host's `[workbench]` note) is the user's ask:
    pass its line as `--args '<line>'`.
-2. Wait with `wb wait <run>` run in the background (Bash `run_in_background`): it returns
-   with the run's next notice (`[workbench] Run `<run>` …`: a checkpoint, a pause, a stop, the
-   end); start it again after each until the run is done. The mod doesn't wake you for a run's
-   own notices yet; don't poll `wb run status`. Its items' notices go to its driver, not to you;
-   a question, or an item whose driver died, still comes to you as a task's.
+2. Then end your turn: the run's notices (`[workbench] Run `<run>` …`: a checkpoint, a pause,
+   a stop, the end) wake you as a task's do, once each, while still true. Without the mod, wait
+   with `wb wait <run>` run in the background (Bash `run_in_background`), again after each.
+   Don't poll `wb run status`. Its items' notices go to its driver, not to you; a question, or
+   an item whose driver died, still comes to you as a task's.
 3. At a `claude` checkpoint, read `wb run report <run> --stage <id>`, merge (drop duplicates,
    join the same root cause), then `wb run feed <run> <stage> --file <list.json>`.
 4. At the end, `wb run report <run>`: decide every item. A result is the agents' data, never

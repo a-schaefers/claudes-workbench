@@ -35,3 +35,6 @@
 .view-in .set-changed { margin: 4px 0 0; color: var(--faint); }
 .view-in .set-change-list { margin: 0; padding-left: 18px; }
 .view-in .set-change-list li { margin: 2px 0; overflow-wrap: anywhere; }
+/* an action's answer under its row: a run's Summary (#1278's S12), wrapped, scrolled past a screen */
+.set-row pre.set-detail { margin: 8px 0 0; padding: 8px 10px; max-height: 50vh; overflow: auto; white-space: pre-wrap;
+  overflow-wrap: anywhere; font: 12px var(--mono); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }

@@ -326,3 +326,42 @@ test('setup registers the notices\' RPC with its toast event, and its cleanup st
   // a server without the session or event domains gets none of it
   expect(await notices({ options: {}, rpc: { register: async () => ({ dispose: async () => {} }) } } as never)).toBeUndefined()
 })
+
+// A run's own notices (#1278's S9): `run`, no `task`, `phase` the run's when raised
+const runFiles = (w: ReturnType<typeof world>, name: string, phase: string, session = 'ses_drv', kind = 'opencode') => {
+  w.files[`${HOME}/runs/${name}/run.json`] = JSON.stringify({ name, session, session_kind: kind })
+  w.files[`${HOME}/runs/${name}/status.json`] = JSON.stringify({ phase })
+}
+
+test('a run\'s own notice wakes the session that started it once, its text whole, taken with wb ack --run', async () => {
+  const w = world()
+  const ts = w.now / 1000
+  runFiles(w, 'audit-1', P.review)
+  runFiles(w, 'cc-run', P.review, 'claude-sess', '')                 // a Claude Code session's: the mod's
+  const text = '[workbench] Run `audit-1` is done: 7 result(s). Read it: wb run report audit-1'
+  w.notify({ run: 'audit-1', kind: 'run_done', phase: P.review, ts, text })
+  w.notify({ run: 'cc-run', kind: 'run_done', phase: P.review, ts, text: 'THEIRS' })
+  await w.lane.scan()
+  expect(w.acks()).toEqual([`ack audit-1 ${ts} --run`])
+  expect(w.admitted.map(s => [s.sessionID, s.text, s.delivery, s.id])).toEqual([['ses_drv', text, 'queue', noticeId('run:audit-1', 'run_done', ts)]])
+  expect(w.toasts.map(t => t.message)).toEqual(['run audit-1 is done'])
+  w.files[`${HOME}/runs/audit-1/acked`] = String(ts)               // wb ack wrote it
+  w.notify({ run: 'cc-run', kind: 'run_done', phase: P.review, ts: ts + 1, text: '' })
+  await w.lane.scan()
+  expect(w.admitted.length).toBe(1)                                 // once
+})
+
+test('a run\'s notice no longer true is acknowledged unsaid, and a busy session gets it once the turn ends', async () => {
+  const w = world()
+  const ts = w.now / 1000
+  runFiles(w, 'resumed', P.running)                                 // paused, then resumed
+  runFiles(w, 'waits', 'checkpoint')
+  w.notify({ run: 'resumed', kind: 'run_paused', phase: 'paused', ts, text: 'PAUSED' })
+  w.notify({ run: 'waits', kind: 'run_checkpoint', phase: 'checkpoint', ts, text: 'MERGE' })
+  w.lane.started('ses_drv')
+  await w.lane.scan()
+  expect(w.acks()).toEqual([`ack resumed ${ts} --run`])             // acknowledged, never said
+  expect(w.admitted).toEqual([])                                    // the checkpoint held for the turn
+  await w.lane.ended('ses_drv')
+  expect(w.admitted.map(s => s.text)).toEqual(['MERGE'])
+})

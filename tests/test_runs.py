@@ -1583,6 +1583,52 @@ class Wiring(Base):
         self.assertEqual(runs.archive(30), 1)  # an old transcript's wake, its run archived since
         self.assertEqual(spend._woken("[workbench] Run `wr` is done: 2 result(s)", {"wr-find-1", "wr-x"}), {"wr-find-1"})
 
+    def test_a_run_notice_says_the_phase_it_is_true_in_and_wb_wait_skips_one_no_longer_true(self):
+        # #1278's S9: the hosts deliver a run's notice while the run is in the phase it was raised
+        # in, as a task's; wb wait <run> told Claude "paused" of a run since resumed
+        run = self.open_run(alive=False)
+        run.set_status(phase="paused")
+        paused = run.notify("run_paused", "the day cap")
+        self.assertEqual((paused["phase"], paused["run"], "task" in paused), ("paused", "wr", False))
+        run.set_status(phase="running")                          # wb run resume
+        self.assertIsNone(runs.due("wr"))
+        self.assertLess(run.acked, paused["ts"])                 # nor taken: the host acknowledges it
+        run.set_status(phase="checkpoint")
+        cp = run.notify("run_checkpoint", "stage merge is yours")
+        self.assertEqual(runs.due("wr")["ts"], cp["ts"])
+        self.assertEqual(run.acked, cp["ts"])
+        self.assertEqual(set(runs.NOTICE_PHASE), set(runs.KINDS))
+        self.assertLessEqual(set(runs.NOTICE_PHASE.values()), set(runs.PHASES))
+
+    def test_wb_ack_run_if_puts_the_mark_back_only_while_it_is_still_the_hosts(self):
+        # a host's wake the engine dropped (#786's rollback, for a run's notice: #1278's S9)
+        run = self.open_run(alive=False)
+        self.assertEqual(wb("ack", "wr", "5", "--run")[0], 0)
+        self.assertEqual(wb("ack", "wr", "5", "--run")[0], 3)            # taken already
+        self.assertEqual(wb("ack", "wr", "0", "--run", "--if", "4")[0], 3)  # not this host's mark
+        self.assertEqual(run.acked, 5.0)
+        code, out, _ = wb("ack", "wr", "0", "--run", "--if", "5")
+        self.assertEqual((code, out.strip(), run.acked), (0, "released run wr", 0.0))
+
+    def test_the_web_apps_stop_is_said_to_the_runs_session_and_claudes_own_is_not(self):
+        # #1278's S12: the web app's Stop (settings.py's run row, WB_ACTOR=web) is the user's: the
+        # session waiting on the run hears it as a notice; Claude's own wb run stop is no news
+        run = self.open_run(alive=False)
+        with mock.patch.dict(os.environ, {"WB_ACTOR": "web"}):
+            for k in ("CLAUDECODE", "WB_TASK", "OPENCODE_SESSION_ID"):
+                os.environ.pop(k, None)
+            code, out, _ = wb("run", "stop", "wr")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((run.status["phase"], run.status["why"]), ("stopped", runs.WEB_STOP))
+        (row,) = store.notices(runs=True)
+        self.assertEqual((row["run"], row["kind"], row["phase"]), ("wr", "run_stopped", "stopped"))
+        self.assertTrue(row["text"].startswith("[workbench] Run `wr` stopped: stopped from the web app; done work is kept"))
+        other = self.open_run("own", alive=False)
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "WB_ACTOR": "web"}):
+            self.assertEqual(wb("run", "stop", "own")[0], 0)
+        self.assertEqual(other.status["why"], "stopped by Claude (wb run stop)")
+        self.assertEqual(len(store.notices(runs=True)), 1)
+
     def test_wb_top_json_carries_each_run_not_closed_with_its_drivers_life(self):
         # plan §5 (#1278, S8): the seam the pane's and the web's run strip read
         live = self.open_run("live")

@@ -2737,8 +2737,6 @@ def cmd_ack(a):
     """The mod's acknowledgement before a wake (claim_ack): exit 3 when another session or a
     wb wait took this notice first."""
     if getattr(a, "run", False):
-        if a.if_ts is not None:
-            die("--if goes with a task's notice")
         return runs.cmd_ack(a)
     task = need(a.name)
     if a.if_ts is not None:  # a rollback: only over this session's own mark (#786)
