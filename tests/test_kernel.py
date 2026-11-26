@@ -75,6 +75,9 @@ class Contract(unittest.TestCase):
     def test_the_plugin_spells_no_phase_of_its_own(self):
         self.assertEqual(kernel.phase_literals(), [])
 
+    def test_only_tests_and_goldens_take_core_ts_untyped_kernel_record(self):
+        self.assertEqual(kernel.core_record_importers(), [])
+
 
 class Bundle(unittest.TestCase):
     """The committed kernel.js and kernel.d.ts are what their banners say they are built from."""
@@ -115,9 +118,20 @@ class Tables(unittest.TestCase):
         self.assertEqual(v["needsClaude"], sorted(store.NEEDS_CLAUDE))
         self.assertEqual(v["parks"], sorted(store.PARKS))
         self.assertEqual(v["closed"], sorted(store.CLOSED))
+        self.assertEqual(v["working"], sorted(store.WORKING))
+        self.assertEqual(v["stopped"], sorted(store.STOPPED))
         self.assertEqual(v["noAnswer"], "No answer arrived in time.")
         self.assertIsInstance(v["chatStaleMs"], float)
         self.assertEqual(v["wakeOpening"], spend.WAKE_OPENING)
+
+    def test_open_order_keeps_its_order_and_names_every_open_phase_once(self):
+        # the pane's header reads its counts in this order (#1325's M1): a sorted copy would put
+        # asking before running
+        v = kernel.tables_values()
+        self.assertEqual(v["openOrder"], list(store.OPEN_ORDER))
+        self.assertEqual(sorted(v["openOrder"]), sorted(store.ACTIVE | store.NEEDS_CLAUDE))
+        self.assertEqual(set(store.WORKING) <= store.ACTIVE, True)
+        self.assertEqual(set(store.STOPPED) <= set(store.PARKS), True)
 
     def test_spends_wake_pattern_is_built_from_the_opening_the_mod_writes(self):
         # the mod's wakes start with core.ts's WAKE_OPENING, from Tables, from spend.WAKE_OPENING:
@@ -489,7 +503,7 @@ class Checker(unittest.TestCase):
 
     def test_effect_ref_imported(self):
         self.edit("kernel/src/Kernel/Phase.purs", "import Prelude\n", "import Prelude\nimport Effect.Ref (new)\n")
-        self.assertIn("Phase.purs:6: imports Effect.Ref, denied", self.errors())
+        self.assertIn("Phase.purs:7: imports Effect.Ref, denied", self.errors())
 
     def test_a_helper_module_importing_an_effect_across_two_lines(self):
         (self.root / "kernel/src/Helper").mkdir()
@@ -514,11 +528,11 @@ class Checker(unittest.TestCase):
             self.assertIn("Tables.purs is not what workbench's Python says", self.errors())
 
     def test_an_export_row_without_its_build_or_goldens(self):
-        self.edit("kernel/BOUNDARY.md", "| `phaseOf` |", "| `openCounts` | Kernel.Counts | counts | born:#1325 | core.ts |\n| `phaseOf` |")
+        self.edit("kernel/BOUNDARY.md", "| `phaseOf` |", "| `gone` | Kernel.Gone | gone | born:#1325 | core.ts |\n| `phaseOf` |")
         self.assertIn("the exports differ", self.errors())
 
     def test_a_golden_for_no_export(self):
-        self.edit("mod/hooks/golden/phase.ts", "fn: 'phaseOf', in: { phase: 'queued'", "fn: 'phase', in: { phase: 'queued'")
+        self.edit("mod/hooks/golden/phase.ts", "fn: 'phaseOf', in: t('queued')", "fn: 'phase', in: t('queued')")
         self.assertIn("the exports differ", self.errors())
 
     def test_a_golden_file_neither_host_runs(self):
@@ -533,20 +547,62 @@ class Checker(unittest.TestCase):
         (self.root / "opencode-plugin/notices.ts").write_text("export const due = (p: string) => p === 'review'\n")
         self.assertIn("opencode-plugin/notices.ts:1: a phase literal", self.errors())
 
+    def test_a_require_or_an_mts_jsx_or_cjs_importer_of_the_kernel(self):
+        # the membrane scan read .ts, .tsx, .js and .mjs only, and no require() (#1356's review)
+        for name, text in (("x.mts", "import * as K from '../mod/hooks/kernel.js'\n"),
+                           ("y.cjs", "const K = require('../mod/hooks/kernel.js')\n"),
+                           ("z.jsx", "const K = require(\"../mod/hooks/kernel\")\n"),
+                           ("w.cts", "import K = require('../mod/hooks/kernel.js')\n")):
+            with self.subTest(file=name):
+                f = self.root / "opencode-plugin" / name
+                f.write_text(text)
+                self.assertIn(f"opencode-plugin/{name} imports kernel.js", self.errors())
+                f.unlink()
+
+    def test_a_host_file_taking_core_ts_untyped_kernel_record(self):
+        # the hosts take core.ts's typed names; its `kernel` record (every export, untyped) is the
+        # goldens' (#1356's review)
+        for text in ("import { ACTIVE, kernel } from './core'\n", "import * as C from './core.js'\n",
+                     "const C = require('./core')\n", "export { kernel } from './core'\n"):
+            with self.subTest(text=text):
+                f = self.root / "mod/hooks/notices.ts"
+                f.write_text(text)
+                self.assertIn("mod/hooks/notices.ts imports core.ts's untyped kernel record", self.errors())
+        f.write_text("import { ACTIVE, phaseOf } from './core'\n")
+        self.assertNotIn("untyped kernel record", self.errors())
+        (self.root / "mod/hooks/notices.test.ts").write_text("import { kernel } from './core.js'\n")
+        (self.root / "mod/hooks/golden/runner2.ts").write_text("import { kernel } from '../core.js'\n")
+        self.assertNotIn("untyped kernel record", self.errors())
+
+    def test_a_phase_set_back_in_the_mods_hooks(self):
+        # register.tsx's RUNNING and tasks.ts's WORKING and COUNTED were hand copies of phase sets
+        # the kernel holds (#1325's M1): two phases on a line, or in one list across lines
+        self.edit("mod/hooks/register.tsx", "\nexport function attachedLines", "\nconst LIVE = new Set(['queued', 'running'])\nexport function attachedLines")
+        self.assertRegex(self.errors(), r"mod/hooks/register.tsx:\d+: a phase literal")
+        self.edit("mod/hooks/register.tsx", "const LIVE = new Set(['queued', 'running'])", "const LIVE = new Set([\n  'queued',\n  'running',\n])")
+        self.assertRegex(self.errors(), r"mod/hooks/register.tsx:\d+: a phase literal")
+        self.edit("mod/hooks/register.tsx", "const LIVE = new Set([\n  'queued',\n  'running',\n])", "const done = (p: string) => p === 'accepted' || p === 'discarded'")
+        self.assertRegex(self.errors(), r"mod/hooks/register.tsx:\d+: a phase literal")
+
+    def test_one_phase_alone_in_the_mods_hooks_is_its_own_words(self):
+        self.edit("mod/hooks/tasks.ts", "\nexport const ago", "\nconst said = (p: string) => p === 'review' ? 'awaiting review' : p\nexport const ago")
+        self.assertNotIn("a phase literal", self.errors())
+
     def test_a_replaced_name_still_defined(self):
         self.edit("kernel/BOUNDARY.md", "mod/hooks/tasks.ts:CLOSED | core.ts;", "mod/hooks/tasks.ts:CLOSED, mod/hooks/core.ts:ACTIVE | core.ts;")
         self.assertIn("mod/hooks/core.ts:ACTIVE is still defined", self.errors())
 
     def test_a_hand_copy_of_a_table_back_in_the_mod(self):
-        self.edit("mod/hooks/register.tsx", "import { ACTIVE, CHAT_STALE_MS, NEEDS,", "import { ACTIVE, CHAT_STALE_MS,")
+        self.edit("mod/hooks/register.tsx", "CLOSED, NEEDS, NO_ANSWER,", "CLOSED, NO_ANSWER,")
         self.edit("mod/hooks/register.tsx", "\nexport function attachedLines", "\nconst NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])\nexport function attachedLines")
         self.assertIn("mod/hooks/register.tsx:NEEDS is still defined", self.errors())
-        self.edit("mod/hooks/tasks.ts", "import { CLOSED } from './core'\n", "export const CLOSED = new Set(['accepted', 'discarded'])\n")
+        self.edit("mod/hooks/tasks.ts", "import { CLOSED, openCounts, phaseOf } from './core'\n",
+                  "import { openCounts, phaseOf } from './core'\nexport const CLOSED = new Set(['accepted', 'discarded'])\n")
         self.assertIn("mod/hooks/tasks.ts:CLOSED is still defined", self.errors())
 
     def test_an_export_over_budget(self):
         self.edit("kernel/BOUNDARY.md", "| exports | 12 |", "| exports | 1 |")
-        self.assertIn("budget: 2 exports, over 1", self.errors())
+        self.assertIn("budget: 5 exports, over 1", self.errors())
 
     def test_a_module_over_its_lines(self):
         self.edit("kernel/BOUNDARY.md", "| module lines | 350 |", "| module lines | 10 |")

@@ -152,7 +152,7 @@ the code around your change.
   TypeScript, Python or docs change needs no toolchain. The committed `mod/hooks/kernel.js` is what
   the mod loads, and `python3 -m unittest` (`tests/test_kernel.py`) checks it offline, each failure
   naming its fix. A change to a Python value the kernel's Tables copies (`store.ACTIVE`,
-  `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `ask_mcp.NO_ANSWER`, `chat.LISTENING_FOR`,
+  `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `WORKING`, `STOPPED`, `OPEN_ORDER`, `ask_mcp.NO_ANSWER`, `chat.LISTENING_FOR`,
   `spend.WAKE_OPENING`) fails the suite until `python3 scripts/kernel.py build`, with
   `mod/hooks/golden/tables.ts` changed to match. A change to `kernel/src` needs the toolchain once:
   `build` fetches the pinned purs and esbuild by hash (network; Linux, WSL2 or macOS, x64 or arm64)

@@ -75,7 +75,7 @@ import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, taskLines } from './tasks'
-import { ACTIVE, CHAT_STALE_MS, NEEDS, NO_ANSWER, PARKS, WAKE_OPENING } from './core'
+import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, NEEDS, NO_ANSWER, openCounts, owns, PARKS, phaseOf, WAKE_OPENING } from './core'
 import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
@@ -141,18 +141,11 @@ const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // which starts the app if it isn't up), and again CHAT_RECHECK_MS after a start or a failure
 const CHAT_CHECK_MS = 60_000
 const CHAT_RECHECK_MS = 3_000
-// the user counts as away this long after they last used the web chat: a web message, or a page
-// in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
-const AWAY_MS = 6 * 3600 * 1000
-// ...or for as long as this session has a task open: a night's batch outlasts six hours, and its
-// permission prompts then waited in the terminal until morning (#110, 2026-11-18). Backlog tasks
-// alone held it, so one long task asked for from the phone that finished past six hours was
-// reported in the terminal only, its question a dialog there (#1402, 2026-11-25).
-export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
-  if (!webAt) return false
-  if (now - webAt < AWAY_MS) return true
-  return list.some(t => isMine(t) && (ACTIVE.has(t.phase) || waitsOnClaude(t)))
-}
+// Whether the user is away (the kernel's awayNow, which the OpenCode plugin judges by too): six
+// hours after they last used the web chat (chat/away.json's `at`, #959), or for as long as this
+// session has a task open (#110, #1402)
+export const awayNow = (webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean =>
+  awayOf(webAt, now, list.map(t => ({ phase: t.phase, parked: t.parked, mine: isMine(t) })))
 // Whether the weekly model check and the automatic optimize may run: no task anywhere active (the
 // GPU's, and a check's question beside a running task's), and none of this session's waiting on
 // Claude lately. Any task open at any age once gated both, so one stuck, failed or unreviewed
@@ -160,7 +153,7 @@ export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: 
 // session long gone, as rewake judges it; a parked one waits for no one.
 export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) => boolean): boolean {
   return !list.some(t => ACTIVE.has(t.phase) ||
-    (waitsOnClaude(t) && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
+    (phaseOf(t).waits && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
 }
 // Away is the user's, not one session's (#688): the listening session records the last web
 // message in chat/away.json and a prompt typed in any session clears it, so every delegating
@@ -253,10 +246,10 @@ export function attachedLines(files: unknown): string {
     ? [`\n[attached: ${f.path} (${size(Number(f.size) || 0)}, ${String(f.type || 'unknown type')})]`] : []).join('')
 }
 
-// Waiting on Claude, unless parked: stopped by /workbench-quit (`wb stop --all`, status `parked`),
-// which the status line, rewake, the boundary and the jobs' gate don't count. It stayed "awaiting
-// review" and kept the weekly check off for good (#541); the pane and `wb status --all` still show it.
-const waitsOnClaude = (t: WbTask) => NEEDS.has(t.phase) && !t.parked
+// Waiting on Claude, unless parked (the kernel's phaseOf `waits`): one stopped by /workbench-quit
+// (`wb stop --all`, status `parked`) the status line, rewake, the boundary and the jobs' gate
+// don't count. It stayed "awaiting review" and kept the weekly check off for good (#541); the
+// pane and `wb status --all` still show it.
 const COLOR: Record<string, string> = {
   queued: 'subtle', running: 'claude', testing: 'suggestion', asking: 'warning',
   review: 'success', stuck: 'error', failed: 'error', accepted: 'inactive', discarded: 'inactive',
@@ -489,7 +482,6 @@ const BATCH_NEXT = (names: string[]) => names.length > 1
     `session, \`wb discard ${names[0]}\` drops it.`
 const batchOf = (row: Row): string[] | null =>
   Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
-const RUNNING = new Set(['queued', 'running', 'testing'])
 // A stop at the day's API spend cap (#1019, cause `spend`) is the user's call: feedback would run
 // a round that stops again at once, so the wake asks for their decision, as the notice does. Each
 // remedy has its own next step: "the role on the GPU … then wb resume" resumed the task on its API
@@ -2121,48 +2113,26 @@ const mem = {
   termDialogs: [] as TermDialog[], // dialogs up in the terminal, for the page's waiting line (#959, #1350)
 }
 
-// Whether path b is path a or inside it, by whole components: /x/ab is not inside /x/a. In lower
-// case where the file system ignores it (`mem.fold`, macOS): ~/Repos typed for ~/repos once
-// missed (the 2026-11-19 audit). wb records task paths real (getcwd, git's toplevel).
-const parts = (p: string) => (mem.fold ? p.toLowerCase() : p).split('/').filter(c => c && c !== '.')
-const within = (a: string, b: string) => {
-  const [pa, pb] = [parts(a), parts(b)]
-  return pa.length <= pb.length && pa.every((c, i) => c === pb[i])
-}
-
-// Whether a task is this session's. One `wb start` ran in this process's sessions (task.json
-// `session`) is, wherever it ran: by directory alone, a `cd /tmp/x && wb start` task was no one's
-// (the 0.90 review). One without (started by hand, or before 0.90) goes by directory: its repo
-// is the session's directory or inside it (a folder of several repos), or the session is inside
-// the task's spot (`spotOf`: its package, else its cwd, else the repo; #695), or where `wb start` ran (`cwd`) is the session's directory or inside it. So
-// does another session's whose Claude Code process (`claude_pid`) is gone: a new process in the
-// project adopts it (the 0.90 review: after a crash or an update, plain `claude` in the same repo
-// was woken for none of them). A session in the home directory or / claims none by directory: a
-// task started from ~ belonged to every session under it (the 0.90 review). A task with no key
-// at all is everyone's. `wb`'s _scope judges the same.
-// A session inside the repo counts only inside the task's own spot: its package (repo/subdir),
-// else where `wb start` ran when that is inside the repo, else the repo. Inside the repo alone, a
-// session in a monorepo's sibling package was woken for another package's review (#695).
-const spotOf = (t: { repo?: string; cwd?: string; subdir?: string }) =>
-  t.subdir ? `${t.repo}/${t.subdir}` : t.cwd && within(t.repo!, t.cwd) ? t.cwd : t.repo!
-const near = (t: { repo?: string; cwd?: string; subdir?: string }) => {
-  const at = parts(mem.cwd).join('/')
-  if (!at || (mem.home && at === parts(mem.home).join('/'))) return false
-  return (!!t.cwd && within(mem.cwd, t.cwd)) ||
-    (!!t.repo && (within(mem.cwd, t.repo) || within(spotOf(t), mem.cwd)))
-}
-// Where `wb start` ran (`cwd`) is this session's very directory. In ~ or /, where `near` claims
-// nothing, that still adopts a gone session's task: `claude` restarted in ~ after a `wb start
-// --repo ~/proj` there was woken for none (#1403, 2026-11-25). One without a session stays no ~
-// session's, as `wb`'s _scope judges.
-const ranHere = (t: { cwd?: string }) => !!mem.cwd && !!t.cwd && parts(t.cwd).join('/') === parts(mem.cwd).join('/')
-const mine = (t: { session?: string; repo?: string; cwd?: string; subdir?: string; claude_pid?: number; claude_start?: string }) => {
-  if (t.session && mem.ids.size) {
-    return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && (near(t) || ranHere(t)))
-  }
-  if (!mem.cwd || (!t.cwd && !t.repo)) return true
-  return near(t)
-}
+// Whether a task is this session's: the kernel's owns (Kernel.Owner), which `wb`'s _scope judges
+// the same and the OpenCode plugin judges by too. One `wb start` ran in this process's sessions
+// (task.json `session`) is, wherever it ran; once that Claude Code process is gone (`claude_pid`,
+// mem.deadPids) a new process near it adopts it, never another driver's (#1309); one without a
+// session goes by directory, in ~ or / by none; one with no key at all is everyone's. Paths by whole
+// components (/x/ab is not inside /x/a), in lower case where the file system ignores it
+// (`mem.fold`, macOS: ~/Repos typed for ~/repos once missed, the 2026-11-19 audit). wb records
+// task paths real (getcwd, git's toplevel). The facts are gathered here; the kernel compares them.
+type OwnerKeys = { session?: string; repo?: string; cwd?: string; subdir?: string; claude_pid?: number; claude_start?: string; driver?: unknown }
+// a task's driver as store.driver_of names it: task.json `driver.tool` opencode, else claude with
+// a session, else none (WbTask carries it as scan read it)
+const driverOf = (t: { session?: string; driver?: unknown }): string =>
+  typeof t.driver === 'string' ? t.driver
+    : (t.driver as { tool?: unknown } | null)?.tool === 'opencode' ? 'opencode' : t.session ? 'claude' : ''
+const ownerOf = (t: OwnerKeys) => owns({
+  session: String(t.session ?? ''), ids: [...mem.ids], driver: driverOf(t), host: 'claude',
+  gone: mem.deadPids.has(pidKey(t)), cwd: String(t.cwd ?? ''), repo: String(t.repo ?? ''),
+  subdir: String(t.subdir ?? ''), here: mem.cwd, home: mem.home, fold: mem.fold,
+})
+const mine = (t: OwnerKeys) => ownerOf(t).mine
 
 // Whether another session's task's Claude Code process is gone (mem.deadPids, for `mine`): `kill
 // -0` and its start (task.json `claude_start`: a recycled pid is another process, #532), a live
@@ -2201,7 +2171,7 @@ const ownPid = (t: { claude_pid?: number; claude_start?: string }) =>
 // task.json as it stands after the claim, whoever won.
 async function claim($: any, name: string, sp: Row): Promise<Row> {
   if (!mem.claudePid || !sp.session || !mem.ids.size || !mem.deadPids.has(pidKey(sp)) || ownPid(sp)) return sp
-  if (!mem.ids.has(sp.session) && !near(sp) && !ranHere(sp)) return sp
+  if (!ownerOf(sp).claims) return sp // neither its id nor near it: never this session's to adopt
   const id = await $.session.id().catch(() => '')
   const ids = [...new Set([id, ...mem.ids].filter(Boolean))]
   const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)
@@ -2218,8 +2188,8 @@ async function claim($: any, name: string, sp: Row): Promise<Row> {
 // neither parked by a quit (store.parked, #698) nor taken over by Claude (#834)
 const delegatedWork = (st: Row) => {
   const phase = String(st.phase ?? 'queued')
-  if (ACTIVE.has(phase)) return true
-  return NEEDS.has(phase) && !(PARKS.has(phase) && st.parked) && !st.taken_over
+  const p = phaseOf({ phase, parked: !!st.parked })
+  return p.active || (p.waits && !st.taken_over)
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a
@@ -2329,7 +2299,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
     const phase = String(st.phase ?? 'queued')
     const updatedAt = Number(st.updated_at ?? 0) * 1000
     if (!ACTIVE.has(phase) && !NEEDS.has(phase) && now - updatedAt > KEEP_CLOSED_MS) {
-      if (phase === 'accepted' || phase === 'discarded') mem.gone.add(ent.name)
+      if (CLOSED.has(phase)) mem.gone.add(ent.name)
       continue
     }
     let sp = await readJson($, `${base}/task.json`)
@@ -2350,7 +2320,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), subdir: String(sp.subdir ?? ''),
-      session: String(sp.session ?? ''),
+      session: String(sp.session ?? ''), driver: driverOf(sp),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
       parked: PARKS.has(phase) && !!st.parked, // as store.parked (#698)
@@ -2394,7 +2364,7 @@ export function viewFacts(sp: Row, st: Row) {
 // its rows. The render draws them and pageShape counts them, one row each: none wraps.
 type ListRow = { parts: RowPart[]; task: string; first: boolean }
 function listRows(list: WbTask[], followed: string, now: number, spin: string, cols: number, bodyRows: number): ListRow[] {
-  const open = list.filter(t => t.phase !== 'accepted' && t.phase !== 'discarded')
+  const open = list.filter(t => !CLOSED.has(t.phase))
   const headers = new Set(open.map(t => t.group).filter(g => g && open.filter(t => t.group === g).length >= 2)).size
   const lines = taskLines(list, { cols, now, spin, followed, compact: compactWanted(open.length, headers, bodyRows), usd })
   const out: ListRow[] = []
@@ -2537,8 +2507,8 @@ const focusOf = (list: WbTask[], followed: string, picked = mem.picked): WbTask 
   const kept = list.find(t => t.name === followed && ACTIVE.has(t.phase))
   if (kept) return kept
   const by = (ts: WbTask[], k: 'createdAt' | 'updatedAt') => [...ts].sort((a, b) => b[k] - a[k])[0]
-  return by(list.filter(t => ACTIVE.has(t.phase) && t.phase !== 'queued'), 'createdAt') ??
-    by(list.filter(t => t.phase === 'queued'), 'createdAt') ??
+  return by(list.filter(t => phaseOf(t).working), 'createdAt') ??
+    by(list.filter(t => ACTIVE.has(t.phase) && !phaseOf(t).working), 'createdAt') ??
     by(list.filter(t => NEEDS.has(t.phase)), 'updatedAt')
 }
 
@@ -2743,7 +2713,7 @@ async function poll($: any) {
     if (!on) mem.boundary = false
     mem.open = open
     await sayRules($, on)
-    if (mem.boundary && !mem.busy && !list.some(t => waitsOnClaude(t) && mine(t))) {
+    if (mem.boundary && !mem.busy && !list.some(t => phaseOf(t).waits && mine(t))) {
       mem.boundary = false
       await compactAtBoundary($)
     }
@@ -3422,7 +3392,7 @@ async function deliver($: any, now: number) {
     for (const row of rows) {
       if (row.ts <= acked) continue
       const current = row.kind === 'checkin'
-        ? RUNNING.has(status.phase) // a check-in is news while the task still runs
+        ? phaseOf({ phase: String(status.phase ?? ''), parked: false }).running // a check-in is news while the task still runs
         : row.kind === 'question' && row.id
           // this question, still unanswered, while the task still asks: a question the runner
           // dropped (timed out, its round ended or stopped) woke Claude for nobody (the 0.90 review)
@@ -3564,7 +3534,7 @@ const REWAKE_MAX_MS = 12 * 3600_000 // older than this, it waited for a session 
 async function rewake($: any, now: number, list: WbTask[]) {
   if (mem.busy || !mem.wake) return
   for (const t of list) {
-    if (!waitsOnClaude(t) || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
+    if (!phaseOf(t).waits || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
     if (now - (mem.dropped.get(t.name) ?? 0) < REWAKE_MS) continue // dropped: once a minute
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
@@ -3742,23 +3712,22 @@ async function restorePane($: any) {
 // Outside workbench mode only this session's: another session's task running opened the pane and
 // filled the status line in a session the user kept off workbench, and /workbench-quit couldn't
 // clear it (2026-11-17)
+const WAITING_WORD: Record<string, string> = { review: 'awaiting review' }
 function taskParts(list: WbTask[], on: boolean) {
   const shown = on ? list : list.filter(t => mine(t))
-  const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
+  const live = shown.filter(t => phaseOf(t).running)
   // what waits on Claude is this session's alone, in the mode too: another session's reviews
   // counted in this one's "N awaiting review", as if this Claude had them to do (#693)
-  const asking = shown.filter(t => t.phase === 'asking' && mine(t))
-  const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking' && mine(t))
+  const own = shown.filter(t => mine(t))
+  const asking = own.filter(t => { const p = phaseOf(t); return p.active && p.needsClaude })
   // a stuck or failed task is counted as such: "2 awaiting review" said so for one review and one
-  // stuck task (seen live, #1048)
-  const count = (phase: string, word: string) => {
-    const n = waiting.filter(t => t.phase === phase).length
-    return n ? [`${n} ${word}`] : []
-  }
+  // stuck task (seen live, #1048). The kernel's openCounts tallies them, as the pane's header does;
+  // a parked one waits for no one
+  const waiting = openCounts(own).counts.filter(c => !c.active && c.waiting > 0)
   return { live, parts: [
     ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
     ...asking.map(t => `${t.name} asks`),
-    ...count('review', 'awaiting review'), ...count('stuck', 'stuck'), ...count('failed', 'failed'),
+    ...waiting.map(c => `${c.waiting} ${WAITING_WORD[c.phase] ?? c.phase}`),
   ] }
 }
 

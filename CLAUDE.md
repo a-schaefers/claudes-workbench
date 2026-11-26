@@ -106,7 +106,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `kernel/`: the PureScript kernel (`BOUNDARY.md`, its contract), built by `scripts/kernel.py` (its toolchain
   fetched by hash into `~/.cache/workbench/kernel`) into the committed `mod/hooks/kernel.js`, imported only by
-  `mod/hooks/core.ts` (`register.tsx` and `tasks.ts` read its tables there); its seeded props in `kernel/test`;
+  `mod/hooks/core.ts` (`register.tsx` and `tasks.ts` read its tables and decisions there); its seeded props in `kernel/test`;
   a change to a value its Tables copy needs `python3 scripts/kernel.py build` (ARCHITECTURE.md, *The kernel*).
   `opencode-plugin/`: the OpenCode plugin (server, TUI, RPC parts, TypeScript, nothing at import; typed by
   `BUN_BE_BUN=1 opencode check -p opencode-plugin`); `ocplugin.py` installs it (`wb setup --opencode`) and

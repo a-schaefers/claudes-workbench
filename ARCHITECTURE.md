@@ -146,7 +146,10 @@ task (1–5 cents at $0.30/kWh) against ~25 cents of Claude tokens saved.
 ```
 
 **Phases** (`store.py`): `ACTIVE` = queued, running, testing, asking; `NEEDS_CLAUDE` = review,
-stuck, failed, asking; `CLOSED` = accepted, discarded.
+stuck, failed, asking; `CLOSED` = accepted, discarded; `WORKING` = running, testing, asking (a round
+under way: its clock, context and estimate mean something); `STOPPED` = stuck, failed; `OPEN_ORDER`,
+every open phase in the order a tally of them reads (running, testing, asking, queued, review,
+stuck, failed: the mod's pane header and status line, through the kernel's `openCounts`).
 
 | Phase | Set by |
 |---|---|
@@ -3667,12 +3670,12 @@ by `wb ack <task> <prev> --if <ts>` (`cli.release_ack`), only while the mark is 
 Two live sessions in one repo keep their own; a task with a `session` but no `claude_pid` stays its
 session's. One without a `session` goes by
 directory: its `repo` is or is inside the session's directory, or the session's directory is inside
-the task's spot (`repo`/`subdir`, else a `cwd` inside the repo, else the repo: `spotOf`, `_scope`;
+the task's spot (`repo`/`subdir`, else a `cwd` inside the repo, else the repo: the kernel's `owns`, `_scope`;
 #695), or its `cwd` is or is inside the session's directory; by whole components of real paths,
 case-folded where the file system ignores case (`mem.fold`, `store.folds_case`: any component of the path found
 in its parent with its case swapped, WSL2's `/mnt/c` too, #1217; 2026-11-19 audit). A
 session in `~` or `/` claims none by directory, but for a gone session's task whose `cwd` is
-exactly there (`ranHere`, `_scope`: plain `claude` restarted in `~` after a `wb start --repo
+exactly there (`owns`, `_scope`: plain `claude` restarted in `~` after a `wb start --repo
 ~/proj` there was woken for none, #1403); a task with neither key is everyone's. Another
 session's notice is at most toasted. `wb status`, a bare `wait`, and `stop`/`takeover`/`resume
 --all` from Claude Code's Bash take the caller's scope (`cli._caller`: `CLAUDE_CODE_SESSION_ID`,
@@ -7398,7 +7401,8 @@ threshold (or the window), with no toast of its own (Claude Code shows the compa
 
 **Status line and pane.** `⚒ wb · <name> <phase> r<round>` for queued/running/testing, `<name>
 asks`, `<N> awaiting review`, `<N> stuck`, `<N> failed` (each counted apart: one review and one stuck
-task read `2 awaiting review`, #1048; not parked: `waitsOnClaude`, #541; `mine` only, #693), joined by
+task read `2 awaiting review`, #1048; not parked: `phaseOf`'s `waits`, #541; `mine` only, #693; tallied by the
+kernel's `openCounts`, as the pane's group header is), joined by
 ` · `; `⚒ wb · workbench mode` with nothing listed. The pane: the task list (*The Tasks view*, below);
 the followed task's transcript (lines cut to `LINE_CHARS` 2000,
 within `HISTORY_CHARS` 60,000: Claude Code drops pane text past 100,000), following the newest
@@ -7702,22 +7706,43 @@ rendering, locale and telemetry never go in), `## Budget` (12 exports, 65,536 by
 module with Tables aside, `core.ts` 250 lines), the wire types (`Number`, `String`, `Boolean`,
 `Array`, closed records; every field present, `-1` and `""` for none, an unknown tag the safe
 answer), the denied imports and the move protocol. Today it holds `tables`, which `register.tsx`
-(`ACTIVE`, `NEEDS`, `PARKS`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING`) and `tasks.ts` (`CLOSED`)
-read through `core.ts`, their hand copies deleted, and `phaseOf`, with no caller yet: #1325's M1
-moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks onto it.
+(`ACTIVE`, `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING`) and `tasks.ts` (`CLOSED`)
+read through `core.ts`, their hand copies deleted; `phaseOf` and `openCounts` (#1325's M1: `register.tsx`'s
+`RUNNING`/`waitsOnClaude` and `tasks.ts`'s `WORKING`/`COUNTED` deleted); `owns` and `awayNow` (M2:
+`register.tsx`'s `parts`, `within`, `spotOf`, `near`, `ranHere` and `AWAY_MS` deleted, its `mine`,
+`claim` and `awayNow` adapters gathering the facts). By the owner's ruling (2026-11-25) Notice (M3,
+M4), the mode machine and `compactPlan` come next; `taskParts` stays out.
 
 - **The membrane**: `mod/hooks/core.ts`, the one importer of `./kernel.js` (with its generated
-  `kernel.d.ts`), exports `kernel` (every export by name, for the goldens), the sets `ACTIVE`,
-  `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING` and `phaseOf`. It maps
-  and decides nothing.
+  `kernel.d.ts`), exports `kernel` (every export by name, untyped, for the goldens: only tests,
+  `*.test.*`, and `golden/` import it), the sets `ACTIVE`, `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`,
+  `CHAT_STALE_MS`, `WAKE_OPENING`, and `phaseOf`, `openCounts(tasks)`, `owns(facts)` and
+  `awayNow(webAt, now, tasks)`, typed from `kernel.d.ts`. It maps (a phase to a string, a mark to
+  a boolean) and decides nothing.
 - **`Kernel.Tables`** (`kernel/src/Kernel/Tables.purs`) is generated by `scripts/kernel.py tables`
-  from wb's Python: `sorted()` of `store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS` and `CLOSED`,
+  from wb's Python: `sorted()` of `store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `WORKING` and
+  `STOPPED`, `store.OPEN_ORDER` in its own order (`openOrder`),
   `ask_mcp.NO_ANSWER`'s first sentence, `chat.LISTENING_FOR * 1000`, `spend.WAKE_OPENING` (`[workbench]
   Task`, from which `spend.WAKE` is built). Python stays the source.
-- **`phaseOf({phase, parked})`** → `{active, running, needsClaude, waits, closed}`: `running` is
-  active and not needing Claude (the mod's `RUNNING`, `queued` included), `waits` needs Claude and
-  isn't parked, a mark counting only in `PARKS` (`store.parked`, #698); a phase no table names is
+- **`phaseOf({phase, parked})`** → `{active, running, working, needsClaude, waits, stopped, done,
+  closed}`: `running` is active and not needing Claude (the status line's, `queued` included),
+  `working` a round under way (`store.WORKING`: the pane's clock, context bar and estimate),
+  `waits` needs Claude and isn't parked, a mark counting only in `PARKS` (`store.parked`, #698),
+  `stopped` stuck or failed (`store.STOPPED`), `done` a review or closed; a phase no table names is
   none of them.
+- **`openCounts({tasks})`** → `{counts: [{phase, n, waiting, active, stopped}], done}`: a row for
+  each open phase that has a task, in `store.OPEN_ORDER`, `waiting` those not parked; `done` the
+  tasks done. The pane's group header (`tasks.ts`: `2 running · 1 stuck`, `1/3 done`) and the
+  status line (`register.tsx`'s `taskParts`: `<N> awaiting review`, `<N> stuck`) draw from it.
+- **`owns({session, ids, driver, host, gone, cwd, repo, subdir, here, home, fold})`** → `{mine,
+  claims}`: whose task it is (*Waking Claude, exactly once*), `claims` the same with its session gone (what
+  `claim` may `wb adopt`). The host gathers the facts (the mod: `mem.ids`, `mem.deadPids`, its
+  directory, `mem.fold`, the task's driver as `store.driver_of` names it); paths compare by whole
+  components, lower case under `fold`. Its twin is `cli._scope` (`kernel.owns_twin` patches
+  `_owner_gone`, `store.folds_case`, `Path.home`), which stays the lock.
+- **`awayNow({webAt, now, tasks})`** → whether the user is away: the web chat used within six hours
+  (`webAt` ms, 0 for none), or one of the session's tasks (`mine`) active or waiting on Claude
+  unparked since (#110, #1402).
 - **`scripts/kernel.py`** (standard library, 3.11): `fetch` downloads `kernel/toolchain.json`'s
   pins for this platform (Linux or macOS, x64 or arm64): purs 0.15.16 from its GitHub release
   (`sha256`), esbuild 0.28.2 from npm (`sha512`), each archive's one member checked against
@@ -7743,10 +7768,14 @@ moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks o
   budget) compiled with `kernel/src` in a temp directory, bundled to `test/props.js` beside a copy
   of `kernel/test/props.test.ts`, and run under Bun (`bun test`, else `BUN_BE_BUN=1 opencode test`;
   neither: refused by name, never skipped): a Park-Miller generator (Schrage's method, Int only),
-  seeds `[20261124, 1, 2]`, 1,000 facts each, within 10 s, holding that closed and active share no
+  seeds `[20261124, 1, 2]`, 1,000 cases each, within 10 s, holding that closed and active share no
   phase, that active and needsClaude share only `asking`, that a parked mark counts only in phases
-  needing Claude, and that `phaseOf` round-trips (each flag says which of wb's sets the phase is in;
-  a phase none names, a near miss or a stranger, is none of them). A failure names its seed and case.
+  needing Claude, that `openOrder` names every open phase once, that `phaseOf` round-trips (each
+  flag says which of wb's sets the phase is in; a phase none names, a near miss or a stranger, is
+  none of them), that `openCounts` tallies what each task's `phaseOf` says, that `owns` gives a
+  session its own id's tasks, never a live session's nor another driver's by directory, nothing in
+  `~` or `/` by directory but where `wb start` ran, `/x/ab` never inside `/x/a`, and that `awayNow`
+  holds for six hours, then while one of the session's tasks is open. A failure names its seed and case.
   `check`: the offline checks below, two builds byte-equal to each other and to the commit, the props.
   `relock`: spago 1.0.4 from npm (no install scripts) into the cache re-locks `spago.lock` from
   `spago.yaml` in a scratch copy; only a new package needs it, and npm.
@@ -7755,8 +7784,12 @@ moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks o
   free of `import(`, `require(`, `process.`, `globalThis`, clocks, `Math.random`, `console.`,
   timers, `Intl.`, locale calls, `eval(`, `new Function`, `fetch(`, `Bun.`, `Deno.`; one set of
   exports across BOUNDARY.md, the bundle, the d.ts and the goldens; one importer across `mod/`,
-  `opencode-plugin/` and `workbench/chat_static/`; no `replaces` name still defined; no phase
-  literal in `opencode-plugin/`; the budgets. So a change to a value Tables copies fails the
+  `opencode-plugin/` and `workbench/chat_static/` (every `.ts`, `.tsx`, `.js`, `.mjs`, `.mts`, `.cts`,
+  `.cjs` and `.jsx`, `import`, `from` and `require(`); `core.ts`'s untyped `kernel` record taken
+  only by tests and goldens (`kernel.core_record_importers`); no `replaces` name still defined; no phase
+  literal in `opencode-plugin/`, and no phase set in `mod/hooks` outside its tests and goldens (two
+  phases on a line or in one bracketed list: `kernel.phase_literals`; one phase alone is its own
+  words or glyph); the budgets. So a change to a value Tables copies fails the
   suite until `python3 scripts/kernel.py build` (the toolchain once, with the network).
 - **The goldens** (`mod/hooks/golden/`): one file per module, `export default {module, cases}
   satisfies Golden`, each case `{fn, in, out, why, twin?}` (`in: null`: a value export), listed in
@@ -7767,7 +7800,7 @@ moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks o
   the Python that judges the same (`kernel.<name>`: `scripts/kernel.py`'s; `<mod>.<name>`:
   workbench's): `tests/test_kernel.py`'s `Twins` reads the goldens through Bun and calls each twin
   with the case's `in` as keyword arguments (none for a value export), so the goldens and wb agree;
-  `tables`' twin is `kernel.tables_values`. Without Bun (neither `bun` nor `opencode`) Twins skips.
+  `tables`' twin is `kernel.tables_values`, `owns`' `kernel.owns_twin` (`cli._scope` on one task). Without Bun (neither `bun` nor `opencode`) Twins skips.
 - **`wb patch`**: `.gitattributes` marks `kernel.js` `-merge -diff`, `kernel.d.ts` and
   `Tables.purs` `-merge`, all `linguist-generated`: a rebase that meets one stops with `wb
   update`'s message; take either side, then `build`. `wb patch upstream` names `python3
@@ -8397,7 +8430,7 @@ mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_BIN` 
 
 **task.json** (by `wb start`; `wb next --test` rewrites `test_cmd`, `wb relocate` `repo`, `git_common`, `cwd`):
 `name`, `repo`, `git_common` (the repo's git dir, real path: `gitops.repo_of` finds the repo once `repo` is gone),
-`cwd` (where `wb start` ran), `session` (`CLAUDE_CODE_SESSION_ID`, else an OpenCode driver's `OPENCODE_SESSION_ID`, `store.opencode_session`; with `cwd`/`repo`, whose task it is), `driver` (an OpenCode driver's task only, #1309: `{tool: "opencode", machine, pid?, start?, store?, seen?, model?, variant?}`, `store.driver_record`: at `wb start` or `wb adopt`, the server `wb` ran under, else one whose heartbeat listed the session, its start as wb read it, its beat's `store`, when the session was last known there (`seen`), the model and variant from that beat; with no beat then, filled in by the first scope check whose fresh beat lists the session, `store.driver_fill`; none on a Claude Code task, whose task.json is as before 2.2: `store.driver_of`), `claude_pid` (`CLAUDE_PID`: once gone,
+`cwd` (where `wb start` ran), `session` (`CLAUDE_CODE_SESSION_ID`, else an OpenCode driver's `OPENCODE_SESSION_ID`, `store.opencode_session`; with `cwd`/`repo`, whose task it is), `driver` (an OpenCode driver's task only, #1309: `{tool: "opencode", machine, pid?, start?, store?, seen?, model?, variant?}`, `store.driver_record`: at `wb start` or `wb adopt`, the server `wb` ran under, else one whose heartbeat listed the session, its start as wb read it, its beat's `store`, when the session was last known there (`seen`), the model and variant from that beat; with no beat then, filled in by the first scope check whose fresh beat lists the session, `store.driver_fill`; none on a Claude Code task, whose task.json is as before 2.2: `store.driver_of`; the mod reads `driver.tool` so the kernel's `owns` never adopts another driver's task by directory), `claude_pid` (`CLAUDE_PID`: once gone,
 the directory rule adopts the task), `claude_start` (`models._started`, against a recycled pid), `claude_machine` (a process on another
 machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: two machines adopted each other's tasks,
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
@@ -8869,7 +8902,8 @@ round-tripping a `coding` change and its settings-changes.jsonl row, probe turne
 `Bundle`, `Tables`, `Imports`, `Build` (the wire types), `Toolchain` (a bad hash, a link, a path escape refused by name),
 `Props` (`kernel.py props`: Bun, else OpenCode's, else refused by name; `check` runs them), `Twins` (each golden's
 Python twin, the goldens read through Bun) and `Checker`, which breaks a copy of the tree each way a check must catch,
-a hand copy of a table back in `register.tsx` or `tasks.ts` among them); `test_workflows.py` (the merge gate in plain text: every action pinned to a commit with its version,
+a hand copy of a table or a phase set back in `register.tsx` or `tasks.ts`, a `require`, `.mts`, `.cts`, `.cjs` or `.jsx`
+importer of the kernel and a host file taking `core.ts`'s untyped record among them); `test_workflows.py` (the merge gate in plain text: every action pinned to a commit with its version,
 every workflow its own permissions, `check` never path-filtered and required from GitHub Actions, green only when every
 `suite` shard, `mod` and `kernel` are, the `kernel` job's steps in order, the macOS nightly's kernel `check` on shard 1 and `opencode.yml`'s Bun goldens, the shards dealing each test once, the ruleset without bypass, the plugin without
 `version`, `owner-merge.yml` approving only the owner's pull requests without running their code); `test_docs.py`
@@ -9391,12 +9425,14 @@ doc needs its own `!/` line).
 - **`models.BOX_QUIET`, `BOX_WAIT`** (a wb remote box's turns) → OpenCode's 2-minute background move (`BG_GRACE`), which
   bounds the gap between a round's requests, and `router.ROUND_DEFAULT_S`;
   `wb start`'s note; `media.turns` (`box_quiet`).
-- **A value `Kernel.Tables` copies** (`store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `ask_mcp.NO_ANSWER`'s opening,
+- **A value `Kernel.Tables` copies** (`store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `WORKING`, `STOPPED`, `OPEN_ORDER`, `ask_mcp.NO_ANSWER`'s opening,
   `chat.LISTENING_FOR`, `spend.WAKE_OPENING`) → `python3 scripts/kernel.py build` (Tables.purs, `kernel.js`, `kernel.d.ts`) and
   `mod/hooks/golden/tables.ts`, in the same commit; `tests/test_kernel.py` fails until then (`Tables`, and `Twins` for
   the golden). The mod reads them only through `core.ts` (`ACTIVE`, `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`,
-  `CHAT_STALE_MS`, `WAKE_OPENING`), so no hand copy is kept equal: a copy back in `register.tsx` or `tasks.ts` fails
-  `tests/test_kernel.py` (BOUNDARY.md's `replaces`). **A kernel export** →
+  `CHAT_STALE_MS`, `WAKE_OPENING`, `phaseOf`, `openCounts`), so no hand copy is kept equal: a copy back in `register.tsx`
+  or `tasks.ts` fails `tests/test_kernel.py` (BOUNDARY.md's `replaces`, and a phase set: `kernel.phase_literals`).
+  **`store.OPEN_ORDER`** → the pane's header order and the status line's (`openCounts`); `tasks.test.ts`'s headers.
+  **A kernel export** →
   its row in `kernel/BOUNDARY.md`'s `## Exports`, its golden file in `golden/index.ts`, a build; **a denied import** →
   BOUNDARY.md's list and `kernel.DENIED`; **a budget** → BOUNDARY.md's `## Budget` only. **`kernel/toolchain.json`
   or `spago.lock`** → `fetch`, `build` (the banner's inputs) and CI's cache key.
@@ -9604,9 +9640,11 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (#1135); the `kind` default (`gpu`) →
   `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`). `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
   table and the round report's `agent tokens` (an API task's) together.
-- **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
-  `scope()` passes every id. An OpenCode task's `session` with no `claude_pid` is what keeps the unchanged mod's `mine`
-  off it (`store.driver_record`); a `driver` key on a Claude task, or a `claude_pid` on an OpenCode one, breaks that.
+- **Which session a task is** → the kernel's `owns` (the mod's `mine` and `claim` gather its facts) and `cli._scope`:
+  the same rule, the home-or-`/` exception and the driver rule included, held by `mod/hooks/golden/owner.ts` on both
+  (its Python twin `kernel.owns_twin`); `scope()` passes every id. The mod passes a task's driver as `store.driver_of`
+  names it (task.json `driver.tool`), so another driver's task is never adopted by directory; an OpenCode task's
+  `session` with no `claude_pid` keeps it off `mine` by id too (`store.driver_record`).
 - **The heartbeat** (`drivers/opencode-<machine_tag>-<pid>.json`: the name, its keys, `store` and its `sessions` being every
   session in it, `ts` the listing's start, `store.HEARTBEAT_FRESH` against the plugin's beat) → the OpenCode plugin's server part,
   which is to write it (#1316; a beat naming a `store` with a partial list makes live sessions' tasks gone), and `store.beat_path`,
@@ -9653,7 +9691,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `prompt.submit` guard, the /workbench skill's *Agents on the web chat*.
 - **A Claude row's session** (`cli._chat_writer`: `session`, `claude_pid`, `claude_start`, `claude_machine`, as
   task.json's) → the mod's `answersTo` and `listen` (whose a user's message is, #1096), `ELSEWHERE_NOTE` ↔ reference/driving.md.
-- **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`, `Handler._desk`, `reportActive`) → `awayNow`,
+- **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`, `Handler._desk`, `reportActive`) → `awayNow`
+  (the kernel's, `Kernel.Away`, which the OpenCode plugin is to judge by too; the mod's is an adapter),
   AWAY_NOTE, `#away-when`, *The web chat*.
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.

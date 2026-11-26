@@ -4,7 +4,8 @@
 // OpenCode plugin (#1296), so a decision made in the kernel is made the same way on each (#1356).
 import * as K from './kernel.js'
 
-// Every export by name, for the goldens (golden/run.ts calls each case's `fn` on it).
+// Every export by name, untyped, for the goldens (golden/run.ts calls each case's `fn` on it): only
+// tests and golden/ import it (scripts/kernel.py's offline check); the hosts take the typed names below.
 export const kernel: Readonly<Record<string, unknown>> = K
 
 // The phase sets, from workbench/store.py through Kernel.Tables (generated: never a hand copy).
@@ -22,6 +23,21 @@ export const WAKE_OPENING: string = K.tables.wakeOpening
 
 export type PhaseFacts = Parameters<typeof K.phaseOf>[0]
 export type Phase = ReturnType<typeof K.phaseOf>
-// What a task's phase means (Kernel.Phase): no caller yet; #1325's M1 moves register.tsx's
-// RUNNING/waitsOnClaude and tasks.ts's phase checks onto it
-export const phaseOf = (facts: PhaseFacts): Phase => K.phaseOf(facts)
+// What a task's phase means (Kernel.Phase): active, running (queued counts), working (a round
+// under way), needs Claude, waits (needs Claude, not parked), stopped, done, closed
+export const phaseOf = (facts: PhaseFacts): Phase => K.phaseOf({ phase: String(facts.phase ?? ''), parked: !!facts.parked })
+export type Counts = ReturnType<typeof K.openCounts>
+// A list of tasks tallied by phase, in store.OPEN_ORDER (Kernel.Phase): the pane's group header and
+// the status line count by it
+export const openCounts = (tasks: ReadonlyArray<PhaseFacts>): Counts =>
+  K.openCounts({ tasks: tasks.map(t => ({ phase: String(t.phase ?? ''), parked: !!t.parked })) })
+
+export type OwnerFacts = Parameters<typeof K.owns>[0]
+// Whose task it is (Kernel.Owner): `mine`, and `claims` (it would be, were its session gone);
+// cli._scope judges the same. The host gathers the facts: its ids, its directory, `gone`
+export const owns = (facts: OwnerFacts): ReturnType<typeof K.owns> => K.owns(facts)
+
+// Whether the user is away from the terminal (Kernel.Away): the web chat used within six hours,
+// or one of the session's own tasks open since
+export const awayNow = (webAt: number, now: number, tasks: ReadonlyArray<PhaseFacts & { mine: boolean }>): boolean =>
+  K.awayNow({ webAt: Number(webAt) || 0, now, tasks: tasks.map(t => ({ phase: String(t.phase ?? ''), parked: !!t.parked, mine: !!t.mine })) })
