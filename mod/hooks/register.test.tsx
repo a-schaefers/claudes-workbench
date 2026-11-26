@@ -3593,6 +3593,59 @@ test('a /loop firing, another plugin\'s prompt or a channel message leaves the u
   expect(posted).toHaveLength(1)                                 // and the answer to m2 reaches them here
 })
 
+test('#1278: deepcode, typed or from the web chat, adds wb\'s rule beside it; a deepmode on line sets it; nothing else does', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('session.id', () => ({ value: 'sess-1' }))
+  const RULE = 'The user wrote `deepcode`, the rule.'
+  const ON = 'Dynamic workflows (deepmode): On. substantive requests run as deep workflows (wb run)'
+  const ran: string[] = []
+  on('process.run', (_: any, e: any) => {
+    const args = e.argv.slice(1).join(' ')
+    ran.push(args)
+    return { value: { exitCode: 0, stdout: args === 'deepmode --rule' ? RULE : args === 'deepmode on' ? ON : '', stderr: '' } }
+  })
+  const got: { text: string; context: readonly string[] }[] = []
+  on('prompt.submit', (_: any, e: any) => { got.push({ text: e.text, context: e.context ?? [] }); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const typed = async (text: string, origin: object = { kind: 'composer' }) => {
+    await $.prompt.submit({ text, origin } as any)
+    return got.at(-1)!
+  }
+  const wb = (args: string) => ran.filter(a => a === args).length
+
+  expect((await typed('deepcode audit the parser')).context).toEqual([RULE])
+  expect((await typed('please DeepCode this')).context).toEqual([RULE])
+  expect(wb('deepmode --rule')).toBe(1)                          // read once a load
+  for (const text of ['what does `deepcode` do?', 'the deepcoder repo', 'ultracode the migration', 'turn deepmode on please'])
+    expect([text, (await typed(text)).context]).toEqual([text, []])
+  expect((await typed('deepcode from another plugin', { kind: 'plugin', name: 'other' })).context).toEqual([])
+  expect(wb('deepmode on')).toBe(0)                              // no line of its own yet
+
+  const set = await typed('deepmode on\ndeepcode rename the flag')
+  expect(wb('deepmode on')).toBe(1)                              // the user's own line is their yes
+  expect(set.context).toEqual([`The user's line \`deepmode on\` was carried out (wb deepmode on): ${ON}`, RULE])
+  expect(toasts).toContain(`workbench: ${ON}`)
+
+  // the web chat: the user's message carries the rule after their words; an agent's never does
+  await $.turn.start({ text: '', turnId: 't0' })
+  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })   // workbench mode: the chat listens
+  await $.turn.complete(endTurn('t0'))
+  await clock.advance(3000)
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'u1', ts: 1_800_000_000, from: 'user', text: 'deepcode fix the login test' }) + '\n' +
+    JSON.stringify({ id: 'a1', ts: 1_800_000_001, from: 'hermes', role: 'agent', text: 'deepcode everything' }) + '\n'
+  await clock.advance(31_000)
+  const web = got.filter(g => g.text.startsWith('[web chat]') || g.text.startsWith('[agent '))
+  expect(web.map(g => g.text)).toEqual([`[web chat] deepcode fix the login test\n\n${RULE}`,
+    expect.stringMatching(/^\[agent hermes\] deepcode everything\n\[message a1: /)])
+  expect(web[1]!.text).not.toContain(RULE)
+})
+
 test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {
   // 2026-11-20: a Python patch whose string held "split it (wb next)" turned workbench mode on
   for (const run of ['wb start t --spec s.md', 'cd ~ && wb start step-2 --spec s.md --repo .', 'wb next t',

@@ -24867,7 +24867,8 @@ class Setup(Base):
                 mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
             self.assertEqual([p for p, _ in ocplugin.shared_files(clone)],
                              ["mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/kernel.js",
-                              "mod/hooks/modeline.ts", "mod/hooks/splash.ts", "mod/hooks/tasks.ts"])
+                              "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/splash.ts",
+                              "mod/hooks/tasks.ts"])
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
             first = Path(self.plugins()[0]["package"])
@@ -35572,6 +35573,49 @@ class RealOpenCodePlugin(Base):
             time.sleep(0.5)
         self.assertEqual(left, [])
 
+
+    def test_deepcode_reaches_the_workbench_agents_model_after_the_words_and_a_deepmode_line_sets_it(self):
+        # #1278 on OpenCode (opencode-plugin/keywords.ts): the prompt hook marks the message by its
+        # id and the context hook adds wb's rule after the user's words in each request, which
+        # only a real server shows works (the ids match; OpenCode makes a message of the edit)
+        from workbench import chat, ocplugin, runs
+        chat.set_on(False)  # the prompt reaches the chat part too (see the tests above)
+        os.environ["HOME"] = str(self.root / "home")
+        state = self.root / "wb-state"
+        state.mkdir()
+        with mock.patch.dict(os.environ, {"WB_HOME": str(state)}):
+            chat.set_on(False)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = self.root / "requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out)])
+        self.addCleanup(lambda: (server.kill(), server.wait()))
+        self.conf.write_text(json.dumps({
+            "plugins": [{"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(state)}}}],
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 131072, "output": 1024}}}}}}))
+        url = self.serve(WB_HOME="")
+        self.listed(url, ocplugin.PLUGIN_ID)
+        rule = runs.DEEPCODE_RULE.replace("the /workbench skill's *Deep workflows*", "your Workbench instructions' *Deep workflows*")
+
+        def users(text):  # the user messages of the requests that offer tools (not the title's)
+            reqs = [json.loads(line) for line in out.read_text().splitlines()]
+            return [m for r in reqs if r.get("tools") for m in r["messages"] if m["role"] == "user"
+                    and text in json.dumps(m["content"])]
+        self.ask(url, "run", "--agent", "workbench", "-m", "cap/cap", "--format", "json", "deepcode audit the parser")
+        said = users("deepcode audit the parser")
+        self.assertTrue(said, out.read_text())
+        self.assertRegex(json.dumps(said[0]["content"]), r"deepcode audit the parser.*" + re.escape(json.dumps(rule)[1:-1]))
+        self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepmode on")
+        self.assertEqual(json.loads((state / "workflows.json").read_text())["mode"], "on")
+        toggled = users("deepmode on")
+        self.assertTrue(toggled, out.read_text())
+        self.assertIn("was carried out (wb deepmode on): Dynamic workflows (deepmode): On.", json.dumps(toggled[0]["content"]))
+        self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepcode on build")
+        self.assertNotIn("Workbench instructions", json.dumps(users("deepcode on build")))  # no instructions to follow there
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCodeSkillFiles(Base):

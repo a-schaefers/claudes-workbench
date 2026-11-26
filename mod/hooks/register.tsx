@@ -72,6 +72,7 @@ import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
+import { keywords, RULE_ARGS, TOGGLED, toggleArgs } from './keywords'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, focusOf as focusOfTasks, frameOf, isEst, speechOf, taskLines, viewFacts } from './tasks'
 // moved to tasks.ts, shared with the OpenCode plugin's panel (#1312); still exported from here
@@ -565,6 +566,33 @@ const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb deepmo
   'first, then tests, then UI or docs.'
 const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb deepmode` shows it): run one task ' +
   'at a time again, as the /workbench skill says.'
+
+// The keywords in what the user wrote (#1278; keywords.ts, the OpenCode plugin's too): what the
+// model reads beside it. `deepcode`, wb's rule (`wb deepmode --rule`, read once a load); a line
+// `deepmode on|off`, the setting changed as the user's own word says, toasted, and the model told
+// it is done. Nothing for a text without them, and no wb run either. The prompt waits for wb, so
+// a hung one holds it KEYWORD_WB_MS at most.
+const KEYWORD_WB_MS = 15_000
+async function keywordNotes($: any, text: string): Promise<string[]> {
+  const k = keywords(text)
+  const out: string[] = []
+  if (k.deepmode !== null) {
+    const { ok, out: said } = await runWb($, toggleArgs(k.deepmode), KEYWORD_WB_MS)
+    if (ok) {
+      $.ui.toast(`workbench: ${said}`)
+      out.push(TOGGLED(k.deepmode, said))
+    } else warnOnce($, 'deepmode', `wb deepmode failed: ${brief(said)}`)
+  }
+  if (k.deepcode) {
+    if (!mem.deepcodeRule) {
+      const { ok, out: rule } = await runWb($, [...RULE_ARGS], KEYWORD_WB_MS)
+      if (ok) mem.deepcodeRule = rule
+      else warnOnce($, 'deepcode', `wb deepmode --rule failed: ${brief(rule)}`)
+    }
+    if (mem.deepcodeRule) out.push(mem.deepcodeRule)
+  }
+  return out
+}
 
 async function workflowsMode($: any): Promise<string> {
   try {
@@ -1891,6 +1919,7 @@ const mem = {
   commandsFile: '', // commands.json ($WB_COMMANDS): Claude's edit never drops a repo's local_only (#1021)
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
   termDialogs: [] as TermDialog[], // dialogs up in the terminal, for the page's waiting line (#959, #1350)
+  deepcodeRule: '', // wb deepmode --rule, read at the first `deepcode` of this load (keywordNotes)
 }
 
 // Whether a task is this session's: the kernel's owns (Kernel.Owner), which `wb`'s _scope judges
@@ -2906,7 +2935,10 @@ async function listen($: any, now: number) {
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
       : a.n == null ? `(about task ${String(a.task)}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
-    const text = chatPrompt(m, elsewhereNote + about)
+    // the user's keywords (#1278), after their words: a plugin's prompt carries no context, and
+    // an agent's message is never the user's word
+    const notes = agentOf(m) ? [] : await keywordNotes($, String(m.text ?? ''))
+    const text = chatPrompt(m, elsewhereNote + about) + notes.map(n => `\n\n${n}`).join('')
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     if (mem.busy) {
@@ -3720,11 +3752,13 @@ export const register: Register = (on, options) => {
     return { ...r, text: add(first ? `${r.text}\n\n${FIRSTRUN_NOTE}` : r.text) }
   })
 
-  // Typed in the terminal: the user is back, so answers go here again
+  // Typed in the terminal: the user is back, so answers go here again; and its keywords (#1278)
   on('prompt.submit', async ($, e, next) => {
     if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith(AGENT) && !e.text.startsWith('[workbench]')) {
       await back($)
       userOwedClear() // back at the terminal: an answer there reaches them (#767), never an agent (#1273)
+      const notes = await keywordNotes($, e.text) // `deepcode`, `deepmode on|off` (#1278)
+      if (notes.length) return next({ ...e, context: [...(e.context ?? []), ...notes] })
     }
     return next(e)
   })

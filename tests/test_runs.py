@@ -422,6 +422,11 @@ class Keywords(unittest.TestCase):
             with self.subTest(text=c["text"]):
                 self.assertEqual(runs.keywords(c["text"]), {"deepcode": c["deepcode"], "deepmode": c["deepmode"]})
 
+    def test_the_rule_names_the_skills_section_as_the_opencode_plugin_rewords_it(self):
+        # opencode-plugin/keywords.ts `forDriver` turns these words into "your Workbench
+        # instructions'": the Workbench agent's prompt is the skill, which it has no /workbench for
+        self.assertIn("the /workbench skill's *Deep workflows*", runs.DEEPCODE_RULE)
+
     def test_the_rule_names_workbenchs_word_and_the_skills_section(self):
         self.assertIn("`deepcode`", runs.DEEPCODE_RULE)
         self.assertIn("*Deep\nworkflows*".replace("\n", " "), runs.DEEPCODE_RULE.replace("\n", " "))

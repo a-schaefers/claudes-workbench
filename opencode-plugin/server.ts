@@ -17,6 +17,7 @@ import { registerAgent } from './agent.ts'
 import { startDriver, type DriverHost } from './driver.ts'
 import { notices } from './notices.ts'
 import { upkeep, type UpkeepHost } from './upkeep.ts'
+import { keywordHooks, type KeywordsHost } from './keywords.ts'
 import { registerCommands, type CommandHost } from './commands.ts'
 import { startPane, type PaneHost } from './pane.ts'
 
@@ -48,6 +49,9 @@ const plugin: ServerPlugin = {
     if (stopCalls) stops.push(stopCalls)
     const stopNotices = await notices(ctx) // the notices and the background jobs (#1313, #1334)
     if (stopNotices) stops.push(stopNotices)
+    // the user's keywords, before upkeep: a `deepmode on` line is set before upkeep reads it (#1278)
+    const stopKeywords = await keywordHooks(ctx as unknown as KeywordsHost).catch(() => undefined)
+    if (stopKeywords) stops.push(stopKeywords)
     // the conversation's rules, what a compaction keeps, the boundary compaction; the commands (#1315)
     const stopUpkeep = await upkeep(ctx as unknown as UpkeepHost).catch(() => undefined)
     if (stopUpkeep) stops.push(stopUpkeep)

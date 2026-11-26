@@ -131,7 +131,9 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   their yes): off (the default), run **one task at a time**: start the next when the last is
   reviewed. On, a `dynamic-workflows` context block says a substantive request runs as a deep
   workflow (*Deep workflows*); a later change comes as a `[workbench]` note. The word
-  `deepcode` in a request asks for one deep workflow whatever the setting.
+  `deepcode` in a request asks for one deep workflow whatever the setting (wb's rule comes
+  beside it). A line `deepmode on|off` of the user's own is set for them, and a note says so:
+  don't run it again.
 - **After a compaction or `/clear`**, a `workbench-mode` context block says the mode is still on
   and where this file is: read it again if its procedure is no longer in your context.
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
