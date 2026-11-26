@@ -7664,11 +7664,30 @@ def cmd_chat(a):
 
 
 def reach_hint() -> str:
-    """The story's `link.reach` while the web app opens on this machine alone, else ""."""
+    """The story's `link.reach` while the web app opens on this machine alone and `wb chat reach
+    tailnet` can work here (this OS's own tailscale CLI: under WSL with Tailscale on Windows it is
+    refused, and `wb chat on` advised it anyway, #1524), else ""."""
+    if not chat.tailscale_cli():
+        return ""
     try:
         return story.text("link.reach") if chat.reach() == "local" else ""
     except chat.ConfigError:
         return ""
+
+
+def still_served(port: int) -> tuple[str, str] | None:
+    """`tailscale serve`'s https in front of the web app on ``port``, as (its URL, the command that
+    stops it), else None: reach `local` drops only the bind, and wb said "this machine only" while
+    every tailnet device still opened the app (#1512, 2026-11-26)."""
+    site = chat.served_site(port)
+    if not site:
+        return None
+    name, _, https = site.rpartition(":")
+    if not name or not https.isdigit():
+        name, https = site, "443"
+    exe = "tailscale.exe" if (chat.tailscale_cli(windows=True) or "").lower().endswith(".exe") else "tailscale"
+    return (f"https://{name}/" if https == "443" else f"https://{name}:{https}/",
+            f"{exe} serve --https={https} off")
 
 
 def chat_reach(to: str | None, port: int) -> None:
@@ -7681,18 +7700,24 @@ def chat_reach(to: str | None, port: int) -> None:
             now = chat.reach()
         except chat.ConfigError as e:
             die(str(e))
-        print(f"web app reach: {now}" + {"local": " (this machine only)", "tailnet": " (this machine and your tailnet)",
-                                          "custom": " (chat.json's own bind)"}[now])
+        still = still_served(port) if now == "local" else None
+        print(f"web app reach: {now}" + (f", but tailnet https via tailscale serve ({still[0]})" if still else
+                                          {"local": " (this machine only)", "tailnet": " (this machine and your tailnet)",
+                                           "custom": " (chat.json's own bind)"}[now]))
         return
     try:
-        got = chat.set_reach(to)
+        got = chat.set_reach(to, port)
     except ValueError as e:
         die(f"wb chat reach {to}: {e}")
     except chat.ConfigError as e:
         die(str(e))
     if to == "local":
-        print("web app reach: local (this machine only)" + ("" if got["from"] == "local" else
-              f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"))
+        drops = "" if got["from"] == "local" else f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"
+        if (still := still_served(port)):  # settings.REACH_LOCAL_HELP's cue: `still serves`
+            print(f"web app reach: local{drops}, but `tailscale serve` still serves it to your tailnet at {still[0]}: "
+                  f"`{still[1]}` stops that")
+        else:
+            print(f"web app reach: local (this machine only){drops}")
         return
     ts = got["ts"]
     name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts["ip"]
@@ -8999,7 +9024,7 @@ def cmd_doctor(a):
         print(f"--  {said}")
     else:
         line(good, said)
-        if good and shutil.which("tailscale") and (hint := reach_hint()):  # the phone's way in (#1355)
+        if good and (hint := reach_hint()):  # the phone's way in (#1355)
             print(f"--  {hint}")
     for good, said in schedule.doctor_lines():  # wb schedule (#1204)
         line(good, said)

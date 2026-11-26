@@ -30474,10 +30474,17 @@ class WebChat(Base):
         # the user's off is remembered across /workbench runs. On starts a server when none
         # answers; off stops only one wb started, and nobody listens.
         self.assertTrue(self.chat.is_on())                             # no switch.json: on
-        out = run_wb("chat", "on", "--port", str(self.port))           # one runs already: kept
+        # the phone's way in while it opens here alone (#1355), only with this OS's own tailscale
+        # CLI (#1524, 2026-11-26): the runner's PATH decides neither, so both are put here
+        from workbench import story
+        with mock.patch.object(self.chat, "tailscale_cli", lambda windows=False: "/opt/ts/tailscale"):
+            out = run_wb("chat", "on", "--port", str(self.port))       # one runs already: kept
         self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
-        from workbench import story  # and the phone's way in while it opens here alone (#1355)
         self.assertTrue(out.endswith(f"--  {story.text('link.reach')}\n"), out)
+        with mock.patch.object(self.chat, "tailscale_cli", lambda windows=False: None):
+            out = run_wb("chat", "on", "--port", str(self.port))
+        self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
+        self.assertNotIn(story.text("link.reach"), out)                # no tailscale here: no hint
         self.assertTrue(self.chat.is_on())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())
         store.write_json(self.chat.chat_dir() / "listener.json", {"session": "s", "pid": os.getpid()})
@@ -30696,7 +30703,8 @@ class WebChat(Base):
             p = chat.plan(["localhost", "tailscale"])
         self.assertEqual((p["binds"], p["skipped"]), (["127.0.0.1"], ["tailscale (not running)"]))
         with mock.patch.object(chat, "tailscale",
-                               return_value={"ip": "100.64.0.9", "names": {"box", "box.ts.net"}}):
+                               return_value={"ip": "100.64.0.9", "names": {"box", "box.ts.net"}}), \
+                mock.patch.object(chat, "listenable", return_value=True):  # on no interface here (#1499)
             p = chat.plan(["localhost", "tailscale"])
         self.assertEqual(p["binds"], ["127.0.0.1", "100.64.0.9"])
         self.assertTrue({"box", "box.ts.net", "100.64.0.9"} <= p["hosts"])
@@ -30727,7 +30735,8 @@ class WebChat(Base):
                                                   "HostName": "box"}}
             return mock.patch.object(chat.subprocess, "run", return_value=types.SimpleNamespace(
                 stdout=json.dumps(me)))
-        with mock.patch.object(chat.shutil, "which", return_value="/usr/bin/tailscale"):
+        with mock.patch.object(chat.shutil, "which", return_value="/usr/bin/tailscale"), \
+                mock.patch.object(chat, "listenable", return_value=True):  # on no interface here (#1499)
             with status(["fd7a:115c:a1e0::9"]):
                 p = chat.plan(["localhost", "tailscale"])
                 self.assertEqual((p["binds"], p["skipped"]), (["127.0.0.1", "fd7a:115c:a1e0::9"], []))
@@ -31809,6 +31818,7 @@ class WebChat(Base):
         ts = {"value": {}}
         execs = []
         with mock.patch.object(chat, "tailscale", side_effect=lambda: ts["value"]), \
+                mock.patch.object(chat, "listenable", return_value=True), \
                 mock.patch.object(chat, "REPLAN_EVERY", 0.05), \
                 mock.patch.object(chat.os, "execv", side_effect=lambda *a: (execs.append(a), sys.exit())), \
                 mock.patch.object(chat, "make_servers", return_value=(
