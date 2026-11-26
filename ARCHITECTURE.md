@@ -9026,8 +9026,8 @@ Claude has the final say (the owner's rule on #1278): every flow ends at a `fina
 
 **The pieces.** `schema.py` (a JSON Schema subset, checked outside the lane: `check`, `valid` refusing a keyword
 it can't check, `last_object`), `cards.py` (role cards), `runs.py` (flows, runs, the driver, `wb run`, the
-keywords' reference). Shipped: cards `agent/roles/` find, verify, judge (tools none), review, critic, build,
-fix; schemas `agent/schemas/` findings (`maxItems` 12), verdict, judgments, review, triage; flows
+keywords' reference). Shipped: cards `agent/roles/` find, verify, judge (tools none), review, choose, critic, build,
+fix; schemas `agent/schemas/` findings (`maxItems` 12), verdict, judgments, review, choice, triage; flows
 `agent/flows/` build, audit, fix, best-of, lenses, triage. The user's own come first: `$WB_ROLES`
 (`~/.config/workbench/roles/`, its `schemas/`), `$WB_FLOWS` (`~/.config/workbench/flows/`). A repo's
 `.workbench/flows/` is listed (`wb run flows`) as "read it first"; `--flow` never takes it, `--plan` does.
@@ -9072,6 +9072,16 @@ exactly N long, each `id` one of the batch's, written to `runs/<run>/schemas/<st
 duplicate in its place) goes under `not_run` as `unjudged` (`runs.unanswered`); a batch's trail lists its
 members as its judge was given them, and a null batch names them (`members`). Before, lenses' and triage's
 judgments reached Claude without what they judged, by ids the judge invented, a skipped one gone.
+**A compare stage** (`compare: true`, a report over a code stage with `attempts` of 2 or more; no split,
+batch, attempts or refix): one item per item of the code stage, once all its attempts ended, its members the
+attempts that reached review (fewer than two: `not_run`, nothing to compare). Its prompt's `{diffs}`
+(`runs._diffs_of`) carries each attempt's diff as `### a<k> (task <t>; tests passed|failed|no tests)`, each
+cut to its share of `CUTS['diff']`; only the green ones when two or more are, the rest named
+(`runs._attempts`); its schema `runs.compare_schema`: `best` and `ranking` one of the labels shown. The
+shipped best-of is code → review → choose (the `choose` card, `choice` schema `{best, ranking, why}`) →
+Claude, whose final row carries the pick and, as its trail, every attempt's task: nothing is discarded on
+the chooser's word (#1134's study: Claude read every review and most diffs, N times the handoff; SWE-agent's
+Chooser).
 Refused: an unknown key or placeholder, a last stage that isn't `final`, and after a code stage anything but a
 report over its `{diff}`. Run names `runs.RUN_RE` (24), stage ids `STAGE_RE` (8): `<run>-<stage>-<n>` fits a task
 name, and the run a `--group`. A run and a task never share a name (`runs.taken`, `cmd_start`).
@@ -10560,7 +10570,7 @@ doc needs its own `!/` line).
   is the one each host names as acting next; modeline.ts's `modeline(link, cols, name)` (`MODELINE` by default,
   `Workbench` in OpenCode); the colour names `Part` uses → `pane-view.ts`'s `TOKEN`; `wb watch --json`'s and `wb diff`'s
   output → `pane.ts`'s `parseLines`, `diffLines`; the owner keys `owns` reads → `pane.ts`'s `PaneTask`.
-- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ `mod/hooks/keywords.ts` (both hosts' detection; the root package.json's `files` brings it to the OpenCode plugin, `opencode-plugin/test/deep.test.ts` reads the fixture); `runs.PLACES`' `{report}` ↔ the shipped build, fix and best-of reviews and the review card; `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip.
+- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ `mod/hooks/keywords.ts` (both hosts' detection; the root package.json's `files` brings it to the OpenCode plugin, `opencode-plugin/test/deep.test.ts` reads the fixture); `runs.PLACES`' `{report}` ↔ the shipped build, fix and best-of reviews and the review card; `runs.compare_schema`'s `best` and `ranking` ↔ `agent/schemas/choice.json` and the choose card; `runs.answers_key` (an array of objects requiring `id`) ↔ judgments' and triage's schemas; `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip.
 - **The wb the mod runs** (`findWb` in register.tsx: `WB_BIN`, `wb` on PATH, `~/.local/bin/wb`) → `cli.mod_wb`, what wb
   doctor says the mod runs, and wb setup's PATH note (#1200).
 - **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).

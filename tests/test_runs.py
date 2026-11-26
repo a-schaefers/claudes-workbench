@@ -406,6 +406,35 @@ class Flows(Base):
               {"id": "claude", "final": True, "from": "review"}]
         self.assertEqual(self.errs(stages=st), "")
 
+    def test_a_compare_stage_reads_every_attempts_diffs_over_a_code_stage_with_attempts_only(self):
+        st = [{"id": "code", "kind": "code", "items": ["x"], "attempts": 2},
+              {"id": "choose", "card": "choose", "from": "code", "compare": True, "prompt": "{diffs}"},
+              {"id": "claude", "final": True, "from": "choose"}]
+        self.assertEqual(self.errs(stages=st), "")
+        st[1]["prompt"] = "{diff}"
+        self.assertIn("a compare stage reads {diffs}, every attempt's, not {diff}", self.errs(stages=st))
+        st[1]["prompt"], st[0]["attempts"] = "{diffs}", 1
+        self.assertIn("compare is a report stage over a code stage with attempts of 2 or more", self.errs(stages=st))
+        st[0]["attempts"] = 2
+        st[1].pop("compare")
+        self.assertIn("{diffs} is a compare stage's (compare: true)", self.errs(stages=st))
+
+    def test_a_compare_shows_the_green_attempts_alone_when_two_or_more_are_and_its_schema_names_them(self):
+        def task(name, ok):
+            store.write_json(store.Task(name).dir / "task.json", {"name": name, "base": "HEAD"})
+            store.write_json(store.Task(name).dir / "status.json", {"tests": None if ok is None else {"ok": ok}})
+            return {"task": name, "round": 1, "item": "x"}
+        it = runs.Item("choose", "1", members=[("1#a1", task("c-1", True)), ("1#a2", task("c-2", False)),
+                                               ("1#a3", task("c-3", True))])
+        rows, said = runs._attempts(it)
+        self.assertEqual([r[0] for r in rows], ["a1", "a3"])
+        self.assertEqual(said, "Only the attempts whose tests pass are shown; left out: a2 (tests failed).\n\n")
+        doc = runs.compare_schema({"card": "choose"}, [r[0] for r in rows])
+        self.assertEqual((doc["properties"]["best"]["enum"], doc["properties"]["ranking"]["items"]["enum"]), (["a1", "a3"], ["a1", "a3"]))
+        it.members = it.members[:2]  # one green: all shown, said
+        rows, said = runs._attempts(it)
+        self.assertEqual(([r[0] for r in rows], said), (["a1", "a2"], "Fewer than two attempts pass their tests: all are shown.\n\n"))
+
     def test_a_batch_member_carries_its_key_as_id_and_its_schema_answers_exactly_the_batch(self):
         self.assertEqual(runs.member("1.2", {"id": "F9", "claim": "c"}), {"id": "1.2", "claim": "c"})
         self.assertEqual(runs.member("3", "issue #12: crash"), {"id": "3", "item": "issue #12: crash"})
@@ -744,6 +773,32 @@ class Runs(Base):
                          [("find", "1.1", "claim-one"), ("find", "1.2", "claim-two")])
         self.assertEqual(rep["not_run"], [{"key": "judge:1.2", "why": "unjudged: judge:b1 returned nothing for it"}])
         self.assertIn("judge:1.2: unjudged", run_wb("run", "report", "bj"))
+
+    def test_best_of_has_a_chooser_read_every_attempts_diff_and_claude_gets_its_pick_with_the_attempts_kept(self):
+        # best-of ran 3 builders and a reviewer per diff, and Claude read every review and most
+        # diffs: N times the handoff (#1134's study); the chooser sees them side by side
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Pick the best attempt": {
+            "best": "a2", "ranking": ["a2", "a1", "a3"], "why": "a2 is the smallest"}})
+        run_wb("run", "start", "bo", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("bo", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        (pick,) = [n for n in runs.run_tasks(runs.Run("bo")) if n.startswith("bo-choose-")]
+        prompt = store.Task(pick).round_dir(1).joinpath("prompt.md").read_text()
+        for a, n in (("a1", 1), ("a2", 2), ("a3", 3)):
+            self.assertIn(f"### {a} (task bo-code-{n}; no tests)\n```diff\n", prompt)
+        self.assertIn("+42", prompt)
+        sch = json.loads((runs.run_dir("bo") / "schemas" / f"choose-1.json").read_text())
+        self.assertEqual(sch["properties"]["best"]["enum"], ["a1", "a2", "a3"])
+        rep = runs.report_of("bo")
+        (final,) = rep["final"]
+        self.assertEqual((final["key"], final["result"]["best"]), ("choose:1", "a2"))
+        self.assertEqual([(t["key"], t["result"]["task"]) for t in final["trail"]],
+                         [("1#a1", "bo-code-1"), ("1#a2", "bo-code-2"), ("1#a3", "bo-code-3")])
+        # nothing discarded on the chooser's word: every attempt waits at review for Claude
+        self.assertEqual([(c["task"], c["phase"]) for c in rep["code"]],
+                         [("bo-code-1", "review"), ("bo-code-2", "review"), ("bo-code-3", "review")])
+        for n in (1, 2, 3):
+            run_wb("discard", f"bo-code-{n}")
 
     def test_a_skipped_stage_and_items_past_max_items_are_not_run_and_named(self):
         flow = {"v": 1, "name": "cap", "params": {"areas": "list"}, "stages": [

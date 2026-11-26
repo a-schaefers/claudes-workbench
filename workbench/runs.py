@@ -45,15 +45,17 @@ STAGE_RE = re.compile(r"^[a-z][a-z0-9]{0,7}\Z")
 FLOW_KEYS = ("v", "name", "description", "params", "budget_usd", "budget_min", "context", "stages")
 STAGE_KEYS = ("id", "card", "kind", "role", "items", "from", "split", "keep", "flow", "batch",
               "attempts", "schema", "tools", "skills", "ask", "setup", "test", "refix", "on_failure",
-              "max_items", "claude", "final", "prompt")
+              "max_items", "claude", "final", "prompt", "compare")
 PARAM_TYPES = ("string", "int", "list", "json", "file", "runs")
 MAX_ITEMS = 200        # a stage's items, at most (`max_items`): the rest not_run, named (no silent caps)
 ATTEMPTS_MAX = 5
 REFIX_MAX = 2
 IN_FLIGHT = 6          # a run's items started and not yet done: each is a worktree, and its setup
 TEMPLATE = re.compile(r"\{\{|\}\}|\{([a-z]+)(?:\.([A-Za-z0-9_-]+))?\}")
-PLACES = ("item", "params", "context", "diff", "report", "run", "stage", "base")
+PLACES = ("item", "params", "context", "diff", "report", "diffs", "run", "stage", "base")
 CODE_PLACES = ("diff", "report")  # over a code stage only: its change, its coder's round report
+# a compare stage's (`compare`): every attempt's change at an item, labelled a1..aN, the whole cut at
+# CUTS["diff"] shared among them
 CUTS = {"item": 16_000, "context": 4_000, "diff": 40_000, "report": 6_000}  # characters a spec carries
 DEFAULT_PROMPT = "{item}"
 WAITING = object()     # a refix's next review, held until the coder's next round is in
@@ -276,6 +278,13 @@ def validate(flow) -> list[str]:
             errs.append(f"{where}: on_failure is checkpoint or absent (null)")
         src = stage_by(flow, s["from"]) if isinstance(s.get("from"), str) else None
         over_code = src is not None and is_code(src) and not src.get("claude")
+        compare = bool(s.get("compare"))
+        if "compare" in s and s["compare"] is not True:
+            errs.append(f"{where}: compare is true or absent")
+        if compare and (code or not over_code or int(src.get("attempts") or 1) < 2):
+            errs.append(f"{where}: compare is a report stage over a code stage with attempts of 2 or more")
+        if compare and any(k in s for k in ("split", "batch", "attempts", "refix")):
+            errs.append(f"{where}: a compare stage takes each item's attempts whole: no split, batch, attempts or refix")
         refix = s.get("refix")
         if refix is not None:
             if not (isinstance(refix, dict) and isinstance(refix.get("path"), str) and set(refix) <= {"path", "max"}
@@ -294,6 +303,10 @@ def validate(flow) -> list[str]:
                 errs.append(f"{where}: {{params.{sub}}} isn't a declared param")
             elif place in CODE_PLACES and not over_code:
                 errs.append(f"{where}: {{{place}}} needs from a code stage")
+            elif place == "diffs" and not compare:
+                errs.append(f"{where}: {{diffs}} is a compare stage's (compare: true)")
+            elif place in CODE_PLACES and compare:
+                errs.append(f"{where}: a compare stage reads {{diffs}}, every attempt's, not {{{place}}}")
             elif place != "item" and place != "params" and sub:
                 errs.append(f"{where}: {{{place}.{sub}}}: only item and params take a key")
         items = s.get("items")
@@ -306,8 +319,9 @@ def validate(flow) -> list[str]:
         # after a code stage, only a report over a code stage's {diff}, or the final: code waits
         # at review for Claude, and nothing may build on code Claude hasn't accepted
         if any(is_code(t) and not t.get("claude") for t in st[:i]) and (code or not over_code
-                                                                      or "{diff}" not in prompt):
-            errs.append(f"{where}: after a code stage comes only a report over its {{diff}}, or final")
+                                                                      or ("{diffs}" if compare else "{diff}") not in prompt):
+            errs.append(f"{where}: after a code stage comes only a report over its {{diff}} (a compare "
+                        "stage's {{diffs}}), or final")
     if st and not st[-1].get("final"):
         errs.append("the last stage is final: Claude's, who has the final say")
     return errs
@@ -369,7 +383,7 @@ def render(text: str, ctx: dict) -> str:
             return _text((ctx.get("params") or {}).get(sub, ""), CUTS["item"])
         if place in CUTS:
             return _text(ctx.get(place) or "", CUTS[place])
-        return str(ctx.get(place) or "")
+        return str(ctx.get(place) or "")  # {diffs} cut each attempt's share already
     return TEMPLATE.sub(one, text)
 
 
@@ -418,6 +432,23 @@ def batch_schema(stage: dict, ids: list[str]) -> dict | None:
     arr = doc["properties"][key]
     arr["minItems"] = arr["maxItems"] = len(ids)
     arr["items"].setdefault("properties", {})["id"] = {"type": "string", "enum": list(ids)}
+    return doc
+
+
+def compare_schema(stage: dict, labels: list[str]) -> dict | None:
+    """A compare item's schema: its `best` one of the attempts' labels, each of `ranking` too, so an
+    attempt it was never shown is asked again once. None when the schema names neither."""
+    doc = stage_schema(stage)
+    props = (doc or {}).get("properties")
+    if not isinstance(props, dict) or not any(isinstance(props.get(k), dict) for k in ("best", "ranking")):
+        return None
+    doc = json.loads(json.dumps(doc))
+    if isinstance(doc["properties"].get("best"), dict):
+        doc["properties"]["best"]["enum"] = list(labels)
+    rank = doc["properties"].get("ranking")
+    if isinstance(rank, dict) and isinstance(rank.get("items"), dict):
+        rank["items"]["enum"] = list(labels)
+        rank["maxItems"] = len(labels)
     return doc
 
 
@@ -638,6 +669,7 @@ def state(run: Run) -> dict:
             complete[sid] = True
             continue
         inputs: list = []
+        groups: dict = {}  # a batch's or a compare item's members, by its key
         if "items" in s:
             inputs = [(str(i + 1), v, None) for i, v in enumerate(_items_of(s, run, params))]
             ready = True
@@ -650,6 +682,15 @@ def state(run: Run) -> dict:
                 out[sid], complete[sid] = None, False
                 continue
             code_src = is_code(stage_by(flow, src) or {})
+            if s.get("compare") and code_src:  # each item's attempts whole, once all of them ended
+                by_item: dict = {}
+                for it in src_items:
+                    by_item.setdefault(it.key.rsplit("#a", 1)[0], []).append(it)
+                for base, its in by_item.items():
+                    if all(i.state not in ("pending", "running", "waiting") for i in its):
+                        groups[base] = [(i.key, i.output) for i in its if i.state == "done"]
+                        inputs.append((base, [v for _, v in groups[base]], None))
+                src_items = []
             for it in src_items:
                 if s.get("refix") and code_src:
                     fixes = refixes.get((sid, it.key)) or []
@@ -677,7 +718,6 @@ def state(run: Run) -> dict:
         if attempts > 1:
             inputs = [(f"{k}#a{a}", v, src) for k, v, src in inputs for a in range(1, attempts + 1)]
         batch = int(s.get("batch") or 1)
-        groups: dict = {}
         if batch > 1:
             for i in range(0, len(inputs), batch):
                 groups[f"b{i // batch + 1}"] = [(k, member(k, v)) for k, v, _ in inputs[i:i + batch]]
@@ -695,6 +735,9 @@ def state(run: Run) -> dict:
                     it.output = (store.read_json(run.output_file(sid, it.n), {}) or {}).get("result")
             elif sid in skipped:
                 it.state, it.why = "not_run", "skipped (wb run amend --skip)"
+            elif s.get("compare") and len(it.members or ()) < 2:
+                it.state, it.why = "not_run", (f"{len(it.members or ())} of its attempts reached review: "
+                                               "nothing to compare (wb run report names the rest)")
             elif idx >= cap:
                 it.state, it.why = "not_run", f"past the stage's max_items ({cap})"
             elif v is WAITING:
@@ -811,9 +854,60 @@ def _counts(items) -> dict:
     return out
 
 
+def attempt_label(key: str) -> str:
+    """An attempt's label in a compare stage: `1#a2` is a2."""
+    return "a" + key.rsplit("#a", 1)[1] if "#a" in key else key
+
+
+def _diffs_of(run: Run, stage: dict, it: Item) -> str:
+    """{diffs}: each attempt's change at the item, labelled a1..aN with its task and tests, the
+    green ones alone when two or more are (said), each cut to its share of CUTS["diff"]. best-of
+    ran N builders and a reviewer per diff, and Claude read every review and most diffs: N times
+    the handoff (#1134's study, SWE-agent's Chooser)."""
+    rows, said = _attempts(it)
+    share = CUTS["diff"] // max(1, len(rows))
+    parts = []
+    for lab, t, ok in rows:
+        try:
+            d = gitops.diff(t.worktree, t.spec["base"]) if t.worktree.is_dir() else ""
+        except (gitops.GitError, KeyError) as e:
+            d = f"(no diff: {e})"
+        d = d if len(d) <= share else d[:share] + f"\n[… {len(d) - share:,} characters cut]"
+        state = "tests passed" if ok else "tests failed" if ok is False else "no tests"
+        parts.append(f"### {lab} (task {t.name}; {state})\n```diff\n{d or '(no changes)'}\n```")
+    return said + "\n\n".join(parts)
+
+
+def _attempts(it: Item) -> tuple[list, str]:
+    """A compare item's attempts shown, [(label, task, tests ok | None)], and what is said of the
+    rest: the green ones alone when two or more are."""
+    rows = []
+    for key, out in it.members or ():
+        t = store.Task(out.get("task", "")) if isinstance(out, dict) else None
+        if t is None or not t.exists:
+            continue
+        tests = t.status.get("tests")
+        rows.append((attempt_label(key), t, None if not isinstance(tests, dict) else bool(tests.get("ok"))))
+    green = [r for r in rows if r[2]]
+    said = ""
+    if len(green) >= 2 and len(green) < len(rows):
+        said = ("Only the attempts whose tests pass are shown; left out: "
+                + ", ".join(f"{lab} (tests {'failed' if ok is False else 'not run'})" for lab, _, ok in rows if not ok) + ".\n\n")
+        rows = green
+    elif rows and len(green) < 2 and any(ok is not None for _, _, ok in rows):
+        said = "Fewer than two attempts pass their tests: all are shown.\n\n"
+    return rows, said
+
+
 def _spec_of(run: Run, stage: dict, it: Item) -> str:
     spec = run.spec
     prompt = stage.get("prompt") or DEFAULT_PROMPT
+    if stage.get("compare"):
+        first = (it.members or [(None, {})])[0][1]
+        return render(prompt, {
+            "item": first.get("item") if isinstance(first, dict) else None, "params": spec.get("params") or {},
+            "context": spec.get("context") or "", "diffs": _diffs_of(run, stage, it), "run": run.name,
+            "stage": stage["id"], "base": spec.get("base", "")})
     diff = report = ""
     over_code = isinstance(it.input, dict) and bool(it.input.get("task")) and any(
         f"{{{p}}}" in prompt for p in CODE_PLACES)
@@ -873,7 +967,9 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     else:
         argv += ["--report", "--ask-budget", str(stage.get("ask") or 0), "--no-self-review",
                  "--no-base-check", "--setup", ""]
-        if it.members and (doc := batch_schema(stage, [k for k, _ in it.members])) is not None:
+        doc = compare_schema(stage, [lab for lab, _, _ in _attempts(it)[0]]) if stage.get("compare") \
+            else batch_schema(stage, [k for k, _ in it.members]) if it.members else None
+        if doc is not None:
             path = run.dir / "schemas" / f"{stage['id']}-{n}.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             store.write_json(path, doc)

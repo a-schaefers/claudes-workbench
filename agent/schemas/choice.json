@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "description": "A chooser's pick among the attempts at one change, by label (a1, a2, …)",
+  "required": ["best", "ranking", "why"],
+  "properties": {
+    "best": {"type": "string", "maxLength": 20},
+    "ranking": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 20}},
+    "why": {"type": "string", "maxLength": 1200}
+  }
+}
