@@ -9131,7 +9131,9 @@ bench's, under its `drive` lock; `runs.spawn`). Each pass (`runs.tick`, woken by
 pass woke the driver itself, 20 passes a second while an item ran): it takes its items' notices (`_ack_items`: an open run's item, its driver alive
 (`runs.item_open`), notifies `runs/<run>/notify.jsonl` with its `noticed` mark, `store.Task.notify`, and the
 driver claims each ack up to it, so neither the mod's wake nor its idle net wakes Claude for one; with the driver
-dead an item's notice is Claude's, a task's as any), reaps dead runners, resumes an item stopped from outside
+dead an item's notice is Claude's, a task's as any), refuses an item's open ask at once (`runs.RUN_REFUSED`,
+`ask_mcp.answer_once`, as the bench's `REFUSED`: nobody is told of it, and a finder's ask for a path held the GPU its
+20-minute `ask_timeout` in the real GPU audit, 2026-11-26), reaps dead runners, resumes an item stopped from outside
 its step whose cause passes or is the user's to lift (`_held`, `runs._outside`: `cli._interrupted`, a restart, a
 killed runner, a shutdown's signal, an update, or `cli.stopped_outside` in `runs.held_infra`: the day cap in a
 round, a provider's rate limit, outage or refusal, a repo made local-only, `wb stop --all`; `wb resume`, journal

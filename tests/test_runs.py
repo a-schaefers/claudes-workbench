@@ -1051,6 +1051,21 @@ class RunsApi(Base):
             time.sleep(0.3)
         return run.status
 
+    def test_an_items_ask_in_a_run_is_refused_at_once_never_left_holding_the_gpu_for_its_timeout(self):
+        # the real GPU audit of #1278 (2026-11-26): a finder asked for a path outside its lane,
+        # nobody is told of an item's ask in a run, and it held the GPU its 20-minute ask_timeout
+        run, _ = self.start("ask")
+        os.environ["FAKE_SLEEP"] = "600"
+        runs.tick(run)
+        task = self.wait_item("ask-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        qid = "abcd1234"
+        store.write_json(task.dir / "ask" / f"{qid}.json", {"id": qid, "question": "May I read it?", "path": "/etc"})
+        task.set_status(phase="asking", asking=qid)
+        runs.tick(run)
+        self.assertEqual((task.dir / "ask" / f"{qid}.answer").read_text().strip(), runs.RUN_REFUSED)
+        os.environ["FAKE_SLEEP"] = "0"
+        run_wb("stop", "ask-find-1")
+
     def stopped_mid_round(self, run, name, **status):
         """Item ``name`` started and at work, then stopped as ``status`` says, its runner gone."""
         os.environ["FAKE_SLEEP"] = "600"
