@@ -215,13 +215,29 @@ def copy_info(d: Path) -> dict | None:
     return note if isinstance(note, dict) else None
 
 
+# The kernel's membrane, which the plugin's parts import from ../mod/hooks (notices.ts, #1313;
+# kernel/BOUNDARY.md, *Membrane*): each copy carries them beside its opencode-plugin/, as the root
+# package.json's `files` does for OpenCode's Git install
+KERNEL_FILES = ("mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/kernel.d.ts")
+
+
 def head_tree(root: Path | None = None) -> tuple[str, str] | None:
-    """(the commit, opencode-plugin/'s tree) at the clone's HEAD; None off git, or without it."""
+    """(the commit, the copy's tree) at the clone's HEAD: opencode-plugin/'s tree, or with the
+    kernel's files there (KERNEL_FILES) a sha1 over it and their blobs, so a kernel rebuilt alone
+    makes a new copy too; None off git, or without opencode-plugin/."""
     try:
         out = gitops.git(root or PKG_ROOT, "rev-parse", "HEAD", "HEAD:opencode-plugin").split()
     except (gitops.GitError, OSError):
         return None
-    return (out[0], out[1]) if len(out) == 2 else None
+    if len(out) != 2:
+        return None
+    try:
+        blobs = gitops.git(root or PKG_ROOT, "rev-parse", *(f"HEAD:{f}" for f in KERNEL_FILES)).split()
+    except (gitops.GitError, OSError):
+        blobs = []  # a commit from before the plugin imported the kernel
+    if len(blobs) != len(KERNEL_FILES):
+        return out[0], out[1]
+    return out[0], hashlib.sha1(" ".join([out[1], *blobs]).encode()).hexdigest()
 
 
 def make_copy(root: Path | None = None) -> tuple[Path, str] | None:
@@ -241,7 +257,7 @@ def make_copy(root: Path | None = None) -> tuple[Path, str] | None:
     final.parent.mkdir(parents=True, exist_ok=True)
     tmp = final.parent / f".tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     try:
-        for row in gitops.git_bytes(root, "ls-tree", "-r", "-z", tree).split(b"\0"):
+        for row in gitops.git_bytes(root, "ls-tree", "-r", "-z", f"{commit}:opencode-plugin").split(b"\0"):
             meta, _, name = row.partition(b"\t")
             mode, kind, sha = (meta.split() + [b"", b"", b""])[:3]
             rel = name.decode("utf-8", "surrogateescape")
@@ -251,6 +267,12 @@ def make_copy(root: Path | None = None) -> tuple[Path, str] | None:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(gitops.git_bytes(root, "cat-file", "blob", sha.decode()))
             out.chmod(0o755 if mode == b"100755" else 0o644)
+        if tree != gitops.git(root, "rev-parse", f"{commit}:opencode-plugin").strip():  # the kernel's too
+            for rel in KERNEL_FILES:
+                out = tmp / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(gitops.git_bytes(root, "cat-file", "blob", f"{commit}:{rel}"))
+                out.chmod(0o644)
         (tmp / COPY_NOTE).write_text(json.dumps({"commit": commit, "tree": tree, "clone": str(root.resolve())}))
         try:
             os.rename(tmp, final)

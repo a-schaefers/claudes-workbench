@@ -28,10 +28,10 @@ defined (`tests/test_kernel.py`).
 | `tables` | Kernel.Tables | the constants both hosts share, generated from wb's Python | mod/hooks/register.tsx:ACTIVE, mod/hooks/register.tsx:NEEDS, mod/hooks/register.tsx:NO_ANSWER, mod/hooks/register.tsx:CHAT_STALE_MS, mod/hooks/tasks.ts:CLOSED | core.ts; register.tsx, tasks.ts |
 | `phaseOf` | Kernel.Phase | what a task's phase means: active, running, working, needs Claude, waits, stopped, done, closed | mod/hooks/register.tsx:waitsOnClaude, mod/hooks/register.tsx:RUNNING, mod/hooks/tasks.ts:WORKING | core.ts; register.tsx, tasks.ts |
 | `openCounts` | Kernel.Phase | a list of tasks tallied by open phase, in `store.OPEN_ORDER`, and how many are done | mod/hooks/tasks.ts:COUNTED | core.ts; tasks.ts (the pane's group header), register.tsx (the status line); the web app's strip from #1325's M5 |
-| `owns` | Kernel.Owner | whose task it is: the session's, and the session's to adopt once its own is gone; `cli._scope` is its twin | mod/hooks/register.tsx:parts, mod/hooks/register.tsx:within, mod/hooks/register.tsx:spotOf, mod/hooks/register.tsx:near, mod/hooks/register.tsx:ranHere | core.ts; register.tsx; the OpenCode plugin from #1313 |
-| `noticesDue` | Kernel.Notice | which notices are due a look: per task its questions and newest notice within the hour, and each task's newest notice however old | born:#1325 | core.ts; register.tsx (`deliver`); the OpenCode plugin from #1313 |
-| `noticePlan` | Kernel.Notice | one due notice judged: still true, toasted once, and the act (skip, none, steer, hold, wake, ack, missed) | born:#1325 | core.ts; register.tsx (`deliver`); the OpenCode plugin from #1313 (steer and queue) |
-| `rewakePlan` | Kernel.Notice | the rewake net: recent, a candidate now, due, and the notice kind a phase stands for | mod/hooks/register.tsx:REWAKE_MAX_MS | core.ts; register.tsx (`rewake`, `quietForJobs`); the OpenCode plugin from #1313 (its idle re-wake) |
+| `owns` | Kernel.Owner | whose task it is: the session's, and the session's to adopt once its own is gone; `cli._scope` is its twin | mod/hooks/register.tsx:parts, mod/hooks/register.tsx:within, mod/hooks/register.tsx:spotOf, mod/hooks/register.tsx:near, mod/hooks/register.tsx:ranHere | core.ts; register.tsx; opencode-plugin/notices.ts (`ownerOf`, #1313) |
+| `noticesDue` | Kernel.Notice | which notices are due a look: per task its questions and newest notice within the hour, and each task's newest notice however old | born:#1325 | core.ts; register.tsx (`deliver`); opencode-plugin/notices.ts (`deliver`, #1313) |
+| `noticePlan` | Kernel.Notice | one due notice judged: still true, toasted once, and the act (skip, none, steer, hold, wake, ack, missed) | born:#1325 | core.ts; register.tsx (`deliver`); opencode-plugin/notices.ts (`deliver`: steer and queue, #1313) |
+| `rewakePlan` | Kernel.Notice | the rewake net: recent, a candidate now, due, and the notice kind a phase stands for | mod/hooks/register.tsx:REWAKE_MAX_MS | core.ts; register.tsx (`rewake`, `quietForJobs`); opencode-plugin/notices.ts (`rewake`: its idle re-wake, #1313), jobs.ts (`quiet`, #1334) |
 | `tellPlan` | Kernel.Mode | what to tell a conversation of the rules: a first message's context blocks, or midway the rules it lacks, and what it has been told after | born:#1325 | core.ts; register.tsx (`unsaid`, `prompt.context`); the OpenCode plugin from #1315 (its instructions) |
 | `modesPlan` | Kernel.Mode | the sessions kept in workbench mode: whether this process's is, and the record to keep | mod/hooks/register.tsx:MODES_KEEP_MS | core.ts; register.tsx (`keepMode`, `modeKept`); the OpenCode plugin from #1312 |
 | `compactPlan` | Kernel.Mode | a task boundary: the mark kept, whether to read the context's usage now, and whether to compact | mod/hooks/register.tsx:COMPACT_AT | core.ts; register.tsx (`poll`, `compactAtBoundary`); the OpenCode plugin from #1315 (its compaction) |
@@ -158,7 +158,9 @@ came to 14.
 
 ## Membrane
 
-Only `mod/hooks/core.ts` imports `./kernel.js`, across `mod/`, `opencode-plugin/` and
+The OpenCode plugin takes the kernel through `../mod/hooks/core.ts` too (notices.ts, jobs.ts), so
+its copies and its Git install carry the membrane (`ocplugin.KERNEL_FILES`, the root `package.json`'s
+`files`). Only `mod/hooks/core.ts` imports `./kernel.js`, across `mod/`, `opencode-plugin/` and
 `workbench/chat_static/` (every `.ts`, `.tsx`, `.js`, `.mjs`, `.mts`, `.cts`, `.cjs` and `.jsx`;
 `import`, `from` and `require(`). It maps tags and decides nothing. Its `kernel` record (every
 export by name, untyped) is the goldens': only tests (`*.test.*`) and `golden/` import it; the hosts

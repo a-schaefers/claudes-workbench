@@ -5,6 +5,7 @@
 // every later piece needs it, and a service started without the user's PATH is the likely cause.
 import type { TuiPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
+import { noticesTui } from './notices-tui.ts'
 
 // where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
 // install of the whole repository does (#1311's review, 2026-11-25)
@@ -14,11 +15,12 @@ const plugin: TuiPlugin = {
   id: 'workbench',
   async setup(ctx) {
     if (process.env.WB_TASK) return
+    const stopNotices = noticesTui(ctx) // the notices' toasts and desktop notifications (#1313)
     let st: Status
     try {
       st = (await ctx.client.rpc(Workbench).status({})) as Status
     } catch {
-      return // the server part isn't there (a server older than this TUI): nothing to say yet
+      return stopNotices // the server part isn't there (a server older than this TUI): nothing to say yet
     }
     if (!st.found) {
       ctx.ui.toast.show({
@@ -31,6 +33,7 @@ const plugin: TuiPlugin = {
           : `this install of the plugin brings no wb, and OpenCode's PATH has none: ${GET_WB}`,
       })
     }
+    return stopNotices
   },
 }
 
