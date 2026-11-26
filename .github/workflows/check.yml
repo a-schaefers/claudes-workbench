@@ -3,9 +3,10 @@
 # plugin validate mod && claude plugin test mod` against the Claude Code version the mod was last
 # verified with; `kernel` rebuilds the PureScript kernel with its pinned toolchain and fails when
 # the committed mod/hooks/kernel.js isn't what kernel/src builds (`scripts/kernel.py check`, its
-# props included), then runs its goldens under OpenCode's Bun; `check`, the ruleset's required check, is green only when
-# all three are. nightly.yml runs the suite and the mod on the newest Claude Code. The README shows
-# both as badges.
+# props included); `opencode-plugin` runs the OpenCode plugin's tests (the kernel's goldens among
+# them) and type-checks it under the pinned OpenCode's Bun (#1328); `check`, the ruleset's required
+# check, is green only when all four are. nightly.yml runs the suite and the mod on the newest
+# Claude Code. The README shows both as badges.
 #
 # One serial job took 28 to 32 minutes at d80b924, its tests doubled in a day (#950), and a fifth
 # of that was one test sitting out a 300 s sleep. Six shards on separate runners (WB_TEST_SHARD,
@@ -135,8 +136,7 @@ jobs:
   # The kernel (kernel/BOUNDARY.md, #1356): fetch the pinned purs, esbuild and packages by hash
   # into the per-user cache (cached here on both pin files), then `check`: lint, Tables against the
   # Python, two builds byte-equal to each other and to the commit, exports, budgets, the seeded props
-  # (kernel/test/Props.purs, under OpenCode's Bun: installed first). Then the same
-  # goldens `mod` runs on Claude Code, under OpenCode's Bun (BUN_BE_BUN, checked on 2.3.0).
+  # (kernel/test/Props.purs, under OpenCode's Bun: installed first).
   kernel:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -154,15 +154,29 @@ jobs:
           key: kernel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kernel/toolchain.json', 'kernel/spago.lock') }}
       - run: python3 scripts/kernel.py fetch
       - run: python3 scripts/kernel.py check
+
+  # The OpenCode plugin (opencode-plugin/, #1328): its own job, as `mod` is the Claude Code
+  # plugin's, so a patch on either path can't break the other's unseen. Its tests (the kernel's
+  # goldens `mod` runs on Claude Code, through the mod's core it imports, and the plugin's own)
+  # under the pinned OpenCode's Bun (BUN_BE_BUN, checked on 2.3.0), then its TypeScript,
+  # type-checked by the same Bun (`bun check`; 2.3.0's and 2.4.1's have it): its env.d.ts and
+  # host.d.ts declare what it uses, so nothing is installed (#1311). wb patch upstream names the
+  # same two commands (patches.PLUGIN_TESTS).
+  opencode-plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
       - run: BUN_BE_BUN=1 opencode test opencode-plugin/test
-      # the OpenCode plugin's TypeScript, type-checked by the same Bun (`bun check`; 2.3.0's and
-      # 2.4.1's have it): its env.d.ts and host.d.ts declare what it uses, so nothing is installed (#1311)
       - run: BUN_BE_BUN=1 opencode check -p opencode-plugin --no-pretty
 
   # The ruleset's required check (.github/rulesets/main.json): one name whatever the shards are
   # called. always(): a failed or cancelled shard must fail it, not skip it, as a skip passes.
   check:
-    needs: [suite, mod, kernel]
+    needs: [suite, mod, kernel, opencode-plugin]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -171,6 +185,7 @@ jobs:
           SUITE: ${{ needs.suite.result }}
           MOD: ${{ needs.mod.result }}
           KERNEL: ${{ needs.kernel.result }}
+          PLUGIN: ${{ needs.opencode-plugin.result }}
         run: |
-          echo "suite: $SUITE, mod: $MOD, kernel: $KERNEL"
-          [ "$SUITE" = success ] && [ "$MOD" = success ] && [ "$KERNEL" = success ]
+          echo "suite: $SUITE, mod: $MOD, kernel: $KERNEL, opencode-plugin: $PLUGIN"
+          [ "$SUITE" = success ] && [ "$MOD" = success ] && [ "$KERNEL" = success ] && [ "$PLUGIN" = success ]

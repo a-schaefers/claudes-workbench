@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "name": "audit",
+  "description": "Finders read each area for one focus, a skeptic verifies each finding against the code, only the confirmed reach Claude",
+  "params": {"areas": "list", "focus": "string"},
+  "stages": [
+    {"id": "find", "card": "find", "items": "{params.areas}",
+     "prompt": "Audit this area of the repository: {item}\n\nLook for: {params.focus}\n\n{context}"},
+    {"id": "verify", "card": "verify", "from": "find", "split": "findings",
+     "keep": {"path": "verdict", "in": ["confirmed"]},
+     "prompt": "Check this finding against the code at {base}; reproduce it if you can:\n\n{item}"},
+    {"id": "claude", "final": true, "from": "verify"}
+  ]
+}

@@ -74,6 +74,15 @@ class OpenCodeChat(Base):
         self.assertEqual(run_wb("chat", "listener", "--drop", "--pid", str(ME)).strip(), "dropped")
         self.assertIsNone(chat.listener())
 
+    def test_the_servers_claim_names_opencode_and_its_sessions_model_to_the_api(self):
+        # the merge with #1366 (2026-11-25): the API names the listening driver by the claim's
+        # `driver` or a beat, and the plugin's claim gave neither shape wb #1366 read
+        run_wb("chat", "listener", "ses_a", "--pid", str(ME))
+        self.assertEqual(chat.listener_driver(chat.listener()), {"tool": "opencode"})
+        store.write_json(store.beat_path(ME), {"tool": "opencode", "pid": ME, "ts": time.time(),
+                                               "sessions": {"ses_a": {"model": "prov/m1"}}})
+        self.assertEqual(chat.listener_view(chat.listener())["driver"], {"tool": "opencode", "model": "prov/m1"})
+
     def test_another_live_listener_stands_and_a_dead_one_gives_way(self):
         # first live claim wins, either driver's: a Claude Code session's `wb events` here
         store.write_json(chat.chat_dir() / "listener.json",
@@ -91,7 +100,7 @@ class OpenCodeChat(Base):
         with self.as_session("ses_other"):
             run_wb("chat", "reply", "--text", "another session's report")
         r = chat.thread()[-1]
-        self.assertEqual((r.get("re"), r["driver"], r["opencode_session"]), (None, "opencode", "ses_other"))
+        self.assertEqual((r.get("re"), r["driver"]["tool"], r["opencode_session"]), (None, "opencode", "ses_other"))
         self.assertNotIn("session", r)  # never one the Claude Code mod would hand a message to
         with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):  # a Claude Code session's
             run_wb("chat", "reply", "--text", "a Claude Code report")
@@ -199,7 +208,7 @@ class OpenCodeChat(Base):
             nid = run_wb("chat", "notice", "--tool", "shell", "--kind", "permission", "--text", "rm -rf build").strip()
         row = next(r for r in chat.thread() if r["id"] == nid)
         self.assertEqual(row["text"], "OpenCode is waiting for you in the terminal." + chat.WAITING_GRANT)
-        self.assertEqual(row["driver"], "opencode")
+        self.assertEqual(row["driver"], {"tool": "opencode"})  # a reply's shape (#1366)
         with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "OPENCODE_SESSION_ID": "ses_a"}):
             nid = run_wb("chat", "notice", "--tool", "AskUserQuestion", "--kind", "question").strip()
         row = next(r for r in chat.thread() if r["id"] == nid)
