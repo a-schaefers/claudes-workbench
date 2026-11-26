@@ -46,7 +46,7 @@ runs the new scripts.
   driver the same way: a reply by its `driver`, a receipt by its `by` (OpenCode's session ids
   start `ses_`), the header and "Waiting for a(n) … session" by the listener's (with none
   listening, the last reply's), a push's title by the
-  reply's, else the listener's; `Claude` where nothing says.
+  reply's, else the listener's; Claude Code where nothing says.
 - **One at a time:** with both drivers open on one machine, one listens (it holds the chat's
   claim, `listener`), and only its replies thread onto an agent's message; the other's plain
   reports go to the user.
