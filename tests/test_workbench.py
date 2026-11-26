@@ -22972,6 +22972,31 @@ class ScheduledRuns(Base):
         self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
         self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
 
+    def test_a_catalog_read_without_the_exported_key_keeps_its_models_so_add_notes_it_and_a_fire_skips(self):
+        # #1496, 2026-11-26: OpenCode 2.4.1 lists an env provider's models only while its variable
+        # is set (the fake does too), so the web app service's Settings read (or a fire's) kept
+        # #1495's provider row but not the role's model: spend_skip's cached lookup found none and
+        # the fire ran, every start in it failing, and wb schedule add's note went unsaid
+        from workbench import models, schedule
+        catalog = Path(self.tmp.name) / "catalog.json"
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", {"type": "env", "name": "XENV_API_KEY"})]}))
+        os.environ.update(WB_FAKE_CATALOG=str(catalog), WB_FAKE_API="xenv=env", XENV_API_KEY="xenv-not-a-real-key")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"significant": {
+            "via": "api", "api": "xenv/grok-9"}}}))
+        self.assertIn("xenv/grok-9", models.hosted(fresh=True))         # the terminal's read
+        with mock.patch.dict(os.environ):
+            os.environ.pop("XENV_API_KEY")                              # the service's read
+            models.hosted(fresh=True)                                   # its catalog lists no grok-9
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "env:XENV_API_KEY")
+        self.assertIn("note: the significant role's key is $XENV_API_KEY in your shell", self.add())
+        os.environ.pop("XENV_API_KEY")                                  # the timer's environment
+        models.hosted(fresh=True)
+        self.assertIn("its key is $XENV_API_KEY, which this fire's environment lacks", schedule.spend_skip())
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
     def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
         # the review of #1204: every fire on a date was batch night-<date>, so a second one took
         # the first's tasks (its row counted them again, its Claude was handed them to review),
@@ -39539,7 +39564,10 @@ class ApiHarness(Base):
         self.assertEqual(listed()["deepinfra"], [{"type": "env", "name": "DEEPINFRA_API_KEY"}])
         self.assertEqual(json.loads(self.fake("auth", "export", "deepinfra", "--standalone")[2]), [])
         self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
-                         ["deepinfra", "anthropic"])                   # its models still listed
+                         ["deepinfra", "anthropic"])                   # its models listed while set
+        os.environ.pop("DEEPINFRA_API_KEY")
+        self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
+                         ["anthropic"])                                # and not after, as 2.4.1 (#1496)
 
     def test_a_provider_without_a_key_drops_out_of_every_list_and_its_models_cant_run(self):
         self.catalog()

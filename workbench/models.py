@@ -1519,12 +1519,19 @@ def _build_hosted() -> dict:
     # a key from $VAR that this environment lacks: `auth list` lists no variable its reader's
     # environment lacks, so this read says nothing of it. The web app's service (or a timer's
     # fire) read "no key" over the terminal's env row, and Settings, the role change and the
-    # terminal's own reads said so until a fresh read there (#1495, 2026-11-26): the row stays
+    # terminal's own reads said so until a fresh read there (#1495, 2026-11-26): the row stays.
+    # Its models too: OpenCode 2.4.1 lists an env provider's models only while its variable is
+    # set, so the row alone left the role's model unknown, a fire's spend_skip found no model to
+    # skip for and every start in it failed, and wb schedule add's note went unsaid (#1496)
     old = _read_hosted()
+    kept = _dict(old.get("models"))
     for pid, row in (old.get("providers") or {}).items():
         if pid in gpu or not loads(pid) or not _env_unseen(row.get("key")) or (provs.get(pid) or {}).get("key"):
             continue
         provs[pid] = {**row, **(provs.get(pid) or {}), "key": row["key"]}
+        for mid, e in kept.items():
+            if mid.split("/", 1)[0] == pid and mid not in found and not (extra.get(mid) or {}).get("skip"):
+                found[mid] = e
     return doc
 
 

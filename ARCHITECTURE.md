@@ -4449,7 +4449,10 @@ read as a wrong id, Claude hunted for the "right" one).
   said, not "no key"; and when that variable isn't set in this process either (`models._env_unseen`:
   `auth list` lists no variable its reader's environment lacks), neither that write-back nor
   `_build_hosted` replaces the row's `env:` key (#1495: the web app's service or a timer's fire
-  read "no key" over the terminal's row, for Settings, a role change and the terminal alike).
+  read "no key" over the terminal's row, for Settings, a role change and the terminal alike), and
+  `_build_hosted` keeps that provider's cached models the read didn't list (#1496: OpenCode 2.4.1
+  lists an env provider's models only while its variable is set, so the role's model went unknown
+  and `spend_skip` found nothing to skip for; the fake's `env` state does the same).
   `remedy` gives `/connect`, top up, or wait;
   `may_come_up` follows the table (a rate limit or an outage is waited out, never a missing key: an
   API start goes on through either with a note, `cli.TRANSIENT`, #1088).
@@ -10806,7 +10809,8 @@ unreachable base `provider.transport`. With `OPENCODE_MODELS_PATH` the fake list
 of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
 and `auth list`, as one OpenCode can't authenticate does. An `env` provider (#1189) holds its key only in
 `<PROVIDER>_API_KEY` (the fake's `env_var`): `auth list` gives it one `{type: "env", name}` connection while that
-variable is set and drops it otherwise, as 2.3.2 does (checked 2026-11-24 in a scratch home), and `auth export`
+variable is set and drops it otherwise, as 2.3.2 does (checked 2026-11-24 in a scratch home), `api model.list`,
+`models` and `serve`'s model list give its models only while it is set, as 2.4.1 does (#1496), and `auth export`
 prints none of its rows. `FAKE_CALLS` (a file) logs each `api`, `models`, `serve` and `auth`
 call's argv (`ApiDiscovery` counts catalog reads, a `serve` each); `FAKE_CATALOG_FAIL` makes `api model.list`, `models` and `serve` fail (stderr,
 exit 1). Only the fake reads `WB_FAKE_API` and `WB_FAKE_CATALOG`: discovery is driven through it, with no product-side
