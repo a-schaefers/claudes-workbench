@@ -6153,7 +6153,8 @@ started (the mod stamps `started`); Claude records `wb coding used <task> --did 
 with `wb feedback`. It is the task's alone: the setting never moves. The pane shows it
 (`allowedLine`: `Claude may, once, if <when>: <edit>`). Enforced: `wb takeover` exits 3 without one
 (`_coding_gate`) unless `--user` (the mod's hand-back, which records an allowance per task); the mod denies Edit, MultiEdit, Write and
-NotebookEdit under `$WB_HOME/tasks/<task>/worktree/` without one (`codingRefusal`, `taskOfPath`, the unmatched
+NotebookEdit under `$WB_HOME/tasks/<task>/worktree/` without one (`codingRefusal`, `taskOfPath`; the rules are the kernel's
+`codingGate`, its verdict `pass`, `start`, `ask` or `refuse`, *The kernel*; the unmatched
 `tool.call` hook, which also keeps Claude's calls there for `wb accept`, `rules/<task>/claude-calls/`, #1211), and outside `decide` adds a `claude-coding` block (`CODING_RULES`), a mid-session
 change arriving as a row (`sayRules`, #540). Shell edits aren't seen: the block covers them.
 
@@ -7377,7 +7378,7 @@ no role on API, read from the files so the mod keeps no state, it returns the wh
 `FIRSTRUN_NOTE` after it, `[workbench-firstrun] A fresh install: …`, which SKILL.md's *First task*
 reads as "run *First run* now", #1190: in the skill's text, since `prompt.context` fires only at a
 conversation's first message), or a
-Bash call running `wb start|next|feedback|steer|answer|resume` (`delegates`, `HANDS_OUT`; not
+Bash call running `wb start|next|feedback|steer|answer|resume` (`delegates`, the kernel's `gateOf` `delegates`; not
 `accept` or `takeover`, which a quit's notes ask for). Only a command counts, not text (#409), read
 as bash reads it (`simpleCommands`, #560): quotes undone within a word, comments and heredoc
 bodies dropped (`$(…)` and backticks in unquoted heredocs and double quotes still run; a `$(…)` in
@@ -7386,8 +7387,8 @@ quoted heredoc's "doesn't (it can't)" or "a)" doesn't close it, #1364's review),
 redirect's file (`>`, `>>`, `>|`, `&>`, `<`; `2>&1` a descriptor) and a here-string no words of the
 command (#1364: kept beside it, `Shell`: its stdin, its redirects' files, the command piped into
 it), split at `;`, `&`, `|`, newlines, `(`, `)`, `$(`, backticks; the command word past `VAR=x`, the reserved
-words and the wrappers with their options (`PREFIXES`: `env`, `time`, `nohup`, `exec`, `command`,
-`timeout` and its duration, `nice`, `ionice`, `stdbuf`) must be `wb` or end in `/wb`. Syntactic:
+words and the wrappers with their options (`Kernel.Gate`'s `gateOf`, `at`: `env`, `time`, `nohup`, `exec`, `command`,
+`timeout` and its duration, `nice`, `ionice`, `stdbuf`, `sudo`, `doas`, `xargs`) must be `wb` or end in `/wb`. Syntactic:
 `true || wb steer` counts. Off: either quit. While on: the `workbench-mode`, `user-notes` (and
 `claude-coding`, `dynamic-workflows`) blocks, the idle status line, pane auto-open, chat listening, the boundary
 compaction. `mem.delegated` remembers it was on in this load, so a hand-back's compaction still
@@ -7600,15 +7601,15 @@ Claude's own files from its builds' output by them, a `wb accept` in the same ca
 **The consent gate** (`sendRefusal`, in the `tool.call` hook every call passes, #1005). Nothing goes to workbench
 upstream without the user's yes to that very call, in a dialog: Claude's, a subagent's or another plugin's alike, from
 Bash, Monitor (its `command` runs in the same shell) or a GitHub MCP tool. A rule in the skill is advice Claude may
-misread; this is the one place every call passes. Outward (`sendsOut`):
+misread; this is the one place every call passes. Outward (the kernel's `gateOf`, its gate `outward`, or `send`; *The kernel*):
 `gh pr create|comment|edit|merge|review|close|reopen|ready|update-branch|lock|unlock`,
 `gh issue create|comment|edit|close|reopen|delete|lock|unlock|transfer|pin|unpin|develop`,
 `gh repo fork|edit|delete|rename|archive|unarchive|sync`, `gh workflow run|enable|disable`, `gh run rerun|cancel|delete`,
-`gh release create|edit|delete|upload|delete-asset`, `gh label create|edit|delete|clone` (`GH_WRITES`, past
-`-R`/`--repo`), `gh api` with a method other than GET or HEAD, or with fields (`apiWrites`), `git push` (past git's own
-options, `GIT_VALUED`), and `wb patch send` (`wb` or a path to it, or Python running `…/wb` or `-m workbench`:
-`wbArgs`); command words lowercased (macOS finds `GIT` as git). Read as bash reads it (`simpleCommands`, `commandAt` as
-in `delegates`, past `sudo`, `doas`, `xargs` and the other `PREFIXES`): echo and heredoc text isn't a command, `$(…)`
+`gh release create|edit|delete|upload|delete-asset`, `gh label create|edit|delete|clone` (past
+`-R`/`--repo`), `gh api` with a method other than GET or HEAD, or with fields, `git push` (past git's own
+options; its `-C` directories, `dirs`), and `wb patch send` (`wb` or a path to it, or Python running `…/wb` or `-m workbench`);
+command words lowercased (macOS finds `GIT` as git). Read as bash reads it (`simpleCommands`, the command word
+`gateOf`'s `at` as in `delegates`, past `sudo`, `doas`, `xargs` and the other wrappers): echo and heredoc text isn't a command, `$(…)`
 and backticks are, and a shell's `-c '…'` (`STDIN_SHELL`: `bash`, `sh`, `zsh`, `dash`, `ksh`, `ash`, `fish`) and
 `eval` are read inside; a line naming none of `gh`, `git`, `wb`,
 `workbench` isn't parsed. What a program that runs text (`RUNS_CODE`) is handed (`runs`, `codeFed`: a heredoc, a
@@ -7642,9 +7643,9 @@ It was refused while they were away (`NOT_SENT_AWAY`), a round trip for nothing,
 page, which cut a long question at `chat.ASK_TEXT` unmarked and left a user back at the terminal with no dialog. The text: `Claude wants to send this to GitHub (<slug>), publicly: <the command>`, the whole line up to
 `SHOW_CHARS` 600, a longer one as the outward command in full, then the line's start (`shownCommand`: cut from the
 start, a long line hid the gh command and its body); for `wb patch send` its `--title` and the body file's first
-`BODY_LINES` 20 lines (`sendQuestion`, `sendArgs`: the last `--title`/`--body-file` given, as argparse takes them; wb
+`BODY_LINES` 20 lines (`sendQuestion`, `gateOf`'s `send`: the last `--title`/`--body-file` given, as argparse takes them; wb
 refuses abbreviations). A send it can't show is refused without asking (`NOT_SHOWN`: no slug, `--title` or
-`--body-file`, a `$` or backtick in either, an unreadable body, or a send inside text another program runs: fed to a
+`--body-file`, a `$` or backtick in either, the kernel's `send.lack`: `slug`, `title`, `bodyFile`, `shell`; an unreadable body, or a send inside text another program runs: fed to a
 shell, or in an interpreter's code that runs commands). The
 options `Send it` and `Don't send`. `Send it` lets that one call through, and for `wb patch send` writes
 `$WB_HOME/send-ok.json` (what wb checks under Claude Code: *Sending a patch upstream*); nothing is remembered (a yes to
@@ -7655,16 +7656,17 @@ of the gate runs the real gh form with a fake gh on PATH: an `echo` of it is tex
 atom. A rejected dialog off the terminal also toasts (`askOrNo`, *Surfaces*).
 
 **The roles' dialog** (`routeRefusal`, beside `sendRefusal` in the same hook, #1014; *Roles*). In Bash and Monitor
-commands, read as above (`runs`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
+commands, read as above (`runs`: `simpleCommands`, `bash -c` and `eval` inside; the kernel's `gateOf`: its gates `route`,
+`start` and `settings`, and each one's dry-run `args`), each `wb route …` and each
 `wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`), and each `wb settings set …` (#1287, a
-`--settings` call; `settings`' own `--json` before `set` too, `settingsSet`: the review of #1336); a show (`wb route`, `--json`) and a dry run
+`--settings` call; `settings`' own `--json` before `set` too: the review of #1336); a show (`wb route`, `--json`) and a dry run
 change nothing. For each call, one after another (`routeDry`), the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
 args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them; a
 Settings row's as `wb settings set <key> <value> --dry-run --json`, `settings.dry_run`: its row's own `wb route` dry
 run word for word, a role's selector, API model, thinking or the cap alike (#1336), or nothing gated for a row whose call
 isn't a `wb route`), 60 s,
 a start's in the directory it runs in (`routeCalls`' `at`: `cd` and `pushd` followed from the session's, with
-`upstreamAim`'s `cdTarget`; wb start's `--repo` is `.` unless given, and a start after `cd other &&` was judged
+`gateOf`'s `cd` and its target, as `upstreamAim` reads it; wb start's `--repo` is `.` unless given, and a start after `cd other &&` was judged
 local-only, or not, by the session's repo, #1125). A `cd` the mod can't resolve (a word with `$` or a backquote, none,
 `-`) and a directory that isn't there (`mkdir x && cd x`) leave the session's: a missing one failed the dry run to
 spawn and the call skipped the dialog. A route's runs in the session's (it reads no directory).
@@ -7680,9 +7682,9 @@ Bash call were refused before any dry run, the review of #1287), and one inside 
 shell is fed (a `wb settings set` row too, gated or not: it isn't dry-run), or one in an interpreter's code that runs
 commands (`ROUTE_TEXT`, `spawns`); a heredoc that only says `wb route cap 9` or `wb settings set cap 9` is no call
 (#1364). The file tools
-(`EDIT_TOOLS`) on routes.json (`routesPath`: `WB_ROUTES`, else `~/.config/workbench/routes.json`, by real path too) or
+(`EDIT_FIELDS`: the kernel's `editTools`, Claude Code's rows) on routes.json (`routesPath`: `WB_ROUTES`, else `~/.config/workbench/routes.json`, by real path too) or
 `$WB_HOME/route-ok.json` are denied (`routesFileRefusal`, `ROUTES_EDIT`), and so is a command that writes
-`$WB_HOME/route-ok.json` (`writesTo`, `ROUTE_OK_OWN`): a redirect onto it, `tee`, `cp`/`mv`/`install`/`ln`/`rsync`
+`$WB_HOME/route-ok.json` (`writesTo`, `ROUTE_OK_OWN`; what a command writes is `gateOf`'s `writes`): a redirect onto it, `tee`, `cp`/`mv`/`install`/`ln`/`rsync`
 onto it or into its directory under its name, `dd of=`, a shell's fed commands too (`cd` and `pushd` followed; the
 path as written, through `~`, `$HOME` or `$WB_HOME`), or an interpreter's code with a write call (`WRITES_CODE`: Python's
 `open(…, 'w')`, its path built inside too, `os.path.join(…)`, `write_text`, Node's `writeFileSync`, …) and the file in a
@@ -7727,19 +7729,24 @@ are written once in PureScript under `kernel/src` and compiled into one committe
 `mod/hooks/kernel.js` (#1325, its boundary #1356). `kernel/BOUNDARY.md` is the contract: the
 entry test, `## Exports` (each export's module, decision, what it `replaces`, its consumers), the
 rulings (one gate classifier over a parsed command comes in, by the owner's ruling of 2026-11-25,
-with the parsing left to each host; wording, formatting and parsing stay in TypeScript; effects,
+with the parsing left to each host, and so do the coding gate's rules; wording, formatting and parsing stay in TypeScript; effects,
 rendering, locale and telemetry never go in), `## Budget` (12 exports, 65,536 bytes, 1,200 source lines and 350 per
 module with Tables aside, `core.ts` 250 lines), the wire types (`Number`, `String`, `Boolean`,
 `Array`, closed records; every field present, `-1` and `""` for none, an unknown tag the safe
 answer), the denied imports and the move protocol. Today it holds `tables`, which `register.tsx`
 (`ACTIVE`, `NEEDS`, `PARKS`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING`) and `tasks.ts` (`CLOSED`)
-read through `core.ts`, their hand copies deleted, and `phaseOf`, with no caller yet: #1325's M1
-moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks onto it.
+read through `core.ts`, their hand copies deleted; `phaseOf`, with no caller yet: #1325's M1
+moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks onto it; the gate
+classifier `gateOf`, which every Bash and Monitor gate in `register.tsx` reads (`delegates`, `runs`,
+`upstreamAim`, `sendQuestion`, `routeCalls`, `writesTo`), its hand copies deleted (#1325, after
+#1364); and the coding gate's rules, `codingGate` and `editTools` (`codingRefusal`, `callRows`).
 
 - **The membrane**: `mod/hooks/core.ts`, the one importer of `./kernel.js` (with its generated
   `kernel.d.ts`), exports `kernel` (every export by name, for the goldens), the sets `ACTIVE`,
-  `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING` and `phaseOf`. It maps
-  and decides nothing.
+  `NEEDS`, `PARKS`, `CLOSED`, `NO_ANSWER`, `CHAT_STALE_MS`, `WAKE_OPENING`, `phaseOf`,
+  `gateOf(words, writes = [])` (its `gate` typed `GateName`), `codingGate` (its `verdict` typed) and
+  `editFields(host)` (`editTools`' rows for `claude-code` or `opencode`, as a tool-to-field map). It
+  maps and decides nothing.
 - **`Kernel.Tables`** (`kernel/src/Kernel/Tables.purs`) is generated by `scripts/kernel.py tables`
   from wb's Python: `sorted()` of `store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS` and `CLOSED`,
   `ask_mcp.NO_ANSWER`'s first sentence, `chat.LISTENING_FOR * 1000`, `spend.WAKE_OPENING` (`[workbench]
@@ -7748,6 +7755,34 @@ moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks o
   active and not needing Claude (the mod's `RUNNING`, `queued` included), `waits` needs Claude and
   isn't parked, a mark counting only in `PARKS` (`store.parked`, #698); a phase no table names is
   none of them.
+- **`gateOf({words, writes})`** (`Kernel.Gate`): one simple command, as the host's parser read it
+  (its words, quotes undone; `writes`, the files its redirects write), → `{at, word, gate, delegates,
+  args, dirs, writes, send}`. `at`: the command's own word, past `VAR=x`, the reserved words (`if`,
+  `then`, `elif`, `else`, `while`, `until`, `do`, `!`, `{`) and the wrappers with their valued
+  options (`env`, `time`, `nohup`, `exec`, `command`, `timeout` and its duration, `nice`, `ionice`,
+  `stdbuf`, `sudo`, `doas`, `xargs`); `word`: its name lowercased. `gate`, closed: `cd` (cd or pushd;
+  `args`, its target, none for home), `send` (wb patch send; `send`: `slug`, `title`/`titled`,
+  `bodyFile`/`filed`, `draft`, `anyway`, and `lack`: `slug`, `title`, `bodyFile`, `shell` or ""),
+  `outward` (the gh forms that write, `gh api` with a method other than GET or HEAD or with fields,
+  `git push`; `dirs`, git's `-C`), `route`, `start` (with a `--m…`), `settings` (`wb settings set`),
+  each with `args` as `wb route --dry-run --json` takes them, or "". `wb` is `wb`, a path to it, or
+  Python running `…/wb` or `-m workbench…`. `delegates`: the word as written is `wb` or ends in
+  `/wb`, then `start`, `next`, `feedback`, `steer`, `answer` or `resume`. `writes`: the redirects',
+  tee's, dd's `of=`, a copy's (`cp`, `mv`, `install`, `ln`, `rsync`) last operand or `-t` directory
+  with `names`, its sources. Only words count (#1364): a heredoc's body, a here-string and an
+  interpreter's code never arrive as words; reading that code (`spawns`, `OUTWARD_TEXT`,
+  `ROUTE_TEXT`, `WRITES_CODE`) is text, and stays in the host, with the parsing, the paths and
+  the dialogs. Ported with a seeded parity run against the old hand copies (120,324 cases: every
+  command in `register.test.tsx` as the old parser read it, 50,000 seeded word lists, 50,000 more
+  from command heads; no disagreement); it also no longer crashes on, or takes for a wrapper, a
+  word naming a property of every JavaScript object (`gh constructor`, `toString git push`).
+- **`codingGate({mode, allowed})`** (`Kernel.Coding`): the user's `wb coding` mode and the task's
+  allowances (`used`, `when`, `started`, each a Boolean) → `{verdict, open}`: `pass` (`decide`, a
+  mode wb doesn't know, or an allowance not handed back), `start` (pass, and the host stamps
+  `started` on allowance `open`, a one-task exception's first edit, #94), `ask`, `refuse`; `open`,
+  the first allowance not handed back, `-1` for none. **`editTools`**: each host's file tools and
+  the field naming the file (Claude Code's `Edit`, `MultiEdit`, `Write` `file_path` and
+  `NotebookEdit` `notebook_path`; OpenCode 2.4.1's `edit` and `write`, `path`).
 - **`scripts/kernel.py`** (standard library, 3.11): `fetch` downloads `kernel/toolchain.json`'s
   pins for this platform (Linux or macOS, x64 or arm64): purs 0.15.16 from its GitHub release
   (`sha256`), esbuild 0.28.2 from npm (`sha512`), each archive's one member checked against
@@ -8975,7 +9010,7 @@ bother") is the way for a user with no GitHub account, or no wish to use one: th
 `git format-patch` files and a `README.txt`, which they email upstream themselves, to `patches.UPSTREAM_CONTACT`
 (`adam.schaefers@icloud.com`, the owner's address, in the git log already; CONTRIBUTING.md says the same, and the README doesn't: the owner, 2026-11-24, wanted it in CONTRIBUTING.md only),
 or send any way they like (*Every `wb` command* has its output). It is local: no fetch, no gh, nothing sent, so no
-dialog asks (*The consent gate* counts only `wb patch send` and the gh and git forms as outward: `sendsOut`). The
+dialog asks (*The consent gate* counts only `wb patch send` and the gh and git forms as outward: the kernel's `gateOf`). The
 patch files' `From:` lines carry each author's name and email from git: README.txt says so, and wb prints it once, in
 one line. Claude offers it when a patch is for everybody and the user says no to GitHub (the skill's
 `reference/patching.md`); `wb patch send` refusing over a missing gh or login names it (`ZIP_HINT`).
@@ -9596,7 +9631,10 @@ doc needs its own `!/` line).
   (*Kept awake*), named in `cli.logout_stops`.
 - **A file in a task's directory** → `context.TASK_FILES`, the names a `--sibling` can't take.
 - **Where a task's worktree is** (`Task.worktree`) → `gitops._record`, `spend._theirs`, `EVENT_SKIP`, the mod's
-  `codingRefusal` and `taskOfPath`, `tasksNamed` (which calls it keeps).
+  `codingRefusal` and `taskOfPath`, `tasksNamed` (which calls it keeps). **`wb coding`'s modes or an allowance's keys**
+  (`cli.CODING`, `coding.json`'s `used`, `when`, `started`) → `Kernel.Coding`'s `codingGate` and its golden, the mod's
+  `codingRefusal`. **A host's file tool** (its name, the field naming its file) → `Kernel.Coding`'s `editTools`, and
+  `runner.CLAUDE_EDIT_TOOLS` for Claude Code's.
 - **A `claude-calls/` row** (the mod's `callRows`, `noteCall`) → `runner.claude_calls`, `_claude_edited`,
   `_claude_built` (its keys, seconds not milliseconds, `end` null while it runs and `denied`, the edit tools' names `CLAUDE_EDIT_TOOLS`), the tests' `claude_ran`.
 - **A prompt's opening words** → `transcript` labels, `round_asks`, `lessons`, the fake OpenCode, the tests quoting them.
@@ -9694,10 +9732,11 @@ doc needs its own `!/` line).
   `wb patch zip`'s README.txt and output (its row in *Every `wb` command* quotes the line), CONTRIBUTING.md's
   contributing line (never the README: the owner's call), *Sending a patch without GitHub*; the skill names no address ("the address it
   printed"), so a new one never leaves Claude telling a user the old. **What sends** (`wb patch send`'s name, the gh and git commands it
-  runs, any new outward command) → `sendsOut`, `GH_WRITES`, `OUTWARD_TEXT`, the gate's tests in `register.test.tsx`.
+  runs, any new outward command) → `Kernel.Gate` (`gateOf`, `ghWrites`; `python3 scripts/kernel.py build`), its
+  golden `mod/hooks/golden/gate.ts`, the mod's `OUTWARD_TEXT`, the gate's tests in `register.test.tsx`.
   **A program that runs text** (a new shell or interpreter, its code flag) → `RUNS_CODE`, `STDIN_SHELL`, `codeFed`,
   `spawns`, `WRITES_CODE` in `register.tsx`, together (#1364).
-  **`wb patch send`'s flags** → the mod's `sendArgs` (it reads `--title`, `--body-file`, `--draft`, `--anyway` as
+  **`wb patch send`'s flags** → `Kernel.Gate`'s `sendOf` (it reads `--title`, `--body-file`, `--draft`, `--anyway` as
   written: keep `allow_abbrev=False`). **`send-ok.json`'s keys** (`slug`, `title`, `body_file`, `body`, `draft`,
   `anyway`, `at`) → the mod's `upstreamRefusal` and `patches._approved`, together. **The `Scope`
   trailer** (`me`, `everybody`) → `patches` (`wb patch list`, `upstream`'s tag) and the mod's
