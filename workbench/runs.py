@@ -2361,11 +2361,15 @@ def _ack_run(run: Run) -> None:
 
 
 def awaiting_feed(run: Run) -> dict | None:
-    """The `claude` stage whose inputs are all in and that Claude hasn't fed yet, or None."""
+    """The `claude` stage whose inputs are all in, whose checkpoint tick has raised (its notice
+    row journalled) and that Claude hasn't fed yet, or None. Unraised, it sits under an item's
+    checkpoint, and only the resume lets tick raise it (#1510): #1546's refusal took that resume
+    too, exit 1, and the merge was never raised (#1546's review, 2026-11-26)."""
     st = state(run)
     complete = st.get("_complete") or {}
+    raised = {r.get("stage") for r in run.journal() if r.get("kind") == "notice" and r.get("stage")}
     return next((s for s in stages(run.flow) if s.get("claude") and complete.get(s.get("from"))
-                 and st.get(s["id"]) is None), None)
+                 and st.get(s["id"]) is None and s["id"] in raised), None)
 
 
 def cmd_resume(a) -> None:

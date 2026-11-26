@@ -1384,6 +1384,9 @@ class Runs(Base):
         st = runs.Run("pq").status
         self.assertEqual((st["phase"], st.get("cause")), ("checkpoint", "item"), st)
         self.assertIn("pq-code-1 (code 1) is failed", st["why"])
+        # #1546's review (2026-11-26): its refusal at an unfed claude stage took this resume too,
+        # exit 1, though the merge's checkpoint isn't raised yet: only one tick raised is waited on
+        self.assertIsNone(runs.awaiting_feed(runs.Run("pq")))
         self.assertIn("resumed pq", run_wb("run", "resume", "pq"))
         st = self.wait_run("pq", ("checkpoint", "review", "failed", "stopped"), timeout=60)
         self.assertEqual((st["phase"], st["why"]), ("checkpoint", "stage merge is Claude's"), st)
