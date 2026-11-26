@@ -6971,7 +6971,8 @@ would be a way to both. "Reply about this task" sets `about: {task}` (`setAbout`
 reaches Claude as `[web chat] (about task <task>) …`; steering stays Claude's (`wb steer`), and the
 page never steers, edits or accepts.
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.ts` removes its link
-over http: localhost counts as secure and one computer got two apps). The `badge` is
+over http: localhost counts as secure and one computer got two apps); there the Settings card says how to get
+https, its `tailscale serve --bg 1337` drawn as code (`paraCode`: a line's backticked part as a `<code>`, #1323). The `badge` is
 `badge-96.png`, white on transparent (Android uses alpha only, #757). `sw.js` (`updateViaCache:
 'none'`) caches nothing and answers no fetch (an offline cache gave iOS white screens). Pushes carry
 no payload (RFC 8030), signed with VAPID (RFC 8292, ES256 in plain integers in `webpush.py`, checked

@@ -2220,6 +2220,13 @@
     }
     const para = (box, text, cls) => { const p = document.createElement('p'); if (cls)
         p.className = cls; p.textContent = text; box.append(p); return p; };
+    // a line whose `…` is a command to type, drawn as code: the install card showed its backticks as
+    // text (the web app review's screenshots, 2026-11-25, #1323). Text nodes alone, as everywhere here
+    const paraCode = (box, text, cls) => {
+        const p = para(box, '', cls);
+        text.split(/`([^`]+)`/).forEach((part, i) => p.append(i % 2 ? Object.assign(document.createElement('code'), { textContent: part }) : part));
+        return p;
+    };
     const HTTPS = "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
         'on the computer, `tailscale serve --bg 1337` gives the chat an https address on your tailnet.';
     function drawApp() {
@@ -2229,9 +2236,9 @@
         if (standalone())
             return para(box, "Installed ✓ — you're using the chat as an app.");
         if (!window.isSecureContext)
-            return para(box, HTTPS, 'small');
+            return paraCode(box, HTTPS, 'small');
         if (!https)
-            return para(box, 'The app installs from the https address, so the one app works on every device: ' +
+            return paraCode(box, 'The app installs from the https address, so the one app works on every device: ' +
                 'on the computer, `tailscale serve --bg 1337` gives the chat one on your tailnet.', 'small');
         if (installEvt) {
             const b = document.createElement('button');
