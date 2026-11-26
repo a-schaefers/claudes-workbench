@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "description": "A read-only review of one change",
+  "required": ["verdict", "must_fix", "nits", "summary"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["approve", "changes"]},
+    "must_fix": {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 600}},
+    "nits": {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 400}},
+    "summary": {"type": "string", "maxLength": 600}
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "description": "A blind judge's judgment of each finding it was given, by id",
+  "required": ["judgments"],
+  "properties": {
+    "judgments": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": ["id", "meets_bar", "class", "why"],
+        "properties": {
+          "id": {"type": "string", "maxLength": 80},
+          "meets_bar": {"type": "boolean"},
+          "class": {"type": "string", "enum": ["lost work", "false result", "blocked path",
+                                                "unasked action", "none"]},
+          "why": {"type": "string", "maxLength": 400}
+        }
+      }
+    }
+  }
+}

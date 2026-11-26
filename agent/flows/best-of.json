@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "name": "best-of",
+  "description": "Three builders try the same change apart, a reviewer reads each diff, Claude keeps the best and discards the rest",
+  "params": {"request": "string"},
+  "stages": [
+    {"id": "code", "card": "build", "items": ["the request"], "attempts": 3,
+     "prompt": "{params.request}\n\n{context}"},
+    {"id": "review", "card": "review", "from": "code",
+     "prompt": "Review this attempt at what was asked; other attempts are reviewed apart.\n\nAsked:\n{params.request}\n\nThe change:\n{diff}"},
+    {"id": "claude", "final": true, "from": "review"}
+  ]
+}

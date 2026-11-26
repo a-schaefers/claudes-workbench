@@ -488,6 +488,8 @@ def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
             # screenshot another session posted still did, stamped in reply() alone (the #1129
             # review, 2026-11-23)
             extra.setdefault("claude_pid", int(pid))
+        if frm == "claude" and (by := writer_driver()):
+            extra.setdefault("driver", by)  # which driver wrote it, for the agent it answers (#1366)
         row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
                "from": frm, "text": text, **({"cid": cid} if cid else {}),
                **{k: v for k, v in extra.items() if v}}
@@ -756,12 +758,39 @@ def caller_listens() -> bool:
     2026-11-23). Either unknown (an older mod's claim, a caller outside Claude Code): yes, as
     before; a claim of another machine's is never this process's."""
     lst = listener() or {}
+    sid = store.opencode_session()
+    if lst and (sid or listener_driver(lst)["tool"] == "opencode"):
+        return _listens_across(lst, sid)
     parent, me = lst.get("parent"), os.environ.get("CLAUDE_PID", "")
     if not isinstance(parent, int) or isinstance(parent, bool) or not parent or not me.isdigit():
         return True
     if isinstance(lst.get("machine"), str) and lst["machine"] and lst["machine"] != store.machine():
         return False
     return int(me) == parent
+
+
+def _listens_across(lst: dict, sid: str) -> bool:
+    """caller_listens when an OpenCode session calls or listens: with both drivers open on one
+    machine, the one that isn't listening threaded its report onto the listener's in-flight
+    message, sent to the agent alone (#1363's matrix, #1366, 2026-11-25), as #1129 was between two
+    Claude Code sessions: an OpenCode caller has no CLAUDE_PID to compare, and an OpenCode claim
+    no `parent`. An OpenCode session (``sid``) listens when the claim is OpenCode's and its
+    `session`, if it names one, is ``sid``; Claude Code (CLAUDE_PID) never does while OpenCode
+    listens; a caller of neither, unknown, does, as before. A caller whose session is the claim's
+    `session` listens before any driver check: an OpenCode claim without `driver`, which no fresh
+    heartbeat lists (none written, one past 120 s, a session newer than its last beat), read as
+    Claude Code's, and the listener's own report missed the agent waiting on it (the #1366
+    review, 2026-11-25)."""
+    if isinstance(lst.get("machine"), str) and lst["machine"] and lst["machine"] != store.machine():
+        return False
+    if sid and lst.get("session") == sid:
+        return True
+    if listener_driver(lst)["tool"] != "opencode":
+        return False  # an OpenCode session's call while Claude Code listens
+    if sid:
+        mine = lst.get("session")
+        return not (isinstance(mine, str) and mine) or mine == sid
+    return not os.environ.get("CLAUDE_PID", "").isdigit()
 
 
 # A turn's own answer, which the mod posts when a turn that had a web message ended with no reply
@@ -866,7 +895,7 @@ def in_view(row: dict, agent: str) -> bool:
 
 def agent_snapshot(agent: str) -> dict:
     """What GET /api/state (and the stream) carries for an agent's token."""
-    return {"api": API_VERSION, "messages": thread(keep=lambda r: in_view(r, agent)), "listener": listener(),
+    return {"api": API_VERSION, "messages": thread(keep=lambda r: in_view(r, agent)), "listener": listener_view(listener()),
             "uploads": upload_limits(), "expire": MESSAGE_EXPIRE, "now": store.now()}
 
 
@@ -897,7 +926,7 @@ _no_key: set[str] = set()
 
 
 def snapshot() -> dict:
-    return {"api": API_VERSION, "messages": thread(), "listener": listener(),
+    return {"api": API_VERSION, "messages": thread(), "listener": listener_view(listener()),
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
@@ -1624,6 +1653,58 @@ def listener() -> dict | None:
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
 
 
+# The drivers a listener or a reply names (`driver.tool`, as task.json's `driver` and
+# store.caller_kind name them). Another agent hands work to whichever listens, and the API said
+# only Claude: the agents' skill told it "Claude" when OpenCode answered (#1366, 2026-11-25).
+DRIVER_TOOLS = ("claude", "opencode")
+
+
+def _driver_row(d: dict) -> dict:
+    """``d`` as the API names a driver: {tool, model?} (the model OpenCode's `<provider>/<id>`)."""
+    return {"tool": d["tool"], **({"model": d["model"]} if isinstance(d.get("model"), str) and d["model"] else {})}
+
+
+def listener_driver(lst: dict) -> dict:
+    """The driver of listener claim ``lst``, {tool, model?}: the claim's own `driver` (the tool's
+    name, or {tool, model?}); else `opencode` when a live OpenCode server's heartbeat lists its
+    `session` (with that session's model); else `claude`: before 2.2 only the Claude Code mod
+    claimed, and its claim carries `parent`, its Claude Code's pid."""
+    d = lst.get("driver")
+    if isinstance(d, str) and d in DRIVER_TOOLS:
+        return {"tool": d}
+    if isinstance(d, dict) and d.get("tool") in DRIVER_TOOLS:
+        return _driver_row(d)
+    sid = lst.get("session")
+    if isinstance(lst.get("parent"), int) or not isinstance(sid, str) or not sid:
+        return {"tool": "claude"}
+    beat = next((hb for hb in store.heartbeats() if store._beating(hb) and sid in hb["sessions"]), None)
+    if beat is None:
+        return {"tool": "claude"}
+    row = beat["sessions"].get(sid)
+    return _driver_row({"tool": "opencode", **(row if isinstance(row, dict) else {})})
+
+
+def listener_view(lst: dict | None) -> dict | None:
+    """The listener as the API serves it: the claim, with its `driver` ({tool, model?})."""
+    return {**lst, "driver": listener_driver(lst)} if lst else None
+
+
+def writer_driver() -> dict | None:
+    """The driver writing one of Claude's rows from this process, {tool, model?}, stamped on the
+    row as `driver` (#1366): Claude Code's Bash (`claude`), or an OpenCode session (`opencode`,
+    with its model when its server's heartbeat lists it); None for anyone else (a terminal, an
+    agent's shell). A reply's `from` stays "claude" whichever driver writes it: the API's name."""
+    kind = store.caller_kind()
+    if kind == "claude":
+        return {"tool": "claude"}
+    if kind != "opencode":
+        return None
+    sid = store.opencode_session()
+    _, beat = store.driver_server(sid) if sid else ("unknown", None)
+    row = (beat or {}).get("sessions", {}).get(sid) if beat else None
+    return _driver_row({"tool": "opencode", **(row if isinstance(row, dict) else {})})
+
+
 IDLE_BUMP_S = 60  # without inotify, nothing changed: the streams wake this often all the same (#841)
 
 
@@ -2150,7 +2231,7 @@ def message(msg_id: str) -> dict | None:
 # ---- the server ----
 
 # One shape for every error answer (#1138): {"error": the plain line, "code": a stable code}.
-# "error" stays the text, as before: the page (chat_static/src/app.ts) and ask_claude.py show it as is,
+# "error" stays the text, as before: the page (chat_static/src/app.ts) and ask_workbench.py show it as is,
 # so moving it would have broken both; a client branches on "code". A code by status unless the
 # answer names its own (ERRORS_SAID: a revoked token, an agent token from another machine, an
 # unknown host, what an agent may not do (outside AGENT_MAY), a malformed Idempotency-Key, an
@@ -2547,12 +2628,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(404, {"error": "no such message"})
                 if got.get("expired"):
                     return self._json(410, {"error": "that message expired unread: it was never passed "
-                                                     "to Claude, so send it again"})
+                                                     "to the driver, so send it again"})
                 lst, left, held = listener(), deadline - time.monotonic(), waiting_on_user()
                 paused = held if paused is None else paused
                 if got["replies"] or (got["done"] and until == "done") or lst is None or left <= 0 \
                         or (held and not paused):
-                    return self._json(200, {**got, "listener": lst, "waiting_on_user": held})
+                    return self._json(200, {**got, "listener": listener_view(lst), "waiting_on_user": held})
                 looked = time.monotonic()
                 while hub.version == seen and time.monotonic() - looked < PING_EVERY \
                         and (left := deadline - time.monotonic()) > 0:
@@ -2630,7 +2711,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             return self._json(200, self._snap())
         if path == "/api/health":  # an agent's first call: is anyone listening (#1042)
-            return self._json(200, {"api": API_VERSION, "listening": listener() is not None})
+            # and which driver listens (#1366): only while one does, as before 2.2 it was the whole answer
+            lst = listener()
+            return self._json(200, {"api": API_VERSION, "listening": lst is not None,
+                                    **({"driver": listener_driver(lst)} if lst else {})})
         if path == "/api/wait":  # send, then wait for the answer (#1042)
             return self._wait()
         if path == "/api/latest":  # the service worker's, at a push (#755)
@@ -2962,7 +3046,7 @@ class Handler(BaseHTTPRequestHandler):
             if had.get("req") != req:
                 return self._json(422, {"error": "that Idempotency-Key went with another request in the "
                                                  "last 24 hours: use a new key for a new request"})
-            data = json.dumps({"message": msg, "listener": listener(), "state": self._snap()}).encode()
+            data = json.dumps({"message": msg, "listener": listener_view(listener()), "state": self._snap()}).encode()
             return self._send(200, data, "application/json", {"Idempotent-Replayed": "true"})
         sent = self._send_message(body, text, cid)
         if sent:
@@ -3008,7 +3092,7 @@ class Handler(BaseHTTPRequestHandler):
             msg = send(text, self.agent or "user", cid, about=about, files=files, role="agent" if self.agent else None)
         except ValueError as e:
             return self._json(409, {"error": str(e)})
-        self._json(200, {"message": msg, "listener": listener(), "state": self._snap()})
+        self._json(200, {"message": msg, "listener": listener_view(listener()), "state": self._snap()})
         return msg
 
 
