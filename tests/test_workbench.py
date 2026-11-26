@@ -24694,7 +24694,7 @@ class Setup(Base):
         self.assertEqual(root["bin"], {"wb": "bin/wb"})
         for need in ("bin/", "workbench/", "agent/", "skill/", "opencode-plugin/*.ts"):
             self.assertIn(need, root["files"])
-        self.assertTrue(set(plugin["files"]) <= {p.name for p in ocplugin.DIR.glob("*.ts")})
+        self.assertTrue(set(plugin["files"]) <= {p.name for p in ocplugin.DIR.glob("*.ts*")})
         for f in (context.HANDBOOK, schedule.PKG_ROOT / "skill/workbench/SKILL.md",
                   *(ROOT / rel for rel in runner.CHILD_CODE)):
             self.assertIn(Path(f).relative_to(ROOT).parts[0] + "/", root["files"], f)
@@ -24717,7 +24717,7 @@ class Setup(Base):
         (clone / "opencode-plugin/test/x.test.ts").write_text("// a test\n")
         git("add", "-A"); git("commit", "-qm", "a test")
         copies = home / ".local/share/workbench/opencode-plugin"
-        tree = lambda: git("rev-parse", "HEAD:opencode-plugin").stdout.decode().strip()  # noqa: E731
+        tree = lambda: ocplugin.head_tree(clone)[1]  # noqa: E731  (opencode-plugin/'s, with the mod files it imports)
         head = lambda: git("rev-parse", "HEAD").stdout.decode().strip()  # noqa: E731
         with mock.patch.object(cli, "PKG_ROOT", clone), mock.patch.object(ocplugin, "PKG_ROOT", clone), \
                 mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
@@ -24761,6 +24761,59 @@ class Setup(Base):
             self.assertFalse(first.exists())                               # two back: removed
             self.assertTrue(second.exists())
             self.assertNotIn("older than", self.setup(cmd="doctor")[1])
+
+    def test_every_file_the_opencode_plugin_imports_from_beside_it_comes_with_each_install(self):
+        # #1333: the TUI part draws the splash from the Claude Code mod's own splash.ts and
+        # apprentice.ts (`../mod/hooks/…`), so OpenCode's Git install (the root package.json's
+        # files) and wb setup --opencode's copy must bring them, or its views never load
+        from workbench import ocplugin
+        root = json.loads((ROOT / "package.json").read_text())["files"]
+        plugin = json.loads((ocplugin.DIR / "package.json").read_text())["files"]
+        imports = set()
+        for name in plugin:
+            text = (ocplugin.DIR / name).read_text()
+            self.assertTrue(fnmatch.fnmatch(f"opencode-plugin/{name}", "opencode-plugin/*.ts*"), name)
+            self.assertTrue(any(fnmatch.fnmatch(f"opencode-plugin/{name}", f) for f in root), name)
+            for rel in re.findall(r"""from '(\.\.?/[^']+)'|import\('(\.\.?/[^']+)'\)""", text):
+                target = (ocplugin.DIR / (rel[0] or rel[1])).resolve().relative_to(ROOT).as_posix()
+                imports.add(target)
+                self.assertTrue(any(fnmatch.fnmatch(target, f) for f in root), (name, target))
+        self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts"} <= imports)
+        # and every mod file the Git install brings is one a module of the plugin imports
+        self.assertEqual({f for f in root if f.startswith("mod/")}, {t for t in imports if t.startswith("mod/")})
+        # the mod files import nothing else of the mod that would be left behind
+        for f in (f for f in root if f.startswith("mod/")):
+            for rel in re.findall(r"from '(\.\.?/[^']+)'", (ROOT / f).read_text()):
+                dep = (ROOT / f).parent / rel
+                dep = next((d for d in (dep, dep.with_name(dep.name + ".ts")) if d.is_file()), dep)
+                self.assertIn(dep.relative_to(ROOT).as_posix(), root, (f, rel))
+
+    def test_wb_setup_opencodes_copy_brings_the_mod_files_it_imports_and_a_change_to_one_renews_it(self):
+        # #1333: a copy of opencode-plugin/ alone left spans.ts's `../mod/hooks/splash.ts` unresolved;
+        # the copy carries the files the root package.json brings from mod/, and its key folds them
+        # in, so a commit changing only splash.ts gets a new copy as one changing the plugin does
+        from workbench import ocplugin
+        home = self.opencode_home()
+        clone, git = plugin_repo(Path(self.tmp.name) / "clone")
+        copies = home / ".local/share/workbench/opencode-plugin"
+        with mock.patch.object(cli, "PKG_ROOT", clone), mock.patch.object(ocplugin, "PKG_ROOT", clone), \
+                mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
+            self.assertEqual([p for p, _ in ocplugin.shared_files(clone)], ["mod/hooks/apprentice.ts", "mod/hooks/splash.ts"])
+            code, out = self.setup("--opencode")
+            self.assertEqual(code, 0, out)
+            first = Path(self.plugins()[0]["package"])
+            self.assertEqual(first.parent.parent, copies)
+            for f in ("mod/hooks/splash.ts", "mod/hooks/apprentice.ts"):
+                self.assertEqual((first.parent / f).read_text(), (clone / f).read_text())
+            self.assertTrue((first / "spans.ts").is_file() and (first / "splash.tsx").is_file())
+            self.assertFalse((first.parent / "mod/hooks/register.tsx").exists())  # only what the plugin imports
+            (clone / "mod/hooks/splash.ts").write_text((clone / "mod/hooks/splash.ts").read_text() + "// tuned\n")
+            git("commit", "-qam", "the splash alone changed")
+            ocplugin.refresh()
+            second = Path(self.plugins()[0]["package"])
+            self.assertNotEqual(second, first)
+            self.assertTrue((second.parent / "mod/hooks/splash.ts").read_text().endswith("// tuned\n"))
+            self.assertEqual(ocplugin.copy_info(second)["tree"], ocplugin.head_tree(clone)[1])
 
     def test_wb_setup_opencode_keeps_opencodes_own_git_install_and_gives_it_the_options(self):
         # the owner's decision on #1357: OpenCode's own plugin mechanism first. An entry
@@ -34626,6 +34679,10 @@ def plugin_repo(repo: Path):
         shutil.copy(ROOT / f, repo / f)
     for d in ("bin", "workbench", "agent", "skill", "opencode-plugin"):
         shutil.copytree(ROOT / d, repo / d, ignore=shutil.ignore_patterns("__pycache__", "test"))
+    for f in json.loads((ROOT / "package.json").read_text())["files"]:  # the mod's files the plugin imports
+        if f.startswith("mod/"):
+            (repo / f).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(ROOT / f, repo / f)
     git = lambda *a: subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
                                      *a], check=True, capture_output=True)
     git("init", "-q", "-b", "main")
