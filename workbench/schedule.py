@@ -201,10 +201,50 @@ def unit_files(name: str) -> list[Path]:
     return [unit_dir() / f"{UNIT}{name}.timer", unit_dir() / f"{UNIT}{name}.service"]
 
 
-def fire_argv(name: str) -> list[str]:
+# A fire from OpenCode's install: the newest generation's bin/wb under the cache key, found at
+# fire time (newest_wb's, standard library only: it runs before any wb). A unit naming the adding
+# generation's ran its code until OpenCode collected it, then exited 2 unseen (#1497, 2026-11-26)
+_NEWEST = ("import glob,os,sys; k,r,*a=sys.argv[1:]; "
+           "f=sorted(glob.glob(os.path.join(glob.escape(k),'*',r)),"
+           "key=lambda p:os.path.relpath(p,k).split(os.sep)[0].zfill(20)); "
+           "f or sys.exit('no Workbench left under '+k+': OpenCode removed its install'); "
+           "os.execv(sys.executable,[sys.executable,'-X','utf8',f[-1],*a])")
+
+
+def unit_wb() -> dict:
+    """The wb a schedule's unit runs, kept in schedule.json: `wb`, this copy's bin/wb; from
+    OpenCode's install, whose every update is a new generation `<key>/<n>/node_modules/<package>`
+    and which removes the old ones, also `wb_cache`: [the key's directory, bin/wb's path under a
+    generation] (#1497)."""
+    from . import ocplugin
+    root = PKG_ROOT.resolve()
+    out: dict = {"wb": str(PKG_ROOT / "bin" / "wb")}
+    key = root.parent.parent.parent
+    if ocplugin.runs_from_cache(root) and root.parent.name == "node_modules" and any(
+            key != c.resolve() and key.is_relative_to(c.resolve()) for c in ocplugin.package_caches()):
+        out["wb_cache"] = [str(key), str(Path("node_modules", root.name, "bin", "wb"))]
+    return out
+
+
+def newest_wb(s: dict) -> Path | None:
+    """The wb a schedule's fire would run now (_NEWEST's choice for a cache install), None when
+    it is gone; a schedule from before #1497 names none: this copy's."""
+    if cache := s.get("wb_cache"):
+        key, rel = cache
+        found = sorted(Path(key).glob(f"*/{rel}"), key=lambda p: p.relative_to(key).parts[0].zfill(20))
+        return found[-1] if found else None
+    wb = Path(s.get("wb") or PKG_ROOT / "bin" / "wb")
+    return wb if wb.exists() else None
+
+
+def fire_argv(name: str, s: dict | None = None) -> list[str]:
     """What the unit runs: this Python and this clone's bin/wb, by full path, so neither the unit's
-    PATH nor a missing ~/.local/bin link decides which wb fires."""
-    return [sys.executable, "-X", "utf8", str(PKG_ROOT / "bin" / "wb"), "schedule", "fire", name]
+    PATH nor a missing ~/.local/bin link decides which wb fires; from OpenCode's install the newest
+    generation's (``s``'s `wb_cache`, _NEWEST)."""
+    w = s if s is not None else read(name) or unit_wb()
+    if cache := w.get("wb_cache"):
+        return [sys.executable, "-X", "utf8", "-c", _NEWEST, *cache, "schedule", "fire", name]
+    return [sys.executable, "-X", "utf8", w.get("wb") or str(PKG_ROOT / "bin" / "wb"), "schedule", "fire", name]
 
 
 def unit_env() -> dict:
@@ -229,7 +269,7 @@ def systemd_units(name: str, s: dict) -> dict[str, str]:
     service = (f"[Unit]\nDescription=workbench schedule {name}: {what.replace('%', '%%')}\n\n"
                "[Service]\nType=oneshot\n"
                f"WorkingDirectory={s['repo'].replace('%', '%%')}\n{env}"  # a path, never quoted
-               f"ExecStart={' '.join(_sd_quote(w, exec_line=True) for w in fire_argv(name))}\n"
+               f"ExecStart={' '.join(_sd_quote(w, exec_line=True) for w in fire_argv(name, s))}\n"
                # a night's run: no start timeout (FIRE_HOURS bounds it); the runners it starts
                # live on in scopes of their own (cli.detach), and KillMode=process keeps them where
                # systemd-run can't make one
@@ -244,7 +284,7 @@ def systemd_units(name: str, s: dict) -> dict[str, str]:
 def launchd_plist(name: str, s: dict) -> bytes:
     when = s["at"]["launchd"]
     log = str(sched_dir(name) / "fire.log")
-    return plistlib.dumps({"Label": f"{LABEL}{name}", "ProgramArguments": fire_argv(name),
+    return plistlib.dumps({"Label": f"{LABEL}{name}", "ProgramArguments": fire_argv(name, s),
                            "EnvironmentVariables": s["env"], "WorkingDirectory": s["repo"],
                            "StartCalendarInterval": when[0] if len(when) == 1 else when,
                            "StandardOutPath": log, "StandardErrorPath": log})
@@ -378,7 +418,7 @@ def add(name: str, file: str | None, repo: str, at: str, turns: int | None = Non
         raise ScheduleError("--max-turns goes with --file (Claude's turns), and is at least 1")
     fl, notes = _flow_check(name, flow, params or [], budget_usd, top) if flow else ({}, [])
     s = {"name": name, **({"file": str(path)} if path else fl), "repo": str(top), "at": parse_at(at),
-         **({} if flow else {"max_turns": turns or TURNS}), "env": unit_env(), "created_at": store.now()}
+         **({} if flow else {"max_turns": turns or TURNS}), "env": unit_env(), **unit_wb(), "created_at": store.now()}
     d = sched_dir(name)
     d.mkdir(parents=True, exist_ok=True)
     try:
@@ -695,8 +735,9 @@ def doctor_lines() -> list[tuple[bool, str]]:
         last = summary(rows[-1]) if rows else "never fired yet"
         path = (s.get("env") or {}).get("PATH", "")
         gaps = [f"{p} not on its PATH" for p in needs(s) if not shutil.which(p, path=path)]
-        if not (PKG_ROOT / "bin" / "wb").exists():
-            gaps.append(f"{PKG_ROOT / 'bin' / 'wb'} is gone")
+        if newest_wb(s) is None:  # the unit's own, not this wb's (#1497): it said ok while each fire exited 2
+            where = s["wb_cache"][0] if s.get("wb_cache") else s.get("wb") or PKG_ROOT / "bin" / "wb"
+            gaps.append(f"its wb is gone ({where}): wb schedule rm {name}, then add")
         if not all(p.exists() for p in unit_files(name)):
             gaps.append("its unit is gone (wb schedule rm, then add)")
         out.append((not gaps, f"schedule {name} ({(s.get('at') or {}).get('said')}): last {last}"

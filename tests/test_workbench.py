@@ -23017,6 +23017,38 @@ class ScheduledRuns(Base):
         self.assertFalse(ok)
         self.assertIn("its unit is gone", said)
 
+    def test_a_schedule_added_from_opencodes_install_fires_its_newest_generation_and_doctor_says_when_none_is_left(self):
+        # #1497: the unit named the adding generation's bin/wb, which ran its old code after
+        # OpenCode updated, then exited 2 once OpenCode collected it, with no row and doctor ok
+        from workbench import schedule
+        tmp = Path(self.tmp.name)
+        os.environ["XDG_CACHE_HOME"] = str(tmp / "cache")
+        key = tmp / "cache/opencode/npm/git-workbench-0123456789ab"
+
+        def generation(n: str) -> Path:
+            pkg = key / n / "node_modules/opencode-workbench"
+            (pkg / "bin").mkdir(parents=True)
+            (pkg / "bin/wb").write_text("import sys\nprint(sys.argv[0], *sys.argv[1:])\n")  # says which ran
+            return pkg
+
+        first = generation("1")
+        with mock.patch.object(schedule, "PKG_ROOT", first):
+            self.add()
+        unit = (Path(os.environ["XDG_CONFIG_HOME"]) / "systemd/user/wb-schedule-night.service").read_text()
+        argv = shlex.split(re.search(r"^ExecStart=(.*)$", unit, re.M)[1])
+        shutil.rmtree(key / "1")                       # OpenCode updated twice and collected the first
+        for n in ("2", "10"):
+            generation(n)
+        ran = subprocess.run(argv, capture_output=True, text=True)
+        self.assertEqual(ran.stdout.split(), [str((key / "10/node_modules/opencode-workbench/bin/wb").resolve()),
+                                              "schedule", "fire", "night"], ran.stderr)
+        self.assertEqual([ok for ok, _ in schedule.doctor_lines()], [True])
+        shutil.rmtree(key)                              # the plugin removed: no wb left to fire
+        [(ok, said)] = schedule.doctor_lines()
+        self.assertFalse(ok)
+        self.assertIn("its wb is gone", said)
+        self.assertNotEqual(subprocess.run(argv, capture_output=True).returncode, 0)
+
 
 class Notes(Base):
     def test_notes_about_the_user_are_kept_short_and_numbered(self):
