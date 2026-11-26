@@ -76,8 +76,8 @@ that one command in a dialog; a yes is never remembered. A pull request goes onl
 patch send`, which refuses under Claude Code what the dialog didn't approve, so never send one
 with gh, git or a GitHub MCP tool yourself (those ask the same dialog). Show them what goes public
 first, so the dialog only confirms what they have read. A "Don't send" is a no: tell them it
-wasn't sent and leave it, unless they bring it up. If they are away on the web chat it is refused without a
-dialog: tell them there what it would send; it waits until they are back at the terminal.
+wasn't sent and leave it, unless they bring it up. If they are away on the web chat, tell them there
+what it would send: the dialog waits in the terminal for their answer.
 1. Search the issues (`gh issue list --repo <origin's owner/repo> --state all --search "<the error's
    words>"`); on a match, comment there instead. Otherwise draft the issue from the matching form
    (`.github/ISSUE_TEMPLATE/`): real output pasted, the commit, `wb doctor`, `wb patch list`.

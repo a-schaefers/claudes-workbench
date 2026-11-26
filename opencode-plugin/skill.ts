@@ -215,17 +215,18 @@ export const HOST_LINES: readonly Rule[] = [
     files: ['reference/patching.md'] },
   line('copies the committed HEAD into the plugin cache), then `/reload-plugins`.',
     "copies the committed HEAD into the plugin cache), then `/reload-plugins`; one under `opencode-plugin/` reaches OpenCode through `wb update` too while OpenCode loads the plugin from this clone (step 1): a copy of what is committed, which it reloads by itself.", ['reference/patching.md']),
-  // the plugin's form asks only for wb patch send (consent.ts): gh's and git's own sends, an MCP
-  // tool's, go out on the user's yes in words; while they are away the form waits (no NOT_SENT_AWAY)
-  { from: /The mod holds every send to\s+workbench upstream[\s\S]*?until they are back at the terminal\./,
-    to: 'Nothing goes to\nworkbench upstream (an issue, a comment, a fork, a push, a pull request) without '
-      + "the user's yes\nto that one thing, asked each time: a yes is never remembered. A pull request goes only "
-      + 'through\n`workbench_patch_send`, which asks them in a form, and wb refuses a send its form didn\'t '
-      + 'approve,\nso never send one with gh, git or a GitHub MCP tool yourself. The form is only for that send: '
-      + 'an\nissue or a comment (step 1) goes out through gh, on their yes in words to the text you showed\nthem. '
-      + 'Show them what goes public first, so the form only confirms what they have read. A "Don\'t\nsend" is a '
-      + "no: tell them it wasn't sent and leave it, unless they bring it up. If they are away on\nthe web chat, "
-      + 'tell them there what it would send: the form waits in the terminal for their answer.',
+  // the plugin's forms hold every send upstream, as the mod's dialog does: wb patch send's
+  // (consent.ts), and a gh write, a git push or a GitHub MCP tool's write (upstream.ts, #1296's
+  // row 14); while they are away the form waits (no NOT_SENT_AWAY)
+  { from: /The mod holds every send to\s+workbench upstream[\s\S]*?in the terminal for their answer\./,
+    to: 'The plugin holds\nevery send to workbench upstream (an issue, a comment, a fork, a push, a pull request) '
+      + "until\nthe user approves that one call in a form; a yes is never remembered. A pull request goes only\n"
+      + 'through `workbench_patch_send`, whose form shows its title and body, and wb refuses a send its\nform '
+      + "didn't approve, so never send one with gh, git or a GitHub MCP tool yourself (those ask in\nthe same "
+      + 'form, as an issue or a comment through gh in step 1 does). Show them what goes public\nfirst, so the '
+      + 'form only confirms what they have read. A "Don\'t send" is a no: tell them it\nwasn\'t sent and leave '
+      + 'it, unless they bring it up. If they are away on the web chat, tell them\nthere what it would send: '
+      + 'the form waits in the terminal for their answer.',
     files: ['reference/patching.md'] },
   // the marketplace clone's rescue is Claude Code's, met here only with both installed (#1321's
   // "checked and fine": it never fires on an OpenCode clone)
@@ -244,8 +245,8 @@ export const HOST_LINES: readonly Rule[] = [
     to: "- **A GitHub MCP server is optional**, never needed for a pull request. If the user wants one,\n"
       + "  it goes in their OpenCode config's `mcp`, with a personal access token they create on GitHub\n"
       + '  and set in their own shell profile (never from `gh auth token` unless they ask for exactly\n'
-      + '  that); `opencode mcp list` checks it connects. Its tools that write to upstream are sends like\n'
-      + "  gh's: each on the user's yes; a pull request still goes through `workbench_patch_send`.",
+      + '  that); `opencode mcp list` checks it connects. Its tools that write to upstream ask in the\n'
+      + '  same form; a pull request still goes through `workbench_patch_send`.',
     files: ['reference/patching.md'] },
 
   // what recurs
