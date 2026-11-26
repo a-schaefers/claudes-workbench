@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test'
 import { capOf, COMMAND, diffLines, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
   WorkbenchPane, type Files, type PaneTask } from '../pane.ts'
-import { footer, mine, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target, type Here } from '../pane-view.ts'
+import { CHANGE, driverRow, footer, mine, MODELS, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target,
+  type Here } from '../pane-view.ts'
 import { ROWS } from '../../mod/hooks/apprentice.ts'
 import { kernel } from '../../mod/hooks/core.ts'
 import { linkDown } from '../../mod/hooks/modeline.ts'
@@ -122,7 +123,7 @@ test('wb\'s answers read as the panel draws them: diff lines styled, the cap, th
   expect(parseLines('{"s":"a","t":"1"}\n{"s":"b","t":"2"}\n', 1)).toEqual([{ s: 'b', t: '2' }])
 })
 
-test('/workbench switches the session to the Workbench agent, applies the pin, then sends what was typed after it', async () => {
+test('/workbench applies the pin, switches the session to the Workbench agent, then sends what was typed after it', async () => {
   const did: unknown[] = []
   const host = {
     options: {},
@@ -135,14 +136,15 @@ test('/workbench switches the session to the Workbench agent, applies the pin, t
   }
   const run: Run = async args => ({ code: 0, stdout: args[0] === 'route' ? '{"driver":"deepinfra/m"}' : '', stderr: '' })
   await workbench(host, { sessionID: 'ses_1', prompt: { text: '  add a flag  ' }, delivery: 'steer' }, run)
+  // the pin first: the agent's selection is when the TUI says the driver's notes, the pinned model's
   expect(did).toEqual([
-    ['agent', { sessionID: 'ses_1', agent: 'workbench' }],
     ['model', { sessionID: 'ses_1', model: { providerID: 'deepinfra', id: 'm' } }],
+    ['agent', { sessionID: 'ses_1', agent: 'workbench' }],
     ['prompt', { sessionID: 'ses_1', text: '  add a flag  ', delivery: 'steer' }],
   ])
   did.length = 0
   await workbench(host, { sessionID: 'ses_1', prompt: { text: '' }, delivery: 'steer' }, run)
-  expect(did.map(d => (d as unknown[])[0])).toEqual(['agent', 'model'])
+  expect(did.map(d => (d as unknown[])[0])).toEqual(['model', 'agent'])
   // what the TUI attached goes with the request, even with nothing typed (the review of #1312)
   did.length = 0
   const files = [{ type: 'file', url: 'file:///p/a.ts' }]
@@ -154,7 +156,7 @@ test('/workbench switches the session to the Workbench agent, applies the pin, t
   let said = ''
   await workbench(refused, { sessionID: 'ses_1', prompt: { text: 'x' }, delivery: 'steer' }, run).catch(e => { said = String(e) })
   expect(said.includes("the Workbench agent isn't there")).toBe(true)
-  expect(did).toEqual([])
+  expect(did.map(d => (d as unknown[])[0])).toEqual(['model'])   // the pin, the user's own standing choice; nothing sent
 })
 
 test('the server part registers the panel\'s RPC and /workbench, and the RPC alone where commands aren\'t', async () => {
@@ -290,4 +292,25 @@ test('no pane module hands OpenCode a task\'s worktree: no location, move or vcs
     expect([/\.move\(/, /\bvcs\b/, /location:\s*\{/, /worktree/].filter(re => re.test(src.replace(/^\s*\/\/.*$/gm, '')))
       .map(String)).toEqual([])
   }
+})
+
+test('the panel\'s driver row says the session\'s model, its side and another pin, and offers OpenCode\'s own /models', () => {
+  const text = (r: ReturnType<typeof driverRow>) => (r ?? []).map(x => x.text).join('')
+  const api = { model: 'deepinfra/m', label: 'deepinfra/m#high', kind: 'api', pin: 'session' }
+  expect(text(driverRow(api, 80))).toBe('driver: deepinfra/m#high (API) · change')
+  expect(driverRow(api, 80)!.at(-1)).toEqual({ text: CHANGE, fg: 'interactive', underline: true })
+  expect(MODELS).toBe('model.list')   // the TUI's /models (tui/src/app.tsx), which the row's press dispatches
+  expect(text(driverRow({ ...api, kind: 'gpu', pin: 'ollama/q' }, 80))).toBe('driver: deepinfra/m#high (GPU) · pin ollama/q · change')
+  expect(text(driverRow({ ...api, pin: 'deepinfra/m#high' }, 80))).toBe('driver: deepinfra/m#high (API) · change')
+  // a model wb finds neither side of is still named; none known yet is said short
+  expect(text(driverRow({ ...api, kind: 'unknown' }, 80))).toBe('driver: deepinfra/m#high · change')
+  expect(text(driverRow({ label: 'not known yet (the plugin records it at the session\'s next request)', kind: 'unknown' }, 80)))
+    .toBe('driver: not known yet · change')
+  // narrow: the pin goes first, then the model is cut, and "change" stays
+  expect(text(driverRow({ ...api, pin: 'ollama/q' }, 44))).toBe('driver: deepinfra/m#high (API) · change')
+  const narrow = text(driverRow(api, 24))
+  expect([narrow.length, narrow.endsWith(' · change'), narrow.includes('…')]).toEqual([24, true, true])
+  // wb not answered, or failed: no row
+  expect(driverRow(null, 80)).toBe(null)
+  expect(driverRow({ label: '', error: 'wb not found' }, 80)).toBe(null)
 })
