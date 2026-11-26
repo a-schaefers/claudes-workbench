@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { readFileSync, readdirSync } from 'node:fs'
-import { HOST_LINES, SKILL_ID, hostLineMatches, line, partId, readSkill, render, skillFor, type Where } from '../skill.ts'
+import { HOST_LINES, PANE_OR_TERMINAL, SKILL_ID, hostLineMatches, line, partId, readSkill, render, skillFor, type Where } from '../skill.ts'
 import { AGENT, NAME, OURS, defineAgent, defineSkills, intro, keepOurs, registerAgent, skillRoot, where, withPrompt } from '../agent.ts'
 import { OWN } from '../wb.ts'
 import { SPECS } from '../tools.ts'
@@ -57,6 +57,20 @@ test("OpenCode's copy has no run_in_background, no $CLAUDE_CODE_SESSION_ID, and 
   expect(offenders(/\b(the|The|workbench) mod\b(?!\/|'s tests)/)).toEqual([])
   // a web chat reply is the plugin's tool (chat.ts), never the shell's
   expect(offenders(/wb chat reply/)).toEqual([])
+})
+
+test("the patch procedure states OpenCode's facts, never Claude Code's: no `!` prompt, the clone to make, the form only for the send (#1321, findings 7 and 17)", () => {
+  // OpenCode's `!` has no terminal for sudo or gh's login to ask on; its terminal pane does
+  expect(offenders(/`! |`!` prefix/)).toEqual([])
+  for (const id of ['prompt', 'workbench-patching', 'workbench-models']) expect(OPENCODE[id]?.includes(PANE_OR_TERMINAL)).toBe(true)
+  const patching = OPENCODE['workbench-patching'] ?? ''
+  // Claude Code's install steps, plugin and dialog: none, but where both are on one machine
+  expect(patching.match(/claude plugin install|restart of Claude|\bdialogs?\b|Once, on a marketplace install|The plugin holds every send/g)).toEqual(null)
+  // OpenCode's install can't keep a patch: wb patch says what makes a clone; the form asks for the send alone
+  const says = ["`/reload-plugins` in Claude Code", "On a machine with Claude Code's install too, it found local changes",
+    '`wb patch` refuses there and prints the two commands that make one', 'The form is only for that send',
+    'the form waits in the terminal for their answer', '**A GitHub MCP server is optional**']
+  expect(says.filter((s) => !patching.includes(s))).toEqual([])
 })
 
 test('the prompt is SKILL.md\'s body, without its frontmatter, and the workbench skill is the same text', () => {
