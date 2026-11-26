@@ -11,6 +11,7 @@ import { Workbench, type Status } from './rpc.ts'
 import { consentTui } from './consent-tui.ts'
 import { noticesTui } from './notices-tui.ts'
 import { childrenTui } from './children-tui.ts'
+import { chatTui, type ChatTui } from './chat.ts'
 
 // where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
 // install of the whole repository does (#1311's review, 2026-11-25)
@@ -23,7 +24,9 @@ const plugin: TuiPlugin = {
     const stopConsent = consentTui(ctx) // the consent gates' forms (#1314)
     const stopNotices = noticesTui(ctx) // the notices' toasts and desktop notifications (#1313)
     const stopChildren = childrenTui(ctx) // the agents' sessions as the lead's child sessions (#1331)
-    const stopAll = () => { stopConsent?.(); stopNotices(); stopChildren() }
+    // the session on screen, said to the server part: only its prompts move the web chat (#1492)
+    const stopShown = chatTui(ctx as unknown as ChatTui)
+    const stopAll = () => { stopConsent?.(); stopNotices(); stopChildren(); stopShown() }
     let st: Status
     try {
       st = (await ctx.client.rpc(Workbench).status({})) as Status

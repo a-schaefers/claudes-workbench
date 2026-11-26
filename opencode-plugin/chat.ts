@@ -7,7 +7,7 @@
 // messages.jsonl, as the Claude Code mod reads them. The same outcomes as the mod's (ARCHITECTURE.md,
 // *The web chat listener*), OpenCode-native, with #1340's simplifications: no relay of any dialog
 // (the page's one line while one waits in the terminal), no handoff between sessions (the listener
-// is the session the user last typed in, on the server that holds the claim), no grace (a receipt
+// is the session the user last typed in in a TUI, on the server that holds the claim), no grace (a receipt
 // once OpenCode says the message was delivered: `session.inbox.delivered`), and the turn's own
 // answer posted when the turn replied to nobody (`wb chat reply --turn-answer --if-owed`).
 //
@@ -17,7 +17,7 @@
 import { execFile } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ServerContext } from './host.d.ts'
+import type { Registration, ServerContext } from './host.d.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv, wbHome } from './wb.ts'
 import type { ChatMsg, ChatOpen, ListenerClaim } from '../mod/types/wire.d.ts'
 import { sameWait, waitingFact, type Waiting } from '../mod/hooks/waiting.ts'
@@ -33,6 +33,16 @@ export const BACK_AFTER_MS = 2_000
 export const ANSWER_ARGV = 16_000     // the most of a turn's answer put on wb's command line (the mod's)
 export const RUN_MS = 15_000          // a wb call's limit
 export const SOURCE = 'workbench.chat' // the metadata our own prompts carry: never the user typing
+// A prompt with no metadata comes from a TUI or from `opencode run` alike (a script's, a hook's),
+// which since 2.4 goes through the same background service and took the chat into its one-shot
+// session (#1492, 2026-11-26). Only a session a TUI shows is the user's: the TUI part says which
+// it shows (`shown`, the `workbench-chat` RPC), looking at its route every SHOWN_POLL_MS and again
+// every SHOWN_AGAIN_MS (a restarted service learns it again); a prompt waits SHOWN_WAIT_MS for it,
+// as the TUI moves to a new session only after sending its first prompt.
+export const SHOWN_POLL_MS = 500
+export const SHOWN_AGAIN_MS = 30_000
+export const SHOWN_WAIT_MS = 30_000
+export const SHOWN_KEEP = 200
 export const WEB = '[web chat]'
 // The tool's id as the model sees it: OpenCode names a namespaced tool `<namespace>_<name>`
 // (core/src/tool/runtime.ts `effectiveName`), so every text names REPLY_ID, never the bare name
@@ -188,6 +198,9 @@ export class ChatLane {
   sessions: ChatSessions | undefined
   checkedAt = -Infinity
   activate: (() => void) | undefined
+  readonly shownAt = new Map<string, number>()      // sessions a TUI has shown (#1492)
+  readonly waiters = new Map<string, (() => void)[]>()
+  shownWaitMs = SHOWN_WAIT_MS
 
   constructor(readonly deps: LaneDeps) {}
 
@@ -255,13 +268,42 @@ export class ChatLane {
     return info?.location?.directory || undefined
   }
 
-  // A prompt the user typed (the `prompt` hook): in a root session, it is the one the chat
-  // listens for now, the user is back at the terminal, and a reply owed to the user is theirs
-  // there (an agent's stays owed: #1273)
+  // A TUI shows ``sid`` (the `shown` RPC): a prompt waiting on it goes on (#1492)
+  shown(sid: string) {
+    if (!sid) return
+    this.shownAt.delete(sid)
+    this.shownAt.set(sid, this.deps.now())
+    if (this.shownAt.size > SHOWN_KEEP) this.shownAt.delete(this.shownAt.keys().next().value!)
+    const wait = this.waiters.get(sid)
+    this.waiters.delete(sid)
+    for (const go of wait ?? []) go()
+  }
+
+  // Whether a TUI shows ``sid``, now or within ``ms``: false for a session none shows (a script's
+  // `opencode run`, #1492)
+  whenShown(sid: string, ms = this.shownWaitMs): Promise<boolean> {
+    if (this.shownAt.has(sid)) return Promise.resolve(true)
+    return new Promise(done => {
+      const go = () => { clearTimeout(timer); done(true) }
+      const timer = setTimeout(() => {
+        const list = this.waiters.get(sid) ?? []
+        list.splice(list.indexOf(go), 1)
+        if (!list.length) this.waiters.delete(sid)
+        done(false)
+      }, ms) as unknown as { unref?: () => void }
+      timer.unref?.()
+      this.waiters.set(sid, [...(this.waiters.get(sid) ?? []), go])
+    })
+  }
+
+  // A prompt the user typed (the `prompt` hook) in a root session a TUI shows: it is the one the
+  // chat listens for now, the user is back at the terminal, and a reply owed to the user is theirs
+  // there (an agent's stays owed: #1273). One no TUI shows is a script's (#1492): nothing moves.
   async typed(e: { sessionID: string; prompt?: { text?: string }; metadata?: Row }) {
     if (!typedByUser(e)) return
     const root = await this.root(e.sessionID)
     if (!root || root !== e.sessionID) return
+    if (!(await this.whenShown(root))) return
     for (const [id, o] of [...this.owed]) if (o.sender === 'user') this.owed.delete(id)
     await this.check()
     if (this.on) await this.deps.run(['chat', 'back'], { session: root })
@@ -542,6 +584,52 @@ export function replyTool(lane: ChatLane, run: Run) {
   }
 }
 
+// The RPC the TUI part says the session it shows on (#1492): data only
+export const WorkbenchChat = {
+  id: 'workbench-chat',
+  methods: {
+    shown: {
+      input: { type: 'object', properties: { sessionID: { type: 'string' } }, required: ['sessionID'], additionalProperties: false },
+      output: { type: 'object' },
+    },
+  },
+  events: {},
+} as const
+
+// Whether a TUI shows ``sid`` on this server, now or within ``ms`` (notices.ts and upkeep.ts ask
+// it of a prompt with no metadata, #1492); true with no chat lane here (nothing to tell it by)
+export function shownHere(sid: string): boolean {
+  const s = (globalThis as Record<string, unknown>)[KEY] as Shared | undefined
+  return !s || s.lane.shownAt.has(sid)
+}
+export function whenShownHere(sid: string, ms?: number): Promise<boolean> {
+  const s = (globalThis as Record<string, unknown>)[KEY] as Shared | undefined
+  return s ? s.lane.whenShown(sid, ms) : Promise.resolve(true)
+}
+
+// The TUI part's half (tui.ts): the session its route shows, said to the server part when it
+// changes and again every SHOWN_AGAIN_MS. Returns the cleanup.
+export interface ChatTui {
+  readonly ui: { readonly router?: { current(): { readonly type: string; readonly sessionID?: string } } }
+  readonly client: { rpc(d: typeof WorkbenchChat): { readonly shown?: (input: { sessionID: string }) => Promise<unknown> } }
+}
+export function chatTui(ctx: ChatTui, now: () => number = Date.now): () => void {
+  let said = '', at = -Infinity
+  const look = () => {
+    try {
+      const r = ctx.ui.router?.current()
+      const sid = r?.type === 'session' && typeof r.sessionID === 'string' ? r.sessionID : ''
+      if (!sid || (sid === said && now() - at < SHOWN_AGAIN_MS)) return
+      said = sid
+      at = now()
+      void ctx.client.rpc(WorkbenchChat).shown?.({ sessionID: sid })?.catch(() => { said = '' })
+    } catch { /* no router or RPC in this TUI: its prompts never move the chat */ }
+  }
+  look()
+  const timer = setInterval(look, SHOWN_POLL_MS)
+  return () => clearInterval(timer)
+}
+
 // One lane per server process (globalThis: a module may be loaded more than once, and OpenCode may
 // set the plugin up once per location): each instance adds its session API and its event feed
 type Shared = { lane: ChatLane; users: number; apis: ChatSessions[]; feeds: (() => void)[]; timer?: unknown }
@@ -592,6 +680,16 @@ export async function chat(ctx: ServerContext): Promise<(() => Promise<void>) | 
   })
   await sessions.hook('prompt', e => { void l.typed(e).catch(() => {}) })
   await c.tool.hook('execute.before', e => l.beforeTool(e))
+  let shownReg: Registration | undefined
+  try {
+    shownReg = await (ctx as ServerContext).rpc.register(WorkbenchChat, {
+      shown: async input => {
+        const sid = (input as { sessionID?: unknown } | undefined)?.sessionID
+        if (typeof sid === 'string') l.shown(sid)
+        return {}
+      },
+    })
+  } catch { /* no RPC here: no TUI can say what it shows, and no prompt moves the chat */ }
   const abort = new AbortController()
   const events = c.event
   let fed = false
@@ -611,6 +709,7 @@ export async function chat(ctx: ServerContext): Promise<(() => Promise<void>) | 
   if (l.listening) feed()
   return async () => {
     abort.abort()
+    await shownReg?.dispose().catch(() => {})
     s.apis.splice(s.apis.indexOf(sessions), 1)
     s.feeds.splice(s.feeds.indexOf(feed), 1)
     l.sessions = s.apis[0]

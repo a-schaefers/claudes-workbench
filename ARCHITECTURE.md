@@ -8714,12 +8714,13 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     `GET_WB`, `ocplugin.GET_WB` word for word); nothing when all is well (a healthy install is
     seen in the TUI's `/plugins`, or `opencode plugin list`), nothing when the server part
     doesn't answer. A no-op under `WB_TASK`. First it starts the consent forms' part (`consentTui(ctx)`),
-    subscribes to the notices' toasts (`noticesTui`, *Notices on OpenCode*) and starts the child
-    sessions' import (`childrenTui`, below); then it imports `pane.tsx` (in setup, never at load:
+    subscribes to the notices' toasts (`noticesTui`, *Notices on OpenCode*), starts the child
+    sessions' import (`childrenTui`, below) and says the session on screen to the chat (`chatTui`,
+    chat.ts: only a shown session's prompts move the web chat, #1492); then it imports `pane.tsx` (in setup, never at load:
     OpenTUI and Solid are only the TUI's) and returns `mountPane`'s removal (the panel through
-    `mountSplash`, the sidebar section, the footer item, the palette entry) with the consent forms', the notices'
-    and the import's as its cleanup; a TUI that can't load the views sets up without them (those two cleanups
-    alone), said nowhere.
+    `mountSplash`, the sidebar section, the footer item, the palette entry) with the consent forms', the notices',
+    the import's and `chatTui`'s as its cleanup; a TUI that can't load the views sets up without them (those
+    cleanups alone), said nowhere.
   - `spans.ts` (#1333, slice 4c of #1296; pure, no OpenTUI or Solid, so Bun tests it bare): the
     cells the mod's `splash.ts` and `apprentice.ts` compute for Claude Code's Raster as rows of
     spans, one span a run of one fg and bg (`spans(cells, cols)`, `cellsOf` back, `words` for a
@@ -8975,9 +8976,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       once, then puts each block whose text differs and removes each of `OURS` it shouldn't have
       (another plugin's keys are never touched), one refresh at a time per session. Unlike the
       mod's once-per-conversation `web-chat` block, the entry follows away: a prompt the user typed
-      (chat.ts's `typedByUser`) is them back, so that prompt's refresh skips the away check
-      (`refresh(…, back)`: chat.ts's `wb chat back` for it runs beside this part's `prompt` hook, not
-      before) and the entry goes before that turn ("… no longer applies").
+      (chat.ts's `typedByUser`) in a session a TUI shows (chat.ts's `shownHere`, asked at the away
+      check, never of a script's `opencode run`: #1492) is them back, so that prompt's refresh skips
+      the away check (`refresh(…, back)`: chat.ts's `wb chat back` for it runs beside this part's
+      `prompt` hook, not before) and the entry goes before that turn ("… no longer applies").
       A server without the entries API gets the same blocks appended to the session's own
       requests' system prompt by the `context` hook, as `<context key="…">` text (the fallback).
     - **What a compaction keeps**: the `compaction` hook adds `KEEP_ON_COMPACT` (the mod's words,
@@ -9389,7 +9391,7 @@ is written before the fetch, so a killed check lost the week's (the 2026-11-26 r
   (`cli.scout_offer_due`, the mod's `scoutIfDue` rule moved into wb; scout.json `offered_at`).
 - `wb settings offers --if-due --json` once settings-changes.jsonl grew, as the session the web chat
   listens to here (chat/listener.json's, this server's pid), else the root session the user last
-  typed in here (the `prompt` hook, unmarked), never while another listener's live claim stands
+  typed in here (the `prompt` hook, unmarked, in a session a TUI shows: `whenShownHere`, #1492), never while another listener's live claim stands
   (Claude Code's mod or another server says them) and not before a session is there (the rows wait):
   each offer toasted and, wakes on, a queued synthetic turn (`[workbench] The user changed …\n<help>\n
   Offer to help with it, and install or change nothing without their yes.`, its id `noticeId(
@@ -9415,8 +9417,17 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   listens (`activate`), so wb's own `--standalone` servers, which remove the plugin anyway
   (`models.plugin_off`), never start or claim the chat. The last cleanup drops the claim.
 - **Who listens.** A prompt the user typed (the `prompt` hook: a root session, unmarked metadata,
-  not `[web chat] ` or `[agent `; automations, `/goal` and our own deliveries carry metadata) makes
-  that session the listener: `wb chat url --json` (on or off, every `CHECK_MS` 60 s, which brings
+  not `[web chat] ` or `[agent `; automations, `/goal` and our own deliveries carry metadata) in a
+  session a TUI shows makes that session the listener. A script's `opencode run` is unmarked too and,
+  since 2.4, goes through the same background service: it took the listener and ran `wb chat back`,
+  and the phone's messages went into its one-shot session (#1492). So the TUI part says the session
+  its route shows (`chatTui`, tui.ts: `ui.router.current()` looked at every `SHOWN_POLL_MS` 0.5 s,
+  said when it changes and again every `SHOWN_AGAIN_MS` 30 s, so a restarted service learns it) over
+  the `workbench-chat` RPC (`WorkbenchChat`, `shown {sessionID}` → `ChatLane.shown`), and a prompt
+  waits up to `SHOWN_WAIT_MS` 30 s for its session to be shown (`whenShown`: the TUI moves to a new
+  session only after its first prompt); one never shown moves nothing. notices.ts's offer target
+  (`prompted`) and upkeep.ts's `back` ask the same (`whenShownHere`, `shownHere`; true with no chat
+  lane). The listener: `wb chat url --json` (on or off, every `CHECK_MS` 60 s, which brings
   the server up as the mod's link does), `wb chat back`, and `wb chat listener <session> --pid
   <server pid>` (`chat.hold`: refused while another live claim stands, a Claude Code session's or
   another server's; the same server moves it between its sessions). `busy` follows the session's
@@ -11605,7 +11616,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **The web chat on OpenCode** (#1319): an OpenCode listener.json (`tool: "opencode"`, `chat.hold`) → `chat.listener`
   (`_server_listens`, `store.beat_of`), the mod's `claimStands` (its pid and `start`, which it judges as any claim's), `chat.ts`'s
   `poll` (`claim()`); `chat.ts`'s `chatPrompt`, `attachedLines`, `agentOf` ↔ the mod's; `inboxId` ↔ OpenCode's
-  `schema/src/identifier.ts`; `SOURCE` ↔ `typedByUser`; `chat.owed` ↔ the mod's `owedAtTurnEnd` rules (`re`, own rows, `auto`, an
+  `schema/src/identifier.ts`; `SOURCE` ↔ `typedByUser`; `chatTui` (tui.ts) ↔ `WorkbenchChat`'s `shown` ↔ `ChatLane.whenShown`; `chat.owed` ↔ the mod's `owedAtTurnEnd` rules (`re`, own rows, `auto`, an
   agent's `to`); a row's `opencode_session` (`cli._chat_writer`) → `chat.owed`, `chat.caller_listens`; `wb chat` output the plugin
   parses (`url --json`'s `state`, `notice`'s id, `away`'s `away`, `claim`'s ` expired: `) → `chat.ts`.
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice

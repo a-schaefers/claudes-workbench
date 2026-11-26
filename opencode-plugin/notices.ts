@@ -24,6 +24,7 @@ import { findWb, wbEnv, wbHome, type Options } from './wb.ts'
 import { ACTIVE, NEEDS, NO_ANSWER, WAKE_OPENING, noticePlan, noticesDue, owns, rewakePlan, runNoticePlan, runNoticesDue } from '../mod/hooks/core.ts'
 import type { NoticeRow, StatusFile, TaskFile } from '../mod/types/wire.d.ts'
 import { Jobs } from './jobs.ts'
+import { whenShownHere } from './chat.ts'
 
 export const SCAN_MS = 15_000          // the timer's look: held notices, the rewake net, the jobs
 export const EARS_RETRY_MS = 2_000     // wb events respawned this long after it ends, doubling to a minute
@@ -522,11 +523,12 @@ export class NoticeLane {
     this.turnEndedAt = this.deps.now()
     void this.scan().catch(() => {})
   }
-  // a prompt the user typed (unmarked: automations and our own deliveries carry metadata)
+  // a prompt the user typed (unmarked: automations and our own deliveries carry metadata) in a
+  // session a TUI shows: a script's `opencode run` is unmarked too, never the target (#1492)
   async prompted(e: { sessionID: string; metadata?: Row }) {
     if (e.metadata && Object.keys(e.metadata).length) return
     const root = await this.root(e.sessionID)
-    if (root && root === e.sessionID) this.typed = root
+    if (root && root === e.sessionID && await whenShownHere(root)) this.typed = root
   }
 }
 

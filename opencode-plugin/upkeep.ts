@@ -33,7 +33,7 @@ import { join } from 'node:path'
 import type * as Core from '../mod/hooks/core.ts'
 import type { StatusFile, TaskFile } from '../mod/types/wire.d.ts'
 import { AGENT } from './agent.ts'
-import { REPLY_ID, typedByUser } from './chat.ts'
+import { REPLY_ID, shownHere, typedByUser } from './chat.ts'
 import { sessionRunner, whereOf, type SessionRun } from './commands.ts'
 import { wbEnv, wbHome, type Options } from './wb.ts'
 
@@ -313,15 +313,16 @@ export class Upkeep {
   // What the session should be told now (the mod's `wanted`), and its blocks: one at a time per
   // session, so a prompt's and an idle look's never put and remove across each other. `back`: the
   // prompt it is for was typed by the user, who is then not away (chat.ts's `wb chat back` for it
-  // runs beside this, not before)
-  refresh(sessionID: string, back = false): Promise<void> {
+  // runs beside this, not before); asked only when it matters, as late as it can be, as the TUI
+  // says it shows a new session only after its first prompt (#1492)
+  refresh(sessionID: string, back: boolean | (() => boolean) = false): Promise<void> {
     const s = this.sess(sessionID)
     const next = s.chain.then(() => this.refreshNow(sessionID, s, back))
     s.chain = next.catch(() => {})
     return next
   }
 
-  private async refreshNow(sessionID: string, s: Sess, back: boolean): Promise<void> {
+  private async refreshNow(sessionID: string, s: Sess, back: boolean | (() => boolean)): Promise<void> {
     const delegating = s.agent === AGENT
     const tasks = openTasks(this.k, this.io, this.home, sessionID)
     const any = delegating || tasks.length > 0
@@ -345,7 +346,7 @@ export class Upkeep {
         if (r.ok && r.out && !r.out.startsWith('no open tasks')) s.tasksText = r.out
       }
     }
-    const away = any && !back && await this.away(sessionID)
+    const away = any && !(typeof back === 'function' ? back() : back) && await this.away(sessionID)
     s.blocks = blocksOf(this.k, want, delegating, routes, s.tasksText, away)
     await this.sync(sessionID, s)
   }
@@ -494,7 +495,10 @@ export async function upkeep(host: UpkeepHost, k?: Kernel, io?: Io): Promise<(()
     // a prompt: the session's blocks before its turn
     await host.session.hook('prompt', async (e: { sessionID: string; prompt?: { text?: string }; metadata?: Record<string, unknown> }) => {
       if (!e?.sessionID) return
-      await within(u.learn(e.sessionID).then(() => u.refresh(e.sessionID, typedByUser(e))), REFRESH_WAIT_MS)
+      // typed in a session a TUI shows: a script's `opencode run` is unmarked too, and never the
+      // user back at the terminal (#1492)
+      const typed = typedByUser(e)
+      await within(u.learn(e.sessionID).then(() => u.refresh(e.sessionID, () => typed && shownHere(e.sessionID))), REFRESH_WAIT_MS)
     }),
     await host.session.hook('context', (input) => u.context(input)),
     await host.session.hook('compaction', (input) => u.compaction(input)),
