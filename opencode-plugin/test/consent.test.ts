@@ -9,8 +9,8 @@ import {
 } from '../consent.ts'
 import { consentTui } from '../consent-tui.ts'
 import {
-  APPROVAL_OWN, ONLY, ROUTES_EDIT, SEND_VIA_TOOL, VIA_TOOL, localOnlyPatchRefusal, localOnlyRefusal, places,
-  shellRefusal, type Places,
+  APPROVAL_OWN, ONLY, ROUTES_EDIT, SEND_VIA_TOOL, VIA_TOOL, lineCommands, localOnlyPatchRefusal, localOnlyRefusal,
+  places, shellRefusal, type Places,
 } from '../gates.ts'
 import { simpleWords } from '../words.ts'
 
@@ -293,6 +293,43 @@ test('a shell call through the permission hook: OpenCode\'s scan, the dry run as
   }
 })
 
+// OpenCode's scan leaves a plain cd, pushd or popd out of the resources the permission hook gets
+// (core/src/shell/parse.ts: a complete directory command is `continue`d past), so the walk takes
+// the call's own line from execute.before (#1314, the kernel-gates lane notes, 2026-11-26)
+test('a cd OpenCode\'s scan leaves out is put back from the call\'s own line, and its workdir followed', async () => {
+  expect(lineCommands('cd /s && echo {} > route-ok.json', ['echo {} > route-ok.json'])).toEqual(['cd /s', 'echo {} > route-ok.json'])
+  expect(lineCommands('X=1; pushd /a; ls | (cd b && wc)', ['ls', 'wc'])).toEqual(['pushd /a', 'ls', 'cd b', 'wc'])
+  expect(lineCommands('cd ls && ls', ['ls'])).toEqual(['cd ls', 'ls'])   // where a command starts, not in a word
+  expect(lineCommands('if cd /a; then wb route x; fi', ['wb route x'])).toEqual(['cd /a', 'wb route x'])
+  expect(lineCommands('ls', ['wc'])).toEqual(['wc'])                     // not in the line: the scan's list
+  const home = scratch()
+  try {
+    const g = new Gates(gateDeps(home, 'yes'))
+    const shell = async (id: string, command: string, resources: string[], workdir?: string, source = id) => {
+      await g.before({ tool: 'shell', sessionID: 'ses_c', id, input: { command, ...(workdir ? { workdir } : {}) } })
+      const e = { ...ev('shell', resources), source: { type: 'tool', id: source } }
+      await g.evaluate(e)
+      return e.effect === 'deny' ? e.message : ''
+    }
+    expect(await shell('c1', `cd ${home} && cp x route-ok.json`, ['cp x route-ok.json'])).toBe(APPROVAL_OWN('route-ok.json'))
+    expect(await shell('c2', `pushd ${home}; echo {} > send-ok.ses_q.json`, ['echo {} > send-ok.ses_q.json']))
+      .toBe(APPROVAL_OWN('send-ok.ses_q.json'))
+    expect(await shell('c3', 'cp x route-ok.json', ['cp x route-ok.json'], home)).toBe(APPROVAL_OWN('route-ok.json'))
+    expect(await shell('c4', 'cp x route-ok.json', ['cp x route-ok.json'], '/repo')).toBe('')
+    expect(await shell('c5', `cd ${home} && popd && cp x route-ok.json`, ['cp x route-ok.json'])).toBe('')   // unknown after a popd
+    // a Code Mode program's call: its permission names the program's id, the line found by its text
+    expect(await shell('c6', `cd ${home} && tee route-ok.json`, ['tee route-ok.json'], undefined, 'prog_1'))
+      .toBe(APPROVAL_OWN('route-ok.json'))
+    // no line kept (another session's call): the resources alone, run from the session's directory
+    await g.before({ tool: 'shell', sessionID: 'ses_other', id: 'c7', input: { command: `cd ${home} && cp y route-ok.json` } })
+    const other = { ...ev('shell', ['cp y route-ok.json']), source: { type: 'tool', id: 'c7' } }
+    await g.evaluate(other)
+    expect(other.effect).toBe('ask')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('an edit of commands.json that lifts a repo\'s local_only is refused before it runs', async () => {
   const home = scratch()
   try {
@@ -310,6 +347,11 @@ test('an edit of commands.json that lifts a repo\'s local_only is refused before
     await g.before({ tool: 'patch', sessionID: 's', input: { patchText: `*** Begin Patch\n*** Update File: ${conf}\n@@\n-    "local_only": true\n+    "local_only": false\n*** End Patch` } })
       .catch(e => { said = e.message })
     has(said, 'not changed')
+    said = ''
+    // an OpenCode whose edit names the file `filePath` (1.x's name) meets the same gate
+    await g.before({ tool: 'edit', sessionID: 's', input: { filePath: conf, oldString: '"local_only": true', newString: '"local_only": 0' } })
+      .catch(e => { said = e.message })
+    has(said, 'drops "local_only": true for /r')
     await g.before({ tool: 'edit', sessionID: 's', input: { path: conf, oldString: '"/r": {', newString: '"/r": {"x": 1,' } })   // kept: no throw
     expect(localOnlyRefusal('{"repos": {}}', '{"repos": {"/x": {"local_only": true}}}')).toBe('')
     expect(localOnlyPatchRefusal('', '"local_only": true')).toBe('')

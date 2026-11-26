@@ -8247,10 +8247,18 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       `shell`: OpenCode's resources are each simple command's raw text; `simpleWords`
       (`words.ts`: quotes undone, redirects' files apart, a heredoc's body never words) feeds the
       kernel's `gateOf` (commands, not mentions: #1364's rule), and `shellRefusal` denies a write
-      onto routes.json or an approval file (`ROUTES_EDIT`, `APPROVAL_OWN`; `cd` followed when its
-      word is literal), `wb patch send` (`SEND_VIA_TOOL`), and a live `wb route`, `wb start
+      onto routes.json or an approval file (`ROUTES_EDIT`, `APPROVAL_OWN`), `wb patch send` (`SEND_VIA_TOOL`), and a live `wb route`, `wb start
       --model` or `wb settings set` whose own dry run (as the session) says gated
-      (`VIA_TOOL(<tool>)`). A line OpenCode couldn't split (`metadata.reason`: a heredoc,
+      (`VIA_TOOL(<tool>)`). The commands run from the call's `workdir` (the shell tool's input,
+      which OpenCode tells the model to set over a cd), else the session's directory, and a `cd`
+      or `pushd` moves the next ones' (its word literal; a bare one to `$HOME`; after `cd -`, a
+      variable or a `popd` a relative path is unknown). OpenCode's scan leaves a plain `cd`,
+      `pushd` or `popd` out of the resources, so `execute.before` keeps each `shell` call's line
+      and workdir by call id (the last `CALLS_KEPT` 64; a Code Mode program's call, whose
+      permission names the program, by the session's newest line holding every resource) and
+      `lineCommands` puts the dropped directory changes back between the resources they sat
+      between (each resource found where a command starts, never inside a cd's words; one not
+      found leaves the scan's list) (#1314's lane notes, 2026-11-26). A line OpenCode couldn't split (`metadata.reason`: a heredoc,
       `$(…)`) is left to wb, whose gate refuses it without an approval anyway. `edit` (every file
       tool's): routes.json (`$WB_ROUTES`) and `route-ok`/`send-ok` files, with or without a
       session (`gates.APPROVAL`), denied for every agent; then the coding gate (`codingGate`, on
@@ -8262,12 +8270,12 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       `opencode-plugin/` alone) the shell gate is wb's alone and a closed coding gate stays
       closed (`NO_KERNEL`).
     - **local_only** (`ctx.tool.hook("execute.before")`, which sees the text): an `edit`,
-      `write` or `patch` of commands.json (`$WB_COMMANDS`) that drops a repo's `"local_only":
+      `write` (the file in `path`, 2.3.2's and 2.4.1's, or 1.x's `filePath`) or `patch` of commands.json (`$WB_COMMANDS`) that drops a repo's `"local_only":
       true` is thrown before it runs (`localOnlyRefusal`, `localOnlyPatchRefusal`: the mod's
       rule); only the user lifts it.
     Nothing runs at import; setup returns a cleanup that ends the bus loop and disposes the RPC.
   - `gates.ts`, `words.ts`: the pure rules `consent.ts` applies (paths: `places`, `guarded`,
-    `taskOfPath`; `shellRefusal`; `codingMode`; the local_only rules; the patch text's files and
+    `taskOfPath`; `shellRefusal`, `lineCommands`; `codingMode`; the local_only rules; the patch text's files and
     lines) and the shell splitter, each tested alone.
   - `calls.ts` (#1331): the driver's own calls in a task's worktree as `claude-calls/` rows,
     the mod's rule (`callRows`, `tasksNamed`, `callFile`, `rowText`): `execute.before` writes a
