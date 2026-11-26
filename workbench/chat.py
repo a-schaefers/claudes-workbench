@@ -74,7 +74,7 @@ WAIT_DEFAULT = 300      # GET /api/wait's timeout when none is given, in seconds
 WAIT_MAX = 600          # and the most it may ask for
 MAX_WAITS = 16          # /api/wait calls held at once (each holds a thread, as a stream does)
 WAIT_LOOK = 1           # seconds between a held wait's looks at its client: one gone frees the slot
-STATIC = Path(__file__).parent / "chat_static"
+STATIC = Path(__file__).parent / "chat_static"  # served by name; its src/ (the TypeScript, #1323) never
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
          ".webmanifest": "application/manifest+json", ".png": "image/png"}
@@ -1254,8 +1254,11 @@ class Pusher:
 
 def build() -> str:
     """The page's files as served now: a page that loaded other ones reloads itself, so an update
-    never leaves a phone running the old page against the new server."""
-    files = [(f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in sorted(STATIC.iterdir())]
+    never leaves a phone running the old page against the new server. Only the files served:
+    src/ and its tsconfigs are the scripts' TypeScript, built into them (#1323), so an edit there
+    alone changes no page."""
+    files = [(f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in sorted(STATIC.iterdir())
+             if f.is_file() and f.suffix in TYPES]
     return format(zlib.crc32(repr(files).encode()), "x")  # not hash(): it differs per process
 
 
@@ -2147,7 +2150,7 @@ def message(msg_id: str) -> dict | None:
 # ---- the server ----
 
 # One shape for every error answer (#1138): {"error": the plain line, "code": a stable code}.
-# "error" stays the text, as before: the page (chat_static/app.js) and ask_claude.py show it as is,
+# "error" stays the text, as before: the page (chat_static/src/app.ts) and ask_claude.py show it as is,
 # so moving it would have broken both; a client branches on "code". A code by status unless the
 # answer names its own (ERRORS_SAID: a revoked token, an agent token from another machine, an
 # unknown host, what an agent may not do (outside AGENT_MAY), a malformed Idempotency-Key, an

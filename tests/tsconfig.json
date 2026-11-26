@@ -1,0 +1,27 @@
+{
+  "//": "The browser tests (#1323), run by Node as they are (its type stripping): only checked here, by python3 scripts/web.py tests <node_modules with @types/node and playwright> (chat.yml).",
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": [
+      "esnext",
+      "dom",
+      "dom.iterable"
+    ],
+    "types": [
+      "node"
+    ],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true
+  },
+  "files": [
+    "e2e_page.d.ts",
+    "e2e_chat.mts",
+    "e2e_stats.mts",
+    "e2e_settings.mts"
+  ]
+}

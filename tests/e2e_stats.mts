@@ -1,4 +1,4 @@
-// The Stats view's checks in a real browser (#1285). e2e_chat.mjs calls check(page, ctx) once per
+// The Stats view's checks in a real browser (#1285). e2e_chat.mts calls check(page, ctx) once per
 // device, on a page with the key and the server up; ctx holds { engine, device, desktop, base,
 // token, home, env, wb, until, check, sleep, goTo, context, browser } (goTo('stats') taps the tab
 // and waits for the view). The page is left on the view it was on.
@@ -16,10 +16,10 @@ import { join } from 'node:path'
 // The history's labels in statsLines' order: a row's place is checked against this
 // (#1322 took the streak, the work absorbed, the questions, the 30 days, the bests and the milestone)
 const ORDER = ['This week', 'All time', '*', 'Other models', 'By size', 'What stopped agents', 'What helps', 'Bench', 'Optimized']
-const rank = label => { const i = ORDER.indexOf(label.replace(/ \(.*$/, '')); return i < 0 ? ORDER.indexOf('*') : i }
+const rank = (label: string) => { const i = ORDER.indexOf(label.replace(/ \(.*$/, '')); return i < 0 ? ORDER.indexOf('*') : i }
 
 const GiB = 2 ** 30
-const tickOf = busy => ({ ts: 1, every: 2,
+const tickOf = (busy: number) => ({ ts: 1, every: 2,
   gpus: [{ index: 0, name: 'Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XTX] (rev c8)', used: 20 * GiB, total: 24 * GiB, busy, watts: 211 },
     { name: 'RAM', ram: true, used: 30 * GiB, total: 64 * GiB }],
   running: [{ task: 'fix-nav', model: 'ollama/fake-coder:30b', label: 'fake-coder 30B', phase: 'running', round: 2, round_s: 190,
@@ -29,17 +29,17 @@ const tickOf = busy => ({ ts: 1, every: 2,
     ...['a', 'b', 'c'].map(x => ({ model: `ollama/idle-${x}:7b`, label: `idle-${x} 7B`, state: 'idle' }))],
   queue: [{ task: 'fix-later', waited_s: 75 }] })
 
-export async function check(page, { desktop, home, wb, until, check, sleep, goTo }) {
+export async function check(page: any, { desktop, home, wb, until, check, sleep, goTo }: E2eCtx) {
   const was = await page.evaluate(() => WB.current())
   const results = join(home, 'state', 'results.jsonl')
   const real = await page.evaluate(async () => (await WB.api('/api/stats')).status === 200)
   await page.exposeFunction('e2eFeed', () => wb('stats', '--json')).catch(() => {})  // once a page
-  await page.evaluate(({ real, ticks }) => {
+  await page.evaluate(({ real, ticks }: { real: boolean; ticks: unknown[] }) => {
     const realFetch = window.e2eRealFetch || window.fetch
     window.e2eRealFetch = realFetch
-    const top = window.e2eTop = { opened: 0, closed: 0, mode: real ? 'real' : 'hold', ticks, n: 0 }
+    const top: Window['e2eTop'] = window.e2eTop = { opened: 0, closed: 0, mode: real ? 'real' : 'hold', ticks, n: 0 }
     const enc = new TextEncoder()
-    window.fetch = async (u, o = {}) => {
+    window.fetch = async (u: RequestInfo | URL, o: RequestInit = {}) => {
       const path = new URL(String(u), location.href).pathname
       if (path === '/api/stats' && top.statsDown) throw new TypeError('Failed to fetch')   // out of reach (#1412)
       if (path === '/api/stats' && !real) return new Response(JSON.stringify({ feed: JSON.parse(await window.e2eFeed()), routes: null, models: null }),
@@ -75,7 +75,7 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
   const top = () => page.evaluate(() => ({ opened: window.e2eTop.opened, closed: window.e2eTop.closed }))
   const again = async () => { await goTo('chat'); await goTo('stats') }   // shown afresh: fetched afresh
   const rows = () => page.evaluate(() => [...document.querySelectorAll('#stats-body .st-row')]
-    .map(r => ({ label: r.querySelector('dt').textContent, text: r.querySelector('dd').textContent })))
+    .map((r: Element) => ({ label: r.querySelector('dt')!.textContent, text: r.querySelector('dd')!.textContent })))
   const history = () => page.evaluate(() => (document.querySelector('#stats-body .st-hist-box') || {}).textContent || '')
   try {
     const now = Date.now() / 1000
@@ -87,17 +87,17 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
       await again()
       // waited for in full: shown again, the view draws its last read at once, and the savings
       // check's feed said "3 tasks" too, so the wait ended before this read came (#1418, 2026-11-25)
-      await until(async () => (await rows()).some(r => r.label === 'This week' && /^3 tasks · 2 landed \(67%\)/.test(r.text)))
+      await until(async () => (await rows()).some((r: any) => r.label === 'This week' && /^3 tasks · 2 landed \(67%\)/.test(r.text)))
         .catch(async () => { throw new Error(JSON.stringify(await rows()) + ' ' + await history()) })
       const got = await rows()
       const say = () => JSON.stringify(got)
-      const of = label => (got.find(r => r.label === label) || {}).text
+      const of = (label: string) => (got.find((r: any) => r.label === label) || {}).text
       if (!/^3 tasks · 2 landed \(67%\)/.test(of('This week'))) throw new Error(say())
       if (of('By size') !== 'complex 1 (100%) · trivial 2 (50%)') throw new Error(say())
       if (of('What stopped agents') !== 'the API day cap 1') throw new Error(say())
       for (let i = 1; i < got.length; i++) if (rank(got[i].label) < rank(got[i - 1].label)) throw new Error('out of order: ' + say())
       // #1322: no score, saving, streak or 30 days (the feed has none of them)
-      if (got.some(r => /^(Streak|Last 30 days|Bests|Milestone|Questions)$/.test(r.label)) || /score|estimate/.test(say())) throw new Error(say())
+      if (got.some((r: any) => /^(Streak|Last 30 days|Bests|Milestone|Questions)$/.test(r.label)) || /score|estimate/.test(say())) throw new Error(say())
     })
 
     await check('Stats shown while the computer is out of reach says so with Try again, and reads again once the network is back, with no tab switch (#1412)', async () => {
@@ -136,7 +136,7 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
         await goTo('stats')
         await until(async () => /3 tasks/.test(await history()))
         await sleep(1500)                                  // a claim: the stream is not asked for
-        const now = await page.evaluate(() => { const b = document.querySelector('#stats-body .st-now-box'); return b ? b.hidden : null })
+        const now = await page.evaluate(() => { const b = document.querySelector<HTMLElement>('#stats-body .st-now-box'); return b ? b.hidden : null })
         if ((await top()).opened !== before || now !== true) throw new Error(JSON.stringify({ asked: (await top()).opened - before, hidden: now }))
       } finally {
         wb('stats', 'set', 'live', 'on')
@@ -147,10 +147,10 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
     // Now, from fixed ticks (whatever server is under test): a stream of three, then its end
     await page.evaluate(() => { window.e2eTop.mode = 'ticks' })
     const nowSays = () => page.evaluate(() => {
-      const box = document.querySelector('#stats-body .st-now-box')
-      const q = s => [...box.querySelectorAll(s)]
+      const box = document.querySelector('#stats-body .st-now-box')!
+      const q = (s: string) => [...box.querySelectorAll(s)]
       return { gpus: q('.st-gpu h3').map(e => e.textContent), meters: q('.st-gpu .st-meter').map(e => e.textContent),
-        spark: (box.querySelector('.st-gpu .st-spark-line') || { getAttribute: () => '' }).getAttribute('points').split(' ').filter(Boolean).length,
+        spark: (box.querySelector('.st-gpu .st-spark-line') || { getAttribute: () => '' }).getAttribute('points')!.split(' ').filter(Boolean).length,
         running: q('.st-run').map(e => e.textContent), rack: q('.st-model').map(e => e.textContent), queue: q('.st-wait').map(e => e.textContent),
         text: box.textContent }
     })
@@ -159,7 +159,7 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
       await until(async () => (await nowSays()).spark >= 3).catch(async () => { throw new Error(JSON.stringify(await nowSays())) })
       const s = await nowSays(), say = () => JSON.stringify(s)
       if (s.gpus.join() !== 'GPU 0 Radeon RX 7900 XTX,RAM') throw new Error(say())
-      if (!s.meters[0].includes('20.0/24.0 GiB') || !s.meters.some(m => /Busy.*%/.test(m)) || !s.meters.some(m => m.includes('30.0/64.0 GiB'))) throw new Error(say())
+      if (!s.meters[0].includes('20.0/24.0 GiB') || !s.meters.some((m: string) => /Busy.*%/.test(m)) || !s.meters.some((m: string) => m.includes('30.0/64.0 GiB'))) throw new Error(say())
       if (!s.text.includes('211 W')) throw new Error(say())
       if (!s.running[0].includes('fix-nav fake-coder 30B · running · round 2 · 3m10s · 61 tok/s · context 34%')) throw new Error(say())
       if (!s.running[1].includes('fix-api API deepinfra Fast-Coder-1 · running · round 1 · 12s · ≈$0.12')) throw new Error(say())
@@ -169,11 +169,11 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
 
     await check(`Stats: the view fits ${desktop ? 1280 : 'a phone\'s'} width with no sideways scroll${desktop ? ', its cards two columns' : ''}`, async () => {
       const got = await page.evaluate(() => {
-        const v = document.getElementById('view-stats'), w = innerWidth
+        const v = document.getElementById('view-stats')!, w = innerWidth
         const cards = [...v.querySelectorAll('.card')].map(c => c.getBoundingClientRect()).filter(r => r.width)
         return { w, page: document.documentElement.scrollWidth, view: v.scrollWidth - v.clientWidth,
           out: cards.filter(r => r.left < -1 || r.right > w + 1).length, cards: cards.length,
-          cols: getComputedStyle(v.querySelector('.st-now')).gridTemplateColumns.split(' ').length }
+          cols: getComputedStyle(v.querySelector('.st-now')!).gridTemplateColumns.split(' ').length }
       })
       if (got.page > got.w || got.view > 0 || got.out || got.cards < 5) throw new Error(JSON.stringify(got))
       if (desktop ? got.w !== 1280 || got.cols !== 2 : got.w > 600 || got.cols !== 1) throw new Error(JSON.stringify(got))

@@ -1,0 +1,15 @@
+{
+  "//": "The service worker (#1323): a classic worker script, built by python3 scripts/web.py build into ../sw.js.",
+  "compilerOptions": {
+    "target": "esnext",
+    "lib": ["esnext", "webworker"],
+    "types": [],
+    "strict": true,
+    "noEmitOnError": true,
+    "removeComments": false,
+    "newLine": "lf",
+    "rootDir": ".",
+    "outDir": ".."
+  },
+  "files": ["sw.d.ts", "sw.ts"]
+}

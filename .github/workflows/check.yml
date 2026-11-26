@@ -3,7 +3,9 @@
 # plugin validate mod && claude plugin test mod` against the Claude Code version the mod was last
 # verified with; `kernel` rebuilds the PureScript kernel with its pinned toolchain and fails when
 # the committed mod/hooks/kernel.js isn't what kernel/src builds (`scripts/kernel.py check`, its
-# props included), then runs its goldens under OpenCode's Bun; `check`, the ruleset's required check, is green only when
+# props included), then runs its goldens under OpenCode's Bun, and rebuilds the web app's scripts
+# from their TypeScript (`scripts/web.py build`, #1323), failing when the commit isn't what they
+# build; `check`, the ruleset's required check, is green only when
 # all three are. nightly.yml runs the suite and the mod on the newest Claude Code. The README shows
 # both as badges.
 #
@@ -158,6 +160,11 @@ jobs:
       # the OpenCode plugin's TypeScript, type-checked by the same Bun (`bun check`; 2.3.0's and
       # 2.4.1's have it): its env.d.ts and host.d.ts declare what it uses, so nothing is installed (#1311)
       - run: BUN_BE_BUN=1 opencode check -p opencode-plugin --no-pretty
+      # The web app's scripts (#1323): workbench/chat_static/src/*.ts built again with the pinned
+      # TypeScript (scripts/install-tsc.sh, by hash), strict; the committed app.js, stats.js,
+      # settings.js and sw.js must be what it builds, and nothing else new beside them
+      - run: python3 scripts/web.py build
+      - run: git diff --exit-code -- workbench/chat_static && test -z "$(git status --porcelain -- workbench/chat_static)"
 
   # The ruleset's required check (.github/rulesets/main.json): one name whatever the shards are
   # called. always(): a failed or cancelled shard must fail it, not skip it, as a skip passes.

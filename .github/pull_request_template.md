@@ -20,7 +20,7 @@ Closes #
 - [ ] `python3 -m unittest` (or the classes named here: …)
 - [ ] the same on Python 3.11
 - [ ] `claude plugin validate mod && claude plugin test mod` (the change touches `mod/`), or not needed
-- [ ] `tests/e2e_chat.mjs` in WebKit and Chromium (the change touches `chat.py`, `webpush.py` or `chat_static/`), or not needed
+- [ ] `tests/e2e_chat.mts` in WebKit and Chromium (the change touches `chat.py`, `webpush.py` or `chat_static/`), or not needed
 
 Skipped:
 
