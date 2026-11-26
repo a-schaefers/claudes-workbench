@@ -8229,8 +8229,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       change, `wb coding` in a terminal) reaches the conversation as OpenCode's own row, starting
       no turn. Which blocks a session should have is the kernel's `tellPlan` (its first-message
       answer, `blocksOf`): `mode` while its agent is `workbench` (Workbench mode is the agent),
-      `notes` then too, `coding` (not `decide`), `workflows` (on) and `routes` (any role on an API
-      model: `wb route`'s lines, read again when routes.json changes, `routesPath`, `routesApi`)
+      `notes` then too, `coding` (not `decide`), `workflows` (on) and `routes` (routes.json not the plain
+      default, GPU-only changes too, as the mod's `readRoutes`: `wb route`'s lines, read again when
+      routes.json changes, `routesPath`, `routesSaid`)
       while in the mode or with a task of its own open; plus `workbench`, `wb status` as the session
       in its directory, while it has open tasks (read again when their names or phases change).
       `refresh` reads those facts (`openTasks`: `tasks/*/status.json` active or waiting, `task.json`
@@ -8246,7 +8247,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     - **What a compaction keeps**: the `compaction` hook adds `KEEP_ON_COMPACT` (the mod's words,
       word for word) to the system prompt of any compaction (OpenCode's own automatic one, `/compact`,
       ours) of a session that was on the Workbench agent in this process with a task of its own
-      open, once.
+      open, once, and to our boundary compaction whatever is open (`keepNext`, set before
+      `session.compact` and cleared by `session.compaction.ended` or a refusal: the boundary is
+      most often the last task closing, and the mod's `compactAtBoundary` always passes it).
     - **The boundary compaction**: at each idle look (`session.execution.succeeded`, `failed`,
       `interrupted`) `compactPlan` judges the session's open tasks against the last look's, in the
       mode only; on `check` (idle, none waiting on the driver) `compactAtBoundary` reads the
@@ -8405,10 +8408,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   the real kernel: a Workbench session's entries are `tellPlan`'s blocks under the mod's names,
   each put once and `wb status` read once while nothing changes, a stale one of ours replaced and
   another plugin's untouched, none sent by the requests themselves; a switch away drops the mode's,
-  nothing open the rest; no roles block without an API role; without the entries API the blocks
+  nothing open the rest; no roles block for the plain default, one for a GPU-only change; without the entries API the blocks
   in the session's own requests' system prompt; a task closing compacts at half of OpenCode's own
   point, not below it, once; `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
-  OpenCode doesn't list; KEEP_ON_COMPACT once, only for a session that delegated with a task open;
+  OpenCode doesn't list; KEEP_ON_COMPACT once, only for a session that delegated with a task open or in the boundary compaction after the last one closed;
   which tasks are the session's; the setup's three hooks),
   `opencode-plugin/test/commands.test.ts` (#1315: each command's wb argv as the session in its
   directory, the switch to Build only from the Workbench agent, which posts start a turn, the

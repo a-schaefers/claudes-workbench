@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import * as core from '../../mod/hooks/core.ts'
-import { autoCeiling, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, Upkeep, upkeep,
+import { autoCeiling, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, routesSaid, Upkeep, upkeep,
   WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
 
 // The driver's conversation kept (#1315), against an in-memory WB_HOME, a fake wb and a fake
@@ -196,6 +196,47 @@ test('a compaction of a session that delegated, with a task of its own open, is 
   const none: { type: 'text'; text: string }[] = []
   u.compaction({ sessionID: 's1', system: none })
   expect(none).toEqual([])
+})
+
+test('the boundary compaction after the last task closed is told what to keep, once, and a later one without a task is not', async () => {
+  const w = world({})
+  task(w.files, 't1', RUNNING)
+  const { host } = entriesHost()
+  const systems: string[][] = []
+  const u = new Upkeep(core, host, w.io, HOME)
+  // OpenCode runs every compaction request through the `compaction` hook (core/src/session/model-request.ts)
+  const compact = (sessionID: string) => {
+    const system: { type: 'text'; text: string }[] = []
+    u.compaction({ sessionID, system })
+    systems.push(system.map(p => p.text))
+  }
+  ;(host.session as { compact: unknown }).compact = async ({ sessionID }: { sessionID: string }) => {
+    compact(sessionID)
+    await u.event({ type: 'session.compaction.ended', data: { sessionID } })
+  }
+  await u.context({ sessionID: 's1', agent: 'workbench', model: { providerID: 'p', id: 'm' }, system: [] })
+  await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
+  task(w.files, 't1', CLOSED)
+  await u.event({ type: 'session.step.ended', data: { sessionID: 's1', tokens: { input: 60_000 } } })
+  await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
+  expect(systems).toEqual([[KEEP_ON_COMPACT]])
+  compact('s1') // the user's own /compact afterwards, nothing open: as before, nothing added
+  expect(systems[1]).toEqual([])
+})
+
+test("the roles block is said for any setup but the plain default, a GPU-only one too, as the mod's", async () => {
+  expect(routesSaid(undefined)).toBe(false)
+  expect(routesSaid('{}')).toBe(false)
+  expect(routesSaid(JSON.stringify({ roles: { trivial: { via: 'gpu', gpu: 'auto', thinking: 'off' } } }))).toBe(false)
+  expect(routesSaid(JSON.stringify({ roles: { trivial: { thinking: 'on' } } }))).toBe(true)
+  expect(routesSaid(JSON.stringify({ day_usd: 2 }))).toBe(true)
+  expect(routesSaid('{not json')).toBe(true)
+  const w = world({}, { route: 'trivial  GPU g/pinned' })
+  w.files['/h/.config/workbench/routes.json'] = JSON.stringify({ roles: { trivial: { gpu: 'g/pinned' } } })
+  const { host, calls } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  await u.context({ sessionID: 's1', agent: 'workbench', system: [] })
+  expect(calls.includes("put workbench-routes: Roles (the user's, `wb route`):")).toBe(true)
 })
 
 test("a session's open tasks are those wb start recorded for it, active or waiting on it, never a bench replay", () => {

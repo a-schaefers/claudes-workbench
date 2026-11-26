@@ -13,7 +13,8 @@
 //   entries until the session's match. A server without the API (it is experimental) gets the same
 //   blocks from the `context` hook, appended to each of the session's requests (the fallback).
 // - Workbench mode is the Workbench agent: a session is delegating while its agent is `workbench`.
-// - Any compaction of a session that delegated, with a task of its own open, is told what to keep
+// - Any compaction of a session that delegated, with a task of its own open, and the boundary
+//   compaction itself are told what to keep
 //   (KEEP_ON_COMPACT, the mod's words) by the `compaction` hook. OpenCode's own automatic
 //   compaction stays on; the boundary compaction (`compactPlan`, Kernel.Mode) runs before it: when
 //   one of the session's tasks closed since the last look, none waits for the driver and the
@@ -127,11 +128,26 @@ export function routesPath(env: Record<string, string | undefined>): string {
   return given === '~' ? home : given.startsWith('~/') ? join(home, given.slice(2)) : given
 }
 
-// Whether any role has an API model: the roles block is said only then, as the mod's
-export function routesApi(text: string | undefined): boolean {
-  const roles = json(text).roles
-  if (!roles || typeof roles !== 'object') return false
-  return Object.values(roles as Record<string, unknown>).some(r => !!r && typeof r === 'object' && typeof (r as { api?: unknown }).api === 'string' && !!(r as { api: string }).api)
+// Whether `wb route`'s lines are said: routes.json is there and not the plain default (every role
+// on the GPU's automatic model, thinking off, no fallback, no day cap, no use or busy setting), or
+// can't be read: the mod's `readRoutes` `said`, so a GPU-only change (a pinned model, thinking on)
+// reaches the driver too (#1315 review)
+export function routesSaid(text: string | undefined): boolean {
+  if (text === undefined) return false
+  let doc: unknown
+  try {
+    doc = JSON.parse(text)
+  } catch {
+    return true // wb route says why
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return true
+  const d = doc as Record<string, any>
+  if (d.roles !== undefined && (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles))) return true
+  const rows = Object.values((d.roles ?? {}) as Record<string, any>)
+  const plain = d.day_usd == null && (d.use ?? 'both') === 'both' && (d.busy ?? 'wait') === 'wait' &&
+    rows.every(r => !!r && typeof r === 'object' && (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' && !r.api &&
+      (r.thinking ?? 'off') === 'off' && (r.thinking_review ?? 'off') === 'off' && !r.fallback)
+  return !plain
 }
 
 // The blocks a session should have, by key, in the kernel's order: `want` as the mod's `wanted`
@@ -204,6 +220,7 @@ export interface Sess {
   delegated: boolean           // its agent was the Workbench agent at some point in this process
   open: string[]               // its open tasks at the last look
   boundary: boolean            // compactPlan's mark between looks
+  keepNext: boolean            // our boundary compaction asked for: KEEP_ON_COMPACT though no task is open
   busy: boolean
   tokens: number               // the last step's prompt
   model?: ModelRef
@@ -230,7 +247,7 @@ export class Upkeep {
   sess(sessionID: string): Sess {
     let s = this.sessions.get(sessionID)
     if (!s) {
-      s = { agent: '', dir: '', delegated: false, open: [], boundary: false, busy: false, tokens: 0, blocks: [],
+      s = { agent: '', dir: '', delegated: false, open: [], boundary: false, keepNext: false, busy: false, tokens: 0, blocks: [],
         put: undefined, tasksSig: '', tasksText: '', chain: Promise.resolve() }
       this.sessions.set(sessionID, s)
     }
@@ -256,16 +273,15 @@ export class Upkeep {
   }
 
   // the roles as `wb route` says them, read again only when routes.json changed
-  async routes(): Promise<{ api: boolean; text: string }> {
+  async routes(): Promise<string> {
     const text = this.io.read(routesPath(this.io.env))
-    const api = routesApi(text)
-    if (!api) return { api, text: '' }
+    if (!routesSaid(text)) return ''
     if (text !== this.routesSeen) {
       const r = await this.io.run(['route'], {})
       this.routesText = r.ok ? r.out : 'routes.json can\'t be read (wb route says why)'
       this.routesSeen = text
     }
-    return { api, text: this.routesText }
+    return this.routesText
   }
 
   // What the session should be told now (the mod's `wanted`), and its blocks: one at a time per
@@ -283,12 +299,12 @@ export class Upkeep {
     const any = delegating || tasks.length > 0
     const read = (f: string) => this.io.read(join(this.home, f))
     const coding = any ? String(json(read('coding.json')).mode ?? '') : ''
-    const routes = any ? await this.routes() : { api: false, text: '' }
+    const routes = any ? await this.routes() : ''
     const want: Said = {
       notes: delegating ? (read('notes.md') ?? '').trim() : '',
       wakeOff: false,
       coding: coding in CODING_RULES ? coding : 'decide',
-      routes: routes.text,
+      routes,
       workflows: any && json(read('workflows.json')).mode === 'on' ? 'on' : 'off',
     }
     // the open tasks as wb lists them, for this session in its directory; read again when they change
@@ -301,7 +317,7 @@ export class Upkeep {
         if (r.ok && r.out && !r.out.startsWith('no open tasks')) s.tasksText = r.out
       }
     }
-    s.blocks = blocksOf(this.k, want, delegating, routes.text, s.tasksText)
+    s.blocks = blocksOf(this.k, want, delegating, routes, s.tasksText)
     await this.sync(sessionID, s)
   }
 
@@ -339,11 +355,13 @@ export class Upkeep {
     for (const [key, text] of s.blocks) input.system.push({ type: 'text', text: `<context key="${key}">\n${text}\n</context>` })
   }
 
-  // The compaction hook: what to keep, in a session that delegated with a task of its own open
+  // The compaction hook: what to keep, in a session that delegated with a task of its own open, or
+  // in our own boundary compaction, which follows the last task closing as often as not (the
+  // mod's compactAtBoundary always passes KEEP_ON_COMPACT; #1315 review)
   compaction(input: { sessionID: string; system: { type: 'text'; text: string }[] }): void {
     const s = this.sessions.get(input.sessionID)
     if (!s?.delegated) return
-    if (!openTasks(this.k, this.io, this.home, input.sessionID).length) return
+    if (!s.keepNext && !openTasks(this.k, this.io, this.home, input.sessionID).length) return
     if (input.system.some(p => typeof p?.text === 'string' && p.text.includes(KEEP_ON_COMPACT))) return
     input.system.push({ type: 'text', text: KEEP_ON_COMPACT })
   }
@@ -387,10 +405,12 @@ export class Upkeep {
     const plan = this.k.compactPlan({ ...at, percentSet, percent: percentSet ? Number(set) : 0, tokens: s.tokens,
       window, autoCompact: true, threshold: autoCeiling(window) })
     if (!plan.compact) return false
+    s.keepNext = true // cleared by session.compaction.ended
     try {
       await this.host.session.compact({ sessionID })
       return true
     } catch {
+      s.keepNext = false
       return false // a turn began meanwhile: the next boundary tries again
     }
   }
@@ -408,7 +428,7 @@ export class Upkeep {
         return
       case 'session.execution.started': s.busy = true; return
       case 'session.step.ended': s.tokens = promptTokens(ev.data?.tokens); return
-      case 'session.compaction.ended': s.tokens = 0; return
+      case 'session.compaction.ended': s.tokens = 0; s.keepNext = false; return
       case 'session.execution.succeeded':
       case 'session.execution.failed':
       case 'session.execution.interrupted':
