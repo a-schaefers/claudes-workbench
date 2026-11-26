@@ -3326,9 +3326,10 @@ def _open_tasks():
 
 
 
-def stop_everything(tasks=None) -> list[str]:
+def stop_everything(tasks=None, ts=None) -> list[str]:
     """`wb stop --all`: every agent (or those of `tasks`). Nothing is finished or thrown away:
-    tasks keep their worktrees (stopped, for wb feedback or wb discard later)."""
+    tasks keep their worktrees (stopped, for wb feedback or wb discard later). ``ts``: the quit's
+    one `parked` stamp (each stop can wait 15 s), which the hand-back groups by (#1550)."""
     stopped = []
     for t in _open_tasks() if tasks is None else tasks:
         # each task under its command lock, as one_at_a_time (which --all skips): an accept or
@@ -3342,13 +3343,13 @@ def stop_everything(tasks=None) -> list[str]:
                      "by": "user", "text": "bail out: stopped by the user"})
             # `infra`: the user's quit (/workbench-quit), not the step's: as wb update --stop (#1260)
             t.set_status(phase="stuck", last=BAIL_OUT, pid=None, infra=BAILED,
-                         parked=store.now())  # out of the status line and new sessions (#541)
+                         parked=ts or store.now())  # out of the status line and new sessions (#541)
             _ack_all(t)
             stopped.append(f"{t.name} (worktree kept: {t.worktree})")
     return stopped
 
 
-def _park_waiting(a) -> str:
+def _park_waiting(a, ts=None) -> str:
     """`wb stop --all --park-waiting` (the mod's /workbench-quit): the scope's tasks waiting on
     Claude (review, stuck, failed, no runner) parked as they stand, their news acknowledged, so
     the status line, the pick-up block and the jobs' gate leave them until the user asks. Only the
@@ -3361,7 +3362,7 @@ def _park_waiting(a) -> str:
         with store.locked(runner.lock_file(t.name, "cmd")):
             if t.status.get("phase") not in store.PARKS or runner_alive(t):
                 continue  # picked up meanwhile
-            t.set_status(parked=store.now())
+            t.set_status(parked=ts or store.now())
             _ack_all(t, upto=store.now())  # its news too, still true: the mod would wake for it
             parked.append(t.name)
     return f"parked as they stand (waiting on Claude): {', '.join(parked)}" if parked else ""
@@ -3376,6 +3377,7 @@ def cmd_stop(a):
         # 2026-11-26); a terminal, or --all-sessions, still stops it
         driver, far = None, ""
         scope = _caller(a)
+        ts = store.now()  # one stamp for everything this quit parks: the hand-back's group (#1550)
         if not (scope[0] or scope[1]):
             try:
                 driver = bench.stop_driver()
@@ -3385,12 +3387,12 @@ def cmd_stop(a):
         drivers = [f"wb run {r.name}" for r in runs._runs_in_scope(a)
                    if r.open() and runs.stop(r, "stopped with every agent (wb stop --all)", items=False) is not None]
         mine, others = _scope(_open_tasks(), *scope)
-        stopped = ([f"wb bench (pid {driver})"] if driver else []) + drivers + stop_everything(mine)
+        stopped = ([f"wb bench (pid {driver})"] if driver else []) + drivers + stop_everything(mine, ts)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
         _say(far and f"left running: {far}")
         if a.park_waiting:
-            _say(_park_waiting(a))
+            _say(_park_waiting(a, ts))
         return
     if a.repo or a.session or a.park_waiting:
         die("--repo, --session and --park-waiting go with --all")
@@ -4854,6 +4856,32 @@ def cmd_run(a):
     runs.COMMANDS[a.run_cmd](a)
 
 
+PARK_GROUP_SECS = 5  # one quit's `parked` stamps: one since #1550, one per task stopped before
+# how long after a quit the hand-back is still that quit's own: a quit a day back, then
+# /workbench and the hand-back with nothing delegated between, took over yesterday's parked
+# tasks and Claude was told to finish and accept them (#1550's review, 2026-11-26)
+PARK_FRESH_SECS = 600
+
+
+def _just_parked(scoped) -> set[str]:
+    """The tasks of the scope (`scoped`, closed ones too) that the latest quit parked, while that
+    quit is under PARK_FRESH_SECS old and nothing in the scope has moved since: its newest
+    `parked` stamp and those within PARK_GROUP_SECS of it. A task started, resumed, accepted or
+    changed after that quit means the work went on, and the quit is an earlier one, whose tasks
+    stay parked (#1540), as do an older quit's; a quit straight before the hand-back is the
+    hand-back's own, and its tasks are taken over (#1550)."""
+    parked = [t for t in scoped if store.parked(t.status)]
+    if not parked:
+        return set()
+    last = max(float(t.status["parked"]) for t in parked)
+    if store.now() - last > PARK_FRESH_SECS:
+        return set()
+    group = {t.name for t in parked if float(t.status["parked"]) >= last - PARK_GROUP_SECS}
+    moved = any(max(t.status.get("updated_at") or 0, t.spec.get("created_at") or 0) > last
+                for t in scoped if t.name not in group)
+    return set() if moved else group
+
+
 @one_at_a_time
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
@@ -4866,14 +4894,17 @@ def cmd_takeover(a):
                    if r.open() and runs.stop(r, "handed back to Claude (wb takeover --all)", items=False) is not None]
         if drivers:
             print("stopped: " + "; ".join(drivers))
-        tasks, others = _scope([t for t in store.all_tasks()
-                                if t.status.get("phase") not in store.CLOSED], *_caller(a))
+        scoped, others = _scope(store.all_tasks(), *_caller(a))
+        tasks = [t for t in scoped if t.status.get("phase") not in store.CLOSED]
+        others = [t for t in others if t.status.get("phase") not in store.CLOSED]
         # a task an earlier /workbench-quit parked stays the user's to pick up by name: the
         # hand-back took it over too, and the driver was told to finish and accept it without
         # asking (#1540, the 2.2 bar, 2026-11-26). Its line never starts "took over", which the
-        # mod's and the plugin's turn key on
-        held = [t.name for t in tasks if store.parked(t.status)]
-        tasks = [t for t in tasks if not store.parked(t.status)]
+        # mod's and the plugin's turn key on. Those the latest quit just parked are the hand-back's
+        # own: a quit, then the hand-back straight after, took over nothing (#1550, 2026-11-26)
+        fresh = _just_parked(scoped)
+        held = [t.name for t in tasks if store.parked(t.status) and t.name not in fresh]
+        tasks = [t for t in tasks if not store.parked(t.status) or t.name in fresh]
         if not tasks and not held:
             print("no open delegated tasks to take over")
         refused = 0

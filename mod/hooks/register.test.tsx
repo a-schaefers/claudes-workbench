@@ -2134,6 +2134,24 @@ test('#918: a hand-back that took over one task and was refused another still gi
   expect(submitted.at(-1)).toContain('report the blocker')      // and the refusal, said with it
 })
 
+test('#1550: a hand-back that exits 0 having taken nothing over starts no turn and says how to hand one over', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {})
+  on('process.run', (_: any, e: any) => ({ value: e.argv[1] === 'takeover'
+    ? { exitCode: 0, stdout: 'left parked by an earlier quit (leave them unless the user asks): fix-it', stderr: '' }
+    : { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const submitted: string[] = []
+  on('prompt.submit', (_: any, e: any) => { submitted.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const back = await $.command.run({ command: 'workbench-quit-and-hand-back-claude', args: '' })
+  expect(back.text).not.toContain('Claude is taking over')
+  expect(back.text).toContain('left parked by an earlier quit (leave them unless the user asks): fix-it')
+  expect(back.text).toContain('`wb takeover <name>`')
+  await clock.advance(3000)
+  expect(submitted.join('\n')).not.toContain('Leave workbench mode')  // no DONE_NOTE turn
+})
+
 test('a closed task compacts Claude early, keeping the delegation state; open tasks come back after', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000
