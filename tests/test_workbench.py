@@ -41636,6 +41636,34 @@ class Routes(Base):
         self.assertEqual(json.loads(self.route("driver", "--json")[1]), {"driver": "session"})
 
 
+    def test_a_driver_pin_opencode_cant_route_is_refused_and_one_set_before_says_it_cant_run(self):
+        # #1530 (2026-11-26): OpenCode 2.4.1 switches a session to any id, so /workbench moved it
+        # onto a pin of a provider with no key, every turn failed, and wb route driver took any id
+        from workbench import driver
+        os.environ["WB_FAKE_API"] = "anthropic=nokey"
+        runner.models.hosted(fresh=True)
+        why = runner.models.unlisted_why("anthropic/claude-haiku-5-5")
+        self.assertIn("it holds none for anthropic: run `opencode auth login anthropic`", why)
+        self.assertEqual(self.route("driver", "anthropic/claude-haiku-5-5")[::2],
+                         (3, f"wb: anthropic/claude-haiku-5-5 can't be the driver: {why}\n"))
+        self.assertEqual(self.route("driver", "ollama/nope")[::2],
+                         (3, f"wb: ollama/nope can't be the driver: {driver.PIN_GPU_GONE.format(id='ollama/nope')}\n"))
+        self.assertFalse(self.path.exists() and "driver" in self.doc())
+        # one set before the key went: --json says so for the plugin, wb doctor and the panel too
+        self.path.write_text(json.dumps({"v": 1, "driver": "anthropic/claude-haiku-5-5#high"}))
+        self.assertEqual(json.loads(self.route("driver", "--json")[1]),
+                         {"driver": "anthropic/claude-haiku-5-5#high", "runs": False, "why": why})
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        self.assertIn(f"the driver pin anthropic/claude-haiku-5-5#high can't run: {why}", buf.getvalue())
+        self.assertEqual([n["text"] for n in driver.info("ses_1", row={})["notes"]],
+                         [f"the driver pin anthropic/claude-haiku-5-5#high wasn't applied: {why}; "
+                          "wb route driver session takes it off"])
+        self.path.write_text(json.dumps({"v": 1, "driver": "deepseek/deepseek-flash"}))
+        self.assertEqual(json.loads(self.route("driver", "--json")[1]),
+                         {"driver": "deepseek/deepseek-flash", "runs": True, "why": ""})
+
 class OpenCodeDriver(Base):
     """The OpenCode driver's identity (#1309, 2.2): OPENCODE_SESSION_ID, which the workbench
     plugin's tools set on their wb child and OpenCode sets in every shell, WB_TASK ranked first;

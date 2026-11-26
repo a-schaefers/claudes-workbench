@@ -4486,14 +4486,21 @@ def _route_driver(a) -> None:
             pin = routes.read().get("driver")
         except routes.RoutesError as e:
             die(routes.unreadable(e), 3)
-        print(json.dumps({"driver": pin or routes.DRIVER_SESSION}) if a.json else
-              f"driver: {pin} ({routes.DRIVER_APPLIED})" if pin else
+        # whether it runs, which the plugin's /workbench reads before it switches (#1530)
+        why = driver.pin_why(pin) if pin else ""
+        print(json.dumps({"driver": pin or routes.DRIVER_SESSION,
+                          **({"runs": not why, "why": why} if pin else {})}) if a.json else
+              f"driver: {pin} ({routes.DRIVER_APPLIED})" + (f"; can't run now: {why}" if why else "") if pin else
               "driver: each OpenCode session's own (/models), no pin")
         return
     pin = a.target
     if pin != routes.DRIVER_SESSION and routes.driver_ref(pin) is None:
         die(f"{pin!r} isn't an OpenCode model id: provider/model, #variant allowed (opencode models "
             f"lists them), or {routes.DRIVER_SESSION}", 3)
+    # a pin OpenCode can't route, refused before the dialog asks: switchModel takes any id, and
+    # every turn of the session failed (#1530, 2026-11-26)
+    if why := driver.pin_why(pin):
+        die(f"{pin} can't be the driver: {why}", 3)
     argv = ["route", "driver", pin]
 
     def changed(doc) -> routes.Change:
@@ -4665,8 +4672,9 @@ def cmd_driver(a):
     if not found:
         print(f"no OpenCode session has driven here in the last {store.DRIVER_HOLD // 60} min "
               "(the plugin's heartbeat lists none)")
-    print(f"pin: {pin} ({routes.DRIVER_APPLIED})" if pin != routes.DRIVER_SESSION else
-          "pin: none (each session's own /models; wb route driver <id> sets one)")
+    why = driver.pin_why(pin)  # #1530
+    print(f"pin: {pin} ({routes.DRIVER_APPLIED})" + (f"; can't run now: {why}" if why else "")
+          if pin != routes.DRIVER_SESSION else "pin: none (each session's own /models; wb route driver <id> sets one)")
 
 
 def cmd_coding(a):

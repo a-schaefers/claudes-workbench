@@ -3883,9 +3883,18 @@ and nothing here changes that path.
   by it. `wb route driver <provider/model>[#variant]|session` sets it (`routes.driver_change`): a GPU
   model's (`models.gpu_side`) needs no yes; any other id is taken for an API model, failing closed,
   and from a model's call takes the host's dialog (`route-ok.json`, as a role's API change),
-  since the session's whole conversation, the code in it, would go to its provider. The plugin's
-  RPC `pin` method (`applyPin`) reads `wb route driver --json` and switches the session to it
-  (`session.switchModel`) unless it is `session` or the session's already; `/workbench` (`pane.ts`)
+  since the session's whole conversation, the code in it, would go to its provider. A pin OpenCode
+  can't route is refused before the dialog (exit 3, `<id> can't be the driver: <why>`; `driver.pin_why`:
+  a GPU id `discover()` doesn't find, `PIN_GPU_GONE`, or an API id the catalog doesn't list, said as a
+  role's, `models.unlisted_why`, which names a provider with no key; never told on a failed or missing
+  catalog read, or a provider the catalog names that wb leaves out; the driver is the user's own OpenCode,
+  so any key it holds runs it, never the keyhole's test: #1530, 2026-11-26, OpenCode 2.4.1's
+  `switchModel` takes any id, and every turn then failed `Model unavailable`). `wb route driver --json`
+  is `{driver, runs, why}` with a pin (`runs: false` only when `pin_why` says why), and `wb route driver`,
+  `wb driver`'s `pin:` and `wb doctor` (`driver.doctor_lines`, a `--` line) say `can't run` with it. The
+  plugin's RPC `pin` method (`applyPin`) reads `wb route driver --json` and switches the session to it
+  (`session.switchModel`) unless it is `session`, `runs` is false (`<pin> not applied: <why>`) or the
+  session's already; `/workbench` (`pane.ts`)
   applies it before it switches the session to the Workbench agent, so the notes said at that switch
   are the pinned model's.
 - **What wb says** (`driver.info`, `wb driver`, the RPC's `driver` method): the session's model, its
@@ -3894,7 +3903,9 @@ and nothing here changes that path.
   `dir` kept, its `used` only for the same model; the live check, 2026-11-26)
   (`label`: `provider/id#variant`, or `not known yet …` before its first request), `kind` (`gpu`:
   `discover()` finds it; `api`: OpenCode's catalog lists it, `models.lookup`, cached first;
-  `unknown`), its `window` (`limit.context`), the pin, and three notes, each never a refusal (wb
+  `unknown`), its `window` (`limit.context`), the pin, and three notes (and `pin:<pin>:<why>`, `the driver
+  pin <pin> wasn't applied: <why>; wb route driver session takes it off`, while `pin_why`, cached, says
+  one, the panel's toast at /workbench, #1530), each never a refusal (wb
   can't make a weak model hold the bar) and said once per key with `--once` (`driver.once`,
   `drivers/said.json`, the newest `SAID_KEEP` 400 kept):
   - `own:<id>`: the driver is the agents' own model (`driver.agents_models`: each role's API model,
@@ -9837,7 +9848,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
 | `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures are plain, no `≈`, from the model's next task; `--clear` the catalog's again. Needs `--input` and `--output`; a cache price left out is the catalog's ratio to input, printed (`models.own_cache`, #1155); refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
-| `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) / `wb route <role> fallback <provider/model>\|gpu\|none` (#1196) / `wb route driver <provider/model>[#variant]\|session` (the OpenCode driver's pin, #1316: *The driver*; alone, it shows the pin, `--json` `{driver}`; an API id from a model's call takes the dialog's yes) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--thinking-review on\|off` (the self-review alone thinks on API, #1059), `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`, #1021; without them the dialog says `via OpenRouter to its choice of backend`, #1322), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, an API fallback with no cap or one `routes._fallback_check` refuses, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin, a `gpu` fallback and `none` need no dialog. |
+| `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) / `wb route <role> fallback <provider/model>\|gpu\|none` (#1196) / `wb route driver <provider/model>[#variant]\|session` (the OpenCode driver's pin, #1316: *The driver*; alone, it shows the pin, `--json` `{driver, runs?, why?}`, #1530; an API id from a model's call takes the dialog's yes; one OpenCode can't route exits 3) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--thinking-review on\|off` (the self-review alone thinks on API, #1059), `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`, #1021; without them the dialog says `via OpenRouter to its choice of backend`, #1322), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, an API fallback with no cap or one `routes._fallback_check` refuses, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin, a `gpu` fallback and `none` need no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--if-due` (#1334: when `cli.scout_offer_due`, `done_at` 7 days old and no `offered_at` since it fell due, prints `cli.SCOUT_OFFER` and writes `offered_at`, under `locks/scout.lock`; else `not due`, exit 1), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill's history, the scan. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (never `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
@@ -11453,7 +11464,7 @@ doc needs its own `!/` line).
 - **What OpenCode reads from a project** → `context.PROJECT_SKILL_DIRS`, `agents_files`, `PROJECT_CONFIGS`,
   `project_config_instructions`; RealOpenCode's #994 test; *What the project's own config gave, handed back*.
 - **The driver's pin** (routes.json `driver`, `wb route driver`, #1316) → the `driver` Settings row (`settings._driver_row`,
-  `_argv`), the plugin's `applyPin` (reads `wb route driver --json`), the pane's `driverRow` (`pin`), and `wb driver`'s `pin`; the mod's
+  `_argv`), the plugin's `applyPin` (reads `wb route driver --json`'s `driver` and `runs`, #1530), the pane's `driverRow` (`pin`), and `wb driver`'s `pin`; the mod's
   `routesValid` never reads it, so `routes.normalize` reads a bad one as no pin, never refuses the file
   (register.test.tsx's #1014 roles test holds one).
 - **The roles** (#1014): **routes.json's keys** (`routes.normalize`) → the mod's reader (`readRoutes`, `routesValid`,

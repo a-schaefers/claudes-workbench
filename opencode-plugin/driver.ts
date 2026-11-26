@@ -216,17 +216,23 @@ const sessionOf = (input: unknown): string => {
   return typeof sid === 'string' ? sid : ''
 }
 
-// The pin, applied: routes.json's `driver` (`wb route driver --json`), unless it is `session` or
-// the session already runs on it
+// The pin, applied: routes.json's `driver` (`wb route driver --json`), unless it is `session`,
+// can't run (`runs: false`: OpenCode's switchModel takes any id, and every turn then failed
+// 'Model unavailable', #1530, 2026-11-26; the panel's toast says wb's why) or the session
+// already runs on it
 export async function applyPin(host: DriverHost, sessionID: string, run: Run, used: ReadonlyMap<string, Used>): Promise<Pinned> {
   const r = await run(['route', 'driver', '--json'])
-  let pin = ''
+  let pin = '', runs: unknown, said: unknown
   try {
-    pin = String((JSON.parse(r.stdout) as { driver?: unknown }).driver ?? '')
+    const doc = JSON.parse(r.stdout) as { driver?: unknown; runs?: unknown; why?: unknown }
+    pin = String(doc.driver ?? '')
+    runs = doc.runs
+    said = doc.why
   } catch {
     return { applied: false, why: (r.stderr || r.stdout).trim() || 'wb route driver failed' }
   }
   if (!pin || pin === 'session') return { applied: false, why: 'no pin: each session keeps its own /models choice' }
+  if (runs === false) return { applied: false, model: pin, why: `${pin} not applied: ${String(said ?? '') || "it can't run"}` }
   const model = parseRef(pin)
   if (!model) return { applied: false, model: pin, why: `${pin} isn't an OpenCode model id` }
   const now = used.get(sessionID)
