@@ -42222,6 +42222,19 @@ class OpenCodeDriver(Base):
         self.assertIn("open elsewhere (other sessions'): t-oc", out)
         self.assertNotIn("/sessions", out)
 
+    def test_the_way_back_to_an_opencode_session_ends_the_live_line_never_a_gone_sessions_line(self):
+        # #1482's gone lines and #1498's way back met in one merge (2026-11-26): the way back went
+        # on the end of every line, after a gone Claude Code session's `wb adopt` line
+        dead = subprocess.Popen(["true"]); dead.wait()
+        self.beat("ses_a", "ses_b")
+        self.opencode_task("t-oc", "ses_a", phase="review")
+        self.task("t-cc", phase="review", session="sess-old", claude_pid=dead.pid)  # its Claude Code gone
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        lines = [l for l in self.wb("status")[1].splitlines() if l.startswith("open elsewhere")]
+        self.assertEqual(lines, [f"open elsewhere (other sessions'): t-oc ({self.here})" + cli.OPENCODE_WAY_BACK,
+                                 f"open elsewhere (a gone Claude Code session's): t-cc ({self.here}; "
+                                 "wb adopt t-cc takes it here)"])
+
     def test_the_heartbeat_says_whether_a_session_is_live_gone_or_unknown(self):
         d = self.server()
         self.assertEqual(store.driver_state("ses_a"), "unknown")     # no store recorded
