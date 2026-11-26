@@ -1283,7 +1283,8 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     specs.mkdir(parents=True, exist_ok=True)
     path = specs / f"{stage['id']}-{n}.md"
     path.write_text(_spec_of(run, stage, it), encoding="utf-8")
-    argv = ["start", name, "--spec", str(path), "--repo", spec["repo"], "--base", spec["base"],
+    # the directory the run was started from (#1494): wb start's package walk goes up from it
+    argv = ["start", name, "--spec", str(path), "--repo", spec.get("package_dir") or spec["repo"], "--base", spec["base"],
             "--role", item_role(stage, it), "--queue", "--group", run.name, "--run", run.name,
             "--stage", stage["id"], "--item", it.key, "--checkin", "0"]
     if stage.get("card"):
@@ -2041,9 +2042,15 @@ def cmd_start(a) -> None:
         flow = load_flow(a.flow, a.plan)
     except RuntimeError as e:
         _die(str(e))
-    repo = Path(a.repo or os.getcwd()).resolve()
-    if not (repo / ".git").exists():
-        _die(f"{repo} is no git repository (--repo)")
+    # a subdirectory is the repo it is in, as wb start's --repo: from repo/packages/web (a
+    # monorepo's package, or Claude's Bash cwd moved) every flow command and deepcode was refused
+    # "is no git repository" (#1494, 2026-11-26). The run reads the repo from its top (files params
+    # and base); each item starts from the directory given, so wb start finds its package there
+    start_dir = Path(a.repo or os.getcwd()).resolve()
+    try:
+        repo = gitops.toplevel(start_dir).resolve()
+    except gitops.GitError:
+        _die(f"{start_dir} is no git repository (--repo)")
     base = gitops.base_commit(repo, a.base or "HEAD")
     if not base:
         _die(f"no commit {a.base or 'HEAD'} in {repo}")
@@ -2072,6 +2079,11 @@ def cmd_start(a) -> None:
         except (OSError, UnicodeDecodeError) as e:
             _die(f"--context-file {a.context_file}: {getattr(e, 'strerror', None) or e}")
     ctx = ctx or flow.get("context") or ""
+    if len(ctx) > CUTS["context"]:
+        # run.json keeps it whole and each spec's {context} is cut there, said (runs._text): cut
+        # here first, the spec's cut note never showed and past 4,000 characters went unsaid
+        # (#1519, 2026-11-26)
+        said.append(f"context: {len(ctx):,} characters, the first {CUTS['context']:,} go in each spec's {{context}}")
     est_usd, est_min, later = estimate(flow, params, exists)
     roles = ", ".join(dict.fromkeys(f"{s['id']} {stage_role(s)}" + (" (API)" if stage_model(s) else " (GPU)")
                                     + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
@@ -2091,7 +2103,8 @@ def cmd_start(a) -> None:
     flow = settled(flow)
     spec = {"name": a.name, "flow": flow, "flow_name": flow["name"], "flow_sha": sha,
             "params": params, **({"exists": exists} if exists else {}),
-            "context": ctx[:CUTS["context"]], "repo": str(repo), "base": base,
+            "context": ctx, "repo": str(repo),
+            **({"package_dir": str(start_dir)} if start_dir != repo else {}), "base": base,
             "base_ref": a.base, "cwd": os.getcwd(), "budget_usd": usd_, "budget_min": mins,
             "overnight": bool(a.overnight), "trial": bool(a.trial), "no_claude_md": bool(a.no_claude_md),
             "created": store.now(), "driver": {"python": sys.executable, "machine": store.machine()},

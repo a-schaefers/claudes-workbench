@@ -581,6 +581,33 @@ class Customized(Base):
         code, _, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run", "--param", "style=x")
         self.assertEqual((code, err.strip()), (1, "wb: --param style: one of unit, prop, not 'x'"))
 
+    def test_a_run_started_in_a_subdirectory_reads_the_repo_from_its_top_and_starts_each_item_in_its_package(self):
+        # #1494 (2026-11-26): from repo/src every flow command and deepcode was refused "is no git
+        # repository", and with --repo <top> a package's own CLAUDE.md, test and skills were lost
+        plan = Path(self.tmp.name) / "tests.json"
+        plan.write_text(json.dumps(self.TESTS))
+        code, out, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo / "src"), "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("2 item(s) from {params.src}", out)  # src/*.py, a path from the top
+        pkg = self.repo / "packages" / "p"
+        pkg.mkdir(parents=True)
+        (pkg / "CLAUDE.md").write_text("# p\nA package.\n")
+        (pkg / "x.py").write_text("x\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm",
+                        "a package"], check=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        with mock.patch.object(runs, "spawn", return_value=0):  # the item started here, below
+            code, _, err = wb("run", "start", "pkg", "--plan", str(plan), "--repo", str(pkg),
+                              "--param", "src=packages/p/*.py")
+        self.assertEqual(code, 0, err)
+        run = runs.Run("pkg")
+        self.assertEqual((run.spec["repo"], run.spec["package_dir"]), (str(self.repo.resolve()), str(pkg.resolve())))
+        stage, it = runs.stages(run.flow)[0], runs.state(run)["write"][0]
+        self.assertEqual(runs._start(run, stage, it, 1), ("running", ""))
+        self.assertEqual(store.Task("pkg-write-1").spec.get("subdir"), "packages/p")
+        wait_phase("pkg-write-1", {"review", "failed", "stuck"}, timeout=90)
+
     def test_the_slash_command_line_reads_as_its_fixture_says(self):
         cases = json.loads((ROOT / "tests/fixtures/flow_args.json").read_text())["cases"]
         for c in cases:
@@ -634,6 +661,25 @@ class Customized(Base):
         self.assertTrue(path.with_name("audit.json.bak").exists())
         self.assertIn("audit (shipped): ", wb("run", "flows")[1])
         self.assertEqual(wb("flow", "reset", "audit")[0], 1)
+
+    def test_a_second_reset_of_a_flow_or_card_keeps_the_first_ones_copy_beside_its_own(self):
+        # #1520 (2026-11-26): the second reset replaced the first's .bak, the first edit lost
+        flow = Path(os.environ["WB_FLOWS"]) / "build.json"
+        card = Path(os.environ["WB_ROLES"]) / "find.md"
+        for v in ("V1", "V2", "V3"):
+            self.assertEqual(wb("flow", "copy", "build")[0], 0)
+            flow.write_text(json.dumps({**json.loads(flow.read_text()), "description": f"MY {v} EDIT"}))
+            self.assertEqual(wb("card", "copy", "find")[0], 0)
+            card.write_text(card.read_text() + f"\nMY {v} EDIT\n")
+            code, out, err = wb("flow", "reset", "build")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(wb("card", "reset", "find")[0], 0)
+        self.assertIn(f"yours is kept as {flow}.bak.3", out)  # the line names the file it wrote
+        for mine in (flow, card):
+            kept = {p.name: p.read_text() for p in mine.parent.glob(mine.name + ".bak*")}
+            self.assertEqual(sorted(kept), [f"{mine.name}.bak", f"{mine.name}.bak.2", f"{mine.name}.bak.3"])
+            for v, name in zip(("V1", "V2", "V3"), sorted(kept)):
+                self.assertIn(f"MY {v} EDIT", kept[name])
 
 
 class ScheduledFlows(Base):
@@ -1617,6 +1663,20 @@ class RunsApi(Base):
         self.assertEqual(code, 1)
         self.assertIn("wb: --context-file", err)
         self.assertNotIn("Traceback", err)
+
+    def test_a_context_past_its_cut_is_said_at_start_and_in_each_spec_it_goes_in(self):
+        # #1519 (2026-11-26): run.json kept it cut, so the spec's cut note never showed and
+        # nothing said the agents missed all past 4,000 characters
+        ctx = Path(self.tmp.name) / "ctx.md"
+        ctx.write_text("x" * 5_990 + "TAILMARKER")
+        flow = {**AUDIT, "stages": [{**AUDIT["stages"][0], "prompt": "Audit area {item} now.\n{context}"},
+                                    *AUDIT["stages"][1:]]}
+        run, out = self.start("long", "--context-file", str(ctx), flow=flow)
+        self.assertIn("context: 6,000 characters, the first 4,000 go in each spec's {context}", out)
+        self.assertEqual(len(run.spec["context"]), 6_000)
+        spec = runs._spec_of(run, runs.stages(run.flow)[0], runs.state(run)["find"][0])
+        self.assertIn("\n[… 2,000 characters cut]", spec)
+        self.assertNotIn("TAILMARKER", spec)
 
 
 class Driver(Base):

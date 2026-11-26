@@ -54,7 +54,7 @@ nothing.
 your place to edit (it records the shipped one it came from); `wb run flows` and `wb card list`
 mark it `shadows shipped`, and `shipped changed since` once an update changed the shipped one:
 read the new one and merge, or `wb flow reset <name>` / `wb card reset <name>` to use it again
-(yours is kept as `.bak`).
+(yours is kept as `.bak`, `.bak.2` when that is taken: the reset line names it).
 
 ## Scheduled
 `wb schedule add <name> --flow <flow> [--param k=v] [--budget-usd N] --repo DIR --at 'Sun 02:00'`:
