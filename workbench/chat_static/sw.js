@@ -12,6 +12,12 @@ async function key() {
 }
 const plain = (t) => String(t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[`*_#>]/g, '').replace(/\s+/g, ' ').trim();
 const cut = (t, n) => t.length > n ? t.slice(0, n - 1) + '…' : t;
+// The title names the driver (#1319): a reply's own `driver`, else the listener's, else Claude
+// (Claude Code's, and every row before 2.2). OpenCode's user got pushes titled "Claude"
+const NAMES = { claude: 'Claude', opencode: 'OpenCode' };
+const named = (d) => (d && NAMES[d.tool]) || '';
+const driver = (s) => named(s.listener && s.listener.driver)
+    || (s.listener && s.listener.tool === 'opencode' ? 'OpenCode' : '') || 'Claude';
 async function what() {
     const token = await key();
     // Claude's last word only: the whole state was up to a megabyte (#755)
@@ -24,14 +30,14 @@ async function what() {
     const last = (s.messages || []).filter(m => m.from === 'claude' || m.from === 'notice').at(-1);
     const test = s.push && s.push.test;
     if (test && now - test < 120 && test >= (last?.ts || 0))
-        return { title: 'Notifications work', body: "You'll hear from Claude here while you're away." };
+        return { title: 'Notifications work', body: `You'll hear from ${driver(s)} here while you're away.` };
     // the command as it is: plain() would drop the `*` of `rm -rf runs/*`
     if (last && last.from === 'notice')
         return { title: last.text,
             body: cut(String(last.what || '').replace(/\s+/g, ' ').trim() || 'Answer it in the terminal.', 180) };
     if (last)
-        return { title: 'Claude', body: cut(plain(last.text), 180) };
-    return { title: 'Claude', body: 'Something new in the chat.' };
+        return { title: named(last.driver) || driver(s), body: cut(plain(last.text), 180) };
+    return { title: driver(s), body: 'Something new in the chat.' };
 }
 self.addEventListener('push', e => {
     e.waitUntil((async () => {

@@ -42,7 +42,11 @@ runs the new scripts.
   for Claude Code, `{"tool": "opencode", "model": "<provider>/<id>"}` for OpenCode (the model of
   that session, when its server says).
 - **Which driver answered:** each reply carries `driver`, its writer, in the same shape. Show it
-  as the answer's author; the client script prints `[answered by …]`.
+  as the answer's author; the client script prints `[answered by …]`, and the web page names the
+  driver the same way: a reply by its `driver`, a receipt by its `by` (OpenCode's session ids
+  start `ses_`), the header and "Waiting for a(n) … session" by the listener's (with none
+  listening, the last reply's), a push's title by the
+  reply's, else the listener's; Claude Code where nothing says.
 - **One at a time:** with both drivers open on one machine, one listens (it holds the chat's
   claim, `listener`), and only its replies thread onto an agent's message; the other's plain
   reports go to the user.
@@ -294,7 +298,11 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
   `received` (the driver's receipt, or null) and `expired: true` once unread past `expire`. A notice
   (a dialog waiting in the terminal) is left out once it settles.
 - `listener`: the listening session `{session, cwd, pid, start, machine?, parent?, busy, driver}`,
-  or null (`driver`: *The driver*).
+  or null (`driver`: *The driver*). Claude Code's claim: `pid` its `wb events` process, `parent`
+  its Claude Code. OpenCode's: `{session: "<OpenCode session id>", tool: "opencode", cwd, pid,
+  start, machine, busy, driver}`, `pid` and `start` the OpenCode server's whose plugin delivers
+  the messages into that session, no `parent`; it listens while that server runs and no
+  heartbeat of it taken since the claim leaves the session out (one deleted there).
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
 - `savings`: the week's `wb savings` totals and `score`, and `api`: the week's API tasks apart
   (`tasks`, `cost` in dollars, `unknown`, `plan`, `trials`, `claude`, `self_est`, `by_provider`,
@@ -385,8 +393,8 @@ such file` (for an agent, also when it isn't its own).
 
 ### `GET /api/latest` (user only)
 What a push notification shows: `{now, messages: [the driver's last message for the user, or an
-open notice], push: {test}}`. A reply only to
-agents is never pushed.
+open notice], listener, push: {test}}` (`listener` as in `/api/state`: its `driver` names a push
+whose row says none). A reply only to agents is never pushed.
 
 ### `GET /api/shot?task=<task>&n=<n>&side=base|candidate` (user only)
 One side of a `wb shot` pair as a PNG (at most 16 MB). 410 `expired` once pruned with its task,
@@ -518,7 +526,11 @@ A **message** (`messages`, `replies`, `message`):
   (the Claude Code process that wrote it, on every row Claude Code writes: a reply, a screenshot, a listen),
   and on a `wb chat reply` from Claude Code `session?`, `claude_start?`, `claude_machine?` beside
   it (the Claude Code session that wrote it, so the user's answer goes back to that session),
-  `turn_by?` (on the listening session's reply: whose turn's end makes a wait on it `done`).
+  `turn_by?` (on the listening session's reply: whose turn's end makes a wait on it `done`); on a
+  row an OpenCode session wrote, `driver: {tool: "opencode", model?}` and `opencode_session?`
+  (that session's id, for the plugin's check that a turn still owes the user an answer), never
+  `session` or `claude_*`. A notice from OpenCode says `OpenCode is waiting for you in the
+  terminal.` and carries `driver: {tool: "opencode"}`.
 
 ## The stream's events
 
