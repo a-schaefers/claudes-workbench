@@ -1589,17 +1589,23 @@ def _held(run: Run, it: Item) -> bool:
     return True
 
 
-def _cap_held(run: Run, stage: dict, it: Item) -> str | None:
-    """The day cap's refusal of ``it``'s last start while it still holds (that day, that cap),
-    else None. Each pass ran a refused wb start, journalled item and retry and wrote a spec, and
-    the journal's write woke the driver at once: about 7 starts a second until midnight at the
-    cap, under keep-awake (#1543, 2026-11-26). A cap the user raised tries again."""
+def _cap_held(run: Run, stage: dict, it: Item, m) -> str | None:
+    """The day cap's refusal of ``it``'s last start while it still holds (that day, that cap,
+    and the cap still refusing ``m``, the item's model now: stage_model), fresh, else None. Each
+    pass ran a refused wb start, journalled item and retry and wrote a spec, and the journal's
+    write woke the driver at once: about 7 starts a second until midnight at the cap, under
+    keep-awake (#1543, 2026-11-26). A cap the user raised tries again, and so does a role the
+    pause's own advice moved to the GPU or a free model: held on the journal row alone, `wb run
+    resume` paused again at once with the old line until midnight (#1543's review, 2026-11-26)."""
+    if m is None:
+        return None  # the GPU's: no day cap
     rows = [r for r in run.journal() if r.get("stage") == stage["id"] and r.get("key") == it.key
             and r.get("kind") in ("item", "retry")]
     last = rows[-1] if rows else {}
-    if last.get("kind") == "retry" and last.get("day") == meter.day() and last.get("cap") == meter.cap():
-        return last.get("why") or f"the day cap ({meter.RESETS})"
-    return None
+    if last.get("kind") != "retry" or last.get("day") != meter.day() or last.get("cap") != meter.cap():
+        return None
+    why = meter.refusal(m, item_role(stage, it), advice=False)
+    return why if why and meter.RESETS in why else None  # any other refusal is wb start's to say
 
 
 def _room(run: Run, stage: dict, st: dict, m) -> str | None:
@@ -1709,7 +1715,7 @@ def tick(run: Run) -> bool:
                                                          and r.get("key") == it.key for r in run.journal()):
                     prev = escalation_key(it.key, k - 1) if k > 1 else re.sub(r"#e\d+\Z", "", it.key)
                     run.log(kind="escalated", stage=s["id"], key=it.key, after=prev, role=item_role(s, it))
-                got, why = ("paused", capped) if (capped := _cap_held(run, s, it)) else _start(run, s, it, n)
+                got, why = ("paused", capped) if (capped := _cap_held(run, s, it, m)) else _start(run, s, it, n)
                 if got in ("not_run", "null"):
                     run.log(kind=got, stage=s["id"], key=it.key, why=why)
                     it.state = got

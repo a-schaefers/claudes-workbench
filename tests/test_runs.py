@@ -1544,6 +1544,27 @@ class RunsApi(Base):
         self.assertEqual([r["kind"] for r in held.journal() if r.get("stage") == "find"], ["item", "retry"])
         self.assertEqual(held.status["phase"], "paused")                 # nothing until wb run resume
 
+    def test_a_run_paused_at_the_day_cap_starts_its_item_once_resumed_on_the_gpu_or_a_free_model(self):
+        # #1543's review, 2026-11-26: _cap_held held on the journal's retry row alone, so a run
+        # paused at the cap whose role the pause's advice moved to the GPU (or a free model)
+        # paused again at once on `wb run resume`, with the old line, until midnight
+        self.spent(5.03)                                                 # today at the $5 cap
+        for name, switch in (("capg", lambda: (store.write_json(Path(os.environ["WB_ROUTES"]), {
+                                 "v": 1, "day_usd": 5, "roles": {"significant": {"via": "gpu"}}}),
+                                 meter._CAP.clear())),
+                             ("capf", lambda: self.roles(SPEND_FREE, 5))):
+            self.roles(SPEND_FLASH, 5)
+            run, _ = self.start(name, "--budget-usd", "1")
+            runs.tick(run)
+            self.assertEqual(run.status["phase"], "paused")
+            switch()
+            run.set_status(phase="running", why="")                     # what wb run resume does
+            runs.tick(run)
+            self.assertEqual(run.status["phase"], "running", run.status.get("why"))
+            self.assertEqual([(r["kind"], r.get("task")) for r in run.journal() if r.get("stage") == "find"],
+                             [("item", f"{name}-find-1"), ("retry", None), ("item", f"{name}-find-2")])
+            self.assertTrue(store.Task(f"{name}-find-2").exists)
+
     def test_any_other_exit_3_is_not_run_and_an_overnight_run_never_tries_it_again(self):
         # the review of #1278 (2026-11-25): "day cap" matched NO_PRICE, NO_CAP and UNREADABLE too,
         # and an --overnight run retried a refusal that never clears every tick, silently
