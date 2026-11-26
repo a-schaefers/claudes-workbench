@@ -507,6 +507,14 @@ def _beating(hb: dict) -> bool:
     return time.time() - hb["ts"] <= HEARTBEAT_FRESH and models._alive(hb["pid"])
 
 
+def beat_of(pid) -> dict | None:
+    """The fresh beat of this machine's running OpenCode server ``pid``, or None: what the web
+    chat's OpenCode listener (`chat.listener`) and anything else asking after one server read."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    return next((hb for hb in heartbeats() if hb["pid"] == pid and _beating(hb)), None)
+
+
 def _store_of(hb_or_driver: dict) -> str:
     """The OpenCode store a beat lists or a task recorded (`store`: the server's database, an
     absolute path), as a real path so a link and its target are one store; "" for none."""

@@ -3731,7 +3731,8 @@ plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*)
   mod. Before the mod has an id, its directory rule could match one (a check of `driver.tool` in
   `mine` is for later).
 - **The heartbeat.** The format the workbench plugin's server part is to write (#1316); no writer
-  exists yet, and wb only reads it. One file per OpenCode server, `drivers/opencode-<machine_tag>-<pid>.json`
+  exists yet, and wb only reads it (the tasks' owners, and the web chat's OpenCode listener:
+  `store.beat_of(pid)`, one server's fresh beat, `chat._server_listens`, #1319). One file per OpenCode server, `drivers/opencode-<machine_tag>-<pid>.json`
   (`store.beat_path`), never one for them all: the background service, every
   `opencode --standalone` TUI and wb's own `--standalone` helpers (`models._opencode_json`,
   `keyhole._opencode`, the runner's export, which load the user's global plugin too) are each a
@@ -6483,7 +6484,10 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
 - **One listener.** A session listens while workbench mode and the chat are on; with several, the
   first live claim on `chat/listener.json` (its `wb events` pid and start). The user's message
   answering another session's row is that session's (#1096): `wb chat reply` stamps the session that
-  wrote it, and that session's mod takes it, listening or not.
+  wrote it, and that session's mod takes it, listening or not. On OpenCode (#1319) the listener is
+  the OpenCode server whose plugin holds the claim (its pid and heartbeat), for the root session
+  the user last typed in there; first live claim wins across both drivers, with no handoff between
+  them (#1340: *The web chat on OpenCode*, under *The OpenCode plugin*).
 - **Claude knows where the user is.** A web message has a typed message's authority, with a note:
   reply there, briefly; a yes there answers only a question asked there; nothing hard to undo on an
   ambiguous OK; while away, report there what finishes or needs them.
@@ -6503,7 +6507,8 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   for a message in a pinch). Nothing is answered on the phone, on either driver: a permission, a
   question (AskUserQuestion), a plan (ExitPlanMode) or an MCP server's form (an elicitation) waits
   in the terminal, and the page shows one line while it does, a `notice` (`wb chat notice`): `Claude
-  is waiting for you in the terminal.`, a permission's adding `Run it with permissions granted to
+  is waiting for you in the terminal.` (OpenCode's: `OpenCode is waiting for you in the terminal.`,
+  #1319), a permission's adding `Run it with permissions granted to
   work from the chat.` (`chat.WAITING`, `WAITING_GRANT`): the driver's own permission modes and
   rules are the one permission policy, and run with them granted most work goes on from the chat
   (#1350's comment). No buttons; every kind, away or not, an agent's turn too; pushed as Claude's
@@ -6518,9 +6523,11 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   messages queued behind it. The mod refuses AskUserQuestion with ``The user is away: ask in the
   web chat (`wb chat reply`) and end your turn.`` (`AWAY_QUESTION`) and ExitPlanMode with `Post the
   plan in the web chat and end your turn; approval is at the terminal.` (`AWAY_PLAN`); at the
-  terminal both are ordinary dialogs. On the OpenCode path (#1319) the same words come from
-  `execute.before`, since a `permission.hook` deny loses the text. The mod's side: *The web chat
-  listener*, under *The mod*.
+  terminal both are ordinary dialogs. On the OpenCode path (#1319) the plugin refuses OpenCode's
+  `question` tool from `execute.before` (a `permission.hook` deny loses the text) with ``The user is
+  away: ask in the web chat (the workbench_chat_reply tool) and end your turn.`` (`chat.ts`
+  `AWAY_QUESTION`, naming its tool by `REPLY_ID`); a plan has no dialog there (Plan is an agent). The mod's side: *The web chat
+  listener*, under *The mod*; the plugin's: *The web chat on OpenCode*.
 
 **Other agents** (#1042). The API is documented for other clients in `docs/chat-api.md` (every
 endpoint, the stream, the agent flow with curl; `test_docs` fails on a path in `chat.py` it doesn't
@@ -6729,8 +6736,13 @@ client; the server needs no browser.
   `claude_start`, `claude_machine` beside it on a `wb chat reply` from Claude Code: the session
   that wrote it, whose mod takes the user's answer to it, #1096; `turn_by`: the listener's key, its
   `turns.jsonl` `by`, on a reply of the listening session's, `chat.caller_listens`: only that
-  session's turn end makes a wait on it done, #1303). A `notice` (`wb chat notice`) has `text: "Claude is waiting for you in the
-  terminal."` (a permission's adds `Run it with permissions granted to work from the chat.`) and adds
+  session's turn end makes a wait on it done, #1303; on a row an OpenCode session wrote, `driver:
+  {tool: "opencode", model?}` and `opencode_session`, its `OPENCODE_SESSION_ID`, never `session`, `cli._chat_writer`,
+  #1319: the plugin's owed-reply check, `chat.owed`, reads it, and the Claude Code mod's #1096 rule
+  never hands a message to a session it can't judge). A `notice` (`wb chat notice`) has `text: "Claude is waiting for you in the
+  terminal."` (a permission's adds `Run it with permissions granted to work from the chat.`; from an
+  OpenCode session, `store.caller_kind`, `OpenCode is waiting for you in the terminal.`,
+  `chat.WAITING_FOR` with `chat.DRIVER_NAMES`, and `driver: {tool: "opencode"}`) and adds
   `tool, kind: "permission"|"plan"|"question"|"elicitation", what?` (2000 characters): news like
   Claude's (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only
   `from: claude`; `chat.thread` leaves it out once settled (the page's line clears, #1350). `files`: `[{id, name, size, type, path}]`.
@@ -6753,10 +6765,11 @@ client; the server needs no browser.
   first session, again to it, or to another after `CLAIM_STALE` 120 s; else exit 1, and for an
   expired one `<id> expired: over 6 hours unread, so not passed to Claude; the page offers to send
   it again`.
-- `away.json`: `{at, by}` (seconds), by the mod's listener on a web message (`by` its key) or the
+- `away.json`: `{at, by}` (seconds), by the mod's listener on a web message (`by` its key; the
+  OpenCode plugin's through `wb chat ack --away`, `by` its session, `chat.went_away`) or the
   server on page use while on, from another device than this one (`by: "page"`; never a localhost
   Host, #1374); `{at: 0}` on a prompt typed in any session, a terminal
-  dialog settled there, or the chat off.
+  dialog settled there (on OpenCode `wb chat back`, `chat.back`), or the chat off.
 - `page.json`: `{at}`, the last page use, chat on or not (for `PAGE_RECENT`).
 - `listener.json`: `{session, cwd, pid, start, machine, parent, busy}` (from the `wb events` hello;
   `parent` its parent, the listening Claude Code, which `chat.caller_listens` checks against a
@@ -6768,7 +6781,13 @@ client; the server needs no browser.
   newer than its last beat) reads as Claude Code's, which then counts as the listener too. Counts
   while its pid is this user's and started at `start` (`chat._alive` = `models._alive`: a root
   daemon on a recycled pid answered EPERM, #532), without a pid while its `ts` is under 15 s, and
-  always when `machine` is another's (`chat.listener`, #922).
+  always when `machine` is another's (`chat.listener`, #922). An OpenCode server's (#1319, `wb chat
+  listener`, `chat.hold` under `listener.lock`): `{session, tool: "opencode", driver: "opencode",
+  cwd, pid, start, machine, busy}` (`chat.listener_driver` names it OpenCode by its `tool`, with the
+  session's model from its server's beat, `store.beat_of`), `pid` the server's, `start` as wb reads it; it counts while that process runs
+  (pid and start) and, once the server beats, while its fresh beat (`store.beat_of`) lists the
+  session whenever the beat names its `store` (`chat._server_listens`); `{}` once dropped
+  (`chat.drop`).
 - `wb chat pending` lists every unreceipted message (#265). A notice open past `ASK_STALE` (an
   hour) no longer counts in `waiting_on_user` (a session that died with its dialog up). A user message unread past `MESSAGE_EXPIRE` (6 h, the one threshold) is `expired: true`; claim
   refuses it and the page offers *send again* (a new cid, the same uploads and `about`, #843). The
@@ -7965,9 +7984,11 @@ one package whose parts OpenCode loads from one `plugins` entry (OpenCode 2.4.1'
 `build/plugins/index.mdx` *Parts* and *Load*; read from its source, `anomalyco/opencode` v2.4.1).
 Its driver side is built from OpenCode's own parts (the host-shape decision,
 https://github.com/a-schaefers/workbench/issues/1296#issuecomment-7158435888); the agents stay one
-laned `opencode run --standalone` per round from the runner. This is the skeleton (#1311); the
-pane, the notices, the gates and the agent come in #1312 to #1316. The skeleton runs no wb command:
-the first part that does (#1312) must run it in the OpenCode session's directory, where wb takes a
+laned `opencode run --standalone` per round from the runner. The skeleton (#1311) and the web chat
+(#1319, `chat.ts`: *The web chat on OpenCode*, below); the pane, the notices, the gates and the agent
+come in #1312 to #1316. The chat runs `wb chat` commands only, as the session it acts for
+(`OPENCODE_SESSION_ID`), its claim in the session's directory; the first part that runs a task's
+commands (#1312) must run them in the OpenCode session's directory, where wb takes a
 session's scope from (`cli._caller` reads the cwd beside `store.opencode_session`; the heartbeat's
 session `dir` is the other source, once the plugin writes beats, #1316: #1309's review).
 
@@ -7979,12 +8000,15 @@ session `dir` is the other source, once the plugin writes beats, #1316: #1309's 
   `bin/`, `workbench/`, `agent/`, `skill/`, `opencode-plugin/*.ts` and `LICENSE` (the plugin and
   the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
   executable); no `type` field, so nothing else in the repository changes how it loads.
-  `opencode-plugin/package.json` (`type: module`, `files` the four parts) is the one a clone's
+  `opencode-plugin/package.json` (`type: module`, `files` the parts: `server.ts`, `tui.ts`,
+  `rpc.ts`, `wb.ts`, `chat.ts`) is the one a clone's
   entry loads (`wb setup --opencode`'s `opencode-plugin/` directory). Each part is TypeScript, run
   as it is by OpenCode's Bun, a package's in `node_modules` too.
   - `server.ts`: `{id: "workbench", setup}` (OpenCode's check is that shape alone,
-    `core/src/plugin/module.ts` `Module`). Setup registers the RPC's `status` handler; under
-    `WB_TASK` it returns at once (#1363). It exports `ID` and `status(options, env)`.
+    `core/src/plugin/module.ts` `Module`). Setup registers the RPC's `status` handler and sets up
+    the web chat (`chat.ts`'s `chat(ctx)`); each part's cleanup joins `stops`, and setup returns
+    one cleanup that runs them all, newest first, at its end, so a part registered later is never
+    after a `return`; under `WB_TASK` it returns at once (#1363). It exports `ID` and `status(options, env)`.
   - `rpc.ts`: the contract `Workbench` (`id: "workbench"`), JSON Schema, no validator package:
     `status` → `{wb, found, from: options|package|PATH|none, home}`. Called over HTTP as `POST
     /api/rpc/workbench/status` with `{"input": {}}` (`protocol/src/groups/rpc.ts`), by the TUI
@@ -8005,6 +8029,10 @@ session `dir` is the other source, once the plugin writes beats, #1316: #1309's 
     `findWb` (#1200); `wbEnv`: OpenCode's environment with the options' `env` over it;
     `wbHome(env, cwd)`: `WB_HOME` with a `~` or a relative path expanded as `store.home` does,
     else `~/.local/state/workbench`. Nothing runs at import.
+  - `chat.ts`: the web chat (*The web chat on OpenCode*, below); `chat-env.d.ts`, the runtime only
+    it uses (timers, `AbortController`, `node:child_process`'s `execFile`, `readFileSync`), in a
+    file of its own so parts built at once each add theirs; its OpenCode API shapes
+    (`ChatContext`) are its own, from the sources each names.
   - `env.d.ts`, `host.d.ts`: the runtime (`process`, `URL`, `import.meta.url`, `node:fs`,
     `node:path`, `node:url`, `bun:test`) and the
     subset of OpenCode's plugin API the parts use, declared from OpenCode's source (each shape
@@ -8118,7 +8146,9 @@ session `dir` is the other source, once the plugin writes beats, #1316: #1309's 
   CI's `opencode-plugin` job runs it after the Bun tests (its own job since #1328, as `mod` is the
   mod's; it was the kernel job's), and `wb patch upstream` names both for a patch that touches
   `opencode-plugin/`, the mod's core it imports or `kernel/` (`patches.PLUGIN_TESTS`).
-- **Tested** by `opencode-plugin/test/plugin.test.ts` (`BUN_BE_BUN=1 opencode test opencode-plugin/test`:
+- **Tested** by `opencode-plugin/test/chat.test.ts` (the web chat's lane against a fake wb and session
+  API, *The web chat on OpenCode*; wb's side in `tests/test_chat_opencode.py`) and
+  `opencode-plugin/test/plugin.test.ts` (`BUN_BE_BUN=1 opencode test opencode-plugin/test`:
   both parts' shape and id, nothing touched under `WB_TASK` (a proxy context that records every
   access, the list asserted empty: a throw alone was swallowed by `tui.ts`'s own `catch`, so its
   guard could be deleted with the test passing, #1311's review), the one RPC registered, which wb
@@ -8159,6 +8189,78 @@ session `dir` is the other source, once the plugin writes beats, #1316: #1309's 
   `RealOpenCodeRun`); a runner that survives the TUI and the background service ending (#1312,
   the first slice that starts a task from inside OpenCode); a wake with no TUI open and a notice
   resent once only (#1313, the notices); forms in the web app and on a phone (#1314, the gates).
+
+### The web chat on OpenCode
+
+`opencode-plugin/chat.ts` (#1319, #1340; the host-shape decision: in-process turns and a
+`chat_reply` tool, `workbench_chat_reply` to the model, the listener the server and its heartbeat). The same outcomes as the Claude
+Code mod's *The web chat listener*, OpenCode-native, with #1340's simplifications; wb stays the
+system of record: every write is a `wb chat` command (`runner`: the options' wb and `WB_*` paths,
+`OPENCODE_SESSION_ID` the session it acts for, `CLAUDECODE`, `CLAUDE_PID`,
+`CLAUDE_CODE_SESSION_ID` and `WB_TASK` dropped, `RUN_MS` 15 s), and it reads only
+`chat/open.json`, `chat/listener.json` and `messages.jsonl`'s size.
+- **One lane per server process** (`lane()`, on `globalThis`): OpenCode may set the plugin up per
+  location; each setup adds its session API, its `prompt` and `execute.before` hooks and its event
+  feed, and events are taken once by id (`seen`). Setup registers the tool and the hooks only; the
+  poll (`POLL_MS` 2 s, a file read) and the event feed (`EVENTS`: `session.execution.*`,
+  `session.inbox.delivered`/`cancelled`, `session.text.ended`, `session.revert.*`,
+  `permission.asked`/`replied`, `form.created`/`replied`/`cancelled`) start once a session here
+  listens (`activate`), so wb's own `--standalone` servers, which remove the plugin anyway
+  (`models.plugin_off`), never start or claim the chat. The last cleanup drops the claim.
+- **Who listens.** A prompt the user typed (the `prompt` hook: a root session, unmarked metadata,
+  not `[web chat] ` or `[agent `; automations, `/goal` and our own deliveries carry metadata) makes
+  that session the listener: `wb chat url --json` (on or off, every `CHECK_MS` 60 s, which brings
+  the server up as the mod's link does), `wb chat back`, and `wb chat listener <session> --pid
+  <server pid>` (`chat.hold`: refused while another live claim stands, a Claude Code session's or
+  another server's; the same server moves it between its sessions). `busy` follows the session's
+  executions. A claim found emptied (`wb chat off`, then on) is taken again at once; a refused one
+  at the next check. A server restarted listens again once the user types in it.
+- **Delivery.** Each message `open.json` holds (the user's, or an agent's: `agentOf`), oldest first,
+  once `wb chat claim <id> --by <session>` grants it (refused: `RETRY_MS` 60 s later; expired:
+  never), goes in as `session.prompt` with `delivery: "steer"` (it enters a running turn at its
+  next step, or opens one), `metadata: {source: "workbench.chat", chat: <id>}` (`SOURCE`), and the
+  inbox id `inboxId(<id>)`: OpenCode's own shape (`msg_`, 12 hex of the message's own ms time as
+  `schema/src/identifier.ts` makes it, then `wb` and the id's hex twice), so it sorts as a prompt
+  typed then would (another shape sorted wrong on a revert, #1340) and a retry gets the first
+  admission back; a conflict (that id in another session) is delivered there. The text is the
+  mod's `chatPrompt` (`[web chat] <words>`, an agent's `[agent <name>] …` with its lines indented
+  and `[message <id>: answer with workbench_chat_reply, to <id>]`, `about`, attachments), then
+  `WEB_NOTE` or `AGENT_NOTE` (answer with the `workbench_chat_reply` tool: every text names
+  `REPLY_ID`). Nothing while a revert is staged in the
+  session (a prompt commits it: `session.revert.staged` until `cleared`/`committed`). On
+  `session.inbox.delivered`: `wb chat ack <id> --by <session> --how now` (an agent's into a running
+  turn `into`, #1175) and, for the user's, `--away`. On `session.inbox.cancelled` (only
+  `Session.cancelInbox` publishes it: the user cancelled the pending item in the TUI or the app)
+  the message is dismissed, never sent again: `wb chat ack <id> --by <session> --how now`, not
+  owed, and for the user's `wb chat back` (a retry under the same inbox id came back after every
+  cancel for six hours: the chat-path review, 2026-11-25).
+- **The turn's answer** (#1340 F). Each delivered message is owed a reply by the session it went
+  to (`turns`, by session: the listener may move since); the turn's answer is the
+  last assistant message's text (`session.text.ended`, its parts joined). At the session's
+  execution end (succeeded, failed or interrupted), one `wb chat reply --turn-answer --if-owed
+  --text=<answer> --to=<id>…` per sender (#1273), which posts only where the session still owes one
+  (`chat.owed`: no `from: claude` row since the message's receipt answers it by `re`, or is the
+  session's own, `opencode_session`, not an `auto` post, to its sender); a turn that said nothing
+  leaves it owed for the next. Then `wb chat ended <ids> --by <session>` (the messages that turn
+  took, or none when `messages.jsonl` grew), after the post (#1352). A typed prompt settles what
+  the user is owed, never an agent's.
+- **`chat_reply`** (the tool, namespace `workbench` (`NAMESPACE`), so OpenCode's id for it, the one
+  the model sees, is `workbench_chat_reply`, `REPLY_ID`: `effectiveName` in core/src/tool/runtime.ts;
+  `{text, to?}`): `wb chat reply --text … --to …`
+  as the calling session's root (a subagent's reply is its driver's), so `chat.caller_listens`
+  (by `OPENCODE_SESSION_ID`, the listener's `session`) threads it onto the messages that session
+  took; wb's refusal is the tool's error.
+- **The waiting line** (#1340 E). `permission.asked` and `form.created` (`formKind`: OpenCode's
+  question tool's `question`, any other form `elicitation`) in the listening session or a child of
+  it get `wb chat notice --tool --kind --text` after `NOTICE_AFTER_MS` 30 s, at once while away
+  (`wb chat away`), one open at a time, in OpenCode's words (`OpenCode is waiting for you in the
+  terminal.`); `permission.replied` and `form.replied` are the user back (`wb chat back`) and clear
+  it (`wb chat notice --done`), as does `form.cancelled` or the turn's end, without `back`. A
+  dialog answered within `BACK_AFTER_MS` 2 s of asking was answered by OpenCode itself (the TUI's
+  autoaccept, `--auto`), so it clears without `back`. No
+  dialog is answered from the phone (#1340: the relay through `permission.list`/`reply` is struck).
+- **A question while away** (#1340 B): `execute.before` refuses the `question` tool in the listening
+  session's tree with `AWAY_QUESTION` while `wb chat away` says `away`.
 
 ## Waiting without polling
 
@@ -8438,9 +8540,9 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--default NAME`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. `--default NAME` (no prompt) sets images.json's `"default"` (*The default engines*). |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end) | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy]` (`chat.hold`: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (`chat.WAITING_FOR`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and its listener `(OpenCode)` | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
 | `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one), `--queue` (accepted, a no-op: the sample queues behind the GPU's holders as any start does, #1251, #1322), `--force` (passed to wb start: the sample waits for a model whose server isn't up yet, else exit 3 with wb start's can't-run refusal, whose `--force` advice wb try once rejected as an unknown argument, #1297) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016) and `--no-sign`, set up by `wb init --no-sign` (a locked key failed it or hung it on a prompt, #1226), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) says so in wb start's model line (#1322: its own line went). |
-| `wb chat reply --turn-answer` | `--text`, `--to <id>` (again for more) | The mod's: a turn's own answer for a web message it didn't reply to (*The web chat listener*, #1352): an `auto` row, cut to `chat.TURN_ANSWER_MAX` 4,000 characters (`chat.turn_answer`). |
+| `wb chat reply --turn-answer` | `--text`, `--to <id>` (again for more), `--if-owed` (the OpenCode plugin's: only the `--to` messages its session still owes, `chat.owed`; none: `not owed: the session replied`, exit 0; a post says `sent to the web chat: <ids>`; without `--turn-answer` and `--to`, exit 1) | The mod's: a turn's own answer for a web message it didn't reply to (*The web chat listener*, #1352): an `auto` row, cut to `chat.TURN_ANSWER_MAX` 4,000 characters (`chat.turn_answer`). The OpenCode plugin's the same, with `--if-owed` (*The web chat on OpenCode*). |
 | `wb init <dir>` | `--no-sign` (its commits unsigned, whatever `commit.gpgsign` says; else signed as accept's, `UNLOCK` at once for a locked key, #1226) | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`), no hooks run (#1254). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
 | `wb setup` | from OpenCode's install refused, exit 1, nothing changed (`wb setup links nothing to OpenCode's install at <dir>: …`, *The OpenCode plugin*); `--force` (only the web app's service unit link pointing elsewhere replaced, which without it is kept and used: wb's own links are replaced without it since #1322), `--no-service` (no service for the web app), `--opencode` (the OpenCode path's fallback, #1311: the `~/.local/bin/wb` link and the OpenCode plugin's entry, `ocplugin.install`, never the `skills/workbench` link, which OpenCode would also list from `~/.claude/skills`. In the file `models.own_config` writes: an entry of the plugin already there keeps its source and gets the options, `ok  the OpenCode plugin <spec> in <file>: its options name <clone>/bin/wb`; one naming another copy's directory moves to this one, `… → <dir> (was <spec>)`; none: `{"package": "<the copy of the clone's committed opencode-plugin/>", "options": {"wb": "<clone>/bin/wb", "env": {WB_* paths}}}` appended (*The OpenCode plugin*: `ocplugin.make_copy`), `… added to <file> (made)`; a second entry of it left, `--  <file> loads the plugin twice (<spec> too): remove one by hand`; a copy in OpenCode's global `plugin/` or `plugins/` directory and no entry: none added (it would be a duplicate id), `--  <dir> loads the OpenCode plugin already (OpenCode's plugins directory), without options: it runs wb by name; left as it is`; a `"-workbench"` there kept, said; then patches.json's `source` set to the clone (`patches.note_install`, as `wb patch init`'s: a later init reuses it, #1321's finding 14); own_config's refusal `BAD …: make this change by hand: add {…} to "plugins" (or run opencode plugin add '…')`, exit 1; off PATH, `--  <home>/.local/bin isn't on PATH: OpenCode's plugin runs <clone>/bin/wb (its options), so only your own terminal lacks it.` and `path_advice(claude=False)`; *The OpenCode plugin*) | Links `~/.local/bin/wb` and `skills/workbench` (a link pointing elsewhere replaced, `ok <at> → <to> (was <old>)`, #1322; a real file or directory left, `BAD … is already there: left as it is`), removes a dead `skills/delegate` link (the mod runs `wb setup` when it finds no `skills/workbench`: only that link, or a fresh install, #1190), exit 1 when something is in the way, PATH advice with `~/.local/bin` off PATH (`--  <home>/.local/bin isn't on PATH: Claude runs wb by name (the mod finds <home>/.local/bin/wb without it, #1200).`, then `cli.path_advice`; with the mod installed, `cli.mod_listed`, for the user's own terminal only, `path_advice(claude=False)`: Claude Code runs wb from the plugin's `bin/` and the marketplace clone, #1190), the web app's systemd or launchd service (`cli.install_service`, *The web chat*), the optimize when due, then `first run:` (`cli.first_run`, with the API keys line `cli.api_key_lines`); names no model (*Installing*). |
 | `wb update` | `--check` (`update available: …` or `up to date`; from OpenCode's install, `OpenCode's install at <dir>: OpenCode updates it (…)`, and without `--check` `wb update leaves OpenCode's install at <dir> to OpenCode: …`, exit 0, before anything else, *The OpenCode plugin*; on a marketplace clone with local changes also `patches.CHECK_LINE`, `local changes in the marketplace clone: wb update would refuse (Claude Code re-clones it); wb patch init keeps them`, alone when nothing is new; the mod toasts both; also `cli._mod_behind`), `--if-due` (implies `--check`, #602, #1322: `UPDATE_EVERY`, `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), `--stop` (`_stop_for_update`: `last` `UPDATE_STOP`, status `infra` `update`, #1260, one `stuck` notice per `store.owner`, #694, a run's items a batch of their own naming `wb run resume <run>`, its driver stopped first, `cli._batch_key`, #1278) | *Installing*, *Local patches*. A marketplace install first looks for local changes in its clone (`patches.marketplace_refusal`) and, with any, saves them under `rescued/` and refuses before anything else: Claude Code's update re-clones it and would wipe them (#1005); a clone does the same to Claude Code's git marketplace clone when there is one (`cli._marketplace_clone`, #1326). A clone: first `patches.track_upstream` (its line printed after the report, with `--check` too), then a branch still tracking nothing refused, `couldn't check for an update: branch B tracks no upstream: git -C P branch -u origin/main B` (`no_upstream`, #1327); `git pull --ff-only` (uncommitted tracked changes refused); on branch `local`, after the fetch, each pull request `wb patch send` opened (`patches.json` `sent`) is asked of gh, `gh pr view <n> -R <owner/repo> --json state,mergeCommit`, at most `GH_SECS` each (`patches.settle_sent`; never with `--check`, which the mod runs on a timer): merged, its merge commit (when gh names one) in the fetched upstream (else nothing yet: `PENDING`), its local commit (matched by ident) is left out of the rebase and the row marked `merged`; closed, at the end once (`closed_lines`, `closed_said`, the patch's sha as it is after the rebase) `your pull request #<n> was closed without merging: kept the local patch <subject> (wb patch check <sha> tells whether upstream fixed it another way)`; open, nothing; not asked (gh missing, offline, a timeout, any other answer) `couldn't ask GitHub about pull request #<n> (<why, scrubbed>): kept the local patch`, never a failure. These lines, and `couldn't check the pull requests wb patch send opened: …`, come after the `updated …` or `already up to date` line, never ahead of it: the mod's `/workbench-update` reloads the plugin only on output that starts `updated` (#1005, 2026-11-22); a refusal after the fetch prints them first, and a plugin step that fails after the branch moved first prints the merged and landed lines too (said then or never, #1005). Then, diverged and behind or with a merged pull request's patch to leave out, its patches rebased in a scratch worktree (`patches.rebase_patches`, `check_move`) before any task is stopped and the branch moved after (`move_branch`), the report `updated clone a..b (N commit(s))` (N: upstream's news only), then `your pull request #<n> merged: dropped the local patch <subject>` per merged one, `landed upstream, dropped from local: <subject>` per patch upstream has, then `N local patch(es) on top of upstream (local)`; a conflict refuses naming the patch, ending `(wb patch check <sha> first: if upstream fixed it another way, drop it)`, its stdout first saying each pull request closed unmerged (`closed_lines`, HEAD's shas: nothing moved; `closed_said` set, so the next run doesn't repeat it); any other branch diverged is refused; on `local` (not `--check`) it writes `patches.json`. At the end, on any clone, each merged pull request whose local commit is gone from `local` is forgotten and its `pr/<slug>` retired (`retire_sent`: `pull request #<n> merged, removed pr/<slug>, its worktree and its body file`), then each `pr/<slug>` of `wb patch upstream`'s (`patches.held`: its worktree under `upstream/`, or its body file there) that landed upstream (`_landed_pr`) goes, worktree, branch and body: `landed upstream, removed pr/<slug>, its worktree and its body file` (`retire_landed`; a worktree with changes of its own is kept, and said). Then `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`, each step at most 300 s; not on a clone OpenCode's plugin loads (`ocplugin.loaded_from`: an entry naming its `opencode-plugin/`, itself or a copy of it, or options naming its `bin/wb`) that Claude Code doesn't have (`cli._claude_has_workbench`: the mod not listed, no `workbench` in either root's `known_marketplaces.json`), which is pulled and rebased alone, claude on PATH or not, its line `updated clone a..b (N commit(s)); OpenCode loads its plugin from this clone: restart OpenCode if it doesn't pick it up` (it refused without claude, and with claude failed on a marketplace it doesn't know, #1321's findings 4 and 15). On any clone, last, `ocplugin.refresh`'s lines: OpenCode's entry moved to the copy of the pulled `opencode-plugin/` (#1321's finding 16). Refuses while a runner lives (`cli._running`, `_whose`); every refusing check, a patch's conflict too, runs before `--stop` stops anything (#775). The fetch (`_fetch_origin`, the upstream's remote `branch.<name>.remote`, #875) never prompts: `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, `FETCH_SECS` 60, the user's `GIT_SSH_COMMAND`/`GIT_SSH`/`core.sshCommand` kept, else `BatchMode`. |
@@ -8554,7 +8656,7 @@ $WB_HOME (~/.local/state/workbench)
   imports/<slug>/                wb skill import's fetches, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), .json sidecars, engine.log
   audio/<YYYYmmdd-HHMMSS>/       wb audio's clips: .wav, .json sidecar, .png spectrogram, engine.log
-  chat/                          messages.jsonl receipts.jsonl open.json listener.json claims.json switch.json ({on, v})
+  chat/                          messages.jsonl receipts.jsonl open.json listener.json (listener.lock: wb chat listener's, #1319) claims.json switch.json ({on, v})
                                  serve.pid ({pid, port, start}: chat.ensure waits on it; `{port}` alone after `wb chat off`) ensure.lock serve.log port.json ({port, pid, start})
                                  away.json ({at, by}; 0 once the user types in the terminal) page.json ({at})
                                  audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json, .transcript.txt) uploads.lock
@@ -9206,6 +9308,7 @@ process with its command line));
 `test_workbench.py` (end to end, one class per feature); `test_gpu.py` (sharing, `can_share`, the budget);
 `test_portable.py` (discovery against real HTTP servers on port 0, `ServerAway`, the polling watcher, the launchers);
 `test_chat_default.py` (the web app on by default: the switch, `chat.ensure`, `wb setup`'s service and its environment, systemd and launchd, #1281, #1342, #1343);
+`test_chat_opencode.py` (the web chat on OpenCode's path, wb's side: an OpenCode server's claim and its heartbeat, `wb chat listener`, `caller_listens` by session, an OpenCode row's stamps, `--if-owed`, away and back, the waiting line in OpenCode's words, #1319);
 `test_chat_admin.py` (*The admin endpoints*, a real `wb chat serve` on a temp `WB_HOME`: GET and POST /api/settings
 round-tripping a `coding` change and its settings-changes.jsonl row, probe turned on without `probe` carrying `help`,
 415 without the JSON type, /api/stats' feed, an agent token 403 on the four and on every path and method outside
@@ -9980,7 +10083,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `session` with no `claude_pid` keeps it off `mine` by id too (`store.driver_record`).
 - **The heartbeat** (`drivers/opencode-<machine_tag>-<pid>.json`: the name, its keys, `store` and its `sessions` being every
   session in it, `ts` the listing's start, `store.HEARTBEAT_FRESH` against the plugin's beat) → the OpenCode plugin's server part,
-  which is to write it (#1316; a beat naming a `store` with a partial list makes live sessions' tasks gone), and `store.beat_path`,
+  which is to write it (#1316; a beat naming a `store` with a partial list makes live sessions' tasks gone, and its web chat
+  listener not listening: `chat._server_listens`), and `store.beat_of`, `store.beat_path`,
   `store.heartbeats`, `store.driver_server`, `store.driver_record` and `store.driver_fill` (task.json `driver.store`, `seen`, `pid`).
 - **A notice kind or its text** → the kernel's `noticePlan` (`question`, `checkin` and a phase's own name: when one is still true) and `rewakePlan`'s `kind`; the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `OUTSIDE_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `OUTSIDE_REMEDY` ↔ `privacy.since_start_line`, #1232; a question notice's `PERMISSION to ` opening ↔ the mod's `PERMISSION`; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy or none, when `OUTSIDE_NEXT`'s carry on is it, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
@@ -10029,14 +10133,21 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `prompt.submit` guard, the /workbench skill's *Agents on the web chat*.
 - **A Claude row's session** (`cli._chat_writer`: `session`, `claude_pid`, `claude_start`, `claude_machine`, as
   task.json's) → the mod's `answersTo` and `listen` (whose a user's message is, #1096), `ELSEWHERE_NOTE` ↔ reference/driving.md.
-- **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`, `Handler._desk`, `reportActive`) → `awayNow`
-  (the kernel's, `Kernel.Away`, which the OpenCode plugin is to judge by too; the mod's is an adapter),
+- **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`, `Handler._desk`, `reportActive`;
+  `chat.went_away`, `chat.back`, the OpenCode plugin's) → `awayNow` (the kernel's, `Kernel.Away`; the mod's is an adapter)
+  ↔ `chat.away` (`AWAY_FOR` ↔ the kernel's `awayMs`, the open-task rule),
   AWAY_NOTE, `#away-when`, *The web chat*.
+- **The web chat on OpenCode** (#1319): an OpenCode listener.json (`tool: "opencode"`, `chat.hold`) → `chat.listener`
+  (`_server_listens`, `store.beat_of`), the mod's `claimStands` (its pid and `start`, which it judges as any claim's), `chat.ts`'s
+  `poll` (`claim()`); `chat.ts`'s `chatPrompt`, `attachedLines`, `agentOf` ↔ the mod's; `inboxId` ↔ OpenCode's
+  `schema/src/identifier.ts`; `SOURCE` ↔ `typedByUser`; `chat.owed` ↔ the mod's `owedAtTurnEnd` rules (`re`, own rows, `auto`, an
+  agent's `to`); a row's `opencode_session` (`cli._chat_writer`) → `chat.owed`, `chat.caller_listens`; `wb chat` output the plugin
+  parses (`url --json`'s `state`, `notice`'s id, `away`'s `away`, `claim`'s ` expired: `) → `chat.ts`.
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
 - **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`) → `e2e_chat.mjs`, the WebChat tests, reference/driving.md
-  and SKILL.md's *the web chat*; **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
-  once #1296's core exists (`texts.ts`), #1319's `execute.before`, reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
+  and SKILL.md's *the web chat*, `chat.WAITING_FOR` beside it (OpenCode's, `DRIVER_NAMES`); **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
+  once #1296's core exists (`texts.ts`), `chat.ts`'s `AWAY_QUESTION` (#1319's `execute.before`, naming `REPLY_ID`, `workbench_chat_reply`), reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
 - **A message's `about`** (`{task, n, step, round}`, `{audio, n, name, path}`) → `listen`'s prefix, `aboutTag`,
   `aboutBody`, `/api/send`'s check.
 - **`$` in `register.tsx`** → only through top-level functions, or `claude plugin validate mod` fails.
