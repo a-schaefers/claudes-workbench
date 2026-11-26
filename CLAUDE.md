@@ -89,7 +89,8 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   in routes.json, the change line `wb route` prints and the mod's dialog shows, and the dialog's
   one-shot approval (`approved`); `use`, the Agents switch (`effective_via`); `busy`, the busy-GPU
   opt-in (`busy_api`); `resolve`, wb start's model.
-  `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
+  `driver.py`: the OpenCode driver (#1316): `wb driver`, the heartbeat's writer (`wb driver beat`), its
+  notes; routes.json `driver`, its pin. `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
 - `spend.py`, `savings.py`: a task's cost to Claude, and against writing it (the score GPU-only; API dollars apart, `api_totals`). `meter.py`: an API

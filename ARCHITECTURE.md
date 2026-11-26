@@ -3706,15 +3706,16 @@ plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*)
   its `session` is none the mod's process had, and with no `claude_pid` it is never gone to the
   mod. Before the mod has an id, its directory rule could match one (a check of `driver.tool` in
   `mine` is for later).
-- **The heartbeat.** The format the workbench plugin's server part is to write (#1316); no writer
-  exists yet, and wb only reads it. One file per OpenCode server, `drivers/opencode-<machine_tag>-<pid>.json`
+- **The heartbeat.** The workbench plugin's server part writes it (#1316: `opencode-plugin/driver.ts`
+  lists its store every `BEAT_MS` 30 s and hands the listing to `wb driver beat`, `driver.write_beat`,
+  which writes the file: *The driver*). One file per OpenCode server, `drivers/opencode-<machine_tag>-<pid>.json`
   (`store.beat_path`), never one for them all: the background service, every
   `opencode --standalone` TUI and wb's own `--standalone` helpers (`models._opencode_json`,
   `keyhole._opencode`, the runner's export, which load the user's global plugin too) are each a
   server, and with one shared file any of them, beating its own pid and none of the service's
   sessions, made a live session's task read as gone, so another session nearby took it, its
   notice and `wb adopt` (the #1309 review, 2026-11-25; #693/#696's kind). Each beat, rewritten
-  every 30 s, is `{tool: "opencode", pid, machine?, store?, ts, sessions: {<id>: {model?, variant?, dir?}}}`
+  every 30 s, is `{tool: "opencode", pid, machine?, store?, ts, sessions: {<id>: {model?, variant?, dir?, used?}}}`
   (`pid` the name's; a file not of that shape, or of another machine's tag or `machine`, is left
   out; one of this machine's whose pid has exited is removed: `store.heartbeats`). **Which sessions
   are live** (#1296 row 3, "the session no longer exists"): `store` is the server's database (an
@@ -3750,6 +3751,71 @@ plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*)
 - **Agents.** Under `WB_TASK` the agent's own shells carry OpenCode's id for their session, which
   is never a driver's; `wb bench run` and `wb optimize` drop it from their replays' environment, as
   they drop Claude Code's.
+
+### The driver
+Which model has the final say on the OpenCode path (#1316, by the host-shape decision): whatever
+the OpenCode session runs on, picked in OpenCode's own `/models` (variants included) or set by the
+`workbench` agent's `model`. wb doesn't own the choice; it records it and says what it means.
+Under Claude Code the driver is Claude Code, fixed (`driver.CLAUDE_CODE`, "Claude Code (fixed)"),
+and nothing here changes that path.
+
+- **Recorded.** The plugin's server part (`opencode-plugin/driver.ts`, `startDriver`) keeps, per
+  session, the model of its last `primary` request (OpenCode's `model.request` hook; a `title`,
+  `compaction` or `generate` request may use a small model and is never the driver) and of a
+  `session.model.selected` event (a `/models` pick, before its first request). Every `BEAT_MS` 30
+  s (the first after `FIRST_BEAT_MS` 1 s) it lists its store's sessions (`session.list`, every page:
+  `listAll`), each with that model or, before any request, its selection, its directory and
+  `used` (the last primary request, epoch seconds), and pipes the listing to `wb driver beat`
+  (`driver.write_beat`): wb checks it (the `pid` must be a process the call runs under,
+  `store._lineage`, so no other process's beat is written; `ts` a time; each row's `model` an id
+  `routes.driver_ref` parses, `dir` absolute) and writes the heartbeat, `machine` added (*The
+  heartbeat*). `store` is OpenCode's database path as its CLI resolves it (`storePath`:
+  `OPENCODE_DB`, else `opencode.db` on the release channels or with
+  `OPENCODE_DISABLE_CHANNEL_DB`, else `opencode-<channel>.db`, under `XDG_DATA_HOME`'s
+  `opencode/`; `cli/src/database-path.ts`), and only for a whole listing: a failed page leaves it
+  out, so its sessions can say live, never gone. Nothing listed at all writes no beat. A hook or
+  event stream the server refuses costs only its piece. wb's own OpenCode calls remove the plugin
+  (`models.plugin_off`), so they never beat.
+- **The pin.** routes.json's top-level `driver` (`routes.normalize`; absent, or `session`: each
+  session's own choice) is an optional standing default, not a fourth role: nothing routes a task
+  by it. `wb route driver <provider/model>[#variant]|session` sets it (`routes.driver_change`): a GPU
+  model's (`models.gpu_side`) needs no yes; any other id is taken for an API model, failing closed,
+  and from a model's call takes the host's dialog (`route-ok.json`, as a role's API change),
+  since the session's whole conversation, the code in it, would go to its provider. The plugin's
+  RPC `pin` method (`applyPin`) reads `wb route driver --json` and switches the session to it
+  (`session.switchModel`) unless it is `session` or the session's already; the TUI's `/workbench`
+  calls it (the pane's slice, #1312).
+- **What wb says** (`driver.info`, `wb driver`, the RPC's `driver` method): the session's model
+  (`label`: `provider/id#variant`, or `not known yet …` before its first request), `kind` (`gpu`:
+  `discover()` finds it; `api`: OpenCode's catalog lists it, `models.lookup`, cached first;
+  `unknown`), its `window` (`limit.context`), the pin, and three notes, each never a refusal (wb
+  can't make a weak model hold the bar) and said once per key with `--once` (`driver.once`,
+  `drivers/said.json`, the newest `SAID_KEEP` 400 kept):
+  - `own:<id>`: the driver is the agents' own model (`driver.agents_models`: each role's API model,
+    GPU pin or the router's pick; the same id or `models.identity`): its review isn't independent
+    and the handoff saves nothing. `wb doctor` says it every time for each live driver
+    (`driver.doctor_lines`).
+  - `local:<id>:<place>`: an API (or unknown) driver in a `local_only` repo
+    (`privacy.local_only_place`): local_only keeps API models off the agents only, so the code
+    reaches the API through the driver.
+  - `small:<id>`: the `/workbench` procedure (`skill/workbench/SKILL.md`, about a token per
+    `BYTES_PER_TOKEN` 4 bytes) takes `context.FIXED_SHARE` 40% of the window or more.
+- **The web app's Settings** row `driver` (*The admin table (settings.py)*); `wb doctor`'s `--`
+  line for a live driver that is the agents' own model, after the OpenCode plugin's lines.
+
+### A local driver on the GPU
+A driver on this machine's GPU (#1317) is held like a running task's model. `store.driver_models()`:
+the models of the sessions in this machine's fresh beats (`HEARTBEAT_FRESH`, the server running)
+that drove within `store.DRIVER_HOLD` 1800 s (`used`). `models.keep_loaded()` adds them, so a
+round's `free_gpu` never unloads the driver's model and its next turn doesn't reload it and evict
+the agent's. `models.driver_holders(m)`: each such model `discover()` finds on `m`'s GPU, not `m`
+itself (the same model shares), and resident, as an admission-only holder
+(`driver:<id>`, `models.DRIVER_HOLDER`, never written to gpu.json): `GpuLease` admits `m` beside
+it only when `admits` says both fit, else the task queues, `waiting for the GPU (held by the
+driver's <id> (<GB> GB))`, re-checked each `QUEUE_POLL` while queued (`_driver_waits`), and
+`load()`'s `_fits_beside` counts it as kept. `wb start` names it (`the GPU is busy with the
+driver's …`, `cli._gpu_wait`); a bench never preempts it (`_preempt_bench`). An API driver, a
+stale beat or a session idle past `DRIVER_HOLD` holds nothing (`DriverLease`).
 
 ## Seeing what the agent does
 
@@ -4421,7 +4487,8 @@ provider:
   --url` made it at WSL2's Windows host, followed the same way (#1167);
 - `keep_loaded` (top level): ids or Ollama names never unloaded, stopped or measured by `wb
   optimize` (#254); an id only when it starts with a configured provider, else a whole Ollama name,
-  untagged as `:latest` (`models._kept_name`, #461);
+  untagged as `:latest` (`models._kept_name`, #461); `models.keep_loaded()` adds the models this
+  machine's live OpenCode drivers run on (`store.driver_models`, *A local driver on the GPU*, #1317);
 - `variant_of`/`replaces`: a `wb optimize apply` variant's source and parent; one record
   (`router.lineage`), the variant first (#584, #723); `wb model retire` keeps both;
 - `cost`: `wb model price` (#1135): an API model's own prices, `[{input, output, cache?: {read?,
@@ -4540,7 +4607,9 @@ running models and `m` local Ollama, needs of `m` and the models not `apart` fro
 running need 3); distinct models within `OLLAMA_MAX_LOADED_MODELS` per server (`max_loaded`; unset
 or 0: `OLLAMA_MAX_LOADED` 3 per counted GPU, #466; cards counted under `gpu_gb` too,
 `models._read_devices`, #811). Resident `keep_loaded` models on `m`'s cards no task runs
-(`_kept_beside`) count in both (#803). Ollama's settings: `hardware.ollama_env_at`.
+(`_kept_beside`) count in both (#803). Ollama's settings: `hardware.ollama_env_at`. A live OpenCode
+driver's resident model on this GPU is a holder for admission alone (`models.driver_holders`,
+`driver:<id>` keys never written to gpu.json): *A local driver on the GPU* (#1317).
 
 Admission is under the `gpu.admit` flock. Holders are live `gpu.json` entries (`_alive`: the start
 time, `/proc/<pid>/stat` field 22 or `ps -o lstart=`, must match `start`; `models._ps_start` runs ps
@@ -7032,7 +7101,12 @@ chosen (`HELP`: `probe` on with no probe set up, `PROBE_HELP` with wb's line, as
 in which Claude offers to set it up and installs nothing without a yes (#1283; #1279's addendum).
 
 **The rows** (the pane's choices and sentences, moved; each `→` its wb call):
-- *shared*: `agents` → `wb route all gpu|api|both`; `busy` → `wb route busy wait|api`;
+- *shared*: `agents` → `wb route all gpu|api|both`; `busy` → `wb route busy wait|api`; `driver`
+  (#1316, after the roles' rows) → `wb route driver <id>|session`: with the OpenCode plugin
+  installed (`ocplugin.installs`) a choice, `other` (any id), of `session` (each session's own
+  `/models`), the GPU models, then the API models (`_api_stops`, each saying where the
+  conversation goes), the pin added when not listed; without it an info row, `Claude Code
+  (fixed)` (`settings.DRIVER_CLAUDE`);
   `role-<significant|trivial|writing>` → `wb route <role> gpu|api`; `coding` → `wb coding
   only|ask|decide`; `workflows` → `wb workflows on|off`; `cap` (number, usd) → `wb route cap <v>|off`;
   `progress` → `wb progress on|off` (On names an `--after` threshold). No `record`, `live`,
@@ -7784,10 +7858,11 @@ one package whose parts OpenCode loads from one `plugins` entry (OpenCode 2.4.1'
 Its driver side is built from OpenCode's own parts (the host-shape decision,
 https://github.com/a-schaefers/workbench/issues/1296#issuecomment-7158435888); the agents stay one
 laned `opencode run --standalone` per round from the runner. This is the skeleton (#1311); the
-pane, the notices, the gates and the agent come in #1312 to #1316. The skeleton runs no wb command:
-the first part that does (#1312) must run it in the OpenCode session's directory, where wb takes a
+pane, the notices, the gates and the agent come in #1312 to #1316. The skeleton ran no wb command;
+the driver part's (#1316) take no scope from the cwd (`wb driver beat`, `wb driver --session`,
+`wb route driver --json`); a part whose wb call does (#1312) must run it in the OpenCode session's directory, where wb takes a
 session's scope from (`cli._caller` reads the cwd beside `store.opencode_session`; the heartbeat's
-session `dir` is the other source, once the plugin writes beats, #1316: #1309's review).
+session `dir` is the other source, which the plugin's beats carry since #1316: #1309's review).
 
 - **The package**, in two manifests of one name, `opencode-workbench` (`ocplugin.PACKAGE`),
   `private`, its version unused (a Git install reports its commit), each `exports` `.` and
@@ -7802,7 +7877,15 @@ session `dir` is the other source, once the plugin writes beats, #1316: #1309's 
   as it is by OpenCode's Bun, a package's in `node_modules` too.
   - `server.ts`: `{id: "workbench", setup}` (OpenCode's check is that shape alone,
     `core/src/plugin/module.ts` `Module`). Setup registers the RPC's `status` handler; under
-    `WB_TASK` it returns at once (#1363). It exports `ID` and `status(options, env)`.
+    `WB_TASK` it returns at once (#1363), then starts the driver part (`startDriver`). It exports
+    `ID` and `status(options, env)`.
+  - `driver.ts` (#1316, *The driver*): `startDriver(host, run, pid, used)` registers the
+    `model.request` hook, the `session.model.selected` subscription, the RPC contract
+    `WorkbenchDriver` (`id: "workbench-driver"`: `driver` `{sessionID, once?}` → `wb driver
+    --session <id> --json [--once]`'s object; `pin` `{sessionID}` → `{applied, model?, why?}`) and
+    the beat timer, and returns the cleanup; `beatOnce`, `beatOf`, `listAll`, `storePath`,
+    `parseRef` (OpenCode's `Model.Ref.parse`, as `routes.driver_ref`), `applyPin`; `wbRunner` runs
+    wb (`findWb`, `wbEnv`) with stdin, killed after `WB_TIMEOUT_MS` 30 s.
   - `rpc.ts`: the contract `Workbench` (`id: "workbench"`), JSON Schema, no validator package:
     `status` → `{wb, found, from: options|package|PATH|none, home}`. Called over HTTP as `POST
     /api/rpc/workbench/status` with `{"input": {}}` (`protocol/src/groups/rpc.ts`), by the TUI
@@ -7934,10 +8017,15 @@ session `dir` is the other source, once the plugin writes beats, #1316: #1309's 
   `opencode-plugin/tsconfig.json` (strict, `noUncheckedIndexedAccess`, `types: []`); the mod's TS
   is Claude Code's to check (`mod/tsconfig.json` extends the types `claude plugin` generates).
   CI's kernel job runs it after the Bun tests.
-- **Tested** by `opencode-plugin/test/plugin.test.ts` (`BUN_BE_BUN=1 opencode test opencode-plugin/test`:
+- **Tested** by `opencode-plugin/test/driver.test.ts` (the store path, the ref parser, a beat's rows,
+  every page listed, the beat on wb's stdin, primary requests alone recorded and a `/models` pick,
+  the pin, the RPC), `RealOpenCodePlugin`'s
+  `test_the_plugins_server_part_beats_every_session_of_its_store_through_wb` (a real server's beat
+  names its session, store and directory; the RPC answers), and
+  `opencode-plugin/test/plugin.test.ts` (`BUN_BE_BUN=1 opencode test opencode-plugin/test`:
   both parts' shape and id, nothing touched under `WB_TASK` (a proxy context that records every
   access, the list asserted empty: a throw alone was swallowed by `tui.ts`'s own `catch`, so its
-  guard could be deleted with the test passing, #1311's review), the one RPC registered, which wb
+  guard could be deleted with the test passing, #1311's review), the RPCs registered (`status`, the driver's), which wb
   (the options', the package's own before PATH's) and which state dir (`~` and relative
   expanded)), `Setup -k opencode` (the install and doctor's lines) and
   `test_doctor_survives_an_opencode_config_that_isnt_an_object_or_cant_be_read`, `Lane`'s
@@ -8094,7 +8182,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
 | `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures are plain, no `≈`, from the model's next task; `--clear` the catalog's again. Needs `--input` and `--output`; a cache price left out is the catalog's ratio to input, printed (`models.own_cache`, #1155); refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
-| `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) / `wb route <role> fallback <provider/model>\|gpu\|none` (#1196) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--thinking-review on\|off` (the self-review alone thinks on API, #1059), `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`, #1021; without them the dialog says `via OpenRouter to its choice of backend`, #1322), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, an API fallback with no cap or one `routes._fallback_check` refuses, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin, a `gpu` fallback and `none` need no dialog. |
+| `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) / `wb route <role> fallback <provider/model>\|gpu\|none` (#1196) / `wb route driver <provider/model>[#variant]\|session` (the OpenCode driver's pin, #1316: *The driver*; alone, it shows the pin, `--json` `{driver}`; an API id from a model's call takes the dialog's yes) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--thinking-review on\|off` (the self-review alone thinks on API, #1059), `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`, #1021; without them the dialog says `via OpenRouter to its choice of backend`, #1322), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, an API fallback with no cap or one `routes._fallback_check` refuses, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin, a `gpu` fallback and `none` need no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill's history, the scan. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (never `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
@@ -8137,6 +8225,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb patch send <slug> --title T --body-file F` | `--draft`, `--anyway` (accepted, a no-op since #1322) | *Sending a patch upstream*. Refuses before any network (`patches._refuse_send`): no `pr/<slug>` in its worktree, a cherry-pick under way, uncommitted changes there, no commits over the target, an empty body or the template unchanged (a `Scope: me` commit is no refusal since #1322: the mod's dialog says `A personal patch: a commit's Scope trailer is me.`, from `git log HEAD --not --remotes` in the worktree, `personal`, one yes); then a remote off GitHub, gh not `ready` (`gh_line`; when `missing` or `logged-out` it adds `patches.ZIP_HINT`, `no GitHub account, or rather not? wb patch zip makes a .zip of the patch to email upstream yourself (it sends nothing)`, #1291), a `.github/workflows/` change over https without the token's `workflow` scope. Under Claude Code (`CLAUDECODE=1`), an OpenCode driver (`OPENCODE_SESSION_ID`, #1309) or in an agent's shell (`WB_TASK`, #1310; `store.under_model`) it then refuses unless the host's dialog approved exactly this send (`patches._approved`, `send-ok.json`), saying the user may run it in a terminal of their own. Then `gh repo fork` (not when the login owns upstream) and which repository the fork is (`_fork_of`), the push to it in gh's protocol, `gh pr create`; prints `pushed …` and `opened <url>` (`opened <url> (already open)` when a pull request for the branch is open already); on both, `patches.json`'s `sent` row records it (`note_sent`), which `wb update` asks gh about. A failed step says what is done already (a rerun goes on from there). No abbreviated flags (`allow_abbrev=False`: the dialog reads `--title` and `--body-file` as written). The mod asks the user first (*The consent gate*). |
 | `wb patch check <commit>` | | *Local patches*. A clone; the commit one of `local@{u}..local` (else `isn't one of local's patches`, exit 1; `no such commit`, exit 1). Its test files (`is_test`) alone, as a diff, `git apply --3way` onto the upstream `wb update` last fetched, in a scratch worktree under `patches/` (removed afterwards, a failure too); then only what the patch added: each `def test_…` its diff adds, as `python -m unittest <module>.<Class>.<method>` (the class read from the file there with `ast`), run by `patches.RUN_TESTS` (a `-c` script, `python -m unittest`'s loader and cwd, telling apart exit 1 a failure or an error, 3 a skip, an expected failure, an unexpected success or no test run, 0 a pass), and `claude plugin test mod` when a `*.test.ts(x)` changed (its exit 0 a pass), with `WB_HOME` inside the scratch directory and `CHECK_SECS` 900 each (the process group killed past it, a failure). One verdict, exit 0, the first that holds: `upstream fails this patch's tests (<subject>): keep it` (any failure); `<subject>'s tests didn't all run here (<why>), so wb patch check can't tell: run them where they can (a skip is not a pass)` (`a test was skipped`, `no test class holds <names>`: an added `def test_…` `_test_ids` placed in no class, `claude isn't on PATH for the mod's tests`; joined by `; `), never a pass: a test skipped without Landlock or claude was called `already passes`, inviting a drop (#1005, 2026-11-22); `<subject> has no test of its own, so wb patch check can't tell: write one (upstream asks for one in a pull request too)` (no test file, or nothing it found to run); `upstream already passes this patch's tests (<subject>): it likely fixed the same thing. Drop it with the user's yes: wb patch drop <sha>`. Before any, `<subject>'s tests don't apply to upstream any more: compare by hand`. It drops nothing. No abbreviated flags. |
 | `wb patch zip [<commit>…]` | `--name SLUG` (the zip's slug, `patches.SLUG`; default the newest commit's short sha) | *Sending a patch without GitHub*. A clone with branch `local` tracking an upstream (one tracking nothing is given one first, `track_upstream`, #1327; else refused, exit 1); the commits named (each one of `local@{u}..local`, else `<c> isn't one of local's patches (wb patch list)` or `<c>: no such commit`, exit 1; kept in local's order, as `git am` applies them), else every one there (none: `no patches on local: it is upstream's`, exit 1). No fetch, no gh, no network: the upstream `wb update` last fetched. Writes `workbench-patch-<slug or short sha>-<UTC %Y%m%d>[-n].zip` (`-2`, `-3`… beside one already there) in `~/Downloads` when that directory exists, else `$WB_HOME/patches/out/` (`patches.zip_out`), through a `.part` file renamed into place: a folder of that name holding one `git format-patch --no-signature` file per commit (`DIFF_PLAIN`, `0001-…`) and `README.txt` (`ZIP_README`: the commits' subjects, the base, `merge-base local local@{u}`, `git switch -c` and `git am <this folder>/*.patch`, `UPSTREAM_CONTACT`, and that the From: lines name the authors). Prints `wrote <path>: N patch(es) on upstream's <base>`, `email it to adam.schaefers@icloud.com, or send it any way you like; nothing was sent`, and `the patch files name the commit author (<name> <email>[, …]); edit them before sending if you'd rather not`. Not an outward command: the mod's gate doesn't ask (`sendsOut`). No abbreviated flags. |
+| `wb driver [beat]` | `--session ID` (that session's, the plugin's RPC; else the caller's `OPENCODE_SESSION_ID`, else every live one), `--once` (each note said once, `drivers/said.json`), `--json` | *The driver*: `driver: <id> (GPU\|API) · session <id>` and a `note:` line each; from a terminal every session that drove in `DRIVER_HOLD` and the `pin:` line; under Claude Code `driver: Claude Code (fixed)`. `beat` (no flag): the plugin's heartbeat on stdin, written by `driver.write_beat` (exit 1 `no heartbeat written: …`) |
 | `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014; then each role on API, `ok  <role> role: <id> ready` or `BAD` with wb start's own refusal, `routes.resolve` and `routes.cant_run`: no key, a key wb can't hold, gone from the catalog, out of credit, no price, the day cap, `cli._api_role_lines`, #1067; with a role on API, the keys, `cli.api_key_lines`); with every role on API, no local model and no OpenCode config read `--` (`--  0 local model(s): every role runs on API`), not `BAD`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`context.interop_gap`, `context.home_gap`: doctor's alone, #1322; `lane.gaps`, what the lane breaks for the agent's tools; from ABI 4 `_tcp_refused`'s `local daemons' TCP ports are out of the lane (N ports)`, *What TCP reaches*), commands.json, each MCP server it names (`ok  MCP server <name> (commands.json): the agents of every task|<repos>`, else `BAD` with wb start's refusal, `cli._mcp_named`, #1202; `--  MCP server '<name>' names <path>, in the repo …` for one whose command names a path in a repo its tasks run in, `context.mcp_checkout_notes`, with a lane on), `context.TOOLCHAINS`, `wb` on PATH (the plugin's launcher, `cli.plugin_launcher`, said as such and never as another copy; not on PATH with the mod installed, a `--` line for the user's own terminal, not BAD, #1190; nor on the OpenCode path alone, the mod not listed and the OpenCode plugin installed or wb run from OpenCode's install, `--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below says which); for your own terminal, …` (a clone's and `bin/wb setup --opencode` from OpenCode's install, else `wb setup --opencode`'s link), #1321's finding 26) and which wb the mod runs (`the mod runs WB_BIN=…`, `it by name` with `, else ~/.local/bin/wb where its PATH has no wb` when that link is there, or off PATH `~/.local/bin/wb (wb setup's link)`: `cli.mod_wb`, #1200), `cli.logout_stops`, the web app (`cli.chat_line`: `ok`, `--` off, or `BAD web app down: …`, *The web chat*), each schedule (`schedule.doctor_lines`: `ok  schedule <name> (<when>): last <its last run>`, `BAD` with claude or opencode not on the unit's PATH, its bin/wb or its unit gone, #1204), `cli.awake_line`, `webpush.has_cas` (with push subscriptions or any API role: the keyhole's context is `webpush.tls()`, #1080), the mod (`cli._mod_behind`; #1061's note on Claude's own files went, #1322: the release notes carry it), each install of the OpenCode plugin and the wb it runs (`ocplugin.doctor_lines`, *The OpenCode plugin*; with the plugin, or wb run from OpenCode's install, and no Claude Code mod, a missing `skills/workbench` is a `--` line, not BAD), then `patches.doctor_lines` (from OpenCode's install instead `ok  install: OpenCode's, at P: OpenCode updates it (…)`, `ocplugin.updated_by`): `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; on `local` tracking nothing, `--  local patches: branch local tracks no upstream: git -C P branch -u origin/main local (wb update sets it)`, #1327; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
 
 ## Files and formats
@@ -8146,7 +8235,8 @@ $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
   notify.old.jsonl               handled notices older than ARCHIVE_DAYS, moved by gc (_rotate_notices); past NOTIFY_OLD_MAX its newest half kept
   claude-sessions/<pid>          "<ts> <session id>" lines after a "start <its start>" line (#787): sessions a Claude Code process ran wb in (spend.sessions, cli._caller)
-  drivers/opencode-<machine_tag>-<pid>.json   one per OpenCode server, the format the workbench plugin's server part is to write (#1309, #1316; no writer yet, wb only reads it): {tool: "opencode", pid, machine?, store?, ts, sessions: {<id>: {model?, variant?, dir?}}}, `store` the server's database, `sessions` every session in it when the listing began (`ts`), no `store` when it can't list them all (*The heartbeat*); store.beat_path, read by store.heartbeats (which removes this machine's files whose pid exited), store.driver_server
+  drivers/opencode-<machine_tag>-<pid>.json   one per OpenCode server, the workbench plugin's server part's every 30 s through wb driver beat (#1309, #1316, driver.write_beat): {tool: "opencode", pid, machine?, store?, ts, sessions: {<id>: {model?, variant?, dir?, used?}}}, `model` the session's last primary request's or its selection, `used` that request's time (epoch s; store.driver_models, #1317), `store` the server's database, `sessions` every session in it when the listing began (`ts`), no `store` when it can't list them all (*The heartbeat*); store.beat_path, read by store.heartbeats (which removes this machine's files whose pid exited), store.driver_server
+  drivers/said.json              {<note key>: ts}: the driver's notes said once (wb driver --once, driver.once; the newest SAID_KEEP 400, *The driver*)
   gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches, refs, …}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved by gc
   coding.json                    {mode: only|ask|decide, ts}; none: decide
@@ -8317,7 +8407,8 @@ $WB_HOME (~/.local/state/workbench)
                                  (a change that needed no yes: routes.stamp), "order": [backend…] (an OpenRouter role's, wb route --order,
                                  #1021), "thinks": {"api": "<id>", "off": "<line>", "on": "<line>"} (what that API model does with each
                                  thinking setting, routes.with_thinks on every change; said only while "api" is that id, #1263), "fallback": "<exact API id>"|"gpu"
-                                 (wb route <role> fallback, #1196; missing: none)}}}; a missing role is the GPU's
+                                 (wb route <role> fallback, #1196; missing: none)}}, "driver": "<provider/model>[#variant]" (the OpenCode
+                                 driver's standing pin, wb route driver, #1316; missing or "session": each session's own)}; a missing role is the GPU's
                                  default; wb route writes it (store.edit_config), the mod reads it (readRoutes); its "day_usd" is the API day
                                  cap the meter keeps (*Spend*, #1019)
 ~/.config/systemd/user/wb-chat.service (wb setup's link to systemd/wb-chat.service) and wb-chat.service.d/10-wb-setup.conf
@@ -9543,6 +9634,8 @@ doc needs its own `!/` line).
   a model of its own → `runner.SYSTEM_AGENTS` (the layer and `rules_env` both read it).
 - **What OpenCode reads from a project** → `context.PROJECT_SKILL_DIRS`, `agents_files`, `PROJECT_CONFIGS`,
   `project_config_instructions`; RealOpenCode's #994 test; *What the project's own config gave, handed back*.
+- **The driver's pin** (routes.json `driver`, `wb route driver`, #1316) → the `driver` Settings row (`settings._driver_row`,
+  `_argv`), the plugin's `applyPin` (reads `wb route driver --json`), and `wb driver`'s `pin`.
 - **The roles** (#1014): **routes.json's keys** (`routes.normalize`) → the mod's reader (`readRoutes`, `routesValid`,
   `routesPath` with `routes.path`); **`routes.summary`** ↔ the mod's `routesSummary` (the
   context block and the echo say it; `Routes` and register.test.tsx check one fixture each), and
@@ -9608,8 +9701,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `scope()` passes every id. An OpenCode task's `session` with no `claude_pid` is what keeps the unchanged mod's `mine`
   off it (`store.driver_record`); a `driver` key on a Claude task, or a `claude_pid` on an OpenCode one, breaks that.
 - **The heartbeat** (`drivers/opencode-<machine_tag>-<pid>.json`: the name, its keys, `store` and its `sessions` being every
-  session in it, `ts` the listing's start, `store.HEARTBEAT_FRESH` against the plugin's beat) → the OpenCode plugin's server part,
-  which is to write it (#1316; a beat naming a `store` with a partial list makes live sessions' tasks gone), and `store.beat_path`,
+  session in it, `ts` the listing's start, `used`, `store.HEARTBEAT_FRESH` against the plugin's `BEAT_MS`) → the OpenCode plugin's
+  `driver.ts` (`beatOf`, `beatOnce`), which writes it through `wb driver beat` (`driver.write_beat`; a beat naming a `store` with a
+  partial list makes live sessions' tasks gone), `storePath` ↔ OpenCode's `cli/src/database-path.ts`, `parseRef` ↔
+  `routes.driver_ref` ↔ OpenCode's `Model.Ref.parse`, `store.driver_models` (#1317), and `store.beat_path`,
   `store.heartbeats`, `store.driver_server`, `store.driver_record` and `store.driver_fill` (task.json `driver.store`, `seen`, `pid`).
 - **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `OUTSIDE_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `OUTSIDE_REMEDY` ↔ `privacy.since_start_line`, #1232; a question notice's `PERMISSION to ` opening ↔ the mod's `PERMISSION`; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy or none, when `OUTSIDE_NEXT`'s carry on is it, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for

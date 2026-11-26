@@ -2885,9 +2885,11 @@ def _unload(m: Model) -> None:
 def keep_loaded() -> set[str]:
     """models.json's top-level `keep_loaded`: model ids or Ollama names that wb never unloads or
     stops (an embedding model a project's tests need, the user's autocomplete or Open WebUI
-    model): every round once unloaded every one of them (the 2026-11-19 audit)."""
+    model): every round once unloaded every one of them (the 2026-11-19 audit). And the models
+    this machine's live OpenCode drivers run on (store.driver_models, #1317): a local driver on
+    this GPU was evicted at every round, and its next turn reloaded it and evicted the agent's."""
     v = _overrides().get("keep_loaded") or []
-    return {str(x) for x in v} if isinstance(v, list) else set()
+    return {*({str(x) for x in v} if isinstance(v, list) else set()), *store.driver_models()}
 
 
 def _kept_name(name: str, held: set[str]) -> bool:
@@ -3722,6 +3724,34 @@ def admits(m: Model | None, held: dict, cards: frozenset | None = None) -> bool:
     return not running or can_share(m, running, gpu_budget(m.root))
 
 
+DRIVER_HOLDER = "driver:"  # an admission-only holder's key prefix (driver_holders): never in gpu.json
+
+
+def driver_holders(m: Model | None) -> dict:
+    """The live OpenCode drivers' models resident on ``m``'s GPU, as holders for admits (#1317):
+    {"driver:<id>": {model, task: "the driver's <id> (<GB>)", driver: True}}. A local driver's
+    model is held like a running task's: kept loaded (keep_loaded), and counted, so the agent's
+    model runs beside it when both fit and else waits, as for a task, until it is unloaded (an
+    idle Ollama model goes after its keep-alive). Only this machine's GPU (pool gpu) and a model
+    discover() finds there: a remote or an API driver frees nothing here and holds nothing.
+    Never ``m``'s own model, which the two share. Only for admission and the notes: never
+    written to gpu.json, and no lease ever waits on a process that doesn't let go."""
+    if m is None or pool(m) != "gpu":
+        return {}
+    ids = store.driver_models()
+    if not ids:
+        return {}
+    found, out = discover(), {}
+    for mid in sorted(ids):
+        d = found.get(mid)
+        if d is None or pool(d) != "gpu" or _key(d) == _key(m) or not status(d)["resident"]:
+            continue
+        gb = need(d) / 1e9
+        out[f"{DRIVER_HOLDER}{mid}"] = {"model": mid, "driver": True,
+                                         "task": f"the driver's {mid}" + (f" ({gb:.0f} GB)" if gb else "")}
+    return out
+
+
 def holders(home: Path | None = None, pool: str | None = "gpu") -> dict:
     """gpu.json's live entries (a remote server's: ``pool`` gpu-<host>): pid → {model, task,
     start, uid, user, waiting?, tests? (tests that use the GPU hold it: GpuLease.step_aside)}.
@@ -3832,7 +3862,9 @@ class GpuLease:
             refuse = self.m is None and not self.wait
             if held and refuse and not admits(None, held, self.cards):
                 raise RuntimeError(busy(held, self._needs()))
-            if admits(self.m, held, self.cards):
+            # a local driver's resident model counts as a holder (#1317), for admission only
+            drivers = driver_holders(self.m)
+            if admits(self.m, {**held, **drivers}, self.cards):
                 try:
                     fcntl.flock(self.fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 except BlockingIOError:
@@ -3846,7 +3878,13 @@ class GpuLease:
                             sorted({h.get("model") or h.get("task") or "?" for h in held.values()})))
                     return
             self._set({**held, self.me: self._entry(waiting=True)})
-        self._take_alone(held)
+        self._take_alone({**held, **drivers})
+
+    def _driver_waits(self) -> bool:
+        """Whether a live driver's resident model leaves no room for this lease's (#1317): the
+        GPU to itself waits for it as for a task, until it is unloaded or fits beside."""
+        drivers = driver_holders(self.m)
+        return bool(drivers) and not admits(self.m, drivers, self.cards)
 
     def _needs(self) -> str:
         return (f"{self.task} needs " + ("its cards" if self.cards else "it to itself")
@@ -3941,7 +3979,8 @@ class GpuLease:
             fcntl.flock(self.fh, fcntl.LOCK_UN)
         with Watcher(self.home) as w:
             while True:
-                if self._first():
+                # a driver holds no lock to wait on: its model is looked for on each poll (#1317)
+                if self._first() and not self._driver_waits():
                     try:
                         fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         break
@@ -3982,14 +4021,16 @@ class GpuLease:
                 held = self._holders()
                 keep = {h["model"] for p, h in held.items()
                         if p != self.me and not h.get("waiting") and h.get("model")}
-            before = set(_ollama_loaded(self.m.root)) if keep and self.m.engine == "ollama" \
+            # a resident driver's model is checked after the load as a holder's is (#1317)
+            drivers = {h["model"] for h in driver_holders(self.m).values()}
+            before = set(_ollama_loaded(self.m.root)) if (keep or drivers) and self.m.engine == "ollama" \
                 and not _fake() else None
             held_ids = keep_loaded() if before else set()
             kept = {n for n in before or () if n and _kept_name(n, held_ids)
                     and not _matches(self.m.name, {n})}
             secs = make_resident(self.m, say=self.say, keep=keep, warn=self.warn)
             # a load that loaded nothing evicted nothing (the 0.90 review)
-            if not keep or not secs or _fits_beside(self.m, keep, before, kept):
+            if not (keep or drivers) or not secs or _fits_beside(self.m, keep | drivers, before, kept):
                 return secs
             self.warn(f"ollama could not fit {self.m.id} beside {', '.join(sorted(keep | kept))}; "
                       "waiting for the GPU to itself")
@@ -4301,6 +4342,8 @@ def lease_for(m: Model, task: str, say=print):
 def busy(held: dict, why: str) -> str:
     """Who holds the GPU, for a refusal: each holder's task, its repo and model, and its phase."""
     def one(h):
+        if h.get("driver"):  # a live OpenCode driver's model (driver_holders, #1317)
+            return h["task"]
         if h.get("uid") is not None and h["uid"] != os.getuid():  # a shared lease (#393)
             return f"{h.get('user') or 'another account'}'s task {h.get('task') or '?'} ({h.get('model') or 'no model'})"
         task = store.Task(h.get("task") or "")

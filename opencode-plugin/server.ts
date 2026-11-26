@@ -10,6 +10,7 @@
 import type { ServerContext, ServerPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
+import { startDriver, type DriverHost } from './driver.ts'
 
 export const ID = 'workbench'
 
@@ -24,6 +25,7 @@ const plugin: ServerPlugin = {
   async setup(ctx) {
     if (process.env.WB_TASK) return
     await ctx.rpc.register(Workbench, { status: async () => status(ctx.options) })
+    return startDriver(ctx as ServerContext & DriverHost)  // the driver's heartbeat and RPC (#1316)
   },
 }
 

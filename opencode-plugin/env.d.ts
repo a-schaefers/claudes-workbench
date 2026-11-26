@@ -6,7 +6,35 @@
 declare const process: {
   readonly env: Record<string, string | undefined>
   readonly platform: string
+  readonly pid: number
   cwd(): string
+}
+
+// driver.ts's beat timer and wb's child (#1316)
+declare function setTimeout(callback: () => unknown, ms: number): { readonly __timer: unique symbol }
+declare function clearTimeout(timer: ReturnType<typeof setTimeout> | undefined): void
+
+declare interface AbortSignal {
+  readonly aborted: boolean
+}
+
+declare class AbortController {
+  readonly signal: AbortSignal
+  abort(): void
+}
+
+declare module 'node:child_process' {
+  interface Readable { on(event: 'data', listener: (chunk: unknown) => void): void }
+  interface ChildProcess {
+    readonly stdout: Readable
+    readonly stderr: Readable
+    readonly stdin: { end(data: string): void }
+    on(event: 'error', listener: (error: unknown) => void): void
+    on(event: 'close', listener: (code: number | null) => void): void
+    kill(signal?: string): boolean
+  }
+  export function spawn(command: string, args: readonly string[],
+                        options: { env: Record<string, string | undefined>; stdio: readonly string[] }): ChildProcess
 }
 
 interface ImportMeta {

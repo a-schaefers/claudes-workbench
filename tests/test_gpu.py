@@ -949,6 +949,63 @@ class Budget(unittest.TestCase):
                           cli.gpu_line())
 
 
+class DriverLease(Base):
+    """A local driver on the GPU (#1317): the model a live OpenCode session drives with, on this
+    machine's GPU, is held like a running task's: kept loaded, and counted when a task's model
+    would load beside it. Before, every round unloaded it, and the driver's next turn reloaded it
+    and evicted the agent's."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["FAKE_RUNS"] = str(Path(self.tmp.name) / "runs.jsonl")
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {BIG: {"weights_gb": 20}, SMALL: {"weights_gb": 9}}))
+
+    def drive(self, model=BIG, used_ago=0.0):
+        """This process's OpenCode server beats a session that drove on ``model``."""
+        now = time.time()
+        store.write_json(store.beat_path(os.getpid()), {
+            "tool": "opencode", "pid": os.getpid(), "ts": now, "sessions": {
+                "ses_d": {"model": model, "dir": str(self.repo), "used": now - used_ago}}})
+
+    def test_a_driver_model_too_big_to_share_with_holds_the_task_queued_until_it_goes(self):
+        os.environ["WB_FAKE_GPU_GB"] = "24"           # 25 GB + 11 GB: not at once
+        self.drive()
+        self.assertIn(BIG, models.keep_loaded())      # never unloaded by a round's free_gpu
+        small = models.discover()[SMALL]
+        self.assertEqual(list(models.driver_holders(small).values()),
+                         [{"model": BIG, "driver": True, "task": f"the driver's {BIG} (25 GB)"}])
+        out = self.start("t-small", "ok", "--model", SMALL, "--test", TEST_CMD)
+        self.assertIn(f"note: the GPU is busy with the driver's {BIG} (25 GB); this task waits as queued", out)
+        deadline = time.time() + 30
+        while store.Task("t-small").status.get("last") != f"waiting for the GPU (held by the driver's {BIG} (25 GB))":
+            self.assertLess(time.time(), deadline, store.Task("t-small").status)
+            time.sleep(0.1)
+        self.assertFalse(models.holders().get(f"{models.DRIVER_HOLDER}{BIG}"))  # never in gpu.json
+        self.assertEqual(store.Task("t-small").status["phase"], "queued")
+        self.drive(used_ago=store.DRIVER_HOLD + 60)    # the session stopped driving: it goes
+        self.assertNotIn(BIG, models.keep_loaded())
+        wait_phase("t-small", {"review"})
+
+    def test_a_driver_model_that_fits_beside_the_tasks_runs_with_it_and_others_hold_nothing(self):
+        os.environ["WB_FAKE_GPU_GB"] = "48"           # both fit
+        self.drive()
+        out = self.start("t-small", "ok", "--model", SMALL, "--test", TEST_CMD)
+        self.assertNotIn("the GPU is busy", out)
+        wait_phase("t-small", {"review"})
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        small, big = models.discover()[SMALL], models.discover()[BIG]
+        self.assertEqual(models.driver_holders(big), {})     # its own model: the two share it
+        self.drive(model="deepseek/deepseek-flash")           # an API driver holds no GPU
+        self.assertEqual(models.driver_holders(small), {})
+        self.drive(used_ago=store.DRIVER_HOLD + 60)
+        self.assertEqual(models.driver_holders(small), {})
+        store.write_json(store.beat_path(os.getpid()), {      # a stale beat says nothing
+            "tool": "opencode", "pid": os.getpid(), "ts": time.time() - store.HEARTBEAT_FRESH - 5,
+            "sessions": {"ses_d": {"model": BIG, "used": time.time()}}})
+        self.assertEqual((models.driver_holders(small), store.driver_models()), ({}, set()))
+
+
 class SharedLease(Base):
     """#393: gpu.lock and gpu.json were per account ($WB_HOME), so two accounts' tasks on one
     system Ollama never saw each other's holds and unloaded each other's models mid-round."""
