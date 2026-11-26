@@ -87,6 +87,13 @@ export const APPROVAL_OWN = (file: string) => `workbench: not run: ${file} is th
   "write, on the user's yes; no command and no edit writes it."
 export const ROUTES_EDIT = "workbench: not edited: the roles change only through wb route, on the user's yes " +
   `(the ${TOOL.route} tool asks them; wb route shows the roles).`
+// a form's no, and no form at all (consent.ts's forms and upstream.ts's)
+export const NOT_SENT = 'workbench: not sent: the user did not approve it in the form. Tell them it was not ' +
+  'sent; try again only if they ask for it.'
+export const NO_FORM = (what: string, command: string) => `workbench: ${what}: no OpenCode window is open on ` +
+  'this session to ask the user in (the form shows in the terminal UI), so nothing was asked and nothing ' +
+  `changed. Tell them; once one is open, ask again. Or the user runs it in a terminal of their own: ${command}`
+export const SEND_ASK = { yes: 'Send it', no: "Don't send" }
 export const NOT_EDITED = (task: string) => `workbench: not edited: the user said no to editing ${task}'s code. ` +
   'Keep the work with the agent; ask again only if they ask for it.'
 export const ONLY = (task: string) => `workbench: not edited: ${task} is the agent's. Coding is "Only when I say" ` +

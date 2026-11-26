@@ -23,6 +23,8 @@
 //   tool to use; an edit or a shell write of routes.json or an approval file is denied for every
 //   agent; an edit in a task's worktree meets the coding gate, whose "Ask me first" asks with the
 //   same form. execute.before refuses an edit of commands.json that lifts a repo's local_only.
+// - Sends upstream beside wb patch send (upstream.ts, #1296's row 14): a gh write, a git push or a
+//   GitHub MCP write aimed at workbench upstream asks in the same form, from execute.before.
 //
 // Nothing runs at import (server.ts's rule): setup builds it. The kernel (mod/hooks/core.ts, the
 // membrane: gateOf, codingGate) is imported at setup and may be missing beside a copy of this
@@ -33,12 +35,14 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { isAbsolute, join, resolve } from 'node:path'
 import type { ServerContext } from './host.d.ts'
 import {
-  APPROVAL_OWN, NOT_EDITED, ONLY, ROUTES_EDIT, allowances, codingMode, editedText, guarded, lineCommands,
+  APPROVAL_OWN, NO_FORM, NOT_EDITED, NOT_SENT, ONLY, ROUTES_EDIT, SEND_ASK, allowances, codingMode, editedText, guarded, lineCommands,
   localOnlyPatchRefusal, localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, wordPath, type Classify, type Coding, type Env, type Places,
 } from './gates.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv } from './wb.ts'
 import { START_INPUT, startCall } from './tools.ts'
 import { simpleWords } from './words.ts'
+// the words the forms' answers leave, beside the refusals' (gates.ts): still exported from here
+export { NO_FORM, NOT_SENT, SEND_ASK }
 
 export const NAMESPACE = 'workbench'
 export const SHOWN_MS = 10_000    // a TUI shows the form this soon, or none is attached: fail closed
@@ -137,7 +141,10 @@ export interface Evaluation {
   message?: string
 }
 // plugin/src/promise/tool.ts's `execute.before`: `id`, the call's (a permission's `source.id`)
-export interface Before { readonly tool: string; readonly sessionID: string; readonly id?: string; readonly input: unknown }
+export interface Before {
+  readonly tool: string; readonly sessionID: string; readonly id?: string; readonly input: unknown
+  readonly info?: { readonly name?: string; readonly options?: { readonly namespace?: string } } // the tool's (an MCP server's namespace)
+}
 // a shell call execute.before saw: its line and its workdir, for the permission hook's walk
 interface ShellCall { readonly session: string; readonly command: string; readonly workdir: string }
 export const CALLS_KEPT = 64
@@ -246,11 +253,6 @@ export function writeApproval(home: string, name: 'route-ok.json' | 'send-ok.jso
 // --- the words the model reads after a form
 export const NOT_CHANGED = 'workbench: not changed: the user did not approve it in the form. Tell them it was ' +
   'not changed; ask again only if they ask for it.'
-export const NOT_SENT = 'workbench: not sent: the user did not approve it in the form. Tell them it was not ' +
-  'sent; try again only if they ask for it.'
-export const NO_FORM = (what: string, command: string) => `workbench: ${what}: no OpenCode window is open on ` +
-  'this session to ask the user in (the form shows in the terminal UI), so nothing was asked and nothing ' +
-  `changed. Tell them; once one is open, ask again. Or the user runs it in a terminal of their own: ${command}`
 export const CANT_SHOW = (why: string) => `workbench: not sent: the form can't show what it sends (${why}). ` +
   'Name the body file and the title as they are, so the user sees both.'
 
@@ -277,7 +279,6 @@ export function gatedChange(r: Ran): { change: string; approval: Row } | null {
 }
 
 export const ROUTE_ASK = { yes: 'Allow', no: "Don't" }
-export const SEND_ASK = { yes: 'Send it', no: "Don't send" }
 
 export interface Deps {
   readonly run: Run
@@ -669,6 +670,15 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
   })
   await c.permission.hook('evaluate', e => gates.evaluate(e))
   await c.tool.hook('execute.before', e => gates.before(e))
+  // the sends upstream the mod's dialog holds: a gh write, a git push, a GitHub MCP write (#1296's
+  // row 14, upstream.ts), asked in the same form. Imported here, as the kernel is: its line reader
+  // (mod/hooks/shell.ts) sits beside the kernel, and a copy without it keeps the rest of the gates
+  const up = await import('./upstream.ts').catch(() => undefined)
+  if (up) {
+    const origin = (cwd: string) => git(['remote', 'get-url', 'origin'], cwd)
+    const upstream = new up.Upstream({ env, dir, read: readText, real: realOf, origin, asker })
+    await c.tool.hook('execute.before', e => upstream.before(e))
+  }
   return async () => {
     open = false
     await stream.return?.().catch(() => {})

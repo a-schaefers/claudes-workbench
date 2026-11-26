@@ -24,6 +24,7 @@
     "consent-tui.ts",
     "tools.ts",
     "gates.ts",
+    "upstream.ts",
     "words.ts",
     "calls.ts",
     "notices.ts",
@@ -37,6 +38,8 @@
     "flows.ts",
     "pane.ts",
     "pane-view.ts",
-    "pane.tsx"
+    "pane.tsx",
+    "children.ts",
+    "children-tui.ts"
   ]
 }

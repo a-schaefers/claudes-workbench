@@ -424,7 +424,7 @@ test('the server part wires the tools, the RPC and both hooks, and nothing witho
   }
   const stop = await consent(ctx as never)
   expect(registered).toEqual([Consent.id, 'route', 'start', 'settings_set', 'patch_send'])
-  expect(hooks).toEqual(['evaluate', 'execute.before'])
+  expect(hooks).toEqual(['evaluate', 'execute.before', 'execute.before']) // the gates', then upstream.ts's (#1296)
   await stop!()
   expect(await consent({ options: {} } as never)).toBeUndefined()
   expect(places({ HOME: '/h' }, '/c').routes).toBe('/h/.config/workbench/routes.json')

@@ -160,6 +160,26 @@ def find_session(task: store.Task) -> str | None:
     return None
 
 
+def exports(task: store.Task) -> dict:
+    """The messages of each of the task's sessions, earlier ones first, for the OpenCode plugin's
+    child sessions (`wb watch <task> --export`, #1331): `sessions`, each {session, current,
+    messages}, the messages as OpenCode exported them, and `missing`, the sessions whose export
+    failed (a busy store), which the plugin asks for again. Only the messages: the export's
+    `info` is the agent's own database's, which its lane writes (the host-shape decision's critic
+    2), so the plugin builds the child's id, parent, location and permissions itself."""
+    st = task.status
+    cur = find_session(task)
+    out, missing = [], []
+    for sid in dict.fromkeys([*(s for s in st.get("sessions") or [] if isinstance(s, str) and s),
+                              *([cur] if cur else [])]):
+        got = export(sid, task=task) if sid == cur else finished_export(task, sid)
+        if not isinstance(got, dict) or not isinstance(got.get("messages"), list):
+            missing.append(sid)
+        elif got["messages"]:
+            out.append({"session": sid, "current": sid == cur, "messages": got["messages"]})
+    return {"sessions": out, "missing": missing}
+
+
 def _k(n: float) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(int(n))
 
