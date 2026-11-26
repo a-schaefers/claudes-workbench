@@ -1487,6 +1487,26 @@ async function run(engine: string, device?: string) {
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Waiting for an OpenCode session'))
     if ((await page.locator('.row.user .meta').nth(-2).textContent()).includes('Claude')) throw new Error('a receipt still names Claude')
   })
+  await check('with the chat switched off, the state line says so and names wb chat on, never a driver to start (#1526)', async () => {
+    // #1526: a server a service kept up told the user to start their driver and run /workbench,
+    // which can't make it listen while the switch is off (what `wb chat off` writes)
+    const sw = join(home, 'state/chat/switch.json'), line = page.locator('#driver-state')
+    const was = existsSync(sw) ? readFileSync(sw, 'utf8') : JSON.stringify({ on: true, v: 2 })
+    writeFileSync(sw, JSON.stringify({ on: false, v: 2 }))
+    writeFileSync(join(home, 'state/chat/listener.json'), '{}')  // a write the streams wake on
+    try {
+      await until(async () => (await line.isVisible()) && (await line.textContent()).includes('The web chat is off'))
+      if ((await line.locator('code').textContent()) !== 'wb chat on') throw new Error(await line.textContent())
+      if ((await line.textContent()).includes('/workbench')) throw new Error(await line.textContent())
+      writeFileSync(sw, JSON.stringify({ on: true, v: 2 }))
+      writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+      // on again: none's line, how to start a driver (it shows `next` alone)
+      await until(async () => { const t = await line.textContent(); return !t.includes('is off') && t.includes('it answers here') })
+    } finally {
+      writeFileSync(sw, was)  // as the checks before left it
+      writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+    }
+  })
   await finish()
 
   async function finish() {

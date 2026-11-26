@@ -1,5 +1,5 @@
 """The driver's state on the web app (#1355): chat.driver_state, the line the page keeps at the top of
-the chat (none, idle, working, waiting, in the story's words), from the listener's claim and the
+the chat (off, none, idle, working, waiting, in the story's words), from the listener's claim and the
 open waiting rows; and who changed a setting (settings.record, changes, changed, the state's
 `settings`). A temp WB_HOME, no server."""
 import contextlib
@@ -34,6 +34,19 @@ class DriverState(Base):
         self.assertEqual((got["state"], got["who"]), ("none", "OpenCode"))
         self.assertEqual(got["next"], "Start OpenCode in a terminal and type in a session: it answers here.")
         self.assertNotIn("waiting", got)
+
+    def test_the_state_line_says_the_chat_is_off_and_how_to_turn_it_on(self):
+        # #1526 (2026-11-26): with the chat off (a service kept the server up), the page told the
+        # user to start their driver and run /workbench, which can't make it listen: only wb chat on
+        chat.set_on(False)
+        got = chat.driver_state(None, [])
+        self.assertEqual(got["state"], "off")
+        self.assertEqual(got["line"], "The web chat is off: no session listens here.")
+        self.assertEqual(got["next"], "Turn it on in a terminal: `wb chat on`.")
+        self.assertNotIn("/workbench", got["next"])
+        self.assertEqual(chat.snapshot()["driver"]["state"], "off")
+        chat.set_on(True)
+        self.assertEqual(chat.driver_state(None, [])["state"], "none")
 
     def test_a_listener_is_idle_or_working_where_it_runs_named_by_its_driver(self):
         got = chat.driver_state(CLAUDE, [])

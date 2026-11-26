@@ -144,9 +144,9 @@ export type Savings = { score?: { score: number; color: string } | null; saved: 
 export type Limits = { file: number; message: number; files: number }
 /** chat.driver_state (#1355): the driver's state line, in the story's words. `driver` the story's
  * name (claude-code, opencode, any); `waiting` the dialog up in the terminal; `grant` only for a
- * permission, the driver's way to run with permissions granted */
+ * permission, the driver's way to run with permissions granted; `off` the chat switched off (#1526) */
 export type DriverState = {
-  state: 'none' | 'idle' | 'working' | 'waiting'; driver: string; who: string; where?: string
+  state: 'off' | 'none' | 'idle' | 'working' | 'waiting'; driver: string; who: string; where?: string
   waiting?: { kind: string; tool: string; since: number; what?: string }
   line: string; next: string; grant?: { line: string; command: string }
 }

@@ -6615,16 +6615,18 @@ default after 2.0 turned it on.
 
 `chat.driver_state(lst, rows)`, the snapshot's `driver` (#1355): `{state, driver, who, where?,
 waiting?, line, next, grant?}`, from the facts the hosts already write. Waiting beats working beats
-idle; no live listener is `none` (named by the newest driver that wrote, else `any`). The wait is
+idle; no live listener is `none` (named by the newest driver that wrote, else `any`), or `off`
+while the chat is switched off (`state.off`, `next.off`: `wb chat on` in a terminal; starting a
+driver can't make it listen then, and `none` told the user to, #1526). The wait is
 the listener claim's own `waiting` (`{kind, tool, since, what?}`, `chat.WAIT_KINDS`), else the
 oldest open notice row under `ASK_STALE` (the one the turn is stuck on). `line` and `next` are the
 story's `state.*` and `next.*`, `{what}` its `wait.<kind>`; `grant` (`next.grant` and the command)
 only for a permission, on a known driver (`claude --permission-mode auto`, `opencode --auto`): a
 question or a plan waits however the driver runs. The page (`drawState`, `#driver-state`,
-`role="status"`) shows it under the header while it asks something of the user, waiting or none:
-the line, the command waiting, what to do, and for a permission the grant with Copy, its one
-button (nothing answers a prompt from the phone, #1350); the header's presence says `waiting for
-you in the terminal`. A notice is no thread row any more: the state line says it, and its push
+`role="status"`) shows it under the header while it asks something of the user, waiting, none or
+off: the line (waiting's and off's), the command waiting, what to do (its backticks as `code`), and
+for a permission the grant with Copy, its one button (nothing answers a prompt from the phone,
+#1350); the header's presence says `waiting for you in the terminal`. A notice is no thread row any more: the state line says it, and its push
 still goes as before. `WAITING_AFTER` (2 s) is the hosts' filter for the claim's `waiting`: a
 dialog answered sooner (an auto-accept) is never written.
 

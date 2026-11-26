@@ -1935,7 +1935,8 @@ def listener_view(lst: dict | None) -> dict | None:
 # the hosts already write: the listener's claim (`busy`; `waiting`, the oldest dialog up in its
 # terminal for WAITING_AFTER or more, the host's own filter of an auto-accept's flicker), else the
 # oldest open notice row (the waiting line a host posts, #1350). Waiting beats working beats idle;
-# no live listener is `none`. The words are the story's (`state.*`, `next.*`, `wait.*`), and only
+# no live listener is `none`, or `off` while the chat is switched off: only `wb chat on` makes a
+# driver listen then, and the page told the user to start one and run /workbench (#1526). The words are the story's (`state.*`, `next.*`, `wait.*`), and only
 # a permission names the grant (`next.grant`, the driver's own way to run with permissions
 # granted): a question or a plan waits however the driver runs.
 WAITING_AFTER = 2.0   # seconds: the hosts' WAITING_AFTER_MS, a dialog answered sooner never shown
@@ -1971,7 +1972,7 @@ _LIVE: dict = {}  # driver_state's default: the live listener, read afresh
 
 
 def driver_state(lst: dict | None = _LIVE, rows: list[dict] | None = None) -> dict:
-    """The driver's state for the page (snapshot's `driver`): {state: none|idle|working|waiting,
+    """The driver's state for the page (snapshot's `driver`): {state: off|none|idle|working|waiting,
     driver (story's: claude-code|opencode|any), who, where?, waiting?: {kind, tool, since, what?},
     line, next, grant?: {line, command}}. ``lst``: the live listener (default: listener(); None: none);
     ``rows``: the thread (default: thread()), whose newest driver names a driver with none
@@ -1986,8 +1987,9 @@ def driver_state(lst: dict | None = _LIVE, rows: list[dict] | None = None) -> di
                        and r["driver"].get("tool") in DRIVER_TOOLS), "any")
     who = story.DRIVERS[driver]["who"]
     if not lst:
-        return {"state": "none", "driver": driver, "who": who,
-                "line": story.text("state.none", driver), "next": story.text("next.none", driver)}
+        state = "none" if is_on() else "off"  # #1526: off, no driver can listen until `wb chat on`
+        return {"state": state, "driver": driver, "who": who,
+                "line": story.text(f"state.{state}", driver), "next": story.text(f"next.{state}", driver)}
     where = _tilde(str(lst.get("cwd") or "")) or "its directory"
     out = {"driver": driver, "who": who, "where": where}
     wait = _waiting_fact(lst, rows)
