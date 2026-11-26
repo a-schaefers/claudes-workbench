@@ -2201,7 +2201,10 @@ def cmd_start(a) -> None:
             "params": params, **({"exists": exists} if exists else {}),
             "context": ctx, "repo": str(repo),
             **({"package_dir": str(start_dir)} if start_dir != repo else {}), "base": base,
-            "base_ref": a.base, "cwd": os.getcwd(), "budget_usd": usd_, "budget_min": mins,
+            # the branch it started from: its items get --base <sha>, which records no branch,
+            # and wb accept --merge merged one into whatever branch was checked out by then
+            # (#1541, 2026-11-26); null for a detached HEAD, tag or commit, as a task's
+            "base_ref": a.base, "base_branch": gitops.start_branch(repo, a.base or "HEAD"), "cwd": os.getcwd(), "budget_usd": usd_, "budget_min": mins,
             "overnight": bool(a.overnight), "trial": bool(a.trial), "no_claude_md": bool(a.no_claude_md),
             "created": store.now(), "driver": {"python": sys.executable, "machine": store.machine()},
             **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),

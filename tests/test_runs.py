@@ -959,6 +959,29 @@ class Runs(Base):
         self.assertEqual(store.Task("cc-code-1").status["phase"], "review")
         self.assertNotIn("null", [r.get("kind") for r in run.journal()])
 
+    def test_a_runs_code_item_merges_only_into_the_branch_the_run_started_from(self):
+        # #1541 (2026-11-26): the driver starts each item with --base <sha>, which records no
+        # base_branch, so with a feature branch checked out by then, accept --merge landed the
+        # run's change there, where a plain task refuses
+        git = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa: E731
+                                        capture_output=True, text=True).stdout.strip()
+        flow = {"v": 1, "name": "mr", "stages": [{"id": "code", "kind": "code", "prompt": "Write {item} to answer.txt.",
+                                                  "items": ["first"]},
+                                                 {"id": "claude", "final": True, "from": "code"}]}
+        run_wb("run", "start", "mr", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.wait_run("mr", ("review", "failed", "paused", "checkpoint", "stopped"))
+        self.assertEqual(runs.Run("mr").spec["base_branch"], "main")
+        self.assertEqual(store.Task("mr-code-1").spec["base_branch"], "main")
+        git("switch", "-qc", "feature-x")
+        (self.repo / "mine.txt").write_text("the user's own work\n")
+        git("add", "mine.txt")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "mine")
+        tip = git("rev-parse", "feature-x")
+        rc, out, err = wb("accept", "mr-code-1", "-m", "feat: answer", "--merge")
+        self.assertEqual(rc, cli.NOT_MERGED, out + err)
+        self.assertIn("has feature-x out, not main", out + err)
+        self.assertEqual(git("rev-parse", "feature-x"), tip)
+
     def test_a_gpu_budget_pauses_before_a_start_and_amend_then_resume_goes_on(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
         run_wb("run", "start", "bud", "--plan", self.plan({**AUDIT, "name": "bud"}), "--param", "areas=a",
