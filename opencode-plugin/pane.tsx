@@ -395,6 +395,20 @@ export function mountPane(host: Host, home: string): () => void {
       replaySplash(host)
     }
   }))
+  // /workbench in the session on screen opens the panel when its agent's selection didn't: a session
+  // already on Workbench, its panel closed with Escape, publishes none (#1517). After SETTLE_MS, so
+  // the selection's own open (a session switching to Workbench) comes first and this one is moot.
+  try {
+    const events = (rpc as unknown as { events?: { on(name: 'open', h: (e: { data?: { sessionID?: string } }) => void): () => void } }).events
+    const off = events?.on('open', e => {
+      const sessionID = String(e?.data?.sessionID ?? '')
+      setTimeout(() => {
+        const route = host.ui.router.current()
+        if (sessionID && route.type === 'session' && route.sessionID === sessionID && !panelOpen()) open('', true)
+      }, SETTLE_MS)
+    })
+    if (off) stops.push(off)
+  } catch { /* no RPC events in this TUI: the agent's selection still opens it */ }
   // a session already on Workbench as the TUI comes to it (`opencode -s`, a new TUI) opens the
   // panel too, once an arrival: OpenCode publishes no agent selection for it (#1517)
   stops.push(createRoot(dispose => {

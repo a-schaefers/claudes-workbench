@@ -59,7 +59,13 @@ export const WorkbenchPane = {
     diff: { input: TASK_IN, output: OBJ },
     link: { input: { type: 'object', properties: {}, additionalProperties: false }, output: OBJ },
   },
-  events: {},
+  // /workbench ran in this session: the TUI opens the panel if the agent's selection didn't (the
+  // session already on Workbench, its panel closed with Escape, publishes none: #1517)
+  events: {
+    open: {
+      schema: { type: 'object', properties: { sessionID: { type: 'string' } }, required: ['sessionID'], additionalProperties: false },
+    },
+  },
 } as const
 
 // The files the scan reads, so tests give it a fake directory
@@ -247,7 +253,8 @@ export interface CommandInvocation {
 }
 export interface PaneHost {
   readonly options: Options
-  readonly rpc: { readonly register: <D extends RpcDefinition>(d: D, h: RpcHandlers<D>) => Promise<Registration> }
+  readonly rpc: { readonly register: <D extends RpcDefinition>(d: D, h: RpcHandlers<D>) => Promise<Registration & {
+    readonly events?: { readonly emit: (name: string, data: object) => Promise<void> } }> }
   readonly command?: {
     readonly transform?: (cb: (editor: { add(d: { name: string; description?: string; execute: (i: CommandInvocation) => Promise<void> }): void }) => void) => Promise<Registration>
   }
@@ -259,8 +266,10 @@ export interface PaneHost {
 
 export const DESCRIPTION = 'Workbench mode: hand coding to OpenCode agents through wb (the Workbench agent and its panel)'
 
-/** /workbench, run: the pin, the Workbench agent, then the request typed after it, if any. */
-export async function workbench(host: PaneHost, input: CommandInvocation, run: Run): Promise<void> {
+/** /workbench, run: the pin, the Workbench agent, then the request typed after it, if any.
+ * ``opened`` tells the TUI it ran (the RPC's `open` event), for a session already on Workbench. */
+export async function workbench(host: PaneHost, input: CommandInvocation, run: Run,
+                                opened?: (sessionID: string) => void): Promise<void> {
   const session = host.session
   if (!session?.switchAgent) throw new Error("this OpenCode can't switch a session's agent")
   // the pin before the agent: the agent's selection is what the TUI says the driver's notes at
@@ -273,6 +282,9 @@ export async function workbench(host: PaneHost, input: CommandInvocation, run: R
     // no Workbench agent: the plugin's skill/ wasn't found to make it (agent.ts registerAgent)
     throw new Error(`the Workbench agent isn't there (${String(e)}): wb doctor says why`)
   }
+  // a switch to the agent the session already has publishes no selection, so the TUI hears of
+  // the command itself (#1517: /workbench after Escape opened nothing)
+  try { opened?.(input.sessionID) } catch { /* no TUI to tell */ }
   // the text as typed, untrimmed, so a mention's offsets into it still hold
   const prompt = input.prompt ?? {}, text = prompt.text ?? ''
   const attached = [prompt.files, prompt.agents, prompt.skills].some(x => x !== undefined && x.length > 0)
@@ -284,16 +296,19 @@ export async function workbench(host: PaneHost, input: CommandInvocation, run: R
 export async function startPane(host: PaneHost, run: Run = wbRunner(host.options)): Promise<() => Promise<void>> {
   const data = new PaneData(wbHome(wbEnv(host.options)), run)
   const regs: Registration[] = []
-  regs.push(await host.rpc.register(WorkbenchPane, {
+  const reg = await host.rpc.register(WorkbenchPane, {
     tasks: async () => data.tasks(),
     live: async (input) => data.transcript(taskOf(input)),
     diff: async (input) => data.diff(taskOf(input)),
     link: async () => data.chatLink(),
-  }))
+  })
+  regs.push(reg)
+  const emit = reg.events?.emit
+  const opened = emit ? (sessionID: string) => { void emit('open', { sessionID }).catch(() => {}) } : undefined
   if (host.command?.transform) {
     try {
       regs.push(await host.command.transform(editor => editor.add({
-        name: COMMAND, description: DESCRIPTION, execute: input => workbench(host, input, run),
+        name: COMMAND, description: DESCRIPTION, execute: input => workbench(host, input, run, opened),
       })))
     } catch { /* no plugin commands in this OpenCode: the agent picker still reaches Workbench */ }
   }

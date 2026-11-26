@@ -180,6 +180,33 @@ test('the server part registers the panel\'s RPC and /workbench, and the RPC alo
   expect(registered.length).toBe(5)
 })
 
+test('/workbench tells the TUI it ran, so a session already on Workbench opens its panel after Escape, and a refused switch tells it nothing', async () => {
+  // #1517: switching to the agent the session already has publishes no selection, so the TUI
+  // never opened the panel again in that session
+  const emitted: unknown[] = []
+  let execute: ((i: { sessionID: string; prompt: object; delivery: 'steer' }) => Promise<void>) | undefined
+  const rpc = { register: async () => ({ dispose: async () => {}, events: { emit: async (name: string, data: object) => { emitted.push([name, data]) } } }) }
+  const run: Run = async () => ({ code: 0, stdout: '{}', stderr: '' })
+  let agentOk = true
+  const host = {
+    options: {}, rpc,
+    session: { switchAgent: async () => { if (!agentOk) throw new Error('agent not found') } },
+    command: { transform: async (cb: (e: { add(d: { execute: typeof execute }): void }) => void) => {
+      cb({ add: d => { execute = d.execute } })
+      return { dispose: async () => {} }
+    } },
+  }
+  const stop = await startPane(host as never, run)
+  await execute!({ sessionID: 'ses_1', prompt: {}, delivery: 'steer' })
+  expect(emitted).toEqual([['open', { sessionID: 'ses_1' }]])
+  emitted.length = 0
+  agentOk = false
+  await execute!({ sessionID: 'ses_1', prompt: {}, delivery: 'steer' }).catch(() => {})
+  expect(emitted).toEqual([])
+  await stop()
+  expect(WorkbenchPane.events.open.schema.required).toEqual(['sessionID'])
+})
+
 // ---------------------------------------------------------------- pane-view.ts
 
 test('the tasks are read by one loop however often a press asks for a read at once, and an older read in flight never draws', async () => {
