@@ -16,6 +16,9 @@ import type { WbTask } from '../types'
 import type { Pose } from './apprentice'
 import { ACTIVE, CLOSED, NEEDS, openCounts, phaseOf } from './core'
 
+/** A task's phase while its status.json has none yet (the mod's scan and OpenCode's panel). */
+export const UNWRITTEN = 'queued'
+
 /** One run of a row's text in one style. */
 export type Part = { text: string; color?: string; dim?: boolean; bold?: boolean; underline?: boolean }
 

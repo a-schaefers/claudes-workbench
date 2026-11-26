@@ -596,8 +596,8 @@ class Checker(unittest.TestCase):
         self.edit("mod/hooks/register.tsx", " NEEDS, NO_ANSWER,", " NO_ANSWER,")
         self.edit("mod/hooks/register.tsx", "\nexport function attachedLines", "\nconst NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])\nexport function attachedLines")
         self.assertIn("mod/hooks/register.tsx:NEEDS is still defined", self.errors())
-        self.edit("mod/hooks/tasks.ts", "import { CLOSED, openCounts, phaseOf } from './core'\n",
-                  "import { openCounts, phaseOf } from './core'\nexport const CLOSED = new Set(['accepted', 'discarded'])\n")
+        self.edit("mod/hooks/tasks.ts", "import { ACTIVE, CLOSED, NEEDS, openCounts, phaseOf } from './core'\n",
+                  "import { ACTIVE, NEEDS, openCounts, phaseOf } from './core'\nexport const CLOSED = new Set(['accepted', 'discarded'])\n")
         self.assertIn("mod/hooks/tasks.ts:CLOSED is still defined", self.errors())
 
     def test_an_export_over_budget(self):

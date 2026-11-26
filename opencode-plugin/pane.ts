@@ -22,7 +22,8 @@ import { join } from 'node:path'
 import type { Registration, RpcDefinition, RpcHandlers } from './host.d.ts'
 import { applyPin, wbRunner, type DriverHost, type Run } from './driver.ts'
 import { wbEnv, wbHome, type Options } from './wb.ts'
-import { viewFacts, isEst, type TaskFacts } from '../mod/hooks/tasks.ts'
+import { apiWorking, isEst, UNWRITTEN, viewFacts, type TaskFacts } from '../mod/hooks/tasks.ts'
+import { LINK_STATES, linkDown, type Link } from '../mod/hooks/modeline.ts'
 import { ACTIVE, CLOSED, NEEDS, PARKS } from '../mod/hooks/core.ts'
 
 export const AGENT = 'workbench'        // the Workbench agent's id (agent.ts, #1335)
@@ -44,7 +45,7 @@ export interface Cap { readonly spent: number; readonly cap: number | null; read
 export interface Tasks { readonly now: number; readonly home: string; readonly tasks: PaneTask[]; readonly cap: Cap | null }
 export interface Line { readonly s: string; readonly t: string }
 export interface Live { readonly task: string; readonly lines: Line[]; readonly why?: string }
-export interface Link { readonly state: 'up' | 'started' | 'off' | 'blocked' | 'failed' | 'checking'; readonly url?: string; readonly why?: string }
+export type { Link }
 
 const OBJ = { type: 'object' } as const
 const TASK_IN = {
@@ -108,7 +109,7 @@ export function scanTasks(home: string, now: number, gone: Set<string>, files: F
   for (const name of names) {
     if (gone.has(name)) continue
     const st = json(files.read(join(dir, name, 'status.json')))
-    const phase = String(st.phase ?? 'queued')
+    const phase = String(st.phase ?? UNWRITTEN)
     const updatedAt = Number(st.updated_at ?? 0) * 1000
     if (!ACTIVE.has(phase) && !NEEDS.has(phase) && now - updatedAt > KEEP_CLOSED_MS) {
       if (CLOSED.has(phase)) gone.add(name)
@@ -161,14 +162,13 @@ export function capOf(routeJson: string): Cap | null {
     est: isEst(r.spend_today?.prices) }
 }
 
-const LINK_STATES = new Set(['up', 'started', 'off', 'blocked', 'failed'])
 export function linkOf(ran: { code: number; stdout: string; stderr: string }): Link {
   const r = json(ran.stdout)
   const state = String(r.state ?? '')
   if (ran.code === 0 && LINK_STATES.has(state)) {
     return { state: state as Link['state'], ...(r.url ? { url: String(r.url) } : {}), ...(r.why ? { why: String(r.why) } : {}) }
   }
-  return { state: 'failed', why: (ran.stderr || ran.stdout).trim().split('\n').at(-1) || 'wb chat url failed' }
+  return linkDown((ran.stderr || ran.stdout).trim().split('\n').at(-1) || 'wb chat url failed')
 }
 
 const taskOf = (input: unknown): string => {
@@ -192,7 +192,7 @@ export class PaneData {
     const now = this.now()
     const tasks = scanTasks(this.home, now, this.gone, this.files)
     let cap: Cap | null = null
-    if (tasks.some(t => t.via === 'api' && ACTIVE.has(t.phase) && t.phase !== 'queued')) {
+    if (apiWorking(tasks)) {
       if (!this.roles || now - this.roles.at >= ROLES_MS) {
         const r = await this.run(['route', '--json'])
         this.roles = { at: now, cap: r.code === 0 ? capOf(r.stdout) : this.roles?.cap ?? null }

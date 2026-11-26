@@ -10,6 +10,10 @@ export const MODELINE = "Claude's Workbench"
 
 /** The link a modeline shows: `wb chat url --json` as the mod last read it (WbChat's `link`). */
 export type Link = WbChat['link']
+/** What `wb chat url --json` says, read as a Link (OpenCode's panel's, pane.ts `linkOf`), and the
+ * link it is when that can't be read: the plugin spells no phase, and `failed` is one (#1312). */
+export const LINK_STATES: ReadonlySet<string> = new Set(['up', 'started', 'off', 'blocked', 'failed'])
+export const linkDown = (why: string): Link => ({ state: 'failed', why })
 
 const width = (s: string) => [...s].length
 // cut to n columns, an ellipsis last when cut (every character the modeline draws is one column)

@@ -8217,14 +8217,16 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     `/workbench`. `WorkbenchPane` (`id: "workbench-pane"`): `tasks` → `{now, home, tasks, cap}`,
     each open task's view facts (`viewFacts` from `mod/hooks/tasks.ts`, the mod's own) with its
     owner keys (`session`, `driver`, `cwd`, `repo`, `subdir`), read by `scanTasks` from
-    `<home>/tasks/*/task.json` and `status.json` as the mod's `scan` reads them, less its pid and
+    `<home>/tasks/*/task.json` and `status.json` as the mod's `scan` reads them (no phase yet is
+    tasks.ts's `UNWRITTEN`; the plugin spells no phase of its own, `kernel.phase_literals`), less its pid and
     adoption steps (bench tasks left out; a task closed for over `KEEP_CLOSED_MS` 30 minutes is
     never read again, `gone`), and the day cap (`capOf` of `wb route --json`) only while an API
-    task works, kept `ROLES_MS` 10 s; `live {task}` → `{task, lines, why?}`, `wb watch <task>
+    task works (tasks.ts's `apiWorking`), kept `ROLES_MS` 10 s; `live {task}` → `{task, lines, why?}`, `wb watch <task>
     --json --last 600` (`LIVE_LINES`) read again once a stopped task's status moved, and a running
     one's every `LIVE_MS` 5 s, moved or not (its session moves between status writes: a long step,
     the tests), never sooner (the mod's `LIVE_EVERY_MS` rule, #691); `diff {task}` → `wb diff <task>` as lines styled `head`, `add`,
-    `del`, `out` (`diffLines`, cut at `DIFF_CHARS`); `link` → `wb chat url --json` (`linkOf`), kept
+    `del`, `out` (`diffLines`, cut at `DIFF_CHARS`); `link` → `wb chat url --json` (`linkOf`, from
+    modeline.ts's `LINK_STATES`, else `linkDown`), kept
     `LINK_MS` 60 s. A task name is checked against `store.NAME_RE`'s shape before any wb call.
     `/workbench` is a server command (`command.transform`'s `add`, `COMMAND`): it switches the
     session to the `workbench` agent (`session.switchAgent`, `AGENT`; one that isn't there throws
@@ -10440,7 +10442,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **A `$.state` atom's type** → its tag (`tasks-12`, `live-1`, `chat-5`, `sessions-1`, `pane-2`, `said-3`,
   `splash-1`).
 - **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → the mod's `WbChat.link`, `LINK_STATES`, `linkOf`,
-  modeline.ts's words per state. **settings-changes.jsonl's row** (the web app's Settings) → `settingsTurns`,
+  modeline.ts's words per state, its `LINK_STATES` and `linkDown` (OpenCode's panel's `linkOf`, pane.ts). **settings-changes.jsonl's row** (the web app's Settings) → `settingsTurns`,
   `settingSaid`, `SETTING_HELP`; a setting the conversation hears from `unsaid` → `SAID_ELSEWHERE`. **routes.json's
   `by` value `web`** → `readRoutes`' `web`.
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963);

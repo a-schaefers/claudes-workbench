@@ -25,6 +25,7 @@ import {
   type Here, type Run, type Token,
 } from './pane-view.ts'
 import { capRow, focusOf, frameOf, speechOf } from '../mod/hooks/tasks.ts'
+import { CLOSED } from '../mod/hooks/core.ts'
 import { COLUMNS, FACE, ROWS } from '../mod/hooks/apprentice.ts'
 
 export const POLL_MS = 2000        // the tasks, while one is open or the panel shows
@@ -107,7 +108,7 @@ class Feed {
   private readonly loop: Poll<Tasks>
   constructor(private readonly rpc: Record<string, (input?: unknown) => Promise<unknown>>, private readonly busy: () => boolean) {
     this.loop = new Poll(() => this.rpc.tasks!({}) as Promise<Tasks>, t => this.state[1](t), () => {
-      const open = (this.state[0]()?.tasks ?? []).some(t => t.phase !== 'accepted' && t.phase !== 'discarded')
+      const open = (this.state[0]()?.tasks ?? []).some(t => !CLOSED.has(t.phase))
       return open || this.busy() ? POLL_MS : IDLE_MS
     })
   }
