@@ -9675,7 +9675,7 @@ through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fi
 `superseded`; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
 `cause: item`, as an `on_failure` report item's: it holds only that item, and while it is open the driver still starts
 and resumes the others, `runs._going`, though it never finishes the run or pauses it; a second item's null then is
-raised after `wb run resume`, journalled `notice` only once raised; a `claude` stage's checkpoint may replace it, #1510),
+raised after `wb run resume`, journalled `notice` only once raised; a `claude` stage's checkpoint waits for the resume, never replacing it, #1510),
 then starts what is ready (`runs.state`, rebuilt
 each pass from the flow, the journal and the tasks: a pipeline item once its input is in, a barrier's once all
 are) and has room (`_room`: `IN_FLIGHT` 6 items; an API stage's provider slots, `cli._api_slots_free`, and none

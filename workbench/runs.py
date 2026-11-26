@@ -1608,8 +1608,10 @@ def tick(run: Run) -> bool:
         if s.get("claude") and complete.get(s.get("from")) and st.get(s["id"]) is None:
             if not any(r.get("kind") == "notice" and r.get("stage") == s["id"] for r in run.journal()):
                 n = len([i for i in st.get(s["from"]) or () if i.state == "done"])
-                # over an item's checkpoint too, whose items went on (#1510); journalled once raised
-                if run.set_status_if(lambda x: x.get("phase") in ("running", "paused") or _going(x),
+                # never over an item's checkpoint: the resume acks that notice, and this one, journalled,
+                # was never raised again, so the run sat running with nothing due (#1510, 2026-11-26).
+                # It waits for the resume instead, journalled only once raised, so raised right after.
+                if run.set_status_if(lambda x: x.get("phase") in ("running", "paused"),
                                      phase="checkpoint", why=f"stage {s['id']} is Claude's", cause=None):
                     run.log(kind="notice", notice="run_checkpoint", stage=s["id"])
                     run.notify("run_checkpoint", f"stage {s['id']} is yours: {n} result(s) of {s['from']} are in "

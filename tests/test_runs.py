@@ -1087,6 +1087,36 @@ class Runs(Base):
         for n in ("nf-code-1", *names):
             run_wb("discard", n)
 
+    def test_a_claude_stage_whose_inputs_finish_under_an_items_checkpoint_is_raised_once_claude_resumes(self):
+        # #1510's review: the merge stage's checkpoint replaced the crashed item's, the resume acked
+        # its notice and its journalled notice row kept tick from raising it again: the run sat
+        # running for ever, its driver alive and nothing due, and Claude never heard the merge was his
+        flow = {"v": 1, "name": "pq", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "items": ["f1", "f2"], "prompt": "Write {item} to answer.txt."},
+            {"id": "merge", "claude": True, "from": "code"},
+            {"id": "claude", "final": True, "from": "merge"}]}
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"pq-code-1": "crash"})
+        run_wb("run", "start", "pq", "--plan", self.plan(flow), "--repo", str(self.repo))
+        deadline = time.time() + 120  # until the code stage is complete: f1 null, f2 done
+        while time.time() < deadline and (runs.Run("pq").status.get("stages") or {}).get("code", {}).get("running", 1):
+            time.sleep(0.3)
+        time.sleep(1)  # the pass that found it complete, and would have raised the merge, has ended
+        st = runs.Run("pq").status
+        self.assertEqual((st["phase"], st.get("cause")), ("checkpoint", "item"), st)
+        self.assertIn("pq-code-1 (code 1) is failed", st["why"])
+        self.assertIn("resumed pq", run_wb("run", "resume", "pq"))
+        st = self.wait_run("pq", ("checkpoint", "review", "failed", "stopped"), timeout=60)
+        self.assertEqual((st["phase"], st["why"]), ("checkpoint", "stage merge is Claude's"), st)
+        self.assertEqual([r["stage"] for r in runs.Run("pq").journal() if r.get("kind") == "notice"
+                          and r.get("notice") == "run_checkpoint" and "stage" in r], ["merge"])
+        due = runs.due("pq")
+        self.assertIsNotNone(due)
+        self.assertIn("stage merge is yours", due["text"])
+        run_wb("run", "stop", "pq")
+        for n in ("pq-code-1", "pq-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
     def test_asks_left_past_refix_max_escalate_with_the_attempt_kept_and_the_last_roles_failure_asks_claude(self):
         asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
