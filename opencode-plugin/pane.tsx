@@ -15,13 +15,13 @@
 //
 // The TUI part imports this only in setup (tui.ts), never at load: it imports OpenTUI and Solid,
 // which only OpenCode's TUI provides.
-import { createEffect, createMemo, createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
+import { createEffect, createMemo, createRoot, createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
 import { TextAttributes } from '@opentui/core'
 import { Apprentice, mountSplash, PANEL, replaySplash, type Panel, type SplashHost } from './splash.tsx'
 import { AGENT, WorkbenchPane, type Link, type Live, type PaneTask, type Tasks } from './pane.ts'
 import { WorkbenchDriver } from './driver.ts'
 import {
-  driverRow, footer, lineRun, LinkPoll, MODELS, modelineOf, panelRows, pixels, Poll, runOf, scoped, separator, sidebar, spinAt, target,
+  driverRow, footer, Landing, lineRun, LinkPoll, MODELS, modelineOf, panelRows, pixels, Poll, runOf, scoped, separator, sidebar, spinAt, target,
   TOKEN, WHO, wrap, type DriverInfo, type Here, type Run, type Token,
 } from './pane-view.ts'
 import { capRow, focusOf, frameOf, speechOf } from '../mod/hooks/tasks.ts'
@@ -327,6 +327,7 @@ export function mountPane(host: Host, home: string): () => void {
   const [picked, pick] = createSignal('')
   const panelOpen = () => host.ui.panel.current()?.name === PANEL
   const feed = new Feed(rpc, panelOpen)
+  const landing = new Landing()
   const open = (task = '') => {
     if (task) pick(task)
     if (!panelOpen()) host.ui.panel.open(PANEL)
@@ -356,6 +357,7 @@ export function mountPane(host: Host, home: string): () => void {
     const { sessionID, agent, previous } = e.data
     const route = host.ui.router.current()
     const here = route.type === 'session' && route.sessionID === sessionID
+    if (here) landing.settle()
     if (agent === AGENT && previous !== AGENT && here) {
       open()
       // asked only for the session on screen (--once records each note as said, so one asked for a
@@ -373,6 +375,18 @@ export function mountPane(host: Host, home: string): () => void {
       if (here && panelOpen()) host.ui.panel.close()
       replaySplash(host)
     }
+  }))
+  // a session already on Workbench as the TUI comes to it (`opencode -s`, a new TUI) opens the
+  // panel too, once an arrival: OpenCode publishes no agent selection for it (#1517)
+  stops.push(createRoot(dispose => {
+    createEffect(() => {
+      const route = host.ui.router.current()
+      const sessionID = route.type === 'session' ? route.sessionID ?? '' : ''
+      const s = sessionID ? host.data.session.get(sessionID) : undefined
+      // the open outside the effect, which would otherwise track the panel's state it reads
+      if (landing.see(sessionID, s ? s.agent ?? '' : undefined)) queueMicrotask(() => open())
+    })
+    return dispose
   }))
   feed.start()
   return () => {

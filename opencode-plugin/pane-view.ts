@@ -9,7 +9,7 @@ import { CLOSED, openCounts, owns } from '../mod/hooks/core.ts'
 import { modeline, type Link } from '../mod/hooks/modeline.ts'
 import { ROWS } from '../mod/hooks/apprentice.ts'
 import { clip, compactWanted, taskLines, type Part } from '../mod/hooks/tasks.ts'
-import { LINK_MS, type PaneTask } from './pane.ts'
+import { AGENT, LINK_MS, type PaneTask } from './pane.ts'
 
 /** The panel's name: `ui.panel.open(PANEL)` (splash.tsx's PANEL, the same word). */
 export const NAME = 'Workbench'
@@ -66,6 +66,24 @@ export class LinkPoll {
     this.timer = this.timers.set(() => { this.timer = undefined; if (this.shown()) void this.want() }, LINK_MS)
   }
   stop() { this.stopped = true; if (this.timer !== undefined) this.timers.clear(this.timer) }
+}
+
+/** Whether the panel opens as the TUI comes to a session (#1517): once for each arrival, when
+ * the session's agent is Workbench, as on `opencode -s` of a Workbench session or a new TUI on
+ * one, where OpenCode publishes no agent selection (the agent is already it) and the panel, the
+ * TUI's own state, starts closed. `see(sessionID, agent)` at each change of the route's session
+ * or of what the TUI knows of its agent (undefined: not known yet); `settle()` once the panel's
+ * state for this arrival is decided otherwise (the agent selected on screen). */
+export class Landing {
+  private at = ''
+  private done = true
+  see(sessionID: string, agent: string | undefined): boolean {
+    if (sessionID !== this.at) { this.at = sessionID; this.done = !sessionID }
+    if (this.done || agent === undefined) return false
+    this.done = true
+    return agent === AGENT
+  }
+  settle() { this.done = true }
 }
 
 // ---------------------------------------------------------------- colours

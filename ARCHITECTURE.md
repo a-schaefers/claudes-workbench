@@ -8437,7 +8437,7 @@ drivers on one machine: *Both drivers on one machine*.
 
 | Claude Code (the mod, the skill) | OpenCode (the plugin) | Where |
 |---|---|---|
-| `/workbench [request]`: the skill, the mode on, the pane | `/workbench [request]`, a server command: the driver pin applied, the session switched to the Workbench agent, whose prompt is the procedure; the panel opens on that switch | `pane.ts`, `agent.ts`, *The driver* |
+| `/workbench [request]`: the skill, the mode on, the pane | `/workbench [request]`, a server command: the driver pin applied, the session switched to the Workbench agent, whose prompt is the procedure; the panel opens on that switch, and as a TUI comes to a session already on it (`opencode -s`, a new TUI); run again in a session already on it, it publishes no switch and opens nothing (the footer's `⚒ wb` or the palette does) | `pane.ts`, `agent.ts`, *The driver* |
 | `/workbench-quit`, `/workbench-quit-and-hand-back-claude`, `/workbench-models`, `/workbench-update` | `/workbench-quit`, `/workbench-quit-and-hand-back` (switching to Build ends the mode and closes the panel), `/workbench-models`, `/workbench-update` | `commands.ts` |
 | SKILL.md and `reference/`, read through the skill link | the same files rendered for OpenCode when the plugin starts (`skill.ts`): the agent's prompt, the `workbench` skill and one `workbench-<name>` skill per reference file, Claude Code's lines replaced by OpenCode's facts | `skill.ts`, `agent.ts` |
 | `wb` recipes typed in Bash | typed tools in the `workbench` namespace (`workbench_start`, `_status`, `_diff`, `_feedback`, `_accept`, `_discard`, `_wait`), the shell for the rest | `tools.ts` |
@@ -8805,13 +8805,19 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     the web app's link for the modeline, asked as the panel draws (the page's opening, each of the
     splash's layouts) at most once a `LINK_MS`, and again `LINK_MS` after each answer while the
     panel shows (a panel opened with the web app down said so until it was reopened, #1518).
+    `Landing`: whether the panel opens as the TUI comes to a session, `see(sessionID, agent)` true
+    once an arrival when the agent is `workbench` (undefined: not known yet, asked again);
+    `settle()` once an agent selection on screen decided it (#1517).
   - `pane.tsx` (the OpenTUI views): `mountPane(host, home)` mounts the page on the panel through
     `mountSplash`, adds the `sidebar.content` and `prompt.footer.status` slots and a palette entry
     `workbench.panel` (`Workbench: show or hide its panel`, a global layer). Selecting the
     `workbench` agent in the route's session (`session.agent.selected`) opens the panel and toasts
     the driver's notes (`WorkbenchDriver.driver` with `once`, each note's `text`; never for a session
     not on screen, whose notes would be spent unseen); leaving it closes the panel and arms
-    the splash again (`replaySplash`). `Feed` polls `tasks` (one `Poll`) every `POLL_MS` 2 s while a task is open
+    the splash again (`replaySplash`). Coming to a session already on Workbench (`opencode -s`, a
+    new TUI: OpenCode publishes no selection, and the panel, the TUI's own state, starts closed)
+    opens it too, once an arrival (`Landing`, an effect on the route and the session's agent;
+    once the panel was opened nowhere then, #1517). `Feed` polls `tasks` (one `Poll`) every `POLL_MS` 2 s while a task is open
     or the panel shows, else `IDLE_MS` 10 s, and `link` while the panel shows (`LinkPoll`, below). The page (the
     panel's width at 108 columns or more beside the session, fullscreen narrower): the driver row
     (`driverRow`; its press opens `/models`, *The driver*), the task rows (a press on a task's first line follows it, the mod's

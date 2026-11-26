@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
-import { capOf, COMMAND, diffLines, LINK_MS, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
+import { AGENT, capOf, COMMAND, diffLines, LINK_MS, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
   WorkbenchPane, type Files, type PaneTask } from '../pane.ts'
-import { CHANGE, driverRow, footer, LinkPoll, mine, MODELS, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target,
+import { CHANGE, driverRow, footer, Landing, LinkPoll, mine, MODELS, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target,
   type Here } from '../pane-view.ts'
 import { ROWS } from '../../mod/hooks/apprentice.ts'
 import { kernel } from '../../mod/hooks/core.ts'
@@ -235,6 +235,23 @@ test('an open panel asks for the web app\'s link again each LINK_MS, so a web ap
   last(); await Promise.resolve()
   expect([asked, pending.size]).toEqual([2, 0])
   links.stop()
+})
+
+test('a session already on Workbench opens the panel as the TUI comes to it, once an arrival (#1517)', () => {
+  // `opencode -s` of a Workbench session, or a new TUI on one: OpenCode publishes no agent
+  // selection, as the agent is already Workbench, and the TUI's panel starts closed (2026-11-26)
+  const l = new Landing()
+  expect(l.see('', undefined)).toBe(false)              // home: no session
+  expect(l.see('ses_a', undefined)).toBe(false)         // its agent not known yet
+  expect(l.see('ses_a', AGENT)).toBe(true)              // known: open
+  expect(l.see('ses_a', AGENT)).toBe(false)             // once: a panel closed by hand stays closed
+  expect(l.see('ses_b', 'build')).toBe(false)           // another session, not on Workbench
+  expect(l.see('ses_b', AGENT)).toBe(false)             // its agent selected after the arrival: the selection's open, not this
+  expect(l.see('ses_a', AGENT)).toBe(true)              // back to the first: a new arrival
+  const settled = new Landing()
+  expect(settled.see('ses_c', undefined)).toBe(false)
+  settled.settle()                                     // the agent selected on screen before its info came
+  expect(settled.see('ses_c', AGENT)).toBe(false)
 })
 
 const task = (name: string, phase: string, more: Partial<PaneTask> = {}): PaneTask => ({
