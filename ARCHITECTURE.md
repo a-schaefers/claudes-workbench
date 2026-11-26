@@ -75,7 +75,8 @@ The runner, the ask server and the chat server never call each other or the mod:
 files in `$WB_HOME` (`store.py`), and waiters sleep in the kernel (inotify, pidfd: `watch.py`).
 The mod's only calls are `wb` subcommands (`events`, `watch --json`, `status`, `chat
 ack|claim|url|log|ask|wait|answer|on|off`, `stop|takeover --all --repo … --session …`, `update`
-and its weekly `update --check --if-due`, `optimize start --if-due` once a session, `setup` when
+and its weekly `update --check --if-due`, `optimize start --if-due` once a session, `deepmode --moved`
+once a load while workflows.json holds 2.1's `mode: on`, `setup` when
 the skill isn't linked), plus `kill
 -0` where there is no `/proc` and `tail -c`. A crash loses nothing; everything reads with `cat`.
 
@@ -6352,8 +6353,15 @@ change arriving as a row (`sayRules`, #540). Shell edits aren't seen: the block 
 its name before, `wb workflows`, one command; on, a substantive request runs as a deep workflow, *Deep
 workflows*; `/deepmode [on|off]` in both hosts, and `deepmode on|off` typed, *The keywords* below).
 Whether Claude may split one request into several tasks that run at once:
-the user's choice, `wb deepmode on|off` (the web app's Settings), kept beside the coding choice in `$WB_HOME/workflows.json` `{mode, ts}`
-(`cli.WORKFLOWS`, `workflows_mode`), read fresh, default `off` (no file, unreadable JSON, an unknown mode). Like
+the user's choice, `wb deepmode on|off` (the web app's Settings), kept beside the coding choice in `$WB_HOME/workflows.json` `{deepmode, ts}`
+(`cli.WORKFLOWS`, `DEEPMODE_KEY`, `workflows_mode`), read fresh, default `off` (no file, unreadable JSON, an unknown mode).
+**2.1's key** (#1507, 2026-11-26): 2.1 kept it as `{mode, ts}`, where on meant Claude may start several tasks
+at once for a request; read as 2.2's deepmode, a 2.1 on made every substantive request a deep workflow,
+unasked. 2.2 reads `deepmode` alone, so a 2.1 on starts off, and `wb deepmode --moved`
+(`cli.deepmode_moved`, under `locks/workflows.lock`) writes `{deepmode: off}` and prints the story's
+`moved.deepmode` once (what deepmode is now, `/deepmode on` to turn it on): the mod (`deepmodeMoved`, at a
+session's start with a person there) and the OpenCode plugin (`Jobs.tick`, once a load) run it only while the
+file holds 2.1's `mode: on` and no `deepmode`, and toast its line; any other file prints nothing. Like
 `wb coding` it is the user's: Claude runs it only on their yes, and wb gates neither (no dialog: nothing it
 starts could not start anyway). **Off**: the skill's rule, one task at a time, as before there was a choice.
 **On**: the mod adds a `dynamic-workflows` block (`WORKFLOWS_RULE`, from `workflowsMode`, said with
@@ -6584,7 +6592,8 @@ default after 2.0 turned it on.
   `consent`: what `state.waiting`'s `{what}` is), `note.waiting` and `note.grant` (the notice row's
   bytes, `chat.WAITING`, `WAITING_GRANT`), `receipt.blocked`, `prompts` and `lane` (Settings cards), `doc.rule`;
   `link.where` (wb setup's last line: where the web app's link is) and `link.reach` (`wb chat on`'s
-  and doctor's: `wb chat reach tailnet`), read by cli.py; `refusal.question`, `refusal.plan`,
+  and doctor's: `wb chat reach tailnet`), read by cli.py; `moved.deepmode` (`wb deepmode --moved`'s
+  line, both hosts' toast, #1507); `refusal.question`, `refusal.plan`,
   `refusal.consent` (the mod's `AWAY_QUESTION`, `AWAY_PLAN`, `CONSENT_WAITING`, the plugin's
   `AWAY_QUESTION` naming `workbench_chat_reply`); `skill.rule` (SKILL.md's terminal-primary
   paragraph) and `skill.prompts` (reference/driving.md's: prompts are answered in the terminal, and
@@ -9376,6 +9385,8 @@ is written before the fetch, so a killed check lost the week's (the 2026-11-26 r
 - `wb update --check --if-due`, once a load: `update available …` and the marketplace clone's
   local changes (`LOCAL_CHANGES`, patches.CHECK_LINE's opening) toasted as wb says them.
 - `wb optimize start --if-due`, once a load, quiet: `measuring …` toasted.
+- `wb deepmode --moved`, once a load while workflows.json holds 2.1's `mode: on` and no `deepmode`:
+  its one line (the story's `moved.deepmode`) toasted, as the mod's `deepmodeMoved` does (#1507).
 - `wb scout --if-due`, once a load, in a server that owned a task in this load (`delegated`), wakes
   on, quiet, every session idle and `QUIET_MS` (a minute) after a turn: wb's offer line toasted
   (`cli.scout_offer_due`, the mod's `scoutIfDue` rule moved into wb; scout.json `offered_at`).
@@ -9780,7 +9791,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb splash [on\|off]` | | `$WB_HOME/splash.json`: the pane's opening (#963). |
 | `wb settings [set KEY VALUE \| offers]` | `--json`; `set`: `--dry-run`, `--json`; `offers`: `--if-due`, `--json` | The web app's Settings rows (*The admin table (settings.py)*, *Claude's writes*, #1287): every row by group with its choices (`cli.settings_lines`); `set` runs `settings.apply(by="claude")` (a role's row gated as `wb route` is, the mod's dialog reading `--dry-run --json`), prints wb's line and the row's `help`, appends to settings-changes.jsonl; exit 2 no such key or value, 3 wb refused. `offers` (#1334, the OpenCode plugin's, *Background jobs on OpenCode*): `settings.offers`, the settings-changes.jsonl rows `by: "web"` newer than settings-offered.json's mark and under `OFFER_MAX_AGE_S` (an hour) old, `{"offers": [{ts, key, label, text, toast}], "notes": [{ts, key, text}]}` (a row with `help` an offer, `change_said` and its help; the rest notes, but `SAID_ELSEWHERE`'s keys), plain the texts; `--if-due` records the newest as said under its lock. |
 | `wb experiment [<name> [on\|off]]` | | *Experiments* (`cli.experiment_lines`, `context.EXPERIMENTS`, use over `USE_RECENT` 5 rows, `cli.use_recent`); sets `experiments.json` for later tasks; old probe levels `context.OLD_LEVELS` mean on; `; on is recommended` while `context.PROBE_RECOMMENDED`. |
-| `wb deepmode [on\|off]`, `wb workflows [on\|off]` | `--rule` (prints `runs.DEEPCODE_RULE`, the rule a host adds when the user types `deepcode`) | *Dynamic workflows (deepmode)* (#1041, #1278): `$WB_HOME/workflows.json`; off by default. One command under two names. |
+| `wb deepmode [on\|off]`, `wb workflows [on\|off]` | `--rule` (prints `runs.DEEPCODE_RULE`, the rule a host adds when the user types `deepcode`); `--moved` (once: a 2.1 `mode: on` written as deepmode off and the story's `moved.deepmode` printed, else nothing; the hosts' once a load, #1507) | *Dynamic workflows (deepmode)* (#1041, #1278): `$WB_HOME/workflows.json`; off by default. One command under two names. |
 | `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--args TEXT` (a flow's slash command's line as typed: `runs.parse_args`, its one param whole, else `k=v` words), `--dry-run`, `--repo DIR` (.), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE`, `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param (a `choices` one not among them; a `files` one matching nothing committed at the base, or over `runs.FILES_MAX` 1,000), a stage on an API role with no day cap (`meter.no_cap`), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `stop: wb run stop <run>` and that its notices wake the session as a task's (without the mod or the plugin, `wb wait <run>` in the background). `--dry-run` (#1295) stops after the cap check and the budget, before any file: a line per stage (its card or code, role and side, where its items come from, those `unless_exists` skips), each items stage's first spec cut at `runs.DRY_SPEC_CUT` 1,500 characters, and the estimate (`runs.dry_run`); exit 0, or 1 on a refusal. |
 | `wb run status [<run>]` | `--all`, `--json`, `--all-sessions` (and, suppressed, `--repo DIR`, `--session ID`) | Reaps a dead driver (`runs.reap`: `stopped`, one `run_stopped`); a line per run in the caller's scope (`runs.status_line`). |
 | `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, filtered, superseded, null, not_run, pending, code, spend; every item accounted for. |
@@ -9895,7 +9906,7 @@ $WB_HOME (~/.local/state/workbench)
   probe-languages.json           {probe (real path), version, languages, at} from `probe search --help`; re-read when path or version differs (context.probe_languages)
   progress.json                  progress checks' opt-in: {on, after?, ts}; none: off
   splash.json                    the pane's opening (wb splash): {on, ts}; on unless "on": false
-  workflows.json                 Dynamic workflows (deepmode; wb deepmode, wb workflows, #1041, #1278): {mode: on|off, ts}; none: off
+  workflows.json                 Dynamic workflows (deepmode; wb deepmode, wb workflows, #1041, #1278): {deepmode: on|off, ts}; none: off; 2.1's {mode, ts} read as off (#1507)
   runs/<run>/                    a deep workflow's (wb run, *Deep workflows*, #1278): run.json {name, flow (whole), flow_name, flow_sha, params, exists? ({<stage>: [paths]}: the
                                  `unless_exists` paths at base, runs.existing, #1295), context,
                                  repo, base, base_ref, cwd, budget_usd, budget_min, overnight, trial, no_claude_md, created, driver {python, machine},
@@ -10014,6 +10025,7 @@ $WB_HOME (~/.local/state/workbench)
   locks/signal-stop.lock         one runner writing a shutdown's one notice (runner._signal_notice)
   locks/cap-wait.lock            the one API task let past the day cap to its own stop, its name in it (runner._cap_go, #1304)
   locks/provider-stop-<provider>.lock   empty: one running task's quota, rate limit or outage stop at a time looks for a told one and tells (runner._told_stop, #1344)
+  locks/workflows.lock           one `wb deepmode --moved` at a time: two hosts loading at once say the 2.1 move once (cli.deepmode_moved, #1507)
   locks/skills.lock              one skill-library change at a time, add to commit (skills._library_lock)
   locks/schedule-<name>.fire.lock   held by a schedule's fire for its life: the next fire skips while it is (schedule.lock_path, #1204)
   locks/config-<key>.lock        not here: store.config_lock_dir ($XDG_RUNTIME_DIR/workbench, else 0700 workbench-<uid> in the temp dir, else here),

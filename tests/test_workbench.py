@@ -24561,11 +24561,32 @@ class DynamicWorkflows(Base):
         self.assertFalse((store.home() / "workflows.json").exists())
         self.assertIn("Dynamic workflows (deepmode): On. substantive requests run as deep workflows (wb run)",
                       run_wb("workflows", "on"))
-        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "on")
+        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["deepmode"], "on")  # #1507
         self.assertEqual(cli.workflows_mode(), "on")
         self.assertIn("On.", run_wb("workflows"))
         self.assertIn("Off (default)", run_wb("workflows", "off"))
-        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "off")
+        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["deepmode"], "off")
+
+    def test_a_2_1_on_starts_2_2_with_deepmode_off(self):
+        # #1507 (2026-11-26): 2.1's on (`mode`) meant Claude may start several tasks at once; read as
+        # 2.2's deepmode it made every substantive request a deep workflow, unasked. It starts off,
+        # and the hosts' once-a-load `wb deepmode --moved` says so once (the story's line)
+        path = store.home() / "workflows.json"
+        path.write_text(json.dumps({"mode": "on", "ts": 1}))
+        self.assertEqual(cli.workflows_mode(), "off")
+        self.assertIn("Off (default)", run_wb("deepmode"))
+        said = run_wb("deepmode", "--moved")
+        self.assertEqual(said, cli.story.text("moved.deepmode") + "\n")
+        self.assertIn("/deepmode on", said)
+        self.assertEqual(json.loads(path.read_text())["deepmode"], "off")
+        self.assertEqual(run_wb("deepmode", "--moved"), "")            # once
+        self.assertEqual(cli.workflows_mode(), "off")
+        # a 2.1 off, or a choice made in 2.2, says nothing
+        for doc in ({"mode": "off"}, {"deepmode": "on", "mode": "on"}):
+            path.write_text(json.dumps(doc))
+            self.assertEqual(run_wb("deepmode", "--moved"), "")
+            self.assertEqual(json.loads(path.read_text()), doc)
+        self.assertEqual(cli.workflows_mode(), "on")
 
     def test_a_workflows_json_wb_cannot_read_or_does_not_know_is_off(self):
         for text in ("not json", '{"mode": "maybe"}', '["on"]'):
@@ -36055,7 +36076,7 @@ console.log(JSON.stringify({ failed }))
         self.assertTrue(said, out.read_text())
         self.assertIn(json.dumps(runs.DEEPCODE_RULE)[1:-1], said[0])
         self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepmode on")
-        self.assertEqual(json.loads((state / "workflows.json").read_text())["mode"], "on")
+        self.assertEqual(json.loads((state / "workflows.json").read_text())["deepmode"], "on")  # #1507
         toggled = system("deepmode on")
         self.assertTrue(toggled, out.read_text())
         self.assertIn("line set it (wb ran `wb deepmode on`): Dynamic workflows (deepmode): On.", toggled[0])

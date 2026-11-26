@@ -4714,12 +4714,31 @@ WORKFLOWS = {"off": ("Off", "Claude runs one task at a time; deepcode asks for a
              "on": ("On", "substantive requests run as deep workflows (wb run) on the user's agents, each "
                           "item on its role's model; the GPUs, the provider slots and the day cap decide.")}
 WORKFLOWS_LABEL = "Dynamic workflows (deepmode)"
+# #1507 (2026-11-26): the choice is kept under `deepmode`, not 2.1's `mode`. 2.1's on meant Claude
+# may start several tasks at once for a request; 2.2's runs every substantive request as a deep
+# workflow, budgeted at what is left of the day cap, so a 2.1 on read as 2.2's changed what every
+# request did without the user asked. A 2.1 on starts 2.2 off, and `wb deepmode --moved` (each
+# host, once a load) says so once, the story's `moved.deepmode`.
+DEEPMODE_KEY = "deepmode"
 
 
 def workflows_mode() -> str:
     doc = store.read_json(store.home() / "workflows.json", {})
-    mode = doc.get("mode") if isinstance(doc, dict) else None
+    mode = doc.get(DEEPMODE_KEY) if isinstance(doc, dict) else None
     return mode if mode in WORKFLOWS else "off"
+
+
+def deepmode_moved() -> str:
+    """The one line a 2.1 Dynamic workflows on gets (#1507), once: workflows.json holding 2.1's
+    `mode: on` and no `deepmode` is written as deepmode off, the choice 2.2 reads it as, under a
+    lock so two hosts loading at once say it once; "" for any other file."""
+    path = store.home() / "workflows.json"
+    with store.locked(store.home() / "locks" / "workflows.lock"):
+        doc = store.read_json(path, {})
+        if not isinstance(doc, dict) or DEEPMODE_KEY in doc or doc.get("mode") != "on":
+            return ""
+        store.write_json(path, {DEEPMODE_KEY: "off", "ts": store.now()})
+    return story.text("moved.deepmode")
 
 
 def cmd_workflows(a):
@@ -4729,8 +4748,14 @@ def cmd_workflows(a):
             die("--rule prints the deepcode rule; set deepmode without it")
         print(runs.DEEPCODE_RULE)
         return
+    if getattr(a, "moved", False):
+        if a.state:
+            die("--moved says once that 2.1's Dynamic workflows didn't carry over; set deepmode without it")
+        if line := deepmode_moved():
+            print(line)
+        return
     if a.state:
-        store.write_json(store.home() / "workflows.json", {"mode": a.state, "ts": store.now()})
+        store.write_json(store.home() / "workflows.json", {DEEPMODE_KEY: a.state, "ts": store.now()})
     label, why = WORKFLOWS[workflows_mode()]
     print(f"{WORKFLOWS_LABEL}: {label}{' (default)' if label == 'Off' else ''}. {why}")
 
@@ -9606,6 +9631,8 @@ def parser() -> argparse.ArgumentParser:
                            if word == "deepmode" else "the same as wb deepmode")
         s.add_argument("state", nargs="?", choices=["on", "off"])
         s.add_argument("--rule", action="store_true", help="the rule a host adds when the user types deepcode")
+        s.add_argument("--moved", action="store_true", help="once, for a host: the line saying a 2.1 Dynamic "
+                       "workflows on starts 2.2 with deepmode off (#1507); nothing otherwise")
         s.set_defaults(f=cmd_workflows)
     s = sub.add_parser("run", help="deep workflows (#1278): a flow's items as tasks on the user's agents, "
                        "driven in the background; Claude is woken at checkpoints and the end")

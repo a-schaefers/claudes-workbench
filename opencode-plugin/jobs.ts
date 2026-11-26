@@ -8,6 +8,8 @@
 //   once wb events said hello; `update available …` and the marketplace clone's local changes
 //   (patches.CHECK_LINE) toasted, wb's line as it is;
 // - the automatic optimize: `wb optimize start --if-due`, once a load, quiet; `measuring …` toasted;
+// - 2.1's Dynamic workflows on, which 2.2 reads as deepmode off: `wb deepmode --moved`, once a load
+//   while workflows.json holds 2.1's `mode: on` and no `deepmode`; its one line toasted (#1507);
 // - the weekly model check: `wb scout --if-due`, once a load, in a server that delegated in this
 //   load, wakes on, quiet, a minute after a turn (QUIET_MS: raised at once, it buried the driver's
 //   question, the mod's 2026-11-16 audit); wb's offer line toasted (scout.json `offered_at`, which
@@ -32,6 +34,7 @@ type Task = { name: string; phase: string; parked: boolean; updatedAt: number }
 export class Jobs {
   updateAsked = false
   optimizeAsked = false
+  movedAsked = false
   scoutAsked = false
   changesSize = -1   // settings-changes.jsonl's size at the last offers asked
 
@@ -56,6 +59,18 @@ export class Jobs {
           l.toast('update', r.out, '', false)
         }
       }, () => {})
+    }
+    if (!this.movedAsked) {
+      this.movedAsked = true
+      // 2.1 kept Dynamic workflows in `mode`; 2.2's deepmode means more, so a 2.1 on starts off and
+      // wb says so once, its line the story's (#1507, 2026-11-26): the mod's deepmodeMoved
+      let doc: Record<string, unknown> = {}
+      try { doc = JSON.parse(l.deps.read(l.path('workflows.json')) ?? '{}') ?? {} } catch { /* none */ }
+      if (doc && doc.mode === 'on' && !('deepmode' in doc)) {
+        void l.deps.run(['deepmode', '--moved'], undefined, JOB_MS).then(r => {
+          if (r.code === 0 && r.out.trim()) l.toast('deepmode', r.out.trim(), '', false)
+        }, () => {})
+      }
     }
     if (!this.optimizeAsked && quiet) {
       this.optimizeAsked = true

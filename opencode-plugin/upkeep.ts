@@ -335,7 +335,8 @@ export class Upkeep {
       wakeOff: any && this.host.options?.wake === 'off', // notices.ts's `wake` option (the mod's)
       coding: coding in CODING_RULES ? coding : 'decide',
       routes,
-      workflows: any && json(read('workflows.json')).mode === 'on' ? 'on' : 'off',
+      // deepmode's own key, never 2.1's `mode`, which meant less (#1507)
+      workflows: any && json(read('workflows.json')).deepmode === 'on' ? 'on' : 'off',
     }
     // the open tasks as wb lists them, for this session in its directory; read again when they change
     const sig = tasks.map(t => `${t.name}:${t.phase}`).join(' ')

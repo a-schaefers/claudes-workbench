@@ -54,7 +54,7 @@ function entriesHost(list: { key: string; value: unknown }[] = []) {
 function rules(files: Record<string, string>) {
   files[`${HOME}/notes.md`] = 'Always run the tests.\n'
   files[`${HOME}/coding.json`] = JSON.stringify({ mode: 'only' })
-  files[`${HOME}/workflows.json`] = JSON.stringify({ mode: 'on' })
+  files[`${HOME}/workflows.json`] = JSON.stringify({ deepmode: 'on' })
   files['/h/.config/workbench/routes.json'] = JSON.stringify({ roles: { significant: { via: 'api', api: 'p/m' } } })
 }
 

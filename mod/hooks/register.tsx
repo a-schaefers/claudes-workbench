@@ -603,12 +603,25 @@ async function setDeepmode($: any, on: boolean): Promise<string> {
   return said
 }
 
+// deepmode's own key (#1507, 2026-11-26): 2.1's `mode` on meant Claude may start several tasks at
+// once; read as 2.2's deepmode it made every substantive request a deep workflow, unasked
 async function workflowsMode($: any): Promise<string> {
   try {
-    return JSON.parse(await $.fs.read(`${mem.root}/workflows.json`)).mode === 'on' ? 'on' : 'off'
+    return JSON.parse(await $.fs.read(`${mem.root}/workflows.json`)).deepmode === 'on' ? 'on' : 'off'
   } catch {
     return 'off'
   }
+}
+
+// Once a load with a person there: a 2.1 Dynamic workflows on (workflows.json `mode: on`, no
+// `deepmode`) starts 2.2 off, and `wb deepmode --moved` records it and says so once, the story's
+// `moved.deepmode` line, toasted (#1507); the OpenCode plugin's jobs.ts does the same
+async function deepmodeMoved($: any): Promise<void> {
+  let doc: any = {}
+  try { doc = JSON.parse(await $.fs.read(`${mem.root}/workflows.json`)) ?? {} } catch { return }
+  if (doc?.mode !== 'on' || 'deepmode' in doc) return
+  const { ok, out } = await runWb($, ['deepmode', '--moved'])
+  if (ok && out !== '(no output)') $.ui.toast(`workbench: ${out}`) // nothing: another host said it
 }
 
 const SEND_ASK = 'Send it'
@@ -3277,6 +3290,7 @@ export const register: Register = (on, options) => {
       await checkVersion($)
       startEars($)
       void chatLink($) // the modeline's link, now (#1283)
+      void deepmodeMoved($).catch(() => {}) // 2.1's Dynamic workflows on, said once (#1507)
     }
     return next(e)
   })

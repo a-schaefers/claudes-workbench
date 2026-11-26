@@ -5652,7 +5652,7 @@ test('#1041: a stored said-2 (no workflows in it) is declined as said-1 is: no r
 
 test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block when on, nothing when off, one row per change', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/workflows.json': JSON.stringify({ mode: 'on' }) }
+  const files: Record<string, string> = { '/wb/workflows.json': JSON.stringify({ deepmode: 'on' }) }
   fakeTasks(on, files, [])
   on('ui.toast', () => ({ value: undefined }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
@@ -5676,18 +5676,18 @@ test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block
   expect(block?.text).toContain('merge logic first, then tests, then UI or docs')
   await clock.advance(31_000)
   const before = rows.length
-  files['/wb/workflows.json'] = JSON.stringify({ mode: 'off' })            // the user turns it off (a terminal, the pane)
+  files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'off' })            // the user turns it off (a terminal, the pane)
   await clock.advance(31_000)
   await clock.advance(31_000)
   expect(rows.slice(before)).toEqual(['[workbench] Dynamic workflows are now off (the user\'s choice; `wb deepmode` shows it): ' +
     'run one task at a time again, as the /workbench skill says.'])
-  files['/wb/workflows.json'] = JSON.stringify({ mode: 'on' })
+  files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'on' })
   await clock.advance(31_000)
   await clock.advance(31_000)
   expect(rows.slice(before + 1)).toEqual([expect.stringMatching(/^\[workbench\] Dynamic workflows are on/)])
   expect(asked).toEqual([])                                                  // rows, never a turn of their own
   // off, the default: no block at all
-  files['/wb/workflows.json'] = JSON.stringify({ mode: 'off' })
+  files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'off' })
   await clock.advance(31_000)
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('dynamic-workflows')
 })
@@ -5711,6 +5711,41 @@ test('#1041: without workflows.json Dynamic workflows are off, and the conversat
   expect(names).toContain('workbench-mode')
   expect(names).not.toContain('dynamic-workflows')
   expect(rows.filter(r => r.includes('Dynamic workflows'))).toEqual([])
+})
+
+test('#1507: a 2.1 Dynamic workflows on starts deepmode off, and the next load is told so once', async ($, on) => {
+  // 2.1's `mode: on` meant Claude may start several tasks at once; read as 2.2's deepmode it made
+  // every substantive request a deep workflow, unasked. wb deepmode --moved records it off and
+  // says the story's line once; the mod toasts it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/workflows.json': JSON.stringify({ mode: 'on', ts: 1 }) }
+  fakeTasks(on, files, [])
+  const LINE = 'Deepmode is off: … /deepmode on turns it on.'
+  const ran: string[] = []
+  on('process.run', (_: any, e: any) => {
+    const line = e.argv.slice(1).join(' ')
+    ran.push(line)
+    if (line === 'deepmode --moved') {
+      files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'off', ts: 2 }) // as wb writes it
+      return { value: { exitCode: 0, stdout: `${LINE}\n`, stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(2000)
+  expect(ran.filter(l => l.startsWith('deepmode'))).toEqual(['deepmode --moved'])
+  expect(toasts.filter(t => t.includes('Deepmode'))).toEqual([`workbench: ${LINE}`])
+  const skill = await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  expect(skill.text).not.toContain('Dynamic workflows are on')                 // off, as 2.1's on reads now
+  // the next load: deepmode's own key is there, so nothing is run or said again
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(2000)
+  expect(ran.filter(l => l.startsWith('deepmode'))).toEqual(['deepmode --moved'])
+  expect(toasts.filter(t => t.includes('Deepmode'))).toHaveLength(1)
 })
 
 test('#1014: the mod\'s summary of the roles reads as routes.summary does', () => {

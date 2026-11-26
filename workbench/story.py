@@ -47,7 +47,9 @@ DRIVERS: dict[str, dict[str, str]] = {
 # (what a waiting dialog is, for `state.waiting`'s {what}), `note.*` (the thread's waiting row,
 # whose bytes the mod's tests and the phone's pushes know), `receipt.*` (a message's meta),
 # `prompts` and `lane` (the Settings cards), `doc.rule` (the docs' block), `link.*` (wb's own
-# lines on where the web app is: wb setup, wb chat on, wb doctor), `refusal.*` (what a host tells
+# lines on where the web app is: wb setup, wb chat on, wb doctor), `moved.deepmode` (`wb deepmode
+# --moved`'s one line, which both hosts toast once: a 2.1 Dynamic workflows on starts 2.2 off,
+# #1507), `refusal.*` (what a host tells
 # its driver instead of a dialog nobody watches: the mod's AWAY_QUESTION, AWAY_PLAN and
 # CONSENT_WAITING, the plugin's AWAY_QUESTION, through the generated mod/hooks/story.ts), and
 # `skill.*` (the driver's own procedure: SKILL.md's and reference/driving.md's blocks, which the
@@ -94,6 +96,9 @@ TEXTS: dict[str, str] = {
     "link.where": "Open the web app to message {who} from anywhere and change your settings: its link is on the "
                   "/workbench pane's modeline, and `wb chat url` prints it (the token in it is the key: keep it private).",
     "link.reach": "To open it on your phone over Tailscale: `wb chat reach tailnet`.",
+    "moved.deepmode": "Deepmode is off: in 2.2, on runs every substantive request as a deep workflow (wb run) on "
+                      "your agents, within the day cap, so 2.1's Dynamic workflows on didn't carry over. "
+                      "/deepmode on turns it on.",
     "tasks.pickup": "Pick them up from here: `wb report <name>` for one, `wb wait <name>` to follow it until it "
                     "needs you.",
     "refusal.question": "The user is away: ask in the web chat ({reply}) and end your turn.",
