@@ -1,0 +1,15 @@
+{
+  "//": "The web app's pages (#1323): plain scripts sharing window.WB, built by python3 scripts/web.py build into ../*.js. sw.ts is tsconfig.sw.json's.",
+  "compilerOptions": {
+    "target": "esnext",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "types": [],
+    "strict": true,
+    "noEmitOnError": true,
+    "removeComments": false,
+    "newLine": "lf",
+    "rootDir": ".",
+    "outDir": ".."
+  },
+  "files": ["types.d.ts", "app.ts", "stats.ts", "settings.ts"]
+}

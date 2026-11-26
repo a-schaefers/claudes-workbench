@@ -565,7 +565,7 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
     sp, st = task.spec, task.status
     took = now - (sp.get("created_at") or now)
     parts = [f"task {_secs(took * 1000)}"]
-    if st.get("round_started_at") and st.get("phase") in ("running", "testing", "asking"):
+    if st.get("round_started_at") and st.get("phase") in store.WORKING:
         parts.append(f"round {st.get('round', 1)} {_secs((now - st['round_started_at']) * 1000)}")
     elif st.get("round", 1) > 1:
         parts.append(f"{st['round']} rounds")

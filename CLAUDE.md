@@ -22,7 +22,8 @@ months behind: the 2026-11-16 audit). Before every commit:
 python3 -m unittest                                   # the whole suite: CI's, never run here
 python3 -m unittest tests.test_workbench.Context      # one class (.Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod
-PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat
+PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mts   # the web chat
+python3 scripts/web.py build                          # the web app's scripts, from chat_static/src/*.ts
 wb doctor
 ```
 **The tests run in CI, not here** (owner, 2026-11-23: two local runs of the whole suite cost an
@@ -48,6 +49,8 @@ or comment without the user's yes for it.
 - Versions are cut by hand: the last number runs .1, .2, .3 at most, then the next minor (1.91,
   1.91.1, 1.91.2, 1.91.3, then 1.92, never 1.91.4); 2.0 only for a change big enough.
 - `chat.py`, `webpush.py`, `chat_static/`: CI's `chat.yml` runs the browser test (Playwright isn't a dependency).
+  The page's scripts are TypeScript, `chat_static/src/`: edit there, `python3 scripts/web.py build`, commit
+  both (the built `.js` never by hand; no new JavaScript anywhere: #1323).
 - `kernel/src`, or a value Tables copies: `python3 scripts/kernel.py check` (the toolchain once;
   its props need Bun: `bun`, or OpenCode's).
 - How OpenCode is invoked or read (argv, event or export fields): `tests/fake_opencode.py` in the
@@ -89,7 +92,8 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   in routes.json, the change line `wb route` prints and the mod's dialog shows, and the dialog's
   one-shot approval (`approved`); `use`, the Agents switch (`effective_via`); `busy`, the busy-GPU
   opt-in (`busy_api`); `resolve`, wb start's model.
-  `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
+  `driver.py`: the OpenCode driver (#1316): `wb driver`, the heartbeat's writer (`wb driver beat`), its
+  notes; routes.json `driver`, its pin. `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `runs.py`: deep workflows (#1278): `wb run`, `wb flow import`, flows (`agent/flows/`, `$WB_FLOWS`), the detached
   driver starting each item with `wb start` (its items' notices its own only while it lives), run notices, the keywords' reference (`keywords`, `tests/fixtures/
   keywords.json`). `cards.py`: role cards (`agent/roles/`, `$WB_ROLES`). `schema.py`: a report task's
@@ -101,7 +105,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   `verify.py`, `optimize.py`, `top.py` (API tasks under RUNNING, never in rack or queue), `images.py`, `audio.py` (`media.py`, what those two
   share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the web
   app's Stats, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
-  inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat; `settings.py`,
+  inotify and pidfd waits. `chat.py` + `chat_static/` (its scripts built from `src/*.ts` by `scripts/web.py`), `webpush.py`: the web chat; `settings.py`,
   its admin rows and their wb calls (*The admin table (settings.py)*). `try/`:
   `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
@@ -110,9 +114,10 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `kernel/`: the PureScript kernel (`BOUNDARY.md`, its contract), built by `scripts/kernel.py` (its toolchain
   fetched by hash into `~/.cache/workbench/kernel`) into the committed `mod/hooks/kernel.js`, imported only by
-  `mod/hooks/core.ts` (`register.tsx` and `tasks.ts` read its tables there); its seeded props in `kernel/test`;
+  `mod/hooks/core.ts` (`register.tsx` and `tasks.ts` read its tables and decisions there); its seeded props in `kernel/test`;
   a change to a value its Tables copy needs `python3 scripts/kernel.py build` (ARCHITECTURE.md, *The kernel*).
-  `opencode-plugin/`: the OpenCode plugin (server, TUI, RPC parts, TypeScript, nothing at import; typed by
+  `opencode-plugin/`: the OpenCode plugin (server, TUI, RPC parts, TypeScript, nothing at import; `skill.ts`,
+  SKILL.md rendered for OpenCode, Claude Code's copy byte for byte; `agent.ts`, the Workbench agent; typed by
   `BUN_BE_BUN=1 opencode check -p opencode-plugin`); `ocplugin.py` installs it (`wb setup --opencode`) and
   names it for `wb doctor`; every task's layer removes it (`"-workbench"`); the root `package.json` is OpenCode's
   Git install, the plugin with its wb (`files`: what wb reads at run time) (ARCHITECTURE.md, *The OpenCode plugin*).

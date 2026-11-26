@@ -3,10 +3,11 @@
 # plugin validate mod && claude plugin test mod` against the Claude Code version the mod was last
 # verified with; `kernel` rebuilds the PureScript kernel with its pinned toolchain and fails when
 # the committed mod/hooks/kernel.js isn't what kernel/src builds (`scripts/kernel.py check`, its
-# props included); `opencode-plugin` runs the OpenCode plugin's tests (the kernel's goldens among
-# them) and type-checks it under the pinned OpenCode's Bun (#1328); `check`, the ruleset's required
-# check, is green only when all four are. nightly.yml runs the suite and the mod on the newest
-# Claude Code. The README shows both as badges.
+# props included), then rebuilds the web app's scripts from their TypeScript (`scripts/web.py
+# build`, #1323), failing when the commit isn't what they build; `opencode-plugin` runs the
+# OpenCode plugin's tests (the kernel's goldens among them) and type-checks it under the pinned
+# OpenCode's Bun (#1328); `check`, the ruleset's required check, is green only when all four are.
+# nightly.yml runs the suite and the mod on the newest Claude Code. The README shows both as badges.
 #
 # One serial job took 28 to 32 minutes at d80b924, its tests doubled in a day (#950), and a fifth
 # of that was one test sitting out a 300 s sleep. Six shards on separate runners (WB_TEST_SHARD,
@@ -154,6 +155,11 @@ jobs:
           key: kernel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kernel/toolchain.json', 'kernel/spago.lock') }}
       - run: python3 scripts/kernel.py fetch
       - run: python3 scripts/kernel.py check
+      # The web app's scripts (#1323): workbench/chat_static/src/*.ts built again with the pinned
+      # TypeScript (scripts/install-tsc.sh, by hash), strict; the committed app.js, stats.js,
+      # settings.js and sw.js must be what it builds, and nothing else new beside them
+      - run: python3 scripts/web.py build
+      - run: git diff --exit-code -- workbench/chat_static && test -z "$(git status --porcelain -- workbench/chat_static)"
 
   # The OpenCode plugin (opencode-plugin/, #1328): its own job, as `mod` is the Claude Code
   # plugin's, so a patch on either path can't break the other's unseen. Its tests (the kernel's

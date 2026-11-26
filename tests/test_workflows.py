@@ -95,6 +95,24 @@ class RequiredCheck(unittest.TestCase):
         self.assertIn("hashFiles('kernel/toolchain.json', 'kernel/spago.lock')", kernel)
         self.assertNotIn("paths:", kernel)
 
+    def test_the_web_apps_scripts_are_rebuilt_in_the_gate_and_the_browser_tests_type_checked_before_they_run(self):
+        # #1323: app.js, stats.js, settings.js and sw.js are generated from chat_static/src/*.ts
+        # and committed; the gate fails when the commit isn't what the pinned TypeScript builds
+        kernel = job("check.yml", "kernel")
+        steps = ["python3 scripts/web.py build", "git diff --exit-code -- workbench/chat_static",
+                 'test -z "$(git status --porcelain -- workbench/chat_static)"']
+        at = [kernel.find(s) for s in steps]
+        self.assertNotIn(-1, at, steps)
+        self.assertEqual(at, sorted(at))
+        chat = job("chat.yml", "browsers")
+        steps = ['"@types/node@$NODE_TYPES_VERSION"', 'python3 scripts/web.py tests "$RUNNER_TEMP/pw/node_modules"',
+                 "node tests/e2e_chat.mts"]
+        at = [chat.find(s) for s in steps]
+        self.assertNotIn(-1, at, steps)
+        self.assertEqual(at, sorted(at), "the types installed, the tests checked, then run")
+        for trigger in ("'tests/e2e_*'", "'scripts/web.py'", "'scripts/install-tsc.sh'"):
+            self.assertEqual(text("chat.yml").count(trigger), 2, trigger)  # push and pull_request
+
     def test_the_opencode_plugin_job_runs_its_tests_and_types_under_the_pinned_opencodes_bun(self):
         # #1328: the plugin's tests ran only inside the kernel's job, as an afterthought; its own
         # job, as the mod has, runs the commands wb patch upstream names for a plugin patch, and

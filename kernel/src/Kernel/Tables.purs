@@ -6,6 +6,9 @@ tables
      , needsClaude :: Array String
      , parks :: Array String
      , closed :: Array String
+     , working :: Array String
+     , stopped :: Array String
+     , openOrder :: Array String
      , noAnswer :: String
      , chatStaleMs :: Number
      , wakeOpening :: String
@@ -15,6 +18,9 @@ tables =
   , needsClaude: [ "asking", "failed", "review", "stuck" ]
   , parks: [ "failed", "review", "stuck" ]
   , closed: [ "accepted", "discarded" ]
+  , working: [ "asking", "running", "testing" ]
+  , stopped: [ "failed", "stuck" ]
+  , openOrder: [ "running", "testing", "asking", "queued", "review", "stuck", "failed" ]
   , noAnswer: "No answer arrived in time."
   , chatStaleMs: 15000.0
   , wakeOpening: "[workbench] Task"

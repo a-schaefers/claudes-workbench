@@ -1,4 +1,4 @@
-// The Settings view's checks in a real browser (#1286). e2e_chat.mjs calls check(page, ctx) once
+// The Settings view's checks in a real browser (#1286). e2e_chat.mts calls check(page, ctx) once
 // per device, on a page with the key and the server up; ctx holds { engine, device, desktop, base,
 // token, home, env, wb, until, check, sleep, goTo, context, browser } (goTo('settings') taps the
 // tab and waits for the view). Leave the page where it was.
@@ -33,12 +33,12 @@ else:
             if r["ok"] else (409, {"ok": False, "error": r["said"], "rows": rows})
 print(json.dumps(out))
 `
-const standIn = (env, req) => new Promise((resolve, reject) =>
+const standIn = (env: E2eCtx['env'], req: unknown) => new Promise<[number, unknown]>((resolve, reject) =>
   execFile(process.env.PYTHON || 'python3', ['-c', STAND_IN, JSON.stringify(req)], { cwd: ROOT, env, encoding: 'utf8', timeout: 60000 },
     (err, out, stderr) => err ? reject(new Error(String(stderr || err).trim().split('\n').pop())) : resolve(JSON.parse(out))))
 
 // rows of every kind, for the checks the machine's own table can't promise (an API row: only with a provider)
-const MOCK_ROWS = [
+const MOCK_ROWS: SettingRow[] = [
   { key: 'coding', group: 'shared', label: 'Claude coding', kind: 'choice', value: 'decide', other: false, says: 'Claude uses its judgment.',
     choices: [{ value: 'only', label: 'Only when I say', says: 'You tell Claude.' }, { value: 'ask', label: 'Ask me first', says: 'Claude asks.' },
       { value: 'decide', label: 'Let Claude decide (default)', says: 'Claude uses its judgment.' }] },
@@ -61,9 +61,9 @@ const MOCK_ROWS = [
 // In the page, of a focused element: whether its ring shows (:focus-visible, an outline) and the
 // ring's contrast against what is under it, its own fill or the nearest one behind it (WCAG's
 // ratio); `outside`, a ring drawn outside the element: the fill behind the element
-export function ringContrast(el, outside = false) {
-  const rgb = s => { const n = (s.match(/[\d.]+/g) || []).map(Number); return s.startsWith('color(') ? n.map(x => x * 255) : n }
-  const lum = c => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * r + 0.7152 * g + 0.0722 * b }
+export function ringContrast(el: Element, outside = false) {
+  const rgb = (s: string) => { const n = (s.match(/[\d.]+/g) || []).map(Number); return s.startsWith('color(') ? n.map(x => x * 255) : n }
+  const lum = (c: number[]) => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * r + 0.7152 * g + 0.0722 * b }
   const cs = getComputedStyle(el)
   let under = outside ? el.parentElement : el
   while (under && (rgb(getComputedStyle(under).backgroundColor)[3] ?? 1) === 0) under = under.parentElement
@@ -73,15 +73,15 @@ export function ringContrast(el, outside = false) {
     under: getComputedStyle(under || document.body).backgroundColor }
 }
 
-export async function check(page, ctx) {
+export async function check(page: any, ctx: E2eCtx) {
   const { base, token, env, home, until, goTo, desktop } = ctx
   const view = () => page.locator('#settings-rows')
-  const row = key => page.locator(`#settings-rows .set-row[data-key="${key}"]`)
-  const toast = () => page.evaluate(() => { const t = document.getElementById('toast'); return t.hidden ? '' : t.textContent })
+  const row = (key: string) => page.locator(`#settings-rows .set-row[data-key="${key}"]`)
+  const toast = () => page.evaluate(() => { const t = document.getElementById('toast')!; return t.hidden ? '' : t.textContent })
   // shown again, from nothing: the waits below see only what this showing's GET drew
   const reshow = async () => {
     await goTo('chat')
-    await page.evaluate(() => document.getElementById('settings-rows').replaceChildren())
+    await page.evaluate(() => document.getElementById('settings-rows')!.replaceChildren())
     await goTo('settings')
   }
 
@@ -92,14 +92,16 @@ export async function check(page, ctx) {
   // json] or null for the next, the newest first, and null from all goes to the server. In the
   // page, not through page.route or context.route: the page is its service worker's client, and
   // WebKit sends such a page's fetches past both (every stand-in call there got the server's 404).
-  const handlers = []
+  // a handler's answer: [status, json], or nothing for the next
+  type Handler = (method: string, body: any) => unknown
+  const handlers: Handler[] = []
   if (!real) handlers.push((method, body) => standIn(env, method === 'POST' ? body : null))
   if (!bound.has(page)) {
     bound.add(page)
-    await page.exposeBinding('__wbSettings', async (_, method, body) => {
+    await page.exposeBinding('__wbSettings', async (_: unknown, method: string, body: unknown) => {
       for (let i = handlers.length - 1; i >= 0; i--) {
         try { const out = await handlers[i](method, body); if (out) return out }
-        catch (e) { return [500, { error: String(e.message || e) }] }
+        catch (e) { return [500, { error: String((e as Error).message || e) }] }
       }
       return null
     })
@@ -107,31 +109,31 @@ export async function check(page, ctx) {
   await page.evaluate(() => {
     if (window.__wbFetch) return
     const real = window.__wbFetch = window.fetch
-    window.fetch = async (url, init = {}) => {
+    window.fetch = async (url: RequestInfo | URL, init: RequestInit = {}) => {
       if (new URL(String(url), location.href).pathname !== '/api/settings') return real(url, init)
       const method = (init.method || 'GET').toUpperCase()
       // a hung answer ends as a real fetch's does, at its signal's abort (#1391)
-      const out = await new Promise((resolve, reject) => {
+      const out = await new Promise<[number, unknown] | null>((resolve, reject) => {
         if (init.signal) init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
-        window.__wbSettings(method, init.body ? JSON.parse(init.body) : null).then(resolve, reject)
+        window.__wbSettings(method, init.body ? JSON.parse(init.body as string) : null).then(resolve, reject)
       })
       if (!out) return real(url, init)
       return new Response(JSON.stringify(out[1]), { status: out[0], headers: { 'Content-Type': 'application/json' } })
     }
   })
-  const mocks = []                                        // each check's own handler, taken off after it
-  const mock = fn => { mocks.push(fn); handlers.push(fn) }
+  const mocks: Handler[] = []                                        // each check's own handler, taken off after it
+  const mock = (fn: Handler) => { mocks.push(fn); handlers.push(fn) }
   const unmock = () => { for (const fn of mocks.splice(0)) handlers.splice(handlers.indexOf(fn), 1) }
-  const answer = (status, body) => [status, body]
-  const fits = async width => {
+  const answer = (status: number, body: unknown) => [status, body]
+  const fits = async (width: number) => {
     const got = await page.evaluate(() => {
-      const v = document.getElementById('view-settings'), w = v.getBoundingClientRect()
+      const v = document.getElementById('view-settings')!, w = v.getBoundingClientRect()
       const out = [...document.querySelectorAll('#settings-rows .set-card, #settings-rows .set-row > *, #settings-rows .seg button')]
         .map(e => ({ e, r: e.getBoundingClientRect() }))
         .filter(({ r }) => r.width && (r.left < w.left - 1 || r.right > w.right + 1))
         .map(({ e, r }) => `${e.className || e.tagName} ${Math.round(r.left)}..${Math.round(r.right)}`)
       return { width: innerWidth, out, scroll: v.scrollWidth - v.clientWidth, page: document.documentElement.scrollWidth - innerWidth,
-        cols: getComputedStyle(document.querySelector('#settings-rows .set-cards')).gridTemplateColumns.split(' ').length }
+        cols: getComputedStyle(document.querySelector('#settings-rows .set-cards')!).gridTemplateColumns.split(' ').length }
     })
     if (got.width !== width || got.out.length || got.scroll > 0 || got.page > 0) throw new Error(JSON.stringify(got))
     return got
@@ -142,13 +144,13 @@ export async function check(page, ctx) {
       await until(async () => (await page.locator('#settings-rows .set-card[data-group]').count()) > 0)
         .catch(async () => { throw new Error('no rows: ' + await view().textContent()) })
       const got = await page.evaluate(() => ({
-        groups: [...document.querySelectorAll('#settings-rows .set-card')].map(c => c.dataset.group + ':' + c.querySelector('h3').textContent),
-        above: !!(document.getElementById('settings-rows').compareDocumentPosition(document.getElementById('settings')) & Node.DOCUMENT_POSITION_FOLLOWING),
+        groups: [...document.querySelectorAll<HTMLElement>('#settings-rows .set-card')].map(c => c.dataset.group + ':' + c.querySelector('h3')!.textContent),
+        above: !!(document.getElementById('settings-rows')!.compareDocumentPosition(document.getElementById('settings')!) & Node.DOCUMENT_POSITION_FOLLOWING),
         coding: !!document.querySelector('#settings-rows .set-card[data-group="shared"] .set-row[data-key="coding"] [role="radio"]') }))
       if (got.groups[0] !== 'shared:Agents and roles' || !got.coding || !got.above) throw new Error(JSON.stringify(got))
       const order = ['shared', 'gpu', 'api', 'terminal', 'experimental']
-      const idx = got.groups.map(g => order.indexOf(g.split(':')[0]))
-      if (idx.some((v, i) => v < 0 || (i && v <= idx[i - 1]))) throw new Error('the groups out of order: ' + got.groups.join())
+      const idx = got.groups.map((g: string) => order.indexOf(g.split(':')[0]))
+      if (idx.some((v: number, i: number) => v < 0 || (i && v <= idx[i - 1]))) throw new Error('the groups out of order: ' + got.groups.join())
     })
 
     await ctx.check('choosing Claude coding → "Ask me first" lights at once, runs wb coding ask and writes coding.json; the toast is wb\'s line', async () => {
@@ -166,8 +168,8 @@ export async function check(page, ctx) {
     })
 
     await ctx.check('a refused change (409) puts the control back and toasts wb\'s refusal; one request at a time, the next click waits', async () => {
-      let rows = MOCK_ROWS, inFlight = 0, most = 0, posts = []
-      mock(async (method, body) => {
+      let rows = MOCK_ROWS, inFlight = 0, most = 0, posts: any[] = []
+      mock(async (method: string, body: any) => {
         if (method !== 'POST') return answer(200, { rows, ts: 1 })
         posts.push(body)
         inFlight++; most = Math.max(most, inFlight)
@@ -193,10 +195,10 @@ export async function check(page, ctx) {
     await ctx.check('a change whose POST never answers is given up after POST_MS: the toast says so, the next change goes, and the control shows the computer\'s value (#1391)', async () => {
       // #1391: with no deadline the hung change stayed lit as applied, and every later click
       // queued behind it, never sent until a reload
-      let rows = MOCK_ROWS, release = null
-      const posts = []
+      let rows = MOCK_ROWS, release = null as ((v?: unknown) => void) | null  // set in the handler: not narrowed to null
+      const posts: any[] = []
       unmock()
-      mock(async (method, body) => {
+      mock(async (method: string, body: any) => {
         if (method !== 'POST') return answer(200, { rows, ts: 1 })
         posts.push(body)
         if (body.key === 'workflows') { await new Promise(res => { release = res }); return answer(200, { ok: true, said: 'late', rows }) }
@@ -222,9 +224,9 @@ export async function check(page, ctx) {
       // #1392: Settings beside the terminal kept a value changed there, and a click on it to put
       // it back sent nothing, the setting left as the terminal made it
       let rows = MOCK_ROWS
-      const posts = []
+      const posts: any[] = []
       unmock()
-      mock(async (method, body) => {
+      mock(async (method: string, body: any) => {
         if (method !== 'POST') return answer(200, { rows, ts: 1 })
         posts.push(body)
         rows = rows.map(x => x.key === body.key ? { ...x, value: body.value } : x)
@@ -248,13 +250,13 @@ export async function check(page, ctx) {
       // and the next Tab began again at the first row
       let rows = MOCK_ROWS
       unmock()
-      mock(async (method, body) => {
+      mock(async (method: string, body: any) => {
         if (method !== 'POST') return answer(200, { rows, ts: 1 })
         rows = rows.map(x => x.key === body.key ? { ...x, value: body.value } : x)
         return answer(200, { ok: true, said: `${body.key}: ${body.value}`, rows })
       })
-      const at = () => page.evaluate(() => { const a = document.activeElement, r = a && a.closest('.set-row')
-        return r ? `${r.dataset.key}:${a.tagName}:${a.dataset.value || ''}:${a.getAttribute('aria-checked') || ''}` : String(a && a.tagName) })
+      const at = () => page.evaluate(() => { const a = document.activeElement as HTMLElement | null, r = a && a.closest<HTMLElement>('.set-row')
+        return r ? `${r.dataset.key}:${a!.tagName}:${a!.dataset.value || ''}:${a!.getAttribute('aria-checked') || ''}` : String(a && a.tagName) })
       await reshow()
       await until(async () => (await row('splash').locator('[aria-checked="true"]').getAttribute('data-value')) === 'on')
       await row('splash').locator('[data-value="off"]').focus()
@@ -266,7 +268,7 @@ export async function check(page, ctx) {
       await row('cap').locator('input').press('Enter')
       await until(async () => (await toast()) === 'cap: 6')
       if (await at() !== 'cap:INPUT::') throw new Error('after Enter: ' + await at())
-      await page.evaluate(() => document.activeElement.blur())
+      await page.evaluate(() => (document.activeElement as HTMLElement).blur())
     })
 
     await ctx.check('the focus ring on a Settings choice, lit or not, stands 3:1 or more against what is under it (#1410)', async () => {
@@ -279,7 +281,7 @@ export async function check(page, ctx) {
         const got = await b.evaluate(ringContrast)
         if (!got.visible || got.ratio < 3) throw new Error(`${v}: ${JSON.stringify(got)}`)
       }
-      await page.evaluate(() => document.activeElement.blur())
+      await page.evaluate(() => (document.activeElement as HTMLElement).blur())
     })
 
     await ctx.check('Settings opened while the computer is out of reach offers Try again, and draws its rows once the line is back, with no tab switch (#1412)', async () => {
@@ -289,7 +291,7 @@ export async function check(page, ctx) {
       await p.addInitScript(() => {
         window.e2eDown = true
         const real = window.fetch
-        window.fetch = (u, o) => window.e2eDown && /^\/api\/(settings|state|stream)$/.test(new URL(String(u), location.href).pathname)
+        window.fetch = (u: RequestInfo | URL, o?: RequestInit) => window.e2eDown && /^\/api\/(settings|state|stream)$/.test(new URL(String(u), location.href).pathname)
           ? Promise.reject(new TypeError('Failed to fetch')) : real(u, o)
       })
       try {
@@ -304,9 +306,9 @@ export async function check(page, ctx) {
     })
 
     await ctx.check('"Other model…" opens a text input, Escape closes it, Enter sends the typed id; a note is a line beside its group\'s rows, an info row a line', async () => {
-      let sent = null
+      let sent: any = null
       unmock()
-      mock(async (method, body) => {
+      mock(async (method: string, body: any) => {
         if (method !== 'POST') return answer(200, { rows: MOCK_ROWS, ts: 1 })
         sent = body
         const rows = MOCK_ROWS.map(x => x.key === sent.key ? { ...x, value: sent.value } : x)
@@ -315,7 +317,7 @@ export async function check(page, ctx) {
       await reshow()
       await until(async () => (await row('api-writing').count()) === 1)
       const gpu = await page.textContent('#settings-rows .set-card[data-group="gpu"]')
-      const kinds = await page.locator('#settings-rows .set-card[data-group="gpu"] .set-row').evaluateAll(rs => rs.map(r => r.dataset.kind).join())
+      const kinds = await page.locator('#settings-rows .set-card[data-group="gpu"] .set-row').evaluateAll((rs: HTMLElement[]) => rs.map(r => r.dataset.kind).join())
       if (!gpu.includes('No GPU model found') || kinds !== 'note,choice' || await row('media-images').locator('[role="radio"]').count() !== 2)
         throw new Error(`${gpu} [${kinds}]`)
       if (!(await row('api-connected').textContent()).includes('Connected: Provider')) throw new Error('no info line')
@@ -340,11 +342,11 @@ export async function check(page, ctx) {
     })
 
     await ctx.check('a number row sends on Enter, and Off sends off; a choice needing Claude\'s help says Claude will offer to set it up', async () => {
-      const sent = []
+      const sent: any[] = []
       unmock()
-      const help = [...MOCK_ROWS, { key: 'probe', group: 'experimental', label: 'Agent code navigation', kind: 'choice', value: 'off', other: false,
+      const help: SettingRow[] = [...MOCK_ROWS, { key: 'probe', group: 'experimental', label: 'Agent code navigation', kind: 'choice', value: 'off', other: false,
         says: 'Whole files.', choices: [{ value: 'off', label: 'Off (default)', says: 'Whole files.' }, { value: 'on', label: 'On (large files only)', says: 'probe.' }] }]
-      mock(async (method, b) => {
+      mock(async (method: string, b: any) => {
         if (method !== 'POST') return answer(200, { rows: help, ts: 1 })
         sent.push(b)
         const rows = help.map(x => x.key === b.key ? { ...x, value: b.value === null ? null : b.key === 'cap' ? Number(b.value) : b.value } : x)
