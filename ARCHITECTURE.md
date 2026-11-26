@@ -8588,7 +8588,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       `metadata.kind: "workbench.consent"`) and calls the `shown` method, a conflict (409: another
       TUI made it first) too, so one form shows in every TUI, the web app and a paired phone. The
       server part is subscribed to the bus (`ctx.event.subscribe`) before it asks; `form.replied`
-      with that id and session is the answer, `form.cancelled` a no. No `shown` within `SHOWN_MS`
+      with that id and session is the answer, `form.cancelled` a no. The forms waiting are one map
+      per server process (`waiters()`, on `globalThis`): OpenCode's background service sets the
+      plugin up once per location, and the TUI's `shown` and the reply reach any location's
+      instance, not always the one that asked (#1486). No `shown` within `SHOWN_MS`
       10 s (no TUI attached, the TUI part missing) is `none`: the server emits `close` (a late
       TUI cancels the form) and refuses. `--auto` answers permission asks, never forms, so it
       can't say yes for the user. A call stopped while it waits is a no, its form closed.

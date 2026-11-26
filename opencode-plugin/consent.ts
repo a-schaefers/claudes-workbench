@@ -153,8 +153,20 @@ export const CALLS_KEPT = 64
 export type Answer = 'yes' | 'no' | 'none'
 type Waiter = { shown: (ok: boolean) => void; answer: (a: Answer) => void; sessionID: string }
 
+// The forms waiting, one map per server process (globalThis, as chat.ts's and notices.ts's lanes):
+// OpenCode's background service sets the plugin up once per location, and the TUI's `shown` and the
+// bus's reply landed on another location's instance than the one that asked, so every form failed
+// closed with "no OpenCode window is open" (#1486, 2026-11-26). Any instance's `shown` and reply now
+// reach any instance's form: ids are unique, a reply still checks its session, resolving twice is
+// nothing, and an instance's dispose leaves the map (each ask takes out only its own form).
+const WAITING = '__workbenchConsentWaiting'
+export function waiters(): Map<string, Waiter> {
+  const g = globalThis as Record<string, unknown>
+  return (g[WAITING] ??= new Map<string, Waiter>()) as Map<string, Waiter>
+}
+
 export class Asker {
-  private waiting = new Map<string, Waiter>()
+  private waiting = waiters()
   constructor(private emit: (name: 'ask' | 'close', data: Row) => Promise<void>, private shownMs = SHOWN_MS) {}
 
   // the TUI's `shown`
