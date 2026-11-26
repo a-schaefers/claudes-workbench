@@ -893,6 +893,7 @@ def state(run: Run) -> dict:
         elif r.get("kind") == "escalate":  # the trigger; "escalated" is the next role's start
             escalated.add((r.get("stage"), r.get("key")))
     skipped = set(spec.get("skip") or ())
+    driven = run.status.get("phase") in OPEN  # _live's: what follows may still start
     out: dict = {}
     complete: dict = {}
     for s in stages(flow):
@@ -997,7 +998,7 @@ def state(run: Run) -> dict:
             elif v is WAITING:
                 it.state, it.input = "waiting", None
             elif it.task:
-                it.state, it.why, it.output = _live(s, it)
+                it.state, it.why, it.output = _live(s, it, driven)
             items.append(it)
             # stuck, failed, or its review's asks left past refix's max: the next role tries it
             # from the base (#1134's study: escalating attempts across roles)
@@ -1010,13 +1011,23 @@ def state(run: Run) -> dict:
     return out
 
 
-def _live(stage: dict, it: Item) -> tuple[str, str, object]:
-    """A started item's state from its task, before the driver has taken its end."""
+TAKEN_OVER = "taken over by Claude (wb takeover): Claude's to finish, not the run's"
+
+
+def _live(stage: dict, it: Item, driven: bool = False) -> tuple[str, str, object]:
+    """A started item's state from its task, before the driver has taken its end. ``driven``:
+    the run is open, its driver starting what follows: there a code item Claude took over is no
+    longer the run's (not_run, never an escalation's null), as its review phase read as done and
+    the next stage reviewed, approved or sent a refix to the unfinished diff Claude was editing
+    (#1471, the #1373 audit, 2026-11-26). Once the run has ended (stopped, at
+    review, closed) its report keeps the item as it was."""
     task = store.Task(it.task)
     if not task.exists:
         return "pending", "", None  # its wb start not through yet, or never: the driver decides
     st = task.status
     phase = st.get("phase")
+    if is_code(stage) and driven and st.get("taken_over"):
+        return "not_run", TAKEN_OVER, None
     if is_code(stage):
         if phase in ("review", "accepted"):
             return "done", "", {"task": it.task, "round": st.get("round"), "item": it.input}

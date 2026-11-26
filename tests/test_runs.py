@@ -770,6 +770,37 @@ class Runs(Base):
         self.assertIn("closed aud", run_wb("run", "close", "aud"))
         self.assertEqual(runs.Run("aud").status["phase"], "closed")
 
+    def test_the_hand_back_stops_the_runs_driver_and_no_item_starts_after_it(self):
+        # #1471 (the #1373 audit, 2026-11-26): `wb takeover --all` (the mod's hand-back) left the
+        # run's driver going, which read the taken-over item at review as done, started its
+        # reviewer after the user's stop, could refix it back to an agent while Claude edited it,
+        # and reported the half-done code approved
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"bld-code-1": "hang"})
+        run_wb("run", "start", "bld", "--flow", "build", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        deadline = time.time() + 30
+        while not (store.Task("bld-code-1").exists and store.Task("bld-code-1").status.get("session")):
+            self.assertLess(time.time(), deadline, "the coder never started")
+            time.sleep(0.2)
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        self.assertIn("stopped: wb run bld", out)
+        self.assertIn("took over bld-code-1", out)
+        run = runs.Run("bld")
+        self.assertEqual((run.status["phase"], run.status.get("pid")), ("stopped", None))
+        self.assertEqual([r["task"] for r in run.journal() if r.get("kind") == "item"], ["bld-code-1"])
+        self.assertFalse([r for r in run.journal() if r.get("kind") in ("refix", "notice")
+                          or r.get("notice") == "run_done"])
+        self.assertEqual([r["kind"] for r in self.run_notices("bld")], [])
+        # a run still open (one item taken over by name): the item is no longer the run's, so
+        # nothing reviews the diff Claude is editing; once the run ended its report keeps it
+        self.assertEqual([(i.state, i.why) for i in runs.state(run)["code"]], [("done", "")])
+        run.set_status(phase="running")
+        st = runs.state(run)
+        self.assertEqual([(i.state, i.why) for i in st["code"]], [("not_run", runs.TAKEN_OVER)])
+        self.assertEqual(st["review"], [])
+        run.set_status(phase="stopped")
+        run_wb("discard", "bld-code-1")
+
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
         seq.write_text(json.dumps([

@@ -4769,6 +4769,14 @@ def cmd_run(a):
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
+        # each open run's driver in the scope first, as wb stop --all's (#1278): left going, it
+        # read the taken-over item as done, started the next stage's agents after the user's stop,
+        # could send the item back to an agent (a refix) and reported the half-done code approved
+        # (#1471, the #1373 audit, 2026-11-26)
+        drivers = [f"wb run {r.name}" for r in runs._runs_in_scope(a)
+                   if r.open() and runs.stop(r, "handed back to Claude (wb takeover --all)", items=False) is not None]
+        if drivers:
+            print("stopped: " + "; ".join(drivers))
         tasks, others = _scope([t for t in store.all_tasks()
                                 if t.status.get("phase") not in store.CLOSED], *_caller(a))
         if not tasks:
