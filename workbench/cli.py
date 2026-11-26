@@ -2174,7 +2174,10 @@ def cmd_start(a):
         print(f"note: held until {runner.clock(at)} (--after): queued until then, checkout and all; "
               "the machine is kept awake meanwhile where wb can, and a reboot before then fails it "
               f"as interrupted (wb resume {a.name} holds it again)")
-    if not os.environ.get("CLAUDECODE"):  # under Claude Code the mod wakes Claude (#1322)
+    # Only a terminal caller is told to wait: under Claude Code the mod wakes Claude (#1322), and an
+    # OpenCode driver's procedure is to end its turn for the plugin's wake, or with wakes off to wait
+    # only on the user's ask; the line held a driver's turn in a wait (#1514, 2026-11-26).
+    if store.caller_kind() == "terminal":
         print(f"next: wb wait {a.name}")
 
 

@@ -1002,6 +1002,15 @@ class Lifecycle(Base):
         self.assertIn("wb-no-such-opencode isn't on PATH", err.getvalue())
         self.assertFalse(store.Task("t-nooc").dir.exists())
 
+    def test_start_tells_only_a_terminal_caller_to_wait_never_an_opencode_driver(self):
+        # #1514 (2026-11-26): `next: wb wait <task>` reached an OpenCode driver too, whose procedure
+        # is to end its turn for the plugin's wake, so a driver that obeyed it held its turn in a wait
+        with mock.patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_x", "OPENCODE": "1"}):
+            out = self.start("t-ocnext", "ok")
+        self.assertIn("started t-ocnext", out)
+        self.assertNotIn("next:", out)
+        self.assertTrue(self.start("t-termnext", "ok").endswith("\nnext: wb wait t-termnext\n"))
+
     def test_start_returns_at_once_and_the_runner_checks_the_base(self):
         # The base check ran inside wb start, which a slow suite pushed past Claude's two-minute
         # Bash limit, leaving a task queued with no runner (the 2026-11-16 audit).
