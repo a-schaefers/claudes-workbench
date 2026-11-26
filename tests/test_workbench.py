@@ -19308,6 +19308,24 @@ class Discovery(Base):
         self.assertEqual(models.resolve("mimo").id, "ollama/mimo-v2.6:9b-q8_0")
         self.assertEqual(models.resolve("strata").id, "strata/strata")
 
+    def test_a_config_with_both_provider_shapes_discovers_the_models_of_each(self):
+        # #1508 (2026-11-26): an older `provider` block beside a hand-written V2 `providers` one
+        # hid every V2 model from wb (read as one shape or the other), though OpenCode 2.4.1 loads
+        # both; the agent's layer left the V2 provider out too
+        from workbench import models
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({
+            "provider": {"ollama": OPENCODE_CONFIG["provider"]["ollama"]},
+            "providers": {"lms": {"package": "@ai-sdk/openai-compatible",
+                                  "settings": {"baseURL": "http://127.0.0.1:1234/v1"},
+                                  "models": {"coder": {}}}}}))
+        found = models.discover()
+        self.assertIn("ollama/qwen3.8-27b", found)
+        self.assertIn("lms/coder", found)
+        self.assertEqual(sorted(p[0] for p in models.configured_providers()), ["lms", "ollama"])
+        self.assertTrue(models.gpu_side("lms/coder"))
+        self.assertTrue(models.gpu_side("ollama/qwen3.8-27b"))
+        self.assertEqual(sorted(models.agent_providers()["provider"]), ["lms", "ollama"])
+
     def test_auth_key_reads_opencode_v2s_export(self):
         # #1010 (2026-11-22): OpenCode 2.x keeps `opencode auth login`'s keys in its database and
         # writes no auth.json, so auth_key always read "" and a local server behind a key read

@@ -4264,7 +4264,13 @@ commands.json, savings.json, #495): atomic, indent 2, through a symlink, keeping
 
 The agent's `OPENCODE_CONFIG` is the task's layer, so `models.agent_providers()` copies
 `PROVIDER_KEYS` from `$WB_OPENCODE_CONFIG` and `$OPENCODE_CONFIG` into it, templates kept, `{file:}`
-made absolute, the layer 0600 (the 2026-11-19 audit: such a provider was "Model unavailable").
+made absolute, the layer 0600 (the 2026-11-19 audit: such a provider was "Model unavailable"); a
+file's V2 `providers` is folded into the layer's `provider`, beside its V1 block too.
+
+A layer's providers are both shapes' (`_providers_of`: `provider` and `providers`, V2's entry
+winning for an id in both, as OpenCode keeps it): read as one or the other, an older `provider`
+block beside a hand-written `providers` one hid every V2 model from discovery, `gpu_side` and the
+layer, though OpenCode 2.4.1 loads both (#1508).
 
 **Discovery** (`discover`, `_scan`) lists GPU models only (`kind == "gpu"`): about 60 call sites
 (the lease, residency, `free_gpu`, media, the router's `choose`/`rank`/`unproven`/`_cheaper`) read

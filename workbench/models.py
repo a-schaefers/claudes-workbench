@@ -279,7 +279,10 @@ def read_config() -> dict:
 
 
 def _providers_of(layer: dict) -> dict:
-    return layer.get("provider") or layer.get("providers") or {}
+    """A layer's providers under both shapes' keys, V2's entry winning for an id in both, as
+    OpenCode keeps it. Read as one or the other, a config beside an older `provider` block lost
+    every model of its `providers` block, which OpenCode 2.4.1 loads (#1508, 2026-11-26)."""
+    return {**_dict(layer.get("provider")), **_dict(layer.get("providers"))}
 
 
 def _provider_dirs() -> dict[str, Path]:
@@ -319,8 +322,8 @@ def agent_providers() -> dict:
         if path.resolve() in own:
             continue
         picked = {k: layer[k] for k in PROVIDER_KEYS if k in layer}
-        if "providers" in layer and "provider" not in layer:
-            picked["provider"] = layer["providers"]
+        if "providers" in layer:  # folded into the layer's V1 key, beside a V1 block too (#1508)
+            picked["provider"] = _providers_of(layer)
         out = _merge(out, _absolute_files(picked, path.parent))
     return out
 
