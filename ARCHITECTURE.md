@@ -4019,6 +4019,14 @@ it cuts to `LINE_CHARS` 2000 and uses `activity` as the apprentice's speech, the
 starts `Writing` or `Running`, else `think` (reword those and update the mod). A new style needs an
 entry in the mod's `LINE_STYLE`; changing the shape needs a new `live-1` tag.
 
+**`wb watch <task> --export`** (hidden) is the OpenCode plugin's (`children.ts`, #1331): one JSON
+object, `{"task", "sessions": [{"session", "current", "messages"}], "missing"}`, each of the
+task's sessions earlier ones first (status `sessions`, then the current one), its messages as
+OpenCode exported them and nothing of the export's `info` (`transcript.exports`); an earlier
+session through `finished_export`, the current one exported again; one that holds no messages is
+left out, and one whose export failed (a busy store) is in `missing`, which the plugin asks for
+again.
+
 ### wb top
 
 `workbench/top.py` (#407): the machine's live view, and a feed (`--json`). One long-lived process
@@ -8370,8 +8378,9 @@ laned `opencode run --standalone` per round from the runner. The skeleton (#1311
 #1334, `notices.ts`, `jobs.ts`: *Notices on OpenCode*, below), the conversation's upkeep and the
 user's commands (#1315, `upkeep.ts`, `commands.ts`, below), the consent gates and the driver's call
 rows (#1314, #1331: `consent.ts`, `calls.ts` below), the procedure's typed wb tools (#1335, `tools.ts`
-below), and the pane (#1312, #1332: `/workbench`, the
-panel, the sidebar section and the footer item, `pane.ts`, `pane-view.ts`, `pane.tsx`). The chat runs `wb chat` commands only, as the session it acts for
+below), the pane (#1312, #1332: `/workbench`, the
+panel, the sidebar section and the footer item, `pane.ts`, `pane-view.ts`, `pane.tsx`), and the
+agents' sessions as the lead's child sessions (#1331: `children.ts`, `children-tui.ts`, below). The chat runs `wb chat` commands only, as the session it acts for
 (`OPENCODE_SESSION_ID`), its claim in the session's directory; the driver part's (#1316) take no
 scope from the cwd (`wb driver beat`, `wb driver --session`, `wb route driver --json`); the
 commands, the upkeep (#1315) and the consent tools (#1314) run a task's commands (`wb stop --all`, `wb takeover --all`, `wb
@@ -8402,7 +8411,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   `opencode-plugin/package.json` (`type: module`, `files` the parts and their modules:
   `server.ts`, `tui.ts`, `rpc.ts`, `wb.ts`, `chat.ts`, `driver.ts`, `skill.ts`, `agent.ts`, `notices.ts`,
   `notices-tui.ts`, `jobs.ts`, `spans.ts`, `splash.tsx`, `upkeep.ts`, `commands.ts`, `deep.ts`, `flows.ts`, `consent.ts`, `consent-tui.ts`, `tools.ts`, `gates.ts`, `upstream.ts`, `words.ts`, `calls.ts`,
-  `pane.ts`, `pane-view.ts`, `pane.tsx`) is the one a clone's
+  `pane.ts`, `pane-view.ts`, `pane.tsx`, `children.ts`, `children-tui.ts`) is the one a clone's
   entry loads (`wb setup --opencode`'s `opencode-plugin/` directory). Each part is TypeScript, run
   as it is by OpenCode's Bun, a package's in `node_modules` too.
   - `server.ts`: `{id: "workbench", setup}` (OpenCode's check is that shape alone,
@@ -8411,8 +8420,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     `registerAgent`; no `skill/` to read, none, the rest stands), starts the driver part
     (`startDriver`), the consent gates (`consent(ctx)`), the procedure's tools (`tools(ctx)`) and the call rows (`calls(ctx)`), and the notices (`notices.ts`'s `notices(ctx)`, which runs the background jobs
     too), sets up the upkeep (`upkeep`) and the commands (`registerCommands`), each
-    skipped on a server without its API, and starts the panel's part (`startPane`: its RPC and
-    `/workbench`); each part's cleanup joins `stops`, and setup returns one cleanup that runs
+    skipped on a server without its API, starts the panel's part (`startPane`: its RPC and
+    `/workbench`) and the child sessions' RPC (`startChildren`); each part's cleanup joins `stops`, and setup returns one cleanup that runs
     them all, newest first, one that throws not stopping the rest, at its end, so a part
     registered later is never after a `return`; under `WB_TASK` it returns at once (#1363). It
     exports `ID` and `status(options, env)`.
@@ -8552,7 +8561,11 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     own). A plain decline fires no `execute.after` (2.4.1 turns `Permission.DeclinedError` into a
     defect), so `Declines` reads the bus: `permission.asked` names its call (`source.id`) and a
     `permission.replied` of `reject` writes that call's row `denied`. `wb accept` reads them as
-    the mod's (*The runner, inside*).
+    the mod's (*The runner, inside*): a real driver's `write` of an ignored file in the worktree
+    is its hand (committed with `--include`) and what a build its `shell` ran there wrote is left
+    out (`RealOpenCodePlugin`'s
+    `test_wb_accept_tells_an_opencode_drivers_write_in_the_worktree_from_the_build_it_ran_there`,
+    #1331's live acceptance, 2026-11-26).
   - `notices.ts`, `jobs.ts` (#1313, #1334): *Notices on OpenCode*, below; `notices-env.d.ts`, the
     runtime only they use (chat-env.d.ts's rule). `notices-tui.ts`: the TUI part's side, its toasts.
   - `rpc.ts`: the contract `Workbench` (`id: "workbench"`), JSON Schema, no validator package:
@@ -8567,11 +8580,12 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     'github:a-schaefers/workbench#main' brings it, or bin/wb setup --opencode in a clone`, its
     `GET_WB`, `ocplugin.GET_WB` word for word); nothing when all is well (a healthy install is
     seen in the TUI's `/plugins`, or `opencode plugin list`), nothing when the server part
-    doesn't answer. A no-op under `WB_TASK`. First it starts the consent forms' part (`consentTui(ctx)`) and
-    subscribes to the notices' toasts (`noticesTui`, *Notices on OpenCode*); then it imports `pane.tsx` (in setup, never at load:
+    doesn't answer. A no-op under `WB_TASK`. First it starts the consent forms' part (`consentTui(ctx)`),
+    subscribes to the notices' toasts (`noticesTui`, *Notices on OpenCode*) and starts the child
+    sessions' import (`childrenTui`, below); then it imports `pane.tsx` (in setup, never at load:
     OpenTUI and Solid are only the TUI's) and returns `mountPane`'s removal (the panel through
-    `mountSplash`, the sidebar section, the footer item, the palette entry) with the consent forms' and the notices'
-    as its cleanup; a TUI that can't load the views sets up without them (those two cleanups
+    `mountSplash`, the sidebar section, the footer item, the palette entry) with the consent forms', the notices'
+    and the import's as its cleanup; a TUI that can't load the views sets up without them (those two cleanups
     alone), said nowhere.
   - `spans.ts` (#1333, slice 4c of #1296; pure, no OpenTUI or Solid, so Bun tests it bare): the
     cells the mod's `splash.ts` and `apprentice.ts` compute for Claude Code's Raster as rows of
@@ -8681,6 +8695,34 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     it has the keyboard. The followed task is tasks.ts's `focusOf`, as the mod's: the one pressed, else the
     one followed while it runs, else the newest that runs, then the newest queued, then the one
     waiting for its reviewer that moved last.
+  - `children.ts`, `children-tui.ts` (#1331, the host-shape decision's "imported child sessions at
+    the lead's location, plus the panel's tail"): a task's agent sessions in OpenCode's own
+    subagent picker, as child sessions of the session that started the task (task.json `session`
+    with `driver.tool` `opencode`: the lead). The server part's `WorkbenchChildren` (`id:
+    "workbench-children"`): `sessions {task}` → `{task, sessions, missing, why?}` from `wb watch <task>
+    --export` (`sessionsOf`; a task name checked against `store.NAME_RE`'s shape first), each
+    session's messages exported in the task's own lane. The membrane builds each child's info
+    (`childImport`), never the export, whose `info` is the agent's own database's, in the home its
+    lane writes (the decision's critic 2): the agent session's id (a second import of it is
+    OpenCode's conflict, never a second copy), `parentID` the lead, the lead's `projectID` and
+    location (never the worktree, critic 1), `permissions` `DENY_ALL` (`*` on `*` denied: a
+    session's rules come after its agent's and the last match wins), title `Workbench agent:
+    <task>` (` (session k of n)` for more than one; never the agent's own `wb: <task>`, which
+    `transcript.find_session` looks for), cost and tokens 0 (the agent's spend is wb's), metadata
+    `{workbench: {task, session, messages}}` (`markOf`); its messages the export's less any that
+    isn't a message object with a `msg_` id and a type, and less `location-switched` (`DROPPED`,
+    `childMessages`). `children-tui.ts`'s `childrenTui(ctx)` reads the tasks (`WorkbenchPane`'s
+    `tasks`) every `CHILDREN_MS` 10 s, and `Children.sync` takes each OpenCode driver's task that
+    has stopped (any phase but the active ones and the unwritten) and whose status moved since its
+    last look: the lead from `session.get` (one this server lacks, of another store or machine,
+    skipped), the sessions from the RPC (wb failing, or a session it couldn't export, `missing`:
+    looked at again up to `TRIES` 3 times until the status moves), and each session imported through `experimental.session.import` (else the
+    client's deprecated `session.import`, `importerOf`) when this server lacks it; one Workbench
+    imported for that lead and task that holds fewer messages (a round of feedback in the same
+    session) is removed (`session.remove`) and imported again, and one of that id that isn't
+    Workbench's (a session of a task from before v1.91.2, in the user's store) is left alone. A
+    client with no import starts nothing: the panel's tail is the view, as it is while a task runs
+    (`RealOpenCodePlugin`'s import test fails by name when OpenCode drops the route).
   - `pane-env.d.ts`: the runtime and OpenTUI and Solid parts only the pane uses (`readdirSync`, the
     layout props, `scrollbox`, `TextAttributes`, `createMemo`, `For`); not `pane.d.ts`, which
     TypeScript takes for `pane.ts`'s own output and ignores.
@@ -9018,11 +9060,24 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   the runner as the session without Claude Code's or an agent's marks, stdin fed, stopped on the
   signal, the session's directory, the six registered direct in the namespace, each named in this
   file), `calls.test.ts` (the rows, their tasks, begun, over
-  and denied, through the hooks, a decline's row denied from the bus), and
+  and denied, through the hooks, a decline's row denied from the bus), `children.test.ts` (#1331:
+  the membrane's info, the messages kept, the titles, `wb watch --export`'s answer and its RPC, the
+  mark, the import's two names and none; a stopped task imported once and a running one never, a
+  longer session replacing its copy, a lead elsewhere, another driver and a session not
+  Workbench's left alone, wb's failure looked at again `TRIES` times, a `missing` session asked
+  for again), `RealOpenCodePlugin`'s
+  `test_a_task_session_is_imported_as_its_leads_child_at_the_leads_location_by_opencodes_import`
+  (`Children.sync` with a fetch client against a real server: the child under the lead at the
+  lead's location, every tool denied, no worktree anywhere in it, listed by `parentID`, the
+  location switch dropped, a second import nothing new, a longer one replacing it) and
+  `test_wb_accept_tells_an_opencode_drivers_write_in_the_worktree_from_the_build_it_ran_there`
+  (a real server with the plugin, a captured model's `shell` build and `write` in a task's
+  worktree: both rows over, `hand_wrote` the write's file, `hand_left` the build's), `Watch`'s
+  `test_export_gives_each_sessions_messages_earlier_first_and_never_the_agents_own_info`, and
   `opencode-plugin/test/plugin.test.ts` (`BUN_BE_BUN=1 opencode test opencode-plugin/test`:
   both parts' shape and id, nothing touched under `WB_TASK` (a proxy context that records every
   access, the list asserted empty: a throw alone was swallowed by `tui.ts`'s own `catch`, so its
-  guard could be deleted with the test passing, #1311's review), the RPCs registered (`status`, the driver's, the panel's), the upkeep's three hooks and the commands' transform, which wb
+  guard could be deleted with the test passing, #1311's review), the RPCs registered (`status`, the driver's, the panel's, the child sessions'), the upkeep's three hooks and the commands' transform, which wb
   (the options', the package's own before PATH's) and which state dir (`~` and relative
   expanded)), `opencode-plugin/test/splash.test.ts` (#1333: every frame a `Play` gives at 60x26
   falling into a bar, 40x22 rising and 120x40 decodes to splash.ts's `frameCells` for
@@ -9612,7 +9667,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0 none); unnamed: `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` (that batch's tasks alone, whichever session's: a scheduled run's headless Claude, which would otherwise take the repo's daytime tasks by directory, #1204) | Reaps, blocks (inotify), prints `[<kind>] <task>\n<text>`, claiming it (`cli.claim_ack`: one waiter or the mod wins, #696); skips notices no longer true. Named: closed exits 2; taken elsewhere "(already delivered once)"; no notice `[<phase>] <task> (no notice: <last>)`. Bare, no open task: exit 2. A run named (#1278, `cli._wait_run`): its next notice (`runs.due`), `[<kind>] run <run>`; unnamed, the caller's runs' notices (`runs._runs_in_scope`) come before its tasks'. |
 | `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` | Reaps. A line per open task; `?` when its runner died within `REAP_GRACE`; a `via` column (`gpu`, `api`) before the model, 24 wide (`cli.status_model`: an API task's `provider/model`, the provider never cut, a vendor segment between cut to `…/` and the model's own name, the id's last segment, kept, its end when it alone overflows, `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash` as `deepinfra/…ek-V4.1-Flash`: two models of one vendor read apart, #1117; a GPU task's last segment, #1016). Named: `worktree:`, `cli.use_line`, `experiments_off`. Parked tasks fold into one `parked by wb stop --all …` line without `--all` (#541); scoped, `open elsewhere (other sessions'): …`. Unnamed, a line per run in the scope after the tasks (`cli._run_lines`, `runs.status_line`), a dead driver reaped first. |
-| `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden, the pane's), `--last N` (hidden) | `transcript.follow`; default the latest open task, never a bench replay (#555). The header's `routed:` line, and with `--json` a `routed` row after `meta` (`transcript.routed_text`, #1016). |
+| `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden, the pane's), `--last N` (hidden), `--export` (hidden, the OpenCode plugin's child sessions) | `transcript.follow`; default the latest open task, never a bench replay (#555). The header's `routed:` line, and with `--json` a `routed` row after `meta` (`transcript.routed_text`, #1016). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The events, one line per `transcript.LOG_KINDS` kind (`EVENT_KINDS`, `text`, `tool`; `transcript.log_body`, which the web chat's task sheet shows too, #1201) (#861); `-n` counts printed lines, `step` rows dropped first (#861); `-f` follows until it needs Claude, reaping, flushing (#90, #545). |
 | `wb report <task>` | `--round N` | summary.md (`store.Task.report`), then the newest regression check (`verify.report_lines`) without `--round`; the web chat's task sheet shows both (#1201). |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | Against the base or the last step (`--all`: the branch; `gitops.diff_base`, which the web chat's task sheet uses too, #1201), with the ignored files `--include` commits (`runner.ignored_to_commit`, #1259); worktree gone: the git command up to `tip` (`gitops.diff_tip`, #477). |
@@ -11252,6 +11307,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   first-run question and register.test.tsx's two-role dialog.
 - **`wb watch --json`** → wire.d.ts's `WatchLine` (and its restatement, `types/index.d.ts`'s `WbLine`), the mod's `LINE_STYLE`, its pose regex, `live-1`; `--last`, `JSON_LINE_CHARS` with
   `KEEP_LINES`, `LINE_CHARS`.
+- **`wb watch --export`'s object** (`transcript.exports`) → the OpenCode plugin's `sessionsOf` (`children.ts`);
+  **OpenCode's `experimental.session.import` input and `Session.Info`** → `children.ts`'s `ImportInput`,
+  `childImport`, `markOf` and `RealOpenCodePlugin`'s import test; **the runner's session title** `wb: <task>`
+  (`transcript.find_session`) → `titleOf`, which must never match it.
 - **task.json's routing keys** (`via`, `role`, `provider`, `provider_name`, #1016) → the mod's row builder (`scan`,
   tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/src/app.ts`'s strip; **`wb status`, `report`, `diff` and
   `log`'s words** → the web chat's task sheet (`chat.task_summary`, `task_diff`, `task_log`; app.ts's `drawSummary`,

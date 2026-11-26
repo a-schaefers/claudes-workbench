@@ -38,6 +38,8 @@
     "flows.ts",
     "pane.ts",
     "pane-view.ts",
-    "pane.tsx"
+    "pane.tsx",
+    "children.ts",
+    "children-tui.ts"
   ]
 }
