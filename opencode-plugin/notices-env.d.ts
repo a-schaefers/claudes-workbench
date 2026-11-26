@@ -7,6 +7,7 @@ declare module 'node:fs' {
   export function openSync(path: string, flags: 'r'): number
   export function readSync(fd: number, buffer: Uint8Array, offset: number, length: number, position: number): number
   export function closeSync(fd: number): void
+  export function realpathSync(path: string): string
 }
 
 declare class TextDecoder {

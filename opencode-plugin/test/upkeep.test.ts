@@ -325,6 +325,20 @@ test("a session's open tasks are those wb start recorded for it, active or waiti
   expect(openTasks(core, w.io, HOME, 's1').map(t => t.name)).toEqual(['a', 'b'])
 })
 
+test('a task that records no session is the open task of a session near it by directory, never one elsewhere or in ~ (#1493)', () => {
+  // a `wb start` typed in a terminal, or a scheduled flow's: notices.ts wakes the session in its
+  // repo for it, and the session's context names it (wb status as the session, in its directory)
+  const w = world({})
+  task(w.files, 'mine', RUNNING)
+  w.files[`${HOME}/tasks/t9/status.json`] = JSON.stringify({ phase: WAITING })
+  w.files[`${HOME}/tasks/t9/task.json`] = JSON.stringify({ name: 't9', cwd: '/src/app', repo: '/src/app' })
+  const at = (dir: string) => openTasks(core, w.io, HOME, 's1', { dir, home: '/home/u', fold: false }).map(t => t.name)
+  expect(at('/src/app/web')).toEqual(['mine', 't9'])
+  expect(at('/src/other')).toEqual(['mine'])
+  expect(at('/home/u')).toEqual(['mine'])
+  expect(openTasks(core, w.io, HOME, 's1').map(t => t.name)).toEqual(['mine'])
+})
+
 test('the setup takes the kernel from the membrane and registers the prompt, context and compaction hooks', async () => {
   const hooks: string[] = []
   const stop = await upkeep({

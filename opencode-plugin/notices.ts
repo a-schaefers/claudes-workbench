@@ -17,7 +17,7 @@
 // TUI part over the `workbench-notices` RPC's `toast` event (notices-tui.ts), which shows them
 // and a desktop notification.
 import { spawn } from 'node:child_process'
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { Registration, RpcDefinition, RpcHandlers, ServerContext } from './host.d.ts'
 import { findWb, wbEnv, wbHome, type Options } from './wb.ts'
@@ -179,6 +179,11 @@ export interface LaneDeps {
   readonly routes: string     // routes.json (WB_ROUTES, else ~/.config/workbench/routes.json: routes.path)
   readonly wake: boolean      // the config entry's options `wake` isn't "off" (the mod's)
   readonly alive: (pid: number) => boolean
+  // a session's directory as wb records a task's (realpath), the user's home, and whether paths
+  // fold case: a task with no session is judged by them (#1493)
+  readonly real?: (path: string) => string
+  readonly userHome?: string
+  readonly fold?: boolean
 }
 
 // a JSON object wb wrote (wire.d.ts's shape `T`), {} for none
@@ -212,6 +217,7 @@ export class NoticeLane {
   emit: (t: Toast) => void = () => {}
   readonly startedAt: number
   readonly busy = new Map<string, boolean>()    // a session's execution under way
+  readonly lately = new Map<string, number>()   // when each session's last execution started (ms)
   readonly toasted = new Set<string>()          // `${task}:${ts}`: toasted once
   readonly heldAsks = new Set<string>()         // a question a busy turn refused (#542)
   readonly dropped = new Map<string, number>()  // task → when its wake failed (ms): a minute before the net
@@ -253,17 +259,43 @@ export class NoticeLane {
     return cur
   }
 
-  // The session here a task is delivered to, '' for none: its recorded `session` (OpenCode's,
-  // `driver.tool`), when this server's store holds it, judged by the kernel's owns (by session:
-  // adoption by directory is wb adopt's)
+  // The session here a task (or run) is delivered to, '' for none: its recorded `session`
+  // (OpenCode's, `driver.tool`), when this server's store holds it, judged by the kernel's owns (a
+  // recorded session gone is wb adopt's to move); with no session recorded (a scheduled flow, a
+  // `wb start` typed in a terminal), a root session here near it by directory (`nearest`)
   async ownerOf(spec: TaskFile): Promise<string> {
     const sid = typeof spec.session === 'string' ? spec.session : ''
     const tool = spec.driver && typeof spec.driver === 'object' ? String(spec.driver.tool ?? '') : ''
-    if (!sid || tool !== 'opencode') return ''
+    if (!sid) return this.nearest(spec)
+    if (tool !== 'opencode') return ''
     const root = await this.root(sid)
     const mine = owns({ session: sid, ids: [root ? sid : '-'], driver: tool, host: 'opencode', gone: false,
       cwd: '', repo: '', subdir: '', here: '', home: '', fold: false }).mine
     return mine && root ? root : ''
+  }
+
+  // A task or run that records no session: the root session the user last typed in here, else
+  // the one that ran last, whose directory the kernel's owns finds near it (its cwd or repo; a
+  // session in ~ or / claims none). It went to none, so its done or checkpoint wake never came,
+  // though Claude Code delivers it by directory (#1493, 2026-11-26); `wb ack`'s compare-and-set
+  // keeps it to one session among several near it. One with no cwd or repo goes to none.
+  async nearest(spec: TaskFile): Promise<string> {
+    const cwd = String(spec.cwd ?? ''), repo = String(spec.repo ?? ''), subdir = String(spec.subdir ?? '')
+    if ((!cwd && !repo) || !this.sessions) return ''
+    const ran = [...this.lately].sort((a, b) => b[1] - a[1]).map(([sid]) => sid)
+    const tried = new Set<string>()
+    for (const sid of [this.typed, ...ran].slice(0, 20)) {
+      const root = sid ? await this.root(sid) : ''
+      if (!root || tried.has(root)) continue
+      tried.add(root)
+      const dir = (await this.sessions.get({ sessionID: root }).catch(() => undefined))?.location?.directory
+      if (!dir) continue
+      let here = dir
+      try { here = this.deps.real ? this.deps.real(dir) : dir } catch { /* gone: as given */ }
+      if (owns({ session: '', ids: [], driver: '', host: 'opencode', gone: false, cwd, repo, subdir, here,
+        home: this.deps.userHome ?? '', fold: !!this.deps.fold }).mine) return root
+    }
+    return ''
   }
 
   // `wb ack <task> <ts>`: true taken, false another took it (exit 3), null wb couldn't say
@@ -433,7 +465,8 @@ export class NoticeLane {
       const picks = d.picks.map(i => rows[i]!).filter(Boolean)
       if (picks.every(r => r.ts <= acked)) continue
       const spec = json<Row>(this.deps.read(this.path('runs', name, 'run.json')))
-      const sid = await this.ownerOf({ session: spec.session, driver: { tool: spec.session_kind === 'opencode' ? 'opencode' : '' } } as TaskFile)
+      const sid = await this.ownerOf({ session: spec.session, driver: { tool: spec.session_kind === 'opencode' ? 'opencode' : '' },
+        cwd: spec.cwd, repo: spec.repo } as TaskFile)
       if (!sid) continue // another driver's, another server's or no session's: theirs (or wb wait's)
       const status = json<Row>(this.deps.read(this.path('runs', name, 'status.json')))
       for (const row of picks) {
@@ -506,7 +539,15 @@ export class NoticeLane {
   }
 
   // OpenCode's events: a session's execution started, or ended (then a look: a held notice goes)
-  started(sid: string) { if (sid) this.busy.set(sid, true) }
+  started(sid: string) {
+    if (!sid) return
+    this.busy.set(sid, true)
+    // a session new here may be near a task or run that records none: notify.jsonl is read again
+    if (!this.lately.has(sid)) this.lastSize = -1
+    this.lately.delete(sid)
+    this.lately.set(sid, this.deps.now())
+    if (this.lately.size > 100) this.lately.delete(this.lately.keys().next().value!)
+  }
   async ended(sid: string) {
     if (!sid) return
     this.busy.set(sid, false)
@@ -528,7 +569,9 @@ export class NoticeLane {
   async prompted(e: { sessionID: string; metadata?: Row }) {
     if (e.metadata && Object.keys(e.metadata).length) return
     const root = await this.root(e.sessionID)
-    if (root && root === e.sessionID && await whenShownHere(root)) this.typed = root
+    if (!(root && root === e.sessionID && await whenShownHere(root))) return
+    if (root !== this.typed) this.lastSize = -1 // as `started`'s: notify.jsonl read again for it (#1493)
+    this.typed = root
   }
 }
 
@@ -679,6 +722,7 @@ export async function notices(ctx: ServerContext): Promise<(() => Promise<void>)
     list: dir => readdirSync(dir),
     wake: options?.wake !== 'off',
     alive: pid => { try { return (process as unknown as { kill(p: number, s: number): boolean }).kill(pid, 0) } catch { return false } },
+    real: realpathSync, userHome: process.env.HOME ?? '', fold: process.platform === 'darwin',
   }))
   const l = s.lane
   const sessions = c.session

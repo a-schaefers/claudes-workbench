@@ -8969,7 +8969,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       while in the mode or with a task of its own open; plus `workbench`, `wb status` as the session
       in its directory, while it has open tasks (read again when their names or phases change).
       `refresh` reads those facts (`openTasks`: `tasks/*/status.json` active or waiting, `task.json`
-      `session` the session's, no bench replay; `notes.md`, `coding.json`, `workflows.json`) at a
+      `session` the session's, or none and near the session's directory by the kernel's `owns`, as
+      notices.ts wakes it for them, #1493; no bench replay; `notes.md`, `coding.json`, `workflows.json`) at a
       prompt (waited for at most `REFRESH_WAIT_MS` 3 s, `within`), a switch of agent (the event, which
       names a session switched to the Workbench agent before any hook has, or
       the `context` hook seeing a new one) and each idle look; `sync` lists the session's entries
@@ -9325,9 +9326,15 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   domains (an older one, a test's ctx) gets none of it.
 - **Whose.** A task is delivered to the root of its `session` (a subagent that ran `wb start`
   reports to its driver) when its `driver.tool` is `opencode` and this server's store holds the
-  session (`session.get`), judged by `owns`; another server's, Claude Code's or no session's task
-  is left alone, unacked and untoasted (its own host, or `wb wait`, delivers it). Adoption by
-  directory stays `wb adopt`'s.
+  session (`session.get`), judged by `owns`; another server's or Claude Code's task is left alone,
+  unacked and untoasted (its own host, or `wb wait`, delivers it), and a recorded session gone stays
+  `wb adopt`'s to move. A task (or run) that records no session (a scheduled flow's run, a `wb
+  start` typed in a terminal) goes by directory (`nearest`, #1493: it went to none, so its done or
+  checkpoint wake never came): the root session the user last typed in here, else those whose
+  executions started here, newest first, the first whose directory (`session.get`'s `location`,
+  realpathed) the kernel's `owns` finds near its `cwd` or `repo` (a session in `~` or `/` claims
+  none; one with neither key goes to none); `wb ack`'s compare-and-set keeps it to one session, or
+  one host. A session new here (its first execution, a new typed one) has notify.jsonl read again.
 - **Delivery** (each due notice's `noticePlan`, `busy` the session's execution under way): `wake`:
   `wb ack <task> <ts>` (exit 3: another server or `wb wait` took it; any other failure: tried again
   at the next look), then `session.synthetic` `{sessionID, id: noticeId(task, kind, ts), text,
@@ -9351,7 +9358,8 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   stays the once-only guarantee.
 - **A run's own notices** (#1278's S9, `deliverRuns`, `parseRunLines`: rows with `run` and no `task`):
   delivered to the session here that ran `wb run start` (run.json `session` with `session_kind`
-  `opencode`, judged as a task's), by core.ts's `runNoticesDue` and `runNoticePlan` (still true while
+  `opencode`, judged as a task's; a run with no session, a scheduled flow's, by its `cwd` and `repo`
+  as a sessionless task's), by core.ts's `runNoticesDue` and `runNoticePlan` (still true while
   the run is in the row's `phase`), `wb ack <run> <ts> --run`, then a queued synthetic, `noticeId("run:<run>",
   kind, ts)`, its text the row's whole, the toast `run <run> <RUN_HEADLINE>`; refused, `wb ack <run> <prev>
   --run --if <ts>` and the next look tries again (no net for a run). *Deep workflows* has the row.

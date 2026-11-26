@@ -37,7 +37,7 @@ import { REPLY_ID, shownHere, typedByUser } from './chat.ts'
 import { sessionRunner, whereOf, type SessionRun } from './commands.ts'
 import { wbEnv, wbHome, type Options } from './wb.ts'
 
-export type Kernel = Pick<typeof Core, 'ACTIVE' | 'NEEDS' | 'phaseOf' | 'tellPlan' | 'compactPlan'>
+export type Kernel = Pick<typeof Core, 'ACTIVE' | 'NEEDS' | 'phaseOf' | 'tellPlan' | 'compactPlan' | 'owns'>
 type Said = Core.Said
 
 // The mod's words for what a compaction keeps (mod/hooks/register.tsx KEEP_ON_COMPACT, word for word)
@@ -121,7 +121,11 @@ const json = <T extends object = Record<string, unknown>>(text: string | undefin
 }
 
 // The session's open tasks (active or waiting on the driver): those `wb start` recorded for it
-export function openTasks(k: Kernel, io: Io, home: string, sessionID: string): Task[] {
+// and, given `near` (the session's directory, the user's home, whether paths fold case), those that
+// record no session (a scheduled flow's, a `wb start` typed in a terminal) the kernel's owns finds
+// near it by directory, which notices.ts wakes it for too (#1493)
+export function openTasks(k: Kernel, io: Io, home: string, sessionID: string,
+                          near?: { readonly dir: string; readonly home: string; readonly fold: boolean }): Task[] {
   const dir = join(home, 'tasks')
   const out: Task[] = []
   for (const name of io.list(dir)) {
@@ -130,7 +134,10 @@ export function openTasks(k: Kernel, io: Io, home: string, sessionID: string): T
     const phase = String(st.phase ?? '')
     if (!k.ACTIVE.has(phase) && !k.NEEDS.has(phase)) continue
     const sp = json<TaskFile>(io.read(join(dir, name, 'task.json')))
-    if (!sp.name || sp.bench || sp.session !== sessionID) continue
+    const nearby = !sp.session && !!near?.dir && !!(sp.cwd || sp.repo) && k.owns({ session: '', ids: [], driver: '',
+      host: 'opencode', gone: false, cwd: String(sp.cwd ?? ''), repo: String(sp.repo ?? ''), subdir: String(sp.subdir ?? ''),
+      here: near.dir, home: near.home, fold: near.fold }).mine
+    if (!sp.name || sp.bench || (sp.session !== sessionID && !nearby)) continue
     out.push({ name, phase, parked: !!st.parked })
   }
   return out.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
@@ -324,7 +331,8 @@ export class Upkeep {
 
   private async refreshNow(sessionID: string, s: Sess, back: boolean | (() => boolean)): Promise<void> {
     const delegating = s.agent === AGENT
-    const tasks = openTasks(this.k, this.io, this.home, sessionID)
+    const tasks = openTasks(this.k, this.io, this.home, sessionID,
+      { dir: s.dir, home: this.io.env.HOME ?? '', fold: process.platform === 'darwin' })
     const any = delegating || tasks.length > 0
     const read = (f: string) => this.io.read(join(this.home, f))
     const coding = any ? String(json(read('coding.json')).mode ?? '') : ''
