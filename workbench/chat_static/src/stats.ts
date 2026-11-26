@@ -68,7 +68,8 @@
   }
   function apiParts(r: Json) {
     if (r.via !== 'api') return []
-    return [typeof r.spend === 'number' ? estUsd(r.spend, r.prices) : '', r.waits ? `waits for ${r.waits}` : '']
+    // a plan's quota is no dollars: its row once said nothing where wb top said $0 (#1522)
+    return [typeof r.spend === 'number' ? estUsd(r.spend, r.prices) : r.plan ? 'plan usage' : '', r.waits ? `waits for ${r.waits}` : '']
   }
 
   // ---- the history: statsLines, label for label; a row may carry a chart's numbers too ----

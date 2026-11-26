@@ -444,8 +444,12 @@ async function run(engine: string, device?: string) {
     }
   })
   await check('a prompt waiting in the terminal is the state line at the top, Copy its one button, no thread row and no answer card, and its settling clears it (#959, #1350, #1355)', async () => {
+    // the wait is the listener's claim's, as the host writes it (#1481: another session's notice never is)
+    const waits = (w?: object) => writeFileSync(join(home, 'state/chat/listener.json'),
+      JSON.stringify({ session: 's1', cwd: '/home/u/project', pid: process.pid, busy: false, ...(w ? { waiting: w } : {}) }))
     const id = wb('chat', 'notice', '--tool', 'Bash', '--text', 'rm -rf runs/*').trim()
     if (id.startsWith('skipped')) throw new Error(id)
+    waits({ kind: 'permission', tool: 'Bash', since: Date.now() / 1000, what: 'rm -rf runs/*' })
     const line = page.locator('#driver-state')
     await until(async () => (await line.isVisible()) && (await line.textContent()).includes('Claude is waiting for you in the terminal: a permission for Bash.'))
     if ((await line.locator('.dstate-what').textContent()) !== 'rm -rf runs/*') throw new Error(await line.textContent())
@@ -461,11 +465,13 @@ async function run(engine: string, device?: string) {
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Waiting behind the prompt in the terminal'))
     const plan = wb('chat', 'notice', '--tool', 'ExitPlanMode', '--kind', 'plan').trim()
     if (!wb('chat', 'notice', '--done', id).startsWith('answered')) throw new Error('not settled')
+    waits({ kind: 'plan', tool: 'ExitPlanMode', since: Date.now() / 1000 })
     // the oldest open prompt is the one named: now the plan's, which names no permissions
     await until(async () => (await line.textContent()).includes('a plan to approve'))
     if ((await line.textContent()).includes('permissions granted') || (await line.locator('button').count())) throw new Error('a plan names permissions')
     // settled there: the line clears
     if (!wb('chat', 'notice', '--done', plan).startsWith('answered')) throw new Error('not settled')
+    waits()
     await until(async () => await line.isHidden())
   })
   await check('Stats shows what the week\'s tasks saved Claude, once: the badge and its one line', async () => {
@@ -714,6 +720,11 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.textContent('#runs')) === 'Run: night (audit) · running · find 1/3 · $0.25 of $2.00')
       const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
       if (!width) throw new Error('the page scrolls sideways')
+      // Settings opened once in this page (its rows loaded), then the chat: the tap's second
+      // visit, which landed at the top of Settings (#1527, 2026-11-26)
+      await goTo('settings')
+      await until(async () => (await page.locator('.set-card[data-group="workflows"]').count()) === 1)
+      await goTo('chat')
       await page.click('#runs')
       await until(() => page.evaluate(() => document.body.dataset.view === 'settings'))
       const row = page.locator('#settings-rows .set-row[data-key="run-night"]')
@@ -721,6 +732,12 @@ async function run(engine: string, device?: string) {
       if (!(await row.textContent()).includes('flow audit · running (no driver) · find: 1 done, 2 running · $0.25 of $2.00'))
         throw new Error('the row says: ' + await row.textContent())
       if (!(await page.locator('.set-card[data-group="workflows"]').isVisible())) throw new Error('the workflows group is not shown')
+      // in view, not only shown: on that second visit the card stayed 2,000 px down on a phone
+      const inView = () => page.evaluate(() => {
+        const top = document.querySelector('.set-card[data-group="workflows"]')!.getBoundingClientRect().top
+        return top >= 0 && top < innerHeight
+      })
+      try { await until(inView, 3000) } catch { throw new Error('the workflows card is out of view') }
       await row.locator('button[data-value="summary"]').click()
       await until(async () => (await row.locator('pre.set-detail').count()) === 1)
       const detail = await row.locator('pre.set-detail').textContent()
@@ -1486,6 +1503,26 @@ async function run(engine: string, device?: string) {
     await page.click('#send')
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Waiting for an OpenCode session'))
     if ((await page.locator('.row.user .meta').nth(-2).textContent()).includes('Claude')) throw new Error('a receipt still names Claude')
+  })
+  await check('with the chat switched off, the state line says so and names wb chat on, never a driver to start (#1526)', async () => {
+    // #1526: a server a service kept up told the user to start their driver and run /workbench,
+    // which can't make it listen while the switch is off (what `wb chat off` writes)
+    const sw = join(home, 'state/chat/switch.json'), line = page.locator('#driver-state')
+    const was = existsSync(sw) ? readFileSync(sw, 'utf8') : JSON.stringify({ on: true, v: 2 })
+    writeFileSync(sw, JSON.stringify({ on: false, v: 2 }))
+    writeFileSync(join(home, 'state/chat/listener.json'), '{}')  // a write the streams wake on
+    try {
+      await until(async () => (await line.isVisible()) && (await line.textContent()).includes('The web chat is off'))
+      if ((await line.locator('code').textContent()) !== 'wb chat on') throw new Error(await line.textContent())
+      if ((await line.textContent()).includes('/workbench')) throw new Error(await line.textContent())
+      writeFileSync(sw, JSON.stringify({ on: true, v: 2 }))
+      writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+      // on again: none's line, how to start a driver (it shows `next` alone)
+      await until(async () => { const t = await line.textContent(); return !t.includes('is off') && t.includes('it answers here') })
+    } finally {
+      writeFileSync(sw, was)  // as the checks before left it
+      writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+    }
   })
   await finish()
 

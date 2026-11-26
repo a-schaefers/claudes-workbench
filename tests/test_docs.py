@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from workbench import cli  # noqa: E402
+from workbench import cli, context, runner  # noqa: E402
 
 CLAUDE = (ROOT / "CLAUDE.md").read_text()
 ARCH = (ROOT / "ARCHITECTURE.md").read_text()
@@ -409,6 +409,20 @@ class DocsMatchTheCode(unittest.TestCase):
                    r"haiku|sonnet|opus|codestral|granite|nemotron|minimax)\w*"
         self.assertIsNone(re.search(families, text.decode(), re.I))
 
+
+    def test_the_handbooks_name_every_file_the_edit_tools_refuse_and_propose_only_what_wb_pairs(self):
+        # #1521: they named CLAUDE.md, AGENTS.md and `.claude/` only, so an agent on a task touching
+        # opencode.json or `.opencode/` met a denied edit with no word of it, and a `.proposed`
+        # inside `.claude/` is denied too (`.claude/*`) while runner.PROPOSABLE pairs only those two
+        names = {re.sub(r"^\*/?|\*$", "", p) for p in (*context.CLAUDE_FILES, *context.OPENCODE_FILES)}
+        files = {n for n in names if not n.endswith("/")}
+        for doc in ("agent/HANDBOOK.md", "agent/WRITING.md"):
+            text = re.sub(r"\s+", " ", (ROOT / doc).read_text())
+            self.assertEqual(sorted(n for n in names if n not in text), [], f"{doc}: names a refused file")
+            said = text[text.index("can't be edited:"):text.index("`<name>.proposed`")]
+            self.assertEqual({n for n in files if re.search(rf"(?<![\w.]){re.escape(n)}(?!\w)", said)},
+                             set(runner.PROPOSABLE), f"{doc}: proposes only what wb pairs")
+            self.assertIn("outside `.claude/`", said, doc)
 
 class DocsFor20(unittest.TestCase):
     """#1027: since 2.0 an agent is a GPU model or an API model, and what people and Claude read

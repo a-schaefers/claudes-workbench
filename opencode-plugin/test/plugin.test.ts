@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import server, { ID, status } from '../server.ts'
-import tui from '../tui.ts'
+import tui, { askStatus, STATUS_TRIES } from '../tui.ts'
 import { Workbench } from '../rpc.ts'
 import { OWN, findWb, optionEnv, wbEnv, wbHome } from '../wb.ts'
 
@@ -41,6 +41,46 @@ test('under WB_TASK neither part does anything at all (#1363)', async () => {
     if (was === undefined) delete process.env.WB_TASK
     else process.env.WB_TASK = was
   }
+})
+
+test('the TUI part asks a cold service\'s status again until it answers, then mounts the rest (#1488)', async () => {
+  // the owner's own machine, 2026-11-26: the first TUI on a stopped service got rpc.unavailable
+  // once and gave up, with no panel, footer or palette entry for its whole life
+  const was = process.env.WB_TASK
+  delete process.env.WB_TASK
+  const said: unknown[] = []
+  let asked = 0
+  try {
+    const ctx = {
+      options: {},
+      client: { rpc: () => ({ status: async () => {
+        if (++asked === 1) throw new Error('RPC is unavailable: workbench')  // rpc.unavailable
+        return { wb: '/gone/bin/wb', found: false, from: 'options', home: '/state' }
+      } }) },
+      ui: { toast: { show: (o: { message: string }) => said.push(o.message) } },
+    }
+    const stop = await tui.setup(ctx as never) as unknown as (() => void) & { ready: Promise<void> }
+    await stop.ready
+    stop()
+  } finally {
+    if (was !== undefined) process.env.WB_TASK = was
+  }
+  expect(asked).toBe(2)
+  expect(said).toEqual(["wb isn't at /gone/bin/wb, which the plugin's options name: run bin/wb setup --opencode in your Workbench clone"])
+})
+
+test('a server part that never answers is asked a bounded number of times, and an unloaded TUI stops asking (#1488)', async () => {
+  let asked = 0
+  const never = async () => { asked++; throw new Error('RPC is unavailable: workbench') }
+  const waits: number[] = []
+  const wait = async (ms: number) => { waits.push(ms) }
+  expect(await askStatus(never, () => false, STATUS_TRIES, wait)).toBeUndefined()
+  expect([asked, waits.length]).toEqual([STATUS_TRIES, STATUS_TRIES - 1])
+  expect(STATUS_TRIES * waits[0]! >= 10_000).toBe(true)  // long enough for a cold service to load the plugin
+  asked = 0
+  let stopped = false
+  expect(await askStatus(async () => { asked++; stopped = true; throw new Error('x') }, () => stopped, STATUS_TRIES, wait)).toBeUndefined()
+  expect(asked).toBe(1)
 })
 
 test('the server part registers the status method, the Workbench agent and its skills (#1335), the driver\'s (#1316), the upkeep\'s hooks and the commands (#1315), the panel\'s (#1312) and the child sessions\' (#1331)', async () => {

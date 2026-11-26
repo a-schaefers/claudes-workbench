@@ -25,7 +25,7 @@ function world(opts: { wake?: boolean; ack?: number; failSynthetic?: boolean } =
   const admitted: Synth[] = []      // what the inbox holds: one per id
   const offered: Synth[] = []       // every call to synthetic, a resend too
   const toasts: { key: string; message: string; sessionID: string; notify: boolean }[] = []
-  const sessions: Record<string, { id: string; parentID?: string }> = {
+  const sessions: Record<string, { id: string; parentID?: string; location?: { directory?: string } }> = {
     ses_drv: { id: 'ses_drv' }, ses_sub: { id: 'ses_sub', parentID: 'ses_drv' }, ses_two: { id: 'ses_two' },
   }
   let clock = 1_800_000_000_000
@@ -48,7 +48,7 @@ function world(opts: { wake?: boolean; ack?: number; failSynthetic?: boolean } =
     list: dir => [...new Set(Object.keys(files).filter(p => p.startsWith(`${dir}/`))
       .map(p => p.slice(dir.length + 1).split('/')[0]!))],
     now: () => clock, pid: 4242, home: HOME, routes: '/config/routes.json', wake: opts.wake ?? true,
-    alive: pid => pid === 999,
+    alive: pid => pid === 999, userHome: '/home/u',
   })
   lane.sessions = {
     get: async ({ sessionID }) => { const s = sessions[sessionID]; if (!s) throw new Error('not found'); return s },
@@ -70,7 +70,7 @@ function world(opts: { wake?: boolean; ack?: number; failSynthetic?: boolean } =
     files[f] = (files[f] ?? '') + JSON.stringify(row) + '\n'
   }
   return {
-    lane, files, calls, limits, admitted, offered, toasts, task, notify,
+    lane, files, calls, limits, admitted, offered, toasts, task, notify, sessions,
     tick: (ms: number) => { clock += ms },
     get now() { return clock },
     acks: () => calls.filter(c => c.startsWith('ack ')),
@@ -250,6 +250,32 @@ test('the jobs: the update check after a turn, the model check after a quiet min
   expect(w.toasts.map(t => t.key)).toEqual(['scout'])
 })
 
+test('#1507: a 2.1 Dynamic workflows on is said once a load, its line toasted, and nothing once deepmode has its own key', async () => {
+  // 2.1's `mode: on` meant the driver may start several tasks at once; 2.2's deepmode runs every
+  // substantive request as a deep workflow, so it starts off and wb deepmode --moved says so once
+  const w = world()
+  w.files[`${HOME}/workflows.json`] = JSON.stringify({ mode: 'on', ts: 1 })
+  const line = 'Deepmode is off: … /deepmode on turns it on.'
+  const run = w.lane.deps.run
+  ;(w.lane.deps as { run: typeof run }).run = async (args, session, ms) => {
+    if (args.join(' ') !== 'deepmode --moved') return run(args, session, ms)
+    w.calls.push('deepmode --moved')
+    w.files[`${HOME}/workflows.json`] = JSON.stringify({ deepmode: 'off', ts: 2 }) // as wb writes it
+    return { code: 0, out: `${line}\n` }
+  }
+  await w.lane.ended('ses_drv')
+  await new Promise(r => setTimeout(() => r(undefined), 5))
+  await w.lane.scan()
+  expect(w.calls.filter(c => c.startsWith('deepmode'))).toEqual(['deepmode --moved'])
+  expect(w.toasts.filter(t => t.key === 'deepmode').map(t => t.message)).toEqual([line])
+  // a later load reads deepmode's own key: nothing run, nothing said
+  const next = world()
+  next.files[`${HOME}/workflows.json`] = w.files[`${HOME}/workflows.json`]!
+  await next.lane.ended('ses_drv')
+  await new Promise(r => setTimeout(() => r(undefined), 5))
+  expect(next.calls.filter(c => c.startsWith('deepmode'))).toEqual([])
+})
+
 test('the jobs\' wb calls get the mod\'s two minutes, as the update check fetches; an ack keeps the short limit', async () => {
   const w = world()
   w.task('t1', P.review)
@@ -349,6 +375,54 @@ test('a run\'s own notice wakes the session that started it once, its text whole
   w.notify({ run: 'cc-run', kind: 'run_done', phase: P.review, ts: ts + 1, text: '' })
   await w.lane.scan()
   expect(w.admitted.length).toBe(1)                                 // once
+})
+
+test('#1491: a run\'s notice hours old still wakes its session once: a run has no rewake under the hour\'s cutoff', async () => {
+  const w = world()
+  const ts = w.now / 1000 - 7 * 3600
+  runFiles(w, 'aud', P.review)
+  w.notify({ run: 'aud', kind: 'run_done', phase: P.review, ts, text: '[workbench] Run `aud` is done' })
+  await w.lane.scan()
+  expect(w.acks()).toEqual([`ack aud ${ts} --run`])
+  expect(w.admitted.map(a => a.text)).toEqual(['[workbench] Run `aud` is done'])
+})
+
+test('a run or task that records no session wakes a session here in its repo once; one elsewhere or in ~ gets nothing (#1493)', async () => {
+  // a scheduled flow's run.json has no session (schedule.py), nor has a `wb start` typed in a
+  // terminal: ownerOf gave none, and the OpenCode user opening the repo next morning was never told
+  const w = world()
+  const ts = w.now / 1000
+  w.sessions.ses_home = { id: 'ses_home', location: { directory: '/home/u' } }
+  w.sessions.ses_else = { id: 'ses_else', location: { directory: '/src/other' } }
+  w.sessions.ses_repo = { id: 'ses_repo', location: { directory: '/src/app/web' } }
+  w.files[`${HOME}/runs/nightly-1/run.json`] = JSON.stringify({ name: 'nightly-1', flow: 'nightly', cwd: '/src/app', repo: '/src/app' })
+  w.files[`${HOME}/runs/nightly-1/status.json`] = JSON.stringify({ phase: P.review })
+  w.notify({ run: 'nightly-1', kind: 'run_done', phase: P.review, ts, text: 'DONE' })
+  w.task('t9', P.review, { cwd: '/src/app', repo: '/src/app' }, '')
+  w.notify({ task: 't9', kind: P.review, ts: ts + 1, text: '' })
+  w.lane.typed = 'ses_home'                                         // a session in ~ claims none by directory
+  w.lane.started('ses_else')
+  await w.lane.ended('ses_else')
+  expect([w.acks(), w.admitted, w.toasts]).toEqual([[], [], []])
+  w.lane.started('ses_repo')                                        // the user opens the repo
+  await w.lane.ended('ses_repo')
+  expect(w.acks()).toEqual([`ack t9 ${ts + 1}`, `ack nightly-1 ${ts} --run`])
+  expect(w.admitted.map(s => [s.sessionID, s.metadata?.task ?? s.metadata?.run])).toEqual([['ses_repo', 't9'], ['ses_repo', 'nightly-1']])
+})
+
+test('a scheduled flow done overnight still wakes the session that opens its repo in the morning, while the run waits in that phase (#1493)', async () => {
+  // the kernel dropped a run notice an hour old, and runs have no rewake net: the flow done at
+  // night was never told (#1493, 2026-11-26)
+  const w = world()
+  const ts = w.now / 1000 - 270 * 60
+  w.sessions.ses_repo = { id: 'ses_repo', location: { directory: '/src/app' } }
+  w.files[`${HOME}/runs/nightly-1/run.json`] = JSON.stringify({ name: 'nightly-1', flow: 'nightly', cwd: '/src/app', repo: '/src/app' })
+  w.files[`${HOME}/runs/nightly-1/status.json`] = JSON.stringify({ phase: P.review })
+  w.notify({ run: 'nightly-1', kind: 'run_done', phase: P.review, ts, text: 'DONE' })
+  w.lane.started('ses_repo')
+  await w.lane.ended('ses_repo')
+  expect(w.acks()).toEqual([`ack nightly-1 ${ts} --run`])
+  expect(w.admitted.map(s => [s.sessionID, s.metadata?.run])).toEqual([['ses_repo', 'nightly-1']])
 })
 
 test('a run\'s notice no longer true is acknowledged unsaid, and a busy session gets it once the turn ends', async () => {

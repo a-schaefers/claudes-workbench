@@ -279,6 +279,32 @@ def _inbound(r: dict) -> bool:
     return r.get("from") == "user" or r.get("role") == "agent"
 
 
+def tailscale_cli(windows: bool = False) -> str | None:
+    """The tailscale CLI to ask: on PATH, else macOS' app bundle (`TAILSCALE_APP`); ``windows``:
+    under WSL with neither, Windows' tailscale.exe (tailscale()'s). None for none."""
+    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
+                                        and os.path.isfile(TAILSCALE_APP) else None)
+    if not cli and windows:
+        from . import hardware
+        cli = (hardware.windows_program("tailscale.exe", TAILSCALE_WINDOWS)
+               if hardware.system() == "wsl" else None)
+    return cli or None
+
+
+def listenable(ip: str) -> bool:
+    """Whether a server here can listen on ``ip``: an address one of this machine's interfaces
+    carries. Tailscale's userspace networking (Docker or LXC, no /dev/net/tun) reports a tailnet
+    address no interface has, and the chat bound to it failed EADDRNOTAVAIL, closed its localhost
+    server too and exited, every restart the same: the whole web app down (#1499, 2026-11-26).
+    Only that refusal counts: another (a port, a permission) is make_servers' to say."""
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((ip, 0))
+    except OSError as e:
+        return e.errno != errno.EADDRNOTAVAIL
+    return True
+
+
 def tailscale(windows: bool = False) -> dict:
     """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up (no Self, or a
     BackendState other than Running); {"missing": True} when there is no CLI to ask (said apart
@@ -290,12 +316,7 @@ def tailscale(windows: bool = False) -> dict:
     install under the automount root: wb-chat.service runs with the user manager's PATH, which
     has none of Windows', as has appendWindowsPath=false (the review of #920). Not for the
     address: in WSL's NAT networking, Windows' tailnet IP isn't on WSL's interfaces."""
-    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
-                                        and os.path.isfile(TAILSCALE_APP) else None)
-    if not cli and windows:
-        from . import hardware
-        cli = (hardware.windows_program("tailscale.exe", TAILSCALE_WINDOWS)
-               if hardware.system() == "wsl" else None)
+    cli = tailscale_cli(windows)
     if not cli:
         return {"missing": True}
     try:
@@ -333,20 +354,31 @@ def reach() -> str:
     return "local" if all(b in LOOPBACK for b in binds) else "custom"
 
 
-def set_reach(to: str) -> dict:
+def set_reach(to: str, port: int = PORT) -> dict:
     """Write chat.json's `bind` for ``to`` (REACH), its other keys kept: {"from", "to", "ts"?: the
     tailscale() it checked}. ValueError, nothing written, for another value, or `tailnet` while
-    Tailscale isn't up here (its reason)."""
+    Tailscale isn't up here or its address can't be listened on (its reason, naming the
+    `tailscale serve --bg <port>` that works there)."""
     if to not in REACH:
         raise ValueError(f"reach is {' or '.join(REACH)}")
     was = reach()
     # the tailnet address plan() binds: this OS's own CLI, never Windows' under WSL (its address
     # isn't on WSL's interfaces, so the bind would be skipped)
     ts = tailscale() if to == "tailnet" else {}
+    if to == "tailnet" and ts.get("missing") and not (win := tailscale(windows=True)).get("missing"):
+        # WSL2 with Tailscale on Windows (#920's setup) was told to install Tailscale again and never
+        # shown the route that works there: Windows' serve, over its localhost forwarding (#1524, 2026-11-26)
+        raise ValueError(f"Tailscale runs on Windows here{'' if win else ' (not up: sign in to it)'}, and its "
+                         f"tailnet address isn't on WSL's interfaces: leave reach local and run `tailscale.exe "
+                         f"serve --bg {port}` (Windows'), which serves the web app to your tailnet over https")
     if to == "tailnet" and not ts.get("ip"):
         raise ValueError("no tailscale command here: install Tailscale (tailscale.com/download), sign in, then "
                          "this again" if ts.get("missing") else
                          "Tailscale isn't up here: `tailscale up`, then this again")
+    if to == "tailnet" and not listenable(ts["ip"]):  # plan() would skip it (#1499)
+        raise ValueError(f"this machine's tailnet address {ts['ip']} is on none of its interfaces (Tailscale's "
+                         f"userspace networking), so nothing can listen on it: leave reach local and run "
+                         f"`tailscale serve --bg {port}`, which serves the web app to your tailnet over https")
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # the user's file, edited in place under its lock (a link to their dotfiles stays one, #495)
@@ -361,8 +393,17 @@ def set_reach(to: str) -> dict:
 def https_served(port: int) -> bool | None:
     """Whether `tailscale serve` puts https in front of the chat's ``port`` here: True, False, or
     None when it can't be told (no CLI, an answer it can't read)."""
-    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin" and os.path.isfile(TAILSCALE_APP)
-                                        else None)
+    site = served_site(port)
+    return None if site is None else bool(site)
+
+
+def served_site(port: int) -> str | None:
+    """The `tailscale serve` site ("<name>:<https port>") proxying to the chat's ``port`` here, ""
+    for none, None when it can't be told. Reach `local` leaves it serving the tailnet, and wb said
+    "this machine only" (#1512, 2026-11-26): its callers name it and the command that stops it.
+    Under WSL, Windows' CLI too: its serve reaches the chat through Windows' localhost forwarding
+    and was never seen (#1524, 2026-11-26)."""
+    cli = tailscale_cli(windows=True)
     if not cli:
         return None
     try:
@@ -373,12 +414,12 @@ def https_served(port: int) -> bool | None:
     if not isinstance(doc, dict):
         return None
     targets = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    for site in (doc.get("Web") or {}).values():
+    for name, site in (doc.get("Web") or {}).items():
         for h in ((site or {}).get("Handlers") or {}).values() if isinstance(site, dict) else ():
             proxy = str((h or {}).get("Proxy") or "") if isinstance(h, dict) else ""
             if any(proxy.rstrip("/").endswith(t) for t in targets):
-                return True
-    return False
+                return str(name)
+    return ""
 
 
 _tailnet = {"at": float("-inf"), "name": ""}
@@ -1787,7 +1828,7 @@ def hold(session: str, pid: int, busy: bool = False, cwd: str | None = None,
     move it to another of its sessions (the user typed there). Written only on a change: every
     write wakes the page's streams. ``waiting``: the dialog up in its terminal, the plugin's
     waitingFact `{kind, tool, since, what?}` (#1355, the page's state line); ValueError for one of
-    another shape."""
+    another shape. (False, None) while the chat is switched off: nothing written (#1480)."""
     if not store.SESSION_RE.fullmatch(session or "") or not isinstance(pid, int) or pid <= 0:
         raise ValueError("a session id and a server pid")
     if waiting is not None and not (isinstance(waiting, dict) and waiting.get("kind") in WAIT_KINDS
@@ -1797,6 +1838,11 @@ def hold(session: str, pid: int, busy: bool = False, cwd: str | None = None,
                                     and isinstance(waiting.get("what", ""), str)):
         raise ValueError("waiting is {kind, tool, since, what?}")
     with store.locked(chat_dir() / "listener.lock"):
+        # Off, nothing delivers: the plugin's on is cached a minute, and its poll took the claim
+        # `wb chat off` had emptied again, so /api/health said OpenCode listened and ask_workbench
+        # waited its whole hour for nothing (#1480, 2026-11-26). Turned on, its check takes it.
+        if not is_on():
+            return False, None
         cur = listener()
         if cur and not (cur.get("tool") == "opencode" and cur.get("pid") == pid
                         and cur.get("machine") in (None, store.machine())):
@@ -1928,30 +1974,27 @@ def listener_view(lst: dict | None) -> dict | None:
 
 # The driver's state (#1355): the one line the page keeps at the top of the chat, from the facts
 # the hosts already write: the listener's claim (`busy`; `waiting`, the oldest dialog up in its
-# terminal for WAITING_AFTER or more, the host's own filter of an auto-accept's flicker), else the
-# oldest open notice row (the waiting line a host posts, #1350). Waiting beats working beats idle;
-# no live listener is `none`. The words are the story's (`state.*`, `next.*`, `wait.*`), and only
+# terminal for WAITING_AFTER or more, the host's own filter of an auto-accept's flicker). Never a
+# notice row: the mod posts one from every delegating session, and another session's dialog (or a
+# dead one's, for ASK_STALE) read as the listener waiting, with its driver's grant (#1481,
+# 2026-11-26); both hosts write their own wait in the claim. Waiting beats working beats idle;
+# no live listener is `none`, or `off` while the chat is switched off: only `wb chat on` makes a
+# driver listen then, and the page told the user to start one and run /workbench (#1526). The words are the story's (`state.*`, `next.*`, `wait.*`), and only
 # a permission names the grant (`next.grant`, the driver's own way to run with permissions
 # granted): a question or a plan waits however the driver runs.
 WAITING_AFTER = 2.0   # seconds: the hosts' WAITING_AFTER_MS, a dialog answered sooner never shown
 WAIT_KINDS = ("permission", "question", "plan", "elicitation", "consent")
 
 
-def _waiting_fact(lst: dict | None, rows: list[dict]) -> dict | None:
-    """The dialog the driver waits on, {kind, tool, since, what?}: the claim's `waiting`, else the
-    oldest open notice row under ASK_STALE old (the one the turn is stuck on); None for none."""
+def _waiting_fact(lst: dict | None) -> dict | None:
+    """The dialog the listening driver waits on, {kind, tool, since, what?}: its claim's
+    `waiting`; None for none (#1481: never another session's notice row)."""
     w = (lst or {}).get("waiting")
     if isinstance(w, dict) and w.get("kind") in WAIT_KINDS and isinstance(w.get("since"), (int, float)) \
             and not isinstance(w.get("since"), bool):
         tool = w.get("tool") if isinstance(w.get("tool"), str) else ""
         return {"kind": w["kind"], "tool": tool[:200], "since": float(w["since"]),
                 **({"what": w["what"][:ASK_TEXT]} if isinstance(w.get("what"), str) and w["what"] else {})}
-    now = store.now()
-    for r in rows:
-        if isinstance(r, dict) and r.get("from") == "notice" and now - (r.get("ts") or 0) <= ASK_STALE:
-            kind = r.get("kind") if r.get("kind") in WAIT_KINDS else "permission"
-            return {"kind": kind, "tool": str(r.get("tool") or "")[:200], "since": float(r.get("ts") or 0),
-                    **({"what": r["what"]} if isinstance(r.get("what"), str) and r["what"] else {})}
     return None
 
 
@@ -1966,11 +2009,11 @@ _LIVE: dict = {}  # driver_state's default: the live listener, read afresh
 
 
 def driver_state(lst: dict | None = _LIVE, rows: list[dict] | None = None) -> dict:
-    """The driver's state for the page (snapshot's `driver`): {state: none|idle|working|waiting,
+    """The driver's state for the page (snapshot's `driver`): {state: off|none|idle|working|waiting,
     driver (story's: claude-code|opencode|any), who, where?, waiting?: {kind, tool, since, what?},
     line, next, grant?: {line, command}}. ``lst``: the live listener (default: listener(); None: none);
     ``rows``: the thread (default: thread()), whose newest driver names a driver with none
-    listening, and whose open notice is a wait the claim doesn't say."""
+    listening."""
     lst = listener() if lst is _LIVE else lst
     rows = thread() if rows is None else rows
     if lst:
@@ -1981,11 +2024,12 @@ def driver_state(lst: dict | None = _LIVE, rows: list[dict] | None = None) -> di
                        and r["driver"].get("tool") in DRIVER_TOOLS), "any")
     who = story.DRIVERS[driver]["who"]
     if not lst:
-        return {"state": "none", "driver": driver, "who": who,
-                "line": story.text("state.none", driver), "next": story.text("next.none", driver)}
+        state = "none" if is_on() else "off"  # #1526: off, no driver can listen until `wb chat on`
+        return {"state": state, "driver": driver, "who": who,
+                "line": story.text(f"state.{state}", driver), "next": story.text(f"next.{state}", driver)}
     where = _tilde(str(lst.get("cwd") or "")) or "its directory"
     out = {"driver": driver, "who": who, "where": where}
-    wait = _waiting_fact(lst, rows)
+    wait = _waiting_fact(lst)
     if wait:
         # an MCP server's name (Claude Code's `mcp:<server>`), else what the host knows: OpenCode
         # names a form by no server
@@ -3450,6 +3494,9 @@ def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict
                 skipped.append("tailscale (CLI not found: put `tailscale` on PATH)" if ts.get("missing")
                                else "tailscale (no Tailscale address)" if ts else "tailscale (not running)")
                 continue
+            if not listenable(ts["ip"]):  # userspace networking: binding it took localhost down too (#1499)
+                skipped.append("tailscale (its address isn't on this machine)")
+                continue
             b = ts["ip"]
             allowed |= {n.lower() for n in ts["names"]}
             names += sorted(ts["names"], key=len, reverse=True)[:1]
@@ -3553,24 +3600,74 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
                 if now != set(p["binds"]):
                     restart("the addresses to listen on changed: restarting to bind them")
         threading.Thread(target=replan, daemon=True).start()
+    def move(new: Path):  # OpenCode installed a newer generation beside this one's (#1525)
+        say(f"a newer workbench is installed at {new}: restarting from it")
+        os.chdir(new)
+        os.execv(sys.executable, serve_argv(new))
     threading.Thread(target=watch_code, args=(
-        lambda: restart("the web chat's code changed: restarting with it"),), daemon=True).start()
+        lambda: restart("the web chat's code changed: restarting with it"),),
+        kwargs={"move": move}, daemon=True).start()
     threading.Thread(target=Pusher(servers[0].RequestHandlerClass.hub).run, daemon=True).start()
     servers[0].serve_forever()
 
 
+def _stamp(d: Path) -> tuple:
+    return tuple(sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in d.glob("*.py")))
+
+
 def code_stamp() -> tuple:
-    return tuple(sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size)
-                        for f in Path(__file__).parent.glob("*.py")))
+    return _stamp(Path(__file__).parent)
 
 
-def watch_code(restart, every: float = RELOAD_EVERY) -> None:
+def newer_generation(root: Path | None = None) -> Path | None:
+    """The newest generation of OpenCode's Git install when ``root`` (this package's, by default)
+    is an older one of the same key: `<cache>/<key>/<n>/node_modules/opencode-workbench`, the
+    highest `<n>` not `<n>.rejected` that holds this package and its bin/wb. None for the newest,
+    and for a root outside OpenCode's cache (a clone, Claude Code's marketplace clone: updated in
+    place, which code_stamp sees). A new commit there is a new directory beside the old, and a
+    server started from one served its page and Settings until OpenCode removed it, then exited
+    restarting into the missing bin/wb (#1525, 2026-11-26)."""
+    from . import ocplugin  # only here: the server needs it for this alone
+    root = root or Path(__file__).resolve().parent.parent
+    mine = root.parent.parent.name
+    if root.parent.name != "node_modules" or not mine.isdigit() or not ocplugin.runs_from_cache(root):
+        return None
+    key = root.parent.parent.parent
+    try:
+        names = os.listdir(key)
+    except OSError:
+        return None
+    for g in sorted((n for n in names if n.isdigit() and f"{n}.rejected" not in names), key=int, reverse=True):
+        d = key / g / "node_modules" / root.name
+        if ocplugin.is_copy(d) and (d / "bin" / "wb").is_file():
+            return d if int(g) > int(mine) else None
+    return None
+
+
+def serve_argv(root: Path) -> list[str]:
+    """This server's command run from ``root``'s bin/wb: another generation's (#1525)."""
+    return [sys.executable, "-X", "utf8", str(root / "bin" / "wb"), *sys.argv[1:]]
+
+
+def watch_code(restart, every: float = RELOAD_EVERY, move=None, root: Path | None = None) -> None:
     """Restart once the package's code has changed and settled (a pull writes files one by one):
     a server left running across an update served the new page from old code for days, and no
-    doc's `systemctl --user restart wb-chat` was ever run (2026-11-18)."""
+    doc's `systemctl --user restart wb-chat` was ever run (2026-11-18). With ``move``, a server
+    run from an older generation of OpenCode's install (newer_generation of ``root``) calls
+    ``move(<the newest's root>)`` once that one has settled too (#1525)."""
     first = prev = code_stamp()
+    seen = None
     while True:
         time.sleep(every)
+        if move is not None:
+            new = newer_generation(root)
+            try:
+                mark = (new, _stamp(new / "workbench")) if new else None
+            except OSError:  # mid-install, or collected
+                mark = None
+            if mark is not None and mark == seen:
+                return move(new)
+            seen = mark
         try:
             now = code_stamp()
         except OSError:  # a file mid-replace

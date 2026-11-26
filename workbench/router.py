@@ -89,6 +89,7 @@ class Score:
     # the record weighed by recency (HALF_LIFE_DAYS); None: as counted
     w: tuple | None = None         # (tries, wins, like_tries, like_wins)
     guessed: bool = False          # weights guessed from its name: the server says no size (#704)
+    waits_on: tuple = ()           # the live drivers' resident models it can't run beside (#1476)
 
     @property
     def quality(self) -> float:
@@ -287,14 +288,15 @@ def explores(task_name: str | None) -> bool:
 def unproven(scores: list[Score]) -> list[Score]:
     """The usable models outside the band with fewer than EXPLORE_TRIES tasks of the size, fewest
     first: those the record left out before it could say much. One that would spill out of the
-    GPU only when the pick would too."""
+    GPU only when the pick would too, and one that waits on a driver's model only when it does (#1476)."""
     band = [s for s in scores if s.state["available"]][:1]
     if not band:
         return []
     best = max(s.quality for s in scores if s.state["available"])
     head = band[0]
     out = [s for s in scores if s.state["available"] and s.quality < best - QUALITY_MARGIN
-           and s.tries < EXPLORE_TRIES and (s.fits is not False or head.fits is False)]
+           and s.tries < EXPLORE_TRIES and (s.fits is not False or head.fits is False)
+           and (not s.waits_on or head.waits_on)]
     return sorted(out, key=lambda s: (s.tries, -s.quality))
 
 
@@ -370,11 +372,13 @@ def fits(m: models.Model, budget: int | None) -> bool | None:
 
 
 def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = None,
-         role: str | None = None) -> list[Score]:
+         role: str | None = None, drivers: bool = True) -> list[Score]:
     """Every discovered model's case for a task of this size (in a repo of this stack), best
     first (the user's policy leaves some out: allowed). ``down`` and ``catalog``: what this pass
     has learnt of the servers (models.status), the caller's to share across calls: each model's
-    status asked its server afresh, so a wb remote box asleep cost 2.5 s a model (#705)."""
+    status asked its server afresh, so a wb remote box asleep cost 2.5 s a model (#705).
+    ``drivers``: a model that would wait on a live driver's resident one goes after those that
+    run now (`waits_on`, #1476); False for a choice that outlives the session (OpenCode's default)."""
     down = set() if down is None else down
     catalog = {} if catalog is None else catalog
     scores = [score(m, size, state=models.status(m, down, catalog), stack=stack, role=role)
@@ -387,6 +391,13 @@ def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = No
         if s.state["available"] and s.model.root not in by_root:
             by_root[s.model.root] = None if s.model.remote else models.gpu_budget(s.model.root)
         s.fits = fits(s.model, by_root[s.model.root]) if s.state["available"] else None
+        # a live local driver's resident model is a holder the lease waits on (#1317): a model
+        # that can't load beside it queued the lead's own task behind the lead's session, for
+        # up to DRIVER_HOLD on a server driver, while a smaller one would run now (#1476,
+        # 2026-11-26). Not `fits`, which choose's lines read as "fits the GPU whole"
+        if drivers and s.state["available"] and (held := models.driver_holders(s.model)) \
+                and not models.admits(s.model, held):
+            s.waits_on = tuple(sorted(h["model"] for h in held.values()))
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
     # a source whose optimize variant can run goes after it: the variant is the window measured
@@ -397,7 +408,8 @@ def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = No
                             key=lambda s: (s.model.id in stood_in, *guess(s))))
     rest = sorted((s for s in usable if s not in close), key=lambda s: -s.quality)
     blocked = [s for s in scores if not s.state["available"]]
-    return close + rest + blocked
+    ordered = close + rest
+    return [s for s in ordered if not s.waits_on] + [s for s in ordered if s.waits_on] + blocked
 
 
 def api_choice(role: str) -> str:
@@ -423,15 +435,16 @@ def api_choice(role: str) -> str:
 
 
 def choose(size: str, stack=(), task_name: str | None = None, down: set | None = None,
-           catalog: dict | None = None, role: str | None = None) -> tuple[Score | None, str]:
+           catalog: dict | None = None, role: str | None = None,
+           drivers: bool = True) -> tuple[Score | None, str]:
     """The model for a task of this size (in a repo of this stack) and one line on why. With
     ``task_name``, one task in EXPLORE_ONE_IN explores a model outside the band (unproven);
     ``down``, ``catalog``: rank's; ``role``: the task's role (wb route's), which picks the record
-    it ranks on (record_role: writing's own, else the size's). None and the refusal when no GPU
+    it ranks on (record_role: writing's own, else the size's); ``drivers``: rank's. None and the refusal when no GPU
     model can take it, which names the API choice for ``role`` (the size's name when not given)
     when a key is stored (#1024)."""
     record = record_role(role)
-    ranked = rank(size, stack, down, catalog, record)
+    ranked = rank(size, stack, down, catalog, record, drivers)
     work = record or size  # whose record the line speaks of
     if explores(task_name) and (new := unproven(ranked)):
         new[0].explored = True
@@ -448,7 +461,11 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
                           + api_choice(role or size))
         return None, "no GPU models: " + models.why_none() + api_choice(role or size)
     usable = [s for s in ranked if s.state["available"]]
-    sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
+    # the largest (smallest) of those that run now: a model that waits on a driver's is passed
+    # over unless they all wait (#1476)
+    sizes = [s.weights for s in usable if (s.fits is not False or top.fits is False)
+             and (not s.waits_on or top.waits_on)]
+    passed = sorted({d for s in usable if s.waits_on and not top.waits_on for d in s.waits_on})
     unknown = [s.model.id for s in usable if not s.weights]
     if len(usable) == 1:
         pick = f"the only model allowed {size} work"
@@ -468,6 +485,13 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
     else:
         kind = f"{work} {'/'.join(stack)}" if top.like_tries else work
         pick = f"the best record on {kind} work"
+    # after the whole chain, never inside it: its else once took the chain's last one, so every
+    # line without a driver read "the best record" and a driver's with a smaller best left pick
+    # unset (the review of #1476, 2026-11-26)
+    if passed and pick.startswith(("the largest", "the smallest", "the best record")):
+        waiting = [s.model.id for s in usable if s.waits_on]
+        pick += (f"{' and' if pick.endswith('fits the GPU') else ' that'} runs beside the driver's {', '.join(passed)} now "
+                 f"({', '.join(waiting[:3])} would wait for it)")
     if top.guessed and pick.startswith(("the largest", "the smallest")):
         pick += " (its size guessed from its name)"
     if unknown and top.weights and size in ("significant", "trivial"):

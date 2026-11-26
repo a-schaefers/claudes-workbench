@@ -7,7 +7,7 @@ It runs on its own only where the user expects a short wait and is told: at setu
 and when a Claude Code session opens (the mod), each time only when it is due (`due`: never
 measured, the GPU changed, a model came since or its window or weights changed, not one
 skipped before its retry time),
-never while a task holds the GPU; each run
+never while a task holds the GPU nor while a local OpenCode driver drives on it (#1501); each run
 takes a minute or two (the user, 2026-11-18). Anything heavier (`--bench`) waits for the user to
 ask, through Claude.
 
@@ -447,6 +447,20 @@ def apply(m: models.Model) -> str:
             "you'd rather it never runs")
 
 
+def _driver_on_gpu() -> bool:
+    """Whether a live local OpenCode driver drives a model on this machine's GPU (store.driver_models,
+    a model discover() finds there): the unasked --if-due run then waits, as for a task. Its probes
+    unload every model (free_gpu with no `of`) and reload each several times, so a driver on the
+    first session, after a pull or right after its own `wb model add` stalled for minutes, mid-turn
+    (#1501, 2026-11-26). Not driver_holders: that wants a model and a resident one, and the
+    driver's model between requests is no less the driver's. A plain wb optimize start still runs."""
+    ids = store.driver_models()
+    if not ids:
+        return False
+    found = models.discover()
+    return any((d := found.get(mid)) is not None and models.pool(d) == "gpu" for mid in ids)
+
+
 def start(bench: bool = False, if_due: bool = False) -> list[str]:
     """Detach the run (it outlives Claude's session) and say what it will take. ``if_due``: only
     when due() says why, and quietly ([]) when it isn't or the GPU is busy (the next session
@@ -456,7 +470,7 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
         return [] if if_due else [f"wb optimize is already running (pid {st['pid']}): wb optimize report"]
     ms = candidates()
     why = due(ms) if if_due else ""
-    if if_due and (not why or models.holders()):
+    if if_due and (not why or models.holders() or _driver_on_gpu()):
         return []
     if not ms:
         raise RuntimeError("no Ollama model here to measure (wb models)")

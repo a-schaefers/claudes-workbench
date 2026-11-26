@@ -39,7 +39,7 @@ import {
   localOnlyPatchRefusal, localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, wordPath, type Classify, type Coding, type Env, type Places,
 } from './gates.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv } from './wb.ts'
-import { START_INPUT, startCall } from './tools.ts'
+import { dirOfSession, sessionRoots, START_INPUT, startCall } from './tools.ts'
 import { simpleWords } from './words.ts'
 // the words the forms' answers leave, beside the refusals' (gates.ts): still exported from here
 export { NO_FORM, NOT_SENT, SEND_ASK }
@@ -116,7 +116,7 @@ export interface ConsentContext {
       Promise<{ dispose(): Promise<void>; events: { emit(name: string, data: Row): Promise<void> } }>
   }
   readonly event: { subscribe(options?: { types?: string[] }): AsyncIterable<OcEvent> }
-  readonly session: { get(input: { sessionID: string }): Promise<{ location?: { directory?: string }; subpath?: string }> }
+  readonly session: { get(input: { sessionID: string }): Promise<{ location?: { directory?: string }; subpath?: string; parentID?: string }> }
   readonly tool: {
     transform(cb: (editor: ToolEditor) => void): Promise<unknown>
     hook(name: 'execute.before', cb: (e: Before) => unknown): Promise<unknown>
@@ -153,8 +153,20 @@ export const CALLS_KEPT = 64
 export type Answer = 'yes' | 'no' | 'none'
 type Waiter = { shown: (ok: boolean) => void; answer: (a: Answer) => void; sessionID: string }
 
+// The forms waiting, one map per server process (globalThis, as chat.ts's and notices.ts's lanes):
+// OpenCode's background service sets the plugin up once per location, and the TUI's `shown` and the
+// bus's reply landed on another location's instance than the one that asked, so every form failed
+// closed with "no OpenCode window is open" (#1486, 2026-11-26). Any instance's `shown` and reply now
+// reach any instance's form: ids are unique, a reply still checks its session, resolving twice is
+// nothing, and an instance's dispose leaves the map (each ask takes out only its own form).
+const WAITING = '__workbenchConsentWaiting'
+export function waiters(): Map<string, Waiter> {
+  const g = globalThis as Record<string, unknown>
+  return (g[WAITING] ??= new Map<string, Waiter>()) as Map<string, Waiter>
+}
+
 export class Asker {
-  private waiting = new Map<string, Waiter>()
+  private waiting = waiters()
   constructor(private emit: (name: 'ask' | 'close', data: Row) => Promise<void>, private shownMs = SHOWN_MS) {}
 
   // the TUI's `shown`
@@ -287,6 +299,9 @@ export interface Deps {
   readonly asker: Pick<Asker, 'ask'>
   readonly home: () => string
   readonly dir: (session: string) => Promise<string>
+  // the session wb runs the call as, and whose approval it takes: the root (tools.ts sessionRoots,
+  // #1477); the form still shows in the session that asked
+  readonly root?: (session: string) => Promise<string>
   readonly read: (path: string) => string | undefined
   readonly now?: () => number
 }
@@ -295,14 +310,15 @@ export interface Deps {
 async function gated(d: Deps, session: string, signal: AbortSignal | undefined, dry: string[] | null,
                      real: string[], what: string, timeout = RUN_MS, input?: string): Promise<{ content: string }> {
   const cwd = await d.dir(session)
-  const q = dry && gatedChange(await d.run(dry, { session, cwd, timeout: DRY_MS }))
+  const owner = d.root ? await d.root(session) : session
+  const q = dry && gatedChange(await d.run(dry, { session: owner, cwd, timeout: DRY_MS }))
   if (q) {
     const a = await d.asker.ask(session, { title: 'Workbench', question: q.change, ...ROUTE_ASK }, signal)
     if (a === 'none') throw new Error(NO_FORM(what, `wb ${line(real)}`))
     if (a === 'no') throw new Error(NOT_CHANGED)
-    writeApproval(d.home(), 'route-ok.json', session, q.approval, d.now?.())
+    writeApproval(d.home(), 'route-ok.json', owner, q.approval, d.now?.())
   }
-  return answer(await d.run(real, { session, cwd, timeout, input }))
+  return answer(await d.run(real, { session: owner, cwd, timeout, input }))
 }
 
 const argsOf = (input: unknown): string[] => {
@@ -404,9 +420,10 @@ async function send(d: Deps, session: string, input: Row, signal?: AbortSignal):
   const a = await d.asker.ask(session, { title: 'Workbench', question, ...SEND_ASK }, signal)
   if (a === 'none') throw new Error(NO_FORM('not sent', `wb ${line(real)}`))
   if (a === 'no') throw new Error(NOT_SENT)
-  writeApproval(d.home(), 'send-ok.json', session,
+  const owner = d.root ? await d.root(session) : session
+  writeApproval(d.home(), 'send-ok.json', owner,
     { slug, title, body_file: file, body, draft, anyway }, d.now?.())
-  return answer(await d.run(real, { session, cwd, timeout: SEND_MS }))
+  return answer(await d.run(real, { session: owner, cwd, timeout: SEND_MS }))
 }
 
 // patches.json's upstream (wb patch's), else this repository's home
@@ -625,8 +642,7 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
     if (known) return known
     let got = c.location?.directory ?? process.cwd()
     try {
-      const s = await sessions.get({ sessionID })
-      if (s.location?.directory) got = s.subpath ? join(s.location.directory, s.subpath) : s.location.directory
+      got = dirOfSession(await sessions.get({ sessionID })) ?? got
     } catch { /* the plugin's location */ }
     dirs.set(sessionID, got)
     return got
@@ -652,7 +668,8 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
       (e, stdout) => done(e ? '' : String(stdout ?? '')))
     child.stdin?.end()
   })
-  const d: Deps = { run, git, asker, home: () => place().home, dir, read: readText }
+  const root = sessionRoots({ session: sessions })
+  const d: Deps = { run, git, asker, home: () => place().home, dir, root, read: readText }
   await c.tool.transform(editor => {
     editor.namespace({ name: NAMESPACE, description: NAMESPACE_DESCRIPTION })
     for (const t of tools(d)) editor.add(t)
@@ -663,10 +680,10 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
     dry: async (args, cwd, session) => {
       const argv = args[0] === '--settings' ? ['settings', 'set', ...args.slice(1), '--dry-run', '--json']
         : ['route', '--dry-run', '--json', ...args]
-      return gatedChange(await run(argv, { session, cwd: existsSync(cwd) ? cwd : undefined, timeout: DRY_MS })) !== null
+      return gatedChange(await run(argv, { session: await root(session), cwd: existsSync(cwd) ? cwd : undefined, timeout: DRY_MS })) !== null
     },
     allow: async (task, session) =>
-      (await run(['coding', 'allow', task, `--said=${CODING_SAID}`], { session, timeout: RUN_MS })).code === 0,
+      (await run(['coding', 'allow', task, `--said=${CODING_SAID}`], { session: await root(session), timeout: RUN_MS })).code === 0,
   })
   await c.permission.hook('evaluate', e => gates.evaluate(e))
   await c.tool.hook('execute.before', e => gates.before(e))

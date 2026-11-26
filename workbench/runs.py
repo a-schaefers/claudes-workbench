@@ -197,6 +197,18 @@ def is_code(stage: dict) -> bool:
     return stage.get("kind") == "code" or (bool(stage.get("card")) and _card_tools(stage) == "code")
 
 
+def settled(flow: dict) -> dict:
+    """``flow`` with each code card's stage marked `kind: code`, as run.json keeps it: is_code read
+    the card on every pass, so a card copied and edited past loading (a typo'd key, a body over
+    cards.BODY_MAX) mid-run made a code item at review read as a report, and the driver's _take
+    or wb run close discarded it, branch and all (#1470, 2026-11-26)."""
+    flow = json.loads(json.dumps(flow))
+    for s in stages(flow):
+        if s.get("card") and s.get("kind") is None and is_code(s):
+            s["kind"] = "code"
+    return flow
+
+
 def _card_tools(stage: dict) -> str | None:
     try:
         return cards.load(stage["card"]).tools
@@ -734,6 +746,7 @@ class Item:
     output: object = None
     src: str | None = None  # the key of the item it came from (the trail)
     members: list | None = None  # a batch's [(key, value)], each value carrying its key as `id`
+    reviews: dict | None = None  # a compare item's: each attempt's review, by its key (#1504)
 
 
 def member(key: str, v) -> dict:
@@ -893,6 +906,7 @@ def state(run: Run) -> dict:
         elif r.get("kind") == "escalate":  # the trigger; "escalated" is the next role's start
             escalated.add((r.get("stage"), r.get("key")))
     skipped = set(spec.get("skip") or ())
+    driven = run.status.get("phase") in OPEN  # _live's: what follows may still start
     out: dict = {}
     complete: dict = {}
     for s in stages(flow):
@@ -916,6 +930,7 @@ def state(run: Run) -> dict:
             continue
         inputs: list = []
         groups: dict = {}  # a batch's or a compare item's members, by its key
+        reviewed: dict = {}  # a compare item's attempts' reviews, by its key
         if "items" in s:
             inputs = [(str(i + 1), v, None) for i, v in enumerate(_items_of(s, run, params))]
             ready = True
@@ -929,12 +944,23 @@ def state(run: Run) -> dict:
                 continue
             code_src = is_code(stage_by(flow, src) or {})
             if s.get("compare") and code_src:  # each item's attempts whole, once all of them ended
+                # and their reviews (an earlier report stage over the same code stage) too, which
+                # its {diffs} carries: best-of paid for a review per attempt that reached neither
+                # the chooser nor Claude (#1504, 2026-11-26)
+                revs = [out.get(r["id"]) for r in stages(flow) if r["id"] in out and r.get("from") == src
+                        and not (is_code(r) or r.get("compare") or r.get("final") or r.get("claude"))]
+                of: dict = {}
+                for r in revs:
+                    for i in r or ():
+                        of.setdefault(i.src, []).append(i)
                 by_item: dict = {}
                 for it in src_items:
                     by_item.setdefault(it.key.rsplit("#a", 1)[0], []).append(it)
                 for base, its in by_item.items():
-                    if all(i.state not in ("pending", "running", "waiting") for i in its):
+                    if all(i.state not in ("pending", "running", "waiting") for i in its) and None not in revs \
+                            and all(x.state not in ("pending", "running", "waiting") for i in its for x in of.get(i.key, ())):
                         groups[base] = [(i.key, i.output) for i in its if i.state == "done"]
+                        reviewed[base] = {i.key: x.output for i in its for x in of.get(i.key, ()) if x.state == "done"}
                         inputs.append((base, [v for _, v in groups[base]], None))
                 src_items = []
             for it in src_items:
@@ -972,10 +998,15 @@ def state(run: Run) -> dict:
         esc = (s.get("escalate") or []) if is_code(s) else []
         there = set((spec.get("exists") or {}).get(sid) or ()) if s.get("unless_exists") else set()
         items = []
-        idx, passed = -1, 0  # passed: the items unless_exists skipped, which count to no cap
+        # the cap counts distinct items: a refix's reviews of one change (`1`, `1~r1`, …) are one,
+        # as an escalation's `#eN` is, and unless_exists's skips are none. Counted by index, a large
+        # fix run's refixes pushed a review already running past the cap, its result dropped (#1484,
+        # 2026-11-26)
+        idx, counted = -1, set()
         while (idx := idx + 1) < len(inputs):
             key, v, src = inputs[idx]
-            it = Item(sid, key, v, src=src, members=groups.get(key))
+            one = re.sub(r"~r\d+", "", key)
+            it = Item(sid, key, v, src=src, members=groups.get(key), reviews=reviewed.get(key))
             row = started.get((sid, key))
             if row:
                 it.n, it.task = row.get("n"), row.get("task")
@@ -986,18 +1017,19 @@ def state(run: Run) -> dict:
                     it.output = (store.read_json(run.output_file(sid, it.n), {}) or {}).get("result")
             elif hit in there:
                 it.state, it.why = "not_run", f"exists at base: {hit}"
-                passed += 1
             elif sid in skipped:
                 it.state, it.why = "not_run", "skipped (wb run amend --skip)"
             elif s.get("compare") and len(it.members or ()) < 2:
                 it.state, it.why = "not_run", (f"{len(it.members or ())} of its attempts reached review: "
                                                "nothing to compare (wb run report names the rest)")
-            elif idx - passed >= cap and "#e" not in key:
-                it.state, it.why = "not_run", f"past the stage's max_items ({cap})"
+            elif not row and "#e" not in key and one not in counted and len(counted) >= cap:
+                it.state, it.why = "not_run", f"past the stage's max_items ({cap})"  # never one started
             elif v is WAITING:
                 it.state, it.input = "waiting", None
             elif it.task:
-                it.state, it.why, it.output = _live(s, it)
+                it.state, it.why, it.output = _live(s, it, driven)
+            if "#e" not in key and hit not in there:
+                counted.add(one)
             items.append(it)
             # stuck, failed, or its review's asks left past refix's max: the next role tries it
             # from the base (#1134's study: escalating attempts across roles)
@@ -1010,13 +1042,23 @@ def state(run: Run) -> dict:
     return out
 
 
-def _live(stage: dict, it: Item) -> tuple[str, str, object]:
-    """A started item's state from its task, before the driver has taken its end."""
+TAKEN_OVER = "taken over by Claude (wb takeover): Claude's to finish, not the run's"
+
+
+def _live(stage: dict, it: Item, driven: bool = False) -> tuple[str, str, object]:
+    """A started item's state from its task, before the driver has taken its end. ``driven``:
+    the run is open, its driver starting what follows: there a code item Claude took over is no
+    longer the run's (not_run, never an escalation's null), as its review phase read as done and
+    the next stage reviewed, approved or sent a refix to the unfinished diff Claude was editing
+    (#1471, the #1373 audit, 2026-11-26). Once the run has ended (stopped, at
+    review, closed) its report keeps the item as it was."""
     task = store.Task(it.task)
     if not task.exists:
         return "pending", "", None  # its wb start not through yet, or never: the driver decides
     st = task.status
     phase = st.get("phase")
+    if is_code(stage) and driven and st.get("taken_over"):
+        return "not_run", TAKEN_OVER, None
     if is_code(stage):
         if phase in ("review", "accepted"):
             return "done", "", {"task": it.task, "round": st.get("round"), "item": it.input}
@@ -1088,6 +1130,24 @@ def stage_model(stage: dict, it: "Item | None" = None):
     return m if m is not None and m.kind == "api" else None
 
 
+def role_cant_run(role: str) -> str:
+    """wb start's own line for a role on API whose model can't be found (routes.resolve's: no
+    API model, or one the catalog doesn't list, a missing key named), or "". Read fresh, not
+    cached: stage_model's None read as the GPU, so `wb run start` said `significant (GPU) ·
+    estimate $0` for a role on a provider with no key, and every item was then refused; with no
+    hosted.json yet, a working API role read as the GPU too (#1532, 2026-11-26)."""
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        return ""  # wb start says why for each item
+    if routes.effective_via(doc, role) != "api":
+        return ""
+    if not (mid := doc["roles"][role].get("api")):
+        return routes.no_api_model(role)
+    m = models.lookup(mid)
+    return "" if m is not None and m.kind == "api" else routes.cant_run(role, mid, models.unlisted_why(mid), "", doc)
+
+
 def stage_role(stage: dict) -> str:
     role = stage.get("role")
     if not role and stage.get("card"):
@@ -1100,6 +1160,27 @@ def stage_role(stage: dict) -> str:
 
 def run_tasks(run: Run) -> list[str]:
     return [r["task"] for r in run.journal() if r.get("kind") == "item" and r.get("task")]
+
+
+def not_chosen(task: store.Task) -> bool:
+    """Whether ``task`` is an attempt of a compare item (key `<item>#a<n>`) that lost: another
+    attempt at the same item in its stage was accepted. best-of's `wb run close` wants every
+    attempt accepted or discarded, and each losing one was recorded as the model's rejected work,
+    so every run scored the role's model 1 of N and the router steered away from it (#1473, the
+    #1373 audit, 2026-11-26)."""
+    name = task.spec.get("run")
+    if not (isinstance(name, str) and RUN_RE.match(name) and Run(name).exists):
+        return False
+    rows = [r for r in Run(name).journal() if r.get("kind") == "item" and isinstance(r.get("task"), str)]
+    me = next((r for r in rows if r["task"] == task.name), None)
+    key = str((me or {}).get("key") or "")
+    if "#a" not in key:
+        return False
+    item = key.rsplit("#a", 1)[0]
+    return any(r["task"] != task.name and r.get("stage") == me.get("stage")
+               and "#a" in (k := str(r.get("key") or "")) and k.rsplit("#a", 1)[0] == item
+               and store.Task(r["task"]).exists and store.Task(r["task"]).status.get("phase") == "accepted"
+               for r in rows)
 
 
 def tasks_of(name: str) -> set[str]:
@@ -1141,6 +1222,7 @@ def _diffs_of(run: Run, stage: dict, it: Item) -> str:
     the handoff (#1134's study, SWE-agent's Chooser)."""
     rows, said = _attempts(it)
     share = CUTS["diff"] // max(1, len(rows))
+    reviews = {attempt_label(k): v for k, v in (it.reviews or {}).items()}
     parts = []
     for lab, t, ok in rows:
         try:
@@ -1149,8 +1231,20 @@ def _diffs_of(run: Run, stage: dict, it: Item) -> str:
             d = f"(no diff: {e})"
         d = d if len(d) <= share else d[:share] + f"\n[… {len(d) - share:,} characters cut]"
         state = "tests passed" if ok else "tests failed" if ok is False else "no tests"
-        parts.append(f"### {lab} (task {t.name}; {state})\n```diff\n{d or '(no changes)'}\n```")
+        parts.append(f"### {lab} (task {t.name}; {state})\n```diff\n{d or '(no changes)'}\n```"
+                     + (f"\nIts review: {_review_of(reviews[lab])}" if lab in reviews else ""))
     return said + "\n\n".join(parts)
+
+
+REVIEW_CUT = 2_000  # characters of an attempt's review a chooser's {diffs} carries
+
+
+def _review_of(v) -> str:
+    """An attempt's review as {diffs} carries it: its verdict, must_fix and summary (the review
+    schema's), else the whole result, as JSON (data), cut at REVIEW_CUT."""
+    shown = {k: v[k] for k in ("verdict", "must_fix", "summary") if k in v} if isinstance(v, dict) else {}
+    out = json.dumps(shown or v, ensure_ascii=False)
+    return out if len(out) <= REVIEW_CUT else out[:REVIEW_CUT] + f" [… {len(out) - REVIEW_CUT:,} characters cut]"
 
 
 def _attempts(it: Item) -> tuple[list, str]:
@@ -1213,6 +1307,29 @@ def _code_report(t: store.Task, n) -> str:
     return t.report(n).strip() or f"(round {n}'s report is empty)"
 
 
+def _base_of(run: Run, stage: dict, it: Item) -> str:
+    """An item's base: the run's, but for a report over one code item the reviewed round's tree
+    committed on it (gitops.review_commit), so its worktree holds the change it reads. At the
+    run's base, every review searched for the change and retyped it from the diff to run a test,
+    on the base (#1503, 2026-11-26). A compare's attempts share no tree: it stays at the base."""
+    base = run.spec["base"]
+    src = stage_by(run.flow, stage.get("from") or "") or {}
+    if is_code(stage) or stage.get("compare") or not is_code(src) or not isinstance(it.input, dict):
+        return base
+    t = store.Task(str(it.input.get("task") or ""))
+    if not it.input.get("task") or not t.exists:
+        return base
+    st = t.status
+    rnd = it.input.get("round") or st.get("round") or 1
+    tree = ((st.get("review_trees") or {}).get(str(rnd)) or {}).get("tree")
+    if not tree:
+        return base
+    try:
+        return gitops.review_commit(Path(run.spec["repo"]), t.name, rnd, tree, t.spec.get("base") or base) or base
+    except gitops.GitError:
+        return base
+
+
 def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     """Start item ``it`` as task <run>-<stage>-<n>: ("running"|"not_run"|"null"|"paused", why)."""
     spec = run.spec
@@ -1221,7 +1338,9 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     specs.mkdir(parents=True, exist_ok=True)
     path = specs / f"{stage['id']}-{n}.md"
     path.write_text(_spec_of(run, stage, it), encoding="utf-8")
-    argv = ["start", name, "--spec", str(path), "--repo", spec["repo"], "--base", spec["base"],
+    # the directory the run was started from (#1494): wb start's package walk goes up from it
+    argv = ["start", name, "--spec", str(path), "--repo", spec.get("package_dir") or spec["repo"],
+            "--base", _base_of(run, stage, it),
             "--role", item_role(stage, it), "--queue", "--group", run.name, "--run", run.name,
             "--stage", stage["id"], "--item", it.key, "--checkin", "0"]
     if stage.get("card"):
@@ -1277,6 +1396,8 @@ def _take(run: Run, stage: dict, it: Item) -> None:
     """A report item's end, once its task waits on Claude: its object kept (filtered by `keep`,
     or a refix sent), the task accepted; a failed one discarded, its result null."""
     task = store.Task(it.task)
+    if not task.spec.get("report"):  # a code task is Claude's, never discarded as a report (#1470)
+        return
     st = task.status
     phase = st.get("phase")
     from . import runner
@@ -1326,16 +1447,29 @@ def _take(run: Run, stage: dict, it: Item) -> None:
         if phase not in store.CLOSED:
             _wb(["discard", it.task, "--reason", f"run {run.name}: no valid result"], run)
         if stage.get("on_failure") == "checkpoint":
-            _checkpoint(run, f"{it.task} ({stage['id']} {it.key}) ended with no result: {why}")
+            _checkpoint(run, f"{it.task} ({stage['id']} {it.key}) ended with no result: {why}", item=True)
 
 
 def _src_items(run: Run, stage: dict) -> list:
     return state(run).get(stage.get("from")) or []
 
 
-def _checkpoint(run: Run, why: str) -> None:
-    if run.set_status_if(lambda st: st.get("phase") == "running", phase="checkpoint", why=why):
+def _going(st: dict) -> bool:
+    """Whether the run starts, and resumes, its items: running, or at a checkpoint an item's null
+    raised (`cause: item`), which holds only that item. One crashed code item stopped every other
+    from starting until wb run resume: a scheduled fix or build flow sat idle all night, and each
+    later night's fire was skipped (#1510, 2026-11-26)."""
+    return st.get("phase") == "running" or (st.get("phase") == "checkpoint" and st.get("cause") == "item")
+
+
+def _checkpoint(run: Run, why: str, item: bool = False) -> bool:
+    """The checkpoint raised and said, or False when the run wasn't there to raise it: an item's
+    (``item``) only from running, another over an item's too."""
+    if run.set_status_if(lambda st: st.get("phase") == "running" if item else _going(st), phase="checkpoint",
+                         why=why, cause="item" if item else None):
         run.notify("run_checkpoint", f"{why}. Then: wb run resume {run.name} (or wb run stop {run.name}).")
+        return True
+    return False
 
 
 def _ack_items(run: Run) -> None:
@@ -1427,7 +1561,7 @@ def _held(run: Run, it: Item) -> bool:
     st = store.Task(it.task).status
     if not _outside(st):
         return False
-    if run.status.get("phase") != "running":
+    if not _going(run.status):
         return True
     mine = [r for r in run.journal() if r.get("task") == it.task]
     why_out = cli.stopped_outside(st) or st.get("last") or "stopped"
@@ -1532,15 +1666,17 @@ def tick(run: Run) -> bool:
             if is_code(s) and it.state == "null" and s.get("on_failure", "checkpoint") == "checkpoint" \
                     and escalation(it.key) >= len(s.get("escalate") or []) \
                     and not any(r.get("kind") == "notice" and r.get("item") == it.task for r in run.journal()):
-                run.log(kind="notice", notice="run_checkpoint", item=it.task)
-                _checkpoint(run, f"{it.task} ({s['id']} {it.key}) is {store.Task(it.task).status.get('phase')}: "
-                                 f"{it.why}; Claude decides it (wb feedback, wb resume or wb discard)")
-    if run.status.get("phase") == "running":
+                # journalled only once raised: one that came at a checkpoint or a pause was marked
+                # said and never raised after the resume (#1510)
+                if _checkpoint(run, f"{it.task} ({s['id']} {it.key}) is {store.Task(it.task).status.get('phase')}: "
+                                    f"{it.why}; Claude decides it (wb feedback, wb resume or wb discard)", item=True):
+                    run.log(kind="notice", notice="run_checkpoint", item=it.task)
+    if _going(run.status):
         for s in stages(flow):
             if s.get("final") or s.get("claude"):
                 continue
             for it in st.get(s["id"]) or ():
-                if it.state != "pending" or run.status.get("phase") != "running":
+                if it.state != "pending" or not _going(run.status):
                     continue
                 m = stage_model(s, it)
                 if it.task and store.Task(it.task).exists:  # started, its runner not up yet
@@ -1578,10 +1714,13 @@ def tick(run: Run) -> bool:
     for s in stages(flow):
         if s.get("claude") and complete.get(s.get("from")) and st.get(s["id"]) is None:
             if not any(r.get("kind") == "notice" and r.get("stage") == s["id"] for r in run.journal()):
-                run.log(kind="notice", notice="run_checkpoint", stage=s["id"])
                 n = len([i for i in st.get(s["from"]) or () if i.state == "done"])
-                if run.set_status_if(lambda x: x.get("phase") in ("running", "paused"), phase="checkpoint",
-                                     why=f"stage {s['id']} is Claude's"):
+                # never over an item's checkpoint: the resume acks that notice, and this one, journalled,
+                # was never raised again, so the run sat running with nothing due (#1510, 2026-11-26).
+                # It waits for the resume instead, journalled only once raised, so raised right after.
+                if run.set_status_if(lambda x: x.get("phase") in ("running", "paused"),
+                                     phase="checkpoint", why=f"stage {s['id']} is Claude's", cause=None):
+                    run.log(kind="notice", notice="run_checkpoint", stage=s["id"])
                     run.notify("run_checkpoint", f"stage {s['id']} is yours: {n} result(s) of {s['from']} are in "
                                f"(wb run report {run.name} --stage {s['from']}). Merge them, then wb run feed "
                                f"{run.name} {s['id']} --file <list.json>")
@@ -1689,9 +1828,11 @@ def reap(run: Run, quiet: bool = False) -> bool:
 # --- the report ----------------------------------------------------------------------------------
 
 def report_of(name: str) -> dict:
-    """{final: [{key, result, trail}], filtered: [{key, why, result}], null: [{key, why}], not_run:
-    [{key, why}], code: [{key, task, phase}], spend}: what the run's items returned, every item
-    accounted for (no silent caps). Agents' strings are data."""
+    """{final: [{key, result, trail}], results: [{key, result, trail}], filtered: [{key, why,
+    result}], null: [{key, why}], not_run: [{key, why}], code: [{key, task, phase}], spend}: what
+    the run's items returned, every item accounted for (no silent caps). `results`: the done items
+    of a stage no later one reads (best-of's reviews), which no report showed though each was
+    paid for (#1504, 2026-11-26). Agents' strings are data."""
     run = Run(name)
     if not run.exists:
         raise RuntimeError(f"no run {name!r} (wb run status lists them)")
@@ -1701,6 +1842,7 @@ def report_of(name: str) -> dict:
     sts = [s for s in stages(flow)]
     last = sts[-1]
     feeds = last.get("from") or next((s["id"] for s in reversed(sts[:-1])), None)
+    read = {s.get("from") for s in sts}
 
     def trail(it):
         """What ``it`` came from, nearest first: each item up the `from` chain; a batch's
@@ -1720,7 +1862,7 @@ def report_of(name: str) -> dict:
                 out.append({"stage": cur.stage, "key": cur.key, "result": cur.output})
         return out
     rep = {"run": name, "flow": flow.get("name"), "phase": run.status.get("phase"),
-           "final": [], "filtered": [], "superseded": [], "null": [], "not_run": [], "code": [], "pending": []}
+           "final": [], "results": [], "filtered": [], "superseded": [], "null": [], "not_run": [], "code": [], "pending": []}
     for s in sts:
         items = st.get(s["id"])
         if items is None and not s.get("final"):
@@ -1728,10 +1870,15 @@ def report_of(name: str) -> dict:
             continue
         for it in items or ():
             k = f"{s['id']}:{it.key}"
-            if is_code(s) and it.task:
+            # only a task there is: _start logs the item's task before wb start runs, so a code
+            # item refused at its start (a role with no key) read "1 change(s) at review", and
+            # the report named a task that never was (#1531, 2026-11-26), as cmd_close filters
+            if is_code(s) and it.task and store.Task(it.task).exists:
                 rep["code"].append({"key": k, "task": it.task, "phase": store.Task(it.task).status.get("phase")})
             if it.state == "done" and s["id"] == feeds and not is_code(s):
                 rep["final"].append({"key": k, "result": it.output, "trail": trail(it)})
+            elif it.state == "done" and s["id"] not in read and not (is_code(s) or s.get("claude")):
+                rep["results"].append({"key": k, "result": it.output, "trail": trail(it)})
             elif it.state == "filtered":
                 rep["filtered"].append({"key": k, "why": it.why, "result": it.output})
             elif it.state == "superseded":
@@ -1758,14 +1905,14 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
            + (f" · GPU {rep['spend']['gpu_min']:g} min" if rep["spend"].get("gpu_min") else "")]
     def js(v):
         return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-    for what in ("final", "filtered", "superseded", "null", "not_run", "pending"):
+    for what in ("final", "results", "filtered", "superseded", "null", "not_run", "pending"):
         rows = [r for r in rep[what] if stage is None or str(r.get("key", "")).startswith(f"{stage}:")
                 or r.get("stage") == stage]
         if not rows:
             continue
         out.append(f"{what} ({len(rows)}):")
         for r in rows:
-            if what == "final":
+            if what in ("final", "results"):
                 out.append(f"  {r['key']}: {js(r['result'])}" + (f"  ← {js([t['result'] for t in r['trail']])}"
                                                                 if r["trail"] else ""))
             elif what in ("filtered", "superseded"):
@@ -1778,7 +1925,7 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
     if stage is not None:  # a checkpoint's look at one stage: its every done item
         st = state(Run(rep["run"]))
         for it in st.get(stage) or ():
-            if it.state == "done" and not any(r["key"] == f"{stage}:{it.key}" for r in rep["final"]):
+            if it.state == "done" and not any(r["key"] == f"{stage}:{it.key}" for r in rep["final"] + rep["results"]):
                 out.append(f"  {stage}:{it.key}: {js(it.output)}")
     if rep["code"]:
         out.append("code (Claude's to review, accept or discard): "
@@ -1956,9 +2103,15 @@ def cmd_start(a) -> None:
         flow = load_flow(a.flow, a.plan)
     except RuntimeError as e:
         _die(str(e))
-    repo = Path(a.repo or os.getcwd()).resolve()
-    if not (repo / ".git").exists():
-        _die(f"{repo} is no git repository (--repo)")
+    # a subdirectory is the repo it is in, as wb start's --repo: from repo/packages/web (a
+    # monorepo's package, or Claude's Bash cwd moved) every flow command and deepcode was refused
+    # "is no git repository" (#1494, 2026-11-26). The run reads the repo from its top (files params
+    # and base); each item starts from the directory given, so wb start finds its package there
+    start_dir = Path(a.repo or os.getcwd()).resolve()
+    try:
+        repo = gitops.toplevel(start_dir).resolve()
+    except gitops.GitError:
+        _die(f"{start_dir} is no git repository (--repo)")
     base = gitops.base_commit(repo, a.base or "HEAD")
     if not base:
         _die(f"no commit {a.base or 'HEAD'} in {repo}")
@@ -1969,11 +2122,13 @@ def cmd_start(a) -> None:
     except (RuntimeError, gitops.GitError) as e:
         _die(str(e))
     said: list[str] = []
-    for s in stages(flow):  # an API role with no cap is refused before any file is written
+    for s in stages(flow):  # an API role with no cap, or that can't run, is refused before any file is written
         if s.get("final") or s.get("claude"):
             continue
         for k in range(len(s.get("escalate") or []) + 1):  # its escalate roles' too
             probe = Item(s["id"], "1" + (f"#e{k}" if k else ""), None)
+            if why := role_cant_run(item_role(s, probe)):  # wb start's exit 3, before a driver (#1532)
+                _die(f"stage {s['id']}: {why}", 3)
             m = stage_model(s, probe)
             if m is not None and not (meter.is_plan(m) or meter.is_free(m)) and meter.cap() is None:
                 _die(f"stage {s['id']} runs on {m.id} (role {item_role(s, probe)}), and {meter.no_cap()}")
@@ -1985,6 +2140,11 @@ def cmd_start(a) -> None:
         except (OSError, UnicodeDecodeError) as e:
             _die(f"--context-file {a.context_file}: {getattr(e, 'strerror', None) or e}")
     ctx = ctx or flow.get("context") or ""
+    if len(ctx) > CUTS["context"]:
+        # run.json keeps it whole and each spec's {context} is cut there, said (runs._text): cut
+        # here first, the spec's cut note never showed and past 4,000 characters went unsaid
+        # (#1519, 2026-11-26)
+        said.append(f"context: {len(ctx):,} characters, the first {CUTS['context']:,} go in each spec's {{context}}")
     est_usd, est_min, later = estimate(flow, params, exists)
     roles = ", ".join(dict.fromkeys(f"{s['id']} {stage_role(s)}" + (" (API)" if stage_model(s) else " (GPU)")
                                     + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
@@ -2000,9 +2160,12 @@ def cmd_start(a) -> None:
     d.mkdir(parents=True)
     for sub in ("inbox", "outputs", "specs"):
         (d / sub).mkdir()
-    spec = {"name": a.name, "flow": flow, "flow_name": flow["name"], "flow_sha": flow_sha(flow),
+    sha = flow_sha(flow)
+    flow = settled(flow)
+    spec = {"name": a.name, "flow": flow, "flow_name": flow["name"], "flow_sha": sha,
             "params": params, **({"exists": exists} if exists else {}),
-            "context": ctx[:CUTS["context"]], "repo": str(repo), "base": base,
+            "context": ctx, "repo": str(repo),
+            **({"package_dir": str(start_dir)} if start_dir != repo else {}), "base": base,
             "base_ref": a.base, "cwd": os.getcwd(), "budget_usd": usd_, "budget_min": mins,
             "overnight": bool(a.overnight), "trial": bool(a.trial), "no_claude_md": bool(a.no_claude_md),
             "created": store.now(), "driver": {"python": sys.executable, "machine": store.machine()},
@@ -2268,9 +2431,11 @@ def cmd_feed(a) -> None:
 
 def cmd_close(a) -> None:
     run = need(a.name)
+    # code is any item not started as a report, from its own task (#1470): never the card as it
+    # reads now, which an edit may have made unloadable
     open_code = [n for n in run_tasks(run) if store.Task(n).exists
                  and store.Task(n).status.get("phase") not in store.CLOSED
-                 and is_code(stage_by(run.flow, store.Task(n).spec.get("stage") or "") or {})]
+                 and not store.Task(n).spec.get("report")]
     if open_code:
         _die(f"run {run.name} has code waiting on you: {', '.join(open_code)} (wb accept or wb discard each)")
     if run.status.get("phase") in OPEN:

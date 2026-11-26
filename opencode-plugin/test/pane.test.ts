@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
-import { capOf, COMMAND, diffLines, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
+import { AGENT, capOf, COMMAND, diffLines, LINK_MS, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
   WorkbenchPane, type Files, type PaneTask } from '../pane.ts'
-import { CHANGE, driverRow, footer, mine, MODELS, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target,
+import { CHANGE, driverRow, FOCUS_PROMPT, footer, Landing, LinkPoll, mine, MODELS, modelineOf, panelRows, Poll, PromptFocus, runOf, scoped, separator, sidebar, target,
   type Here } from '../pane-view.ts'
 import { ROWS } from '../../mod/hooks/apprentice.ts'
 import { kernel } from '../../mod/hooks/core.ts'
@@ -207,6 +207,67 @@ test('the tasks are read by one loop however often a press asks for a read at on
   expect(answers.length).toBe(5)
 })
 
+test('an open panel asks for the web app\'s link again each LINK_MS, so a web app started meanwhile reaches the modeline (#1518)', async () => {
+  // a panel opened while the web app was down said `web app down` until it was closed and opened
+  // again: the link was asked only as the panel drew (2026-11-26)
+  let now = NOW, shown = true
+  const pending = new Map<number, () => void>()
+  let id = 0
+  const timers = { set: (f: () => void, _ms: number) => { pending.set(++id, f); return id }, clear: (h: unknown) => { pending.delete(h as number) } }
+  const answers = [linkDown('not started'), { state: 'up' as const, url: 'http://h/' }]
+  let asked = 0
+  const drawn: string[] = []
+  const links = new LinkPoll(async () => answers[Math.min(asked++, 1)]!, l => drawn.push(l.state), () => shown, () => now, timers)
+  await links.want()
+  await links.want()                       // the splash's next layout, within the minute: no second ask
+  expect([asked, drawn, pending.size]).toEqual([1, [answers[0]!.state], 1])
+  now += LINK_MS
+  const tick = [...pending.values()][0]!
+  pending.clear()
+  tick(); await Promise.resolve(); await Promise.resolve()
+  expect([asked, drawn]).toEqual([2, [answers[0]!.state, 'up']])
+  // the panel closed: the next tick asks nothing and schedules nothing
+  expect(pending.size).toBe(1)
+  shown = false
+  now += LINK_MS
+  const last = [...pending.values()][0]!
+  pending.clear()
+  last(); await Promise.resolve()
+  expect([asked, pending.size]).toEqual([2, 0])
+  links.stop()
+})
+
+test('a session already on Workbench opens the panel as the TUI comes to it, once an arrival (#1517)', () => {
+  // `opencode -s` of a Workbench session, or a new TUI on one: OpenCode publishes no agent
+  // selection, as the agent is already Workbench, and the TUI's panel starts closed (2026-11-26)
+  const l = new Landing()
+  expect(l.see('', undefined)).toBe(false)              // home: no session
+  expect(l.see('ses_a', undefined)).toBe(false)         // its agent not known yet
+  expect(l.see('ses_a', AGENT)).toBe(true)              // known: open
+  expect(l.see('ses_a', AGENT)).toBe(false)             // once: a panel closed by hand stays closed
+  expect(l.see('ses_b', 'build')).toBe(false)           // another session, not on Workbench
+  expect(l.see('ses_b', AGENT)).toBe(false)             // its agent selected after the arrival: the selection's open, not this
+  expect(l.see('ses_a', AGENT)).toBe(true)              // back to the first: a new arrival
+  const settled = new Landing()
+  expect(settled.see('ses_c', undefined)).toBe(false)
+  settled.settle()                                     // the agent selected on screen before its info came
+  expect(settled.see('ses_c', AGENT)).toBe(false)
+})
+
+test('after the mode\'s start opens the panel, the keyboard goes back to the prompt once, through OpenCode\'s own command (#1509)', () => {
+  // OpenCode's panel host focuses a panel as it draws it, so what was typed after /workbench went
+  // nowhere until Esc (2026-11-26); a press that opens it (the palette, the footer) keeps that
+  expect(FOCUS_PROMPT).toBe('pane.focus.left')
+  const f = new PromptFocus()
+  expect(f.due(true)).toBe(false)                       // an open the user pressed for: the panel keeps it
+  f.want(true)
+  expect(f.due(false)).toBe(false)                      // drawn, not focused yet
+  expect([f.due(true), f.due(true)]).toEqual([true, false])  // focused: handed back, once
+  f.want(true)
+  f.want(false)                                        // closed before it took the keyboard
+  expect(f.due(true)).toBe(false)
+})
+
 const task = (name: string, phase: string, more: Partial<PaneTask> = {}): PaneTask => ({
   name, phase, round: 1, model: 'gpu/m', label: 'm', via: 'gpu', role: 'trivial', provider: '', tests: null,
   last: 'Writing x', createdAt: NOW - 600_000, updatedAt: NOW - 60_000, recent: [], parked: false,
@@ -232,6 +293,13 @@ test('the footer item counts the open tasks by phase, a stopped one in error, an
   const runs = footer([task('a', RUNNING), task('b', RUNNING), task('c', STUCK)], false)!
   expect(runs.map(r => r.text).join('')).toBe('⚒ wb · 2 running · 1 stuck')
   expect(runs.find(r => r.text === '1 stuck')!.fg).toBe('error')
+})
+
+test('the footer item leaves out the tasks /workbench-quit parked, as Claude Code\'s strip does (#1516)', () => {
+  const parked = (name: string) => task(name, REVIEW, { parked: true })
+  expect(footer([parked('a'), parked('b')], false)).toBe(null)
+  expect(footer([parked('a'), task('b', RUNNING)], false)!.map(r => r.text).join('')).toBe('⚒ wb · 1 running')
+  expect(footer([parked('a')], true)!.map(r => r.text)).toEqual(['⚒ wb'])  // the mode still shows its mark
 })
 
 test('the sidebar section heads its tasks with their counts and gives each line its task', () => {
@@ -292,6 +360,23 @@ test('no pane module hands OpenCode a task\'s worktree: no location, move or vcs
     expect([/\.move\(/, /\bvcs\b/, /location:\s*\{/, /worktree/].filter(re => re.test(src.replace(/^\s*\/\/.*$/gm, '')))
       .map(String)).toEqual([])
   }
+})
+
+test('no Index row of the panel reads its item once at its top, so a row redraws when its line changes (#1472)', async () => {
+  // Solid makes an Index row once per index and changes only its item: a `const r = f(l())` at
+  // the row's top kept the first text, so `d` showed the transcript under the diff's separator
+  // and a 600-line tail froze (2026-11-26). Each row's body before its JSX may read the item only
+  // through a memo.
+  let rows = 0
+  for (const f of ['pane.tsx', 'splash.tsx']) {
+    const src = (await Bun.file(new URL(`../${f}`, import.meta.url)).text()).replace(/^\s*\/\/.*$/gm, '')
+    const stale = [...src.matchAll(/<Index each=\{[^\n]*\}>\s*\{\s*(\w+)\s*=>\s*\{([\s\S]*?)\breturn\b/g)].flatMap(m => {
+      rows++
+      return m[2]!.split('\n').filter(line => line.includes(`${m[1]}()`) && !line.includes('createMemo('))
+    })
+    expect([f, stale]).toEqual([f, []])
+  }
+  expect(rows > 0).toBe(true)  // the history's row is one: the scan finds what it checks
 })
 
 test('the panel\'s driver row says the session\'s model, its side and another pin, and offers OpenCode\'s own /models', () => {

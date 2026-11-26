@@ -27,15 +27,18 @@ not on a repo's flow), `stages`. Each stage:
   answers must be one per id, a missing one named `unjudged`); `attempts` N (the same item N times).
 - `keep`: `{"path": "verdict", "in": ["confirmed"]}`: the rest are filtered, kept in the report.
 - `compare: true`: a report over a code stage with `attempts`: one item per item, once its
-  attempts ended, its prompt's `{diffs}` every attempt's change, labelled a1..aN (the green ones
-  when two or more are); the `choose` card returns `{best, ranking, why}`.
+  attempts (and an earlier stage's reviews of them) ended, its prompt's `{diffs}` every attempt's
+  change, labelled a1..aN (the green ones when two or more are), each with its review; the
+  `choose` card returns `{best, ranking, why}`. A stage no later one reads (best-of's reviews) is
+  in `wb run report` under `results`.
 - `refix`: on a report over a code stage, `{"path": "must_fix", "max": 1|2}`: a non-empty list
   goes back to the coder as `wb feedback`, then the change is reviewed again.
 - `escalate: [roles]`: on a code stage: an item stuck or failed, or with its review's asks left
   past refix's max, is tried again from the base on the next role (`<key>#e1`, …); the attempt
   before is kept. Shipped as `fix-escalate` (trivial, then significant).
-- `on_failure`: `checkpoint` stops the run for you when an item ends with no result; a code item
-  stuck or failed always does (with `escalate`, only once its last role has).
+- `on_failure`: `checkpoint` asks you when an item ends with no result; a code item stuck or
+  failed always does (with `escalate`, only once its last role has). It holds only that item:
+  the others still start and run, and the run ends after your `wb run resume`.
 - `"claude": true` with `from`: a checkpoint of yours. You merge, then `wb run feed`.
 - `max_items` (200): past it, items are `not_run`, named in the report.
 - `unless_exists`: on a stage whose `items` is a `files` param, a path template
@@ -53,7 +56,7 @@ nothing.
 your place to edit (it records the shipped one it came from); `wb run flows` and `wb card list`
 mark it `shadows shipped`, and `shipped changed since` once an update changed the shipped one:
 read the new one and merge, or `wb flow reset <name>` / `wb card reset <name>` to use it again
-(yours is kept as `.bak`).
+(yours is kept as `.bak`, `.bak.2` when that is taken: the reset line names it).
 
 ## Scheduled
 `wb schedule add <name> --flow <flow> [--param k=v] [--budget-usd N] --repo DIR --at 'Sun 02:00'`:

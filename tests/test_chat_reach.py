@@ -17,6 +17,8 @@ from workbench import chat, settings, story  # noqa: E402
 from tests.test_workbench import Base, run_wb  # noqa: E402
 
 NAME = "box.example-tail.ts.net"
+NOWHERE = "192.0.2.1"  # TEST-NET-1 (RFC 5737): on no machine's interfaces
+LISTENABLE = chat.listenable
 
 
 class Reach(Base):
@@ -25,15 +27,16 @@ class Reach(Base):
         tmp = Path(self.tmp.name)
         self.bin = tmp / "ts-bin"
         self.bin.mkdir()
-        # `tailscale status --json` up (FAKE_TS=down: stopped), `serve status --json` serving the
-        # chat's port when FAKE_TS_SERVE names it
+        # `tailscale status --json` up (FAKE_TS=down: stopped; FAKE_TS_IP: its one address),
+        # `serve status --json` serving the chat's port when FAKE_TS_SERVE names it
         (self.bin / "tailscale").write_text(textwrap.dedent(f"""\
             #!{sys.executable}
             import json, os, sys
             if sys.argv[1:] == ["status", "--json"]:
                 up = os.environ.get("FAKE_TS") != "down"
                 print(json.dumps({{"BackendState": "Running" if up else "Stopped", "Self": {{
-                    "DNSName": "{NAME}.", "HostName": "box", "TailscaleIPs": ["100.64.0.7", "fd7a::7"]}}}}))
+                    "DNSName": "{NAME}.", "HostName": "box",
+                    "TailscaleIPs": [os.environ["FAKE_TS_IP"]] if "FAKE_TS_IP" in os.environ else ["100.64.0.7", "fd7a::7"]}}}}))
             elif sys.argv[1:] == ["serve", "status", "--json"]:
                 port = os.environ.get("FAKE_TS_SERVE")
                 print(json.dumps({{"Web": {{"{NAME}:443": {{"Handlers": {{"/": {{"Proxy": f"http://127.0.0.1:{{port}}"}}}}}}}}}}
@@ -42,6 +45,10 @@ class Reach(Base):
                 sys.exit(2)
             """))
         (self.bin / "tailscale").chmod(0o755)
+        # the fake's address is on no interface here either: taken as one but in #1499's test
+        listen = mock.patch.object(chat, "listenable", lambda ip: ip != NOWHERE)
+        listen.start()
+        self.addCleanup(listen.stop)
         self.conf = chat.config_path()
         self.conf.parent.mkdir(parents=True, exist_ok=True)
 
@@ -66,7 +73,8 @@ class Reach(Base):
 
     def test_tailnet_binds_the_tailnet_too_keeps_the_users_other_keys_and_says_the_name_to_open(self):
         self.conf.write_text(json.dumps({"hosts": ["laptop"]}))
-        self.assertEqual(run_wb("chat", "reach"), "web app reach: local (this machine only)\n")
+        with self.without_tailscale():  # nor a real one's serve (#1512)
+            self.assertEqual(run_wb("chat", "reach"), "web app reach: local (this machine only)\n")
         with self.with_tailscale():
             out = run_wb("chat", "reach", "tailnet", "--port", "1400")
             self.assertEqual(json.loads(self.conf.read_text()), {"hosts": ["laptop"], "bind": ["127.0.0.1", "tailscale"]})
@@ -100,9 +108,52 @@ class Reach(Base):
         with self.assertRaises(ValueError):
             chat.set_reach("lan")  # no LAN option: a wildcard bind is the user's own edit
 
+    def test_a_tailnet_address_this_machine_cannot_bind_is_refused_and_never_takes_localhost_down_1499(self):
+        # #1499 (2026-11-26): under Tailscale's userspace networking (Docker, LXC) the tailnet
+        # address is on no interface; `reach tailnet` wrote the bind anyway, and the server's
+        # rebind to it failed, closed its localhost server too and exited, every restart the same
+        with mock.patch.object(chat, "listenable", LISTENABLE):
+            self.assertTrue(chat.listenable("127.0.0.1"))
+            self.assertFalse(chat.listenable(NOWHERE))
+            with self.with_tailscale(FAKE_TS_IP=NOWHERE):
+                said = self.refused("chat", "reach", "tailnet", "--port", "1400")
+                self.assertIn(f"tailnet address {NOWHERE} is on none of its interfaces", said)
+                self.assertIn("`tailscale serve --bg 1400`", said)              # the route that works there
+                self.assertFalse(self.conf.exists())
+                self.assertEqual(self.changes(), [])
+                self.conf.write_text(json.dumps({"bind": chat.TAILNET_BIND}))  # by hand, or before the fix
+                servers, p = chat.make_servers(0)
+                try:
+                    self.assertEqual([s.server_address[0] for s in servers], ["127.0.0.1"])  # localhost kept
+                    self.assertEqual(p["skipped"], ["tailscale (its address isn't on this machine)"])
+                    self.assertEqual(chat.plan()["binds"], p["binds"])          # replan: nothing to restart for
+                finally:
+                    for s in servers:
+                        s.server_close()
+
+    def test_local_with_tailscale_serve_still_in_front_names_the_https_and_the_command_that_stops_it_1512(self):
+        # #1512 (2026-11-26): `local` drops only the bind, and wb said "this machine only" while the
+        # `tailscale serve` it had advised still served the app to every tailnet device
+        self.conf.write_text(json.dumps({"bind": chat.TAILNET_BIND}))
+        with self.with_tailscale(FAKE_TS_SERVE="1400"):
+            out = run_wb("chat", "reach", "local", "--port", "1400")
+            now = run_wb("chat", "reach", "--port", "1400")
+        self.assertEqual(out, f"web app reach: local; the server drops the tailnet within {chat.REPLAN_EVERY} s, but "
+                              f"`tailscale serve` still serves it to your tailnet at https://{NAME}/: "
+                              "`tailscale serve --https=443 off` stops that\n")
+        self.assertEqual(now, f"web app reach: local, but tailnet https via tailscale serve (https://{NAME}/)\n")
+        self.assertEqual(json.loads(self.conf.read_text()), {})                 # the bind still dropped
+        [row] = self.changes()
+        self.assertEqual((row["from"], row["to"]), ("tailnet", "local"))
+        self.assertEqual(row["help"], settings.REACH_LOCAL_HELP.format(said=out.strip()))
+        self.assertIn("run it only on their yes", row["help"])
+        with self.with_tailscale():                                              # serve stopped: here alone
+            self.assertEqual(run_wb("chat", "reach", "--port", "1400"), "web app reach: local (this machine only)\n")
+
     def test_local_drops_the_bind_and_a_bind_of_the_users_own_reads_custom(self):
         self.conf.write_text(json.dumps({"bind": ["127.0.0.1", "tailscale"], "hosts": ["laptop"]}))
-        out = run_wb("chat", "reach", "local")
+        with self.without_tailscale():  # nor a real one's serve (#1512)
+            out = run_wb("chat", "reach", "local")
         self.assertEqual(out, f"web app reach: local (this machine only); the server drops the tailnet within "
                               f"{chat.REPLAN_EVERY} s\n")
         self.assertEqual(json.loads(self.conf.read_text()), {"hosts": ["laptop"]})
@@ -124,9 +175,36 @@ class Reach(Base):
 
     def test_chat_on_and_doctor_point_at_the_phones_way_in_only_while_it_opens_here_alone(self):
         from workbench import cli
-        self.assertEqual(cli.reach_hint(), story.text("link.reach"))
+        with self.with_tailscale():
+            self.assertEqual(cli.reach_hint(), story.text("link.reach"))
+        with self.without_tailscale():                       # nothing here to reach the tailnet with (#1524)
+            self.assertEqual(cli.reach_hint(), "")
         self.conf.write_text(json.dumps({"bind": ["127.0.0.1", "tailscale"]}))
-        self.assertEqual(cli.reach_hint(), "")
+        with self.with_tailscale():
+            self.assertEqual(cli.reach_hint(), "")
+
+    def test_on_wsl2_with_tailscale_on_windows_tailnet_names_windows_serve_and_never_says_install_1524(self):
+        # #1524 (2026-11-26): with Tailscale for Windows and none in the distro (#920's setup),
+        # `reach tailnet` said "install Tailscale", Windows' serve went unseen, and `wb chat on`
+        # advised the refused command
+        from workbench import cli, hardware
+        win = Path(self.tmp.name) / "win-bin"
+        win.mkdir()
+        (win / "tailscale.exe").write_text((self.bin / "tailscale").read_text())
+        (win / "tailscale.exe").chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": str(win), "FAKE_TS_SERVE": "1400"}), \
+                mock.patch.object(hardware, "system", return_value="wsl"):
+            said = self.refused("chat", "reach", "tailnet", "--port", "1400")
+            self.assertNotIn("install Tailscale", said)
+            self.assertIn("Tailscale runs on Windows here", said)
+            self.assertIn("`tailscale.exe serve --bg 1400`", said)                # the route that works there
+            self.assertFalse(self.conf.exists())
+            self.assertEqual(self.changes(), [])
+            self.assertIs(chat.https_served(1400), True)                           # Windows' serve, seen
+            self.assertEqual(run_wb("chat", "reach", "--port", "1400"),
+                             f"web app reach: local, but tailnet https via tailscale serve (https://{NAME}/)\n")
+            self.assertEqual(cli.still_served(1400)[1], "tailscale.exe serve --https=443 off")
+            self.assertEqual(cli.reach_hint(), "")                                 # never advised where refused
 
 
 if __name__ == "__main__":

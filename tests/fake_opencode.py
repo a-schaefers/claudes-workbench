@@ -93,7 +93,8 @@
          message says only that it was sent;
          FAKE_SUBMIT_LOG gets the server's reply text. FAKE_REPORT_WRITE: it writes
          notes.txt in the worktree first (what the lane refuses a report task). FAKE_REPORT_PAD:
-         that many characters of prose before the object (past the report's cut, #1186)
+         that many characters of prose before the object (past the report's cut, #1186).
+         FAKE_REPORT_READS: that many more reads, each of another file, first (#1489)
 A `run` message must follow `--` when it starts with '-', or the fake prints its usage and exits
 1, as OpenCode does. FAKE_LATE: seconds before the first event (a model reading its prompt).
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
@@ -157,7 +158,8 @@ its own state before its provider's, and a `nokey` provider
 drops out of `api model.list`, `models` and `auth list`, as one OpenCode can't authenticate does.
 An `env` provider (#1189) has its key only in `<PROVIDER>_API_KEY` (env_var): `auth list` gives it
 one connection, `{type: "env", name}`, while that variable is set (and drops it otherwise), as
-2.3.2 does, and `auth export` prints no row of it; its runs play `ok`.
+2.3.2 does, `api model.list` and `models` list its models only while it is set, as 2.4.1 does
+(#1496), and `auth export` prints no row of it; its runs play `ok`.
 `api model.list` prints `{location, data}`; `serve --stdio` (how wb reads the catalog: models.model_list)
 prints `{"url": ...}`, a server on 127.0.0.1 asking Basic `opencode:<OPENCODE_PASSWORD>` (401
 otherwise), until its stdin closes: GET /api/plugin `{location, data: [plugins]}`, GET /api/model
@@ -238,9 +240,11 @@ def env_var(provider: str) -> str:
 
 
 def reachable() -> list:
-    """The catalog as OpenCode lists it: only providers it can authenticate."""
+    """The catalog as OpenCode lists it: only providers it can authenticate, an `env` one's
+    models only while its variable is set, as 2.4.1 lists them (#1496, 2026-11-26)."""
     return [e for e in catalog_file()["data"]
-            if api_state(e["providerID"], e["id"]) != "nokey"]
+            if api_state(e["providerID"], e["id"]) != "nokey"
+            and (api_state(e["providerID"]) != "env" or os.environ.get(env_var(e["providerID"])))]
 
 
 if os.environ.get("FAKE_CALLS") and args[:1] in (["api"], ["models"], ["auth"], ["serve"]):
@@ -871,6 +875,8 @@ if scenario == "report":  # #1278: a read, then prose and one object
 
     prompt = args[-1] if args else ""
     tool("read", {"filePath": os.path.abspath("README.md")})
+    for i in range(int(os.environ.get("FAKE_REPORT_READS") or 0)):  # #1489: a long read-only sweep
+        tool("read", {"filePath": os.path.abspath(f"src/part{i}.py")})
     if os.environ.get("FAKE_REPORT_WRITE"):
         with open("notes.txt", "w") as fh:
             fh.write("a report task writing its worktree\n")

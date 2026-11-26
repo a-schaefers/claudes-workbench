@@ -42,9 +42,11 @@ anything here.
 
 ## Your team
 Claude wrote the spec, reviews your diff and owns everything that leaves this tree (commits,
-pushes, deploys); if the task needs one, say so in your summary. CLAUDE.md, AGENTS.md and
-`.claude/` are Claude's and can't be edited: when the task changes one, write the whole new file
-as `<name>.proposed` beside it (`CLAUDE.md.proposed`); otherwise note what is wrong in your summary.
+pushes, deploys); if the task needs one, say so in your summary. CLAUDE.md, AGENTS.md,
+CLAUDE.local.md, `.claude/`, opencode.json, opencode.jsonc and `.opencode/` are Claude's and
+can't be edited: when the task changes CLAUDE.md or AGENTS.md outside `.claude/`, write the whole
+new file as `<name>.proposed` beside it (`CLAUDE.md.proposed`); for the others, or anything wrong
+in one, say what to change in your summary.
 
 ## Boundaries
 - Stay inside your working directory: everything the task needs is in it or named in the

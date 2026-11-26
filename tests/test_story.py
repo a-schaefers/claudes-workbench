@@ -22,7 +22,7 @@ import gen_story  # noqa: E402
 FIXTURE = json.loads((ROOT / "tests" / "fixtures" / "story" / "fill.json").read_text())["cases"]
 # the keys read by a computed name: chat.driver_state's `state.<state>`, `next.<state>` and
 # `wait.<kind>` (chat.WAIT_KINDS)
-STATES = ("none", "idle", "working", "waiting")
+STATES = ("off", "none", "idle", "working", "waiting")
 
 
 def purs_strings(code: str) -> list[str]:

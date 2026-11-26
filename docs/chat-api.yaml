@@ -1093,7 +1093,7 @@ components:
         driver:
           type: object
           description: >-
-            the driver's state (none, idle, working, waiting), in the story's words: {state, driver,
+            the driver's state (off, none, idle, working, waiting), in the story's words: {state, driver,
             who, where?, waiting?, line, next, grant?}
         settings:
           type: [object, "null"]

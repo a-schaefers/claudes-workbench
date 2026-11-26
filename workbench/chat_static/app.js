@@ -908,12 +908,13 @@
     // The state line (#1355): the driver's state at the top of the chat, the server's (chat.driver_state,
     // in the story's words), while it asks something of the user: waiting on a prompt in the
     // terminal (what it is, what to do, and for a permission the way to run with permissions granted,
-    // which Copy copies), or no session listening (how to start one). Only the terminal answers a
+    // which Copy copies), no session listening (how to start one), or the chat switched off (how
+    // to turn it on: starting a driver can't make it listen then, #1526). Only the terminal answers a
     // prompt (#1350): Copy is its one button. It took the waiting line's place in the thread.
     const stateLine = $('driver-state');
     function drawState() {
         const d = state.driver;
-        const show = !!token && live && reachable && !!d && (d.state === 'waiting' || d.state === 'none');
+        const show = !!token && live && reachable && !!d && (d.state === 'waiting' || d.state === 'none' || d.state === 'off');
         stateLine.hidden = !show;
         if (!show || !d) {
             stateLine.dataset.key = '';
@@ -925,7 +926,7 @@
         stateLine.dataset.key = key;
         stateLine.className = 'dstate ' + d.state;
         const parts = [];
-        if (d.state === 'waiting')
+        if (d.state === 'waiting' || d.state === 'off')
             parts.push(span('dstate-line', d.line));
         if (d.waiting && d.waiting.what) {
             const c = document.createElement('code');
@@ -933,7 +934,9 @@
             c.textContent = d.waiting.what;
             parts.push(c);
         }
-        parts.push(span('dstate-next', d.next));
+        const next = span('dstate-next', '');
+        storyInto(next, d.next);
+        parts.push(next); // off's names `wb chat on`
         if (d.grant) {
             const g = document.createElement('span');
             g.className = 'dstate-grant';

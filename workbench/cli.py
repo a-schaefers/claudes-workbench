@@ -922,15 +922,22 @@ def _driver_way_out(held: dict) -> str:
     """What a wait on a live driver's model needs said (#1317, the review of 2026-11-25): it ends
     only when Ollama lets the model go (its keep-alive) or the session has been idle
     store.DRIVER_HOLD, and the driver's own session, polling its task, keeps both fresh. ""
-    when no driver holds the GPU."""
+    when no driver holds the GPU. A server engine's model never unloads and shares the GPU with
+    nothing, so there no smaller model helps: only the driver's own one (#1476, 2026-11-26)."""
     drv = sorted(h["model"] for h in held.values() if h.get("driver"))
     if not drv:
         return ""
     sid = store.opencode_session()
     own = sorted(set(drv) & store.driver_models(sid)) if sid else []
     who = f"this session's own {', '.join(own)}" if own else "the driver's model"
-    return (f"; {who} leaves only once Ollama unloads it or its session is idle "
-            f"{store.DRIVER_HOLD // 60} min{', so it waits on this session' if own else ''}: "
+    found = models.discover()
+    server = [d for d in drv if (m := found.get(d)) and m.engine != "ollama"]
+    waits = f"{store.DRIVER_HOLD // 60} min{', so it waits on this session' if own else ''}"
+    if server:
+        return (f"; {who} stays loaded on its server (it never unloads) until its session is idle "
+                f"{waits}: the driver's own model ({', '.join(server)}), an API role or an API driver "
+                "runs it sooner")
+    return (f"; {who} leaves only once Ollama unloads it or its session is idle {waits}: "
             "a smaller model for either side, an API role or an API driver runs it sooner")
 
 
@@ -1901,7 +1908,9 @@ def cmd_start(a):
     # `test` runs before the task's own --test, in the agent's lane, as one acceptance command
     # (granted, base-checked, sent back to auto-fix as --test is); a report task runs none
     standing = context.repo_conf(repo, sub)
-    if not report and (test := context.with_repo_test(standing.get("test"), a.test)) != a.test:
+    # from its key's directory, as a standing setup (#1490)
+    if not report and (test := context.with_repo_test(standing.get("test"), a.test,
+                                                      context.repo_test_at(repo, sub))) != a.test:
         a.test = test
         _lane_fits(repo, a.test, off="*" in (a.allow_path or []))  # a snap there too (#1271)
     if listed := standing.get("skills"):
@@ -2174,7 +2183,10 @@ def cmd_start(a):
         print(f"note: held until {runner.clock(at)} (--after): queued until then, checkout and all; "
               "the machine is kept awake meanwhile where wb can, and a reboot before then fails it "
               f"as interrupted (wb resume {a.name} holds it again)")
-    if not os.environ.get("CLAUDECODE"):  # under Claude Code the mod wakes Claude (#1322)
+    # Only a terminal caller is told to wait: under Claude Code the mod wakes Claude (#1322), and an
+    # OpenCode driver's procedure is to end its turn for the plugin's wake, or with wakes off to wait
+    # only on the user's ask; the line held a driver's turn in a wait (#1514, 2026-11-26).
+    if store.caller_kind() == "terminal":
         print(f"next: wb wait {a.name}")
 
 
@@ -2549,7 +2561,7 @@ def cmd_next(a):
     dropped = _stale_notes(task)
     if a.test is not None and not spec.get("report"):  # the repo's standing one first (#1295 P2)
         a.test = context.with_repo_test(context.repo_conf(spec["repo"], spec.get("subdir")).get("test"),
-                                        a.test)
+                                        a.test, context.repo_test_at(spec["repo"], spec.get("subdir")))
     if a.allow or a.test:
         exact, tools = context.test_allowances(a.test)
         context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
@@ -3061,7 +3073,8 @@ def _caller(a) -> tuple:
     which the skill and the compaction note send Claude to, listed every session's open tasks
     as one, so one session could review, accept or discard another's (#693). From an OpenCode
     driver's tool or shell (store.opencode_session), that session's: its one id (an OpenCode
-    session keeps it) and the directory (#1309). The third value is the driver (_scope's `kind`):
+    session keeps it) and the directory (#1309), with every subagent session under it
+    (store.opencode_family, #1477). The third value is the driver (_scope's `kind`):
     `--session` given under an OpenCode driver is OpenCode's, else Claude Code's, as the mod's."""
     repo, sessions = getattr(a, "repo", None), getattr(a, "session", None)
     kind = "opencode" if store.caller_kind() == "opencode" else "claude"
@@ -3070,7 +3083,7 @@ def _caller(a) -> tuple:
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not sid:
         oc = store.opencode_session()
-        return (os.getcwd(), [oc], "opencode") if oc else (None, None, None)
+        return (os.getcwd(), store.opencode_family(oc), "opencode") if oc else (None, None, None)
     pid = os.environ.get("CLAUDE_PID", "")
     # this process's ids only: a dead one's under the same pid were taken for its own (#787)
     ids = list(dict.fromkeys([*(store.claude_sessions(pid, start=models._started(int(pid)))
@@ -3078,12 +3091,53 @@ def _caller(a) -> tuple:
     return os.getcwd(), ids, "claude"
 
 
+def _adopt_hint(name: str) -> str:
+    """The `wb adopt` that takes a gone owner's task into the caller's session: under Claude Code
+    it needs the session's id (cmd_adopt's --session), under OpenCode none (_adopt_opencode)."""
+    if store.caller_kind() == "opencode":
+        return f"wb adopt {name}"
+    return f"wb adopt {name} --session {os.environ.get('CLAUDE_CODE_SESSION_ID') or '<id>'}"
+
+
 def _others_line(others, what):
-    if others:  # by name: all_tasks' order follows the file system's (flaky in CI on 0.90's merge)
-        return (f"{what} (other sessions'): "
-                + ", ".join(f"{t.name} ({t.spec.get('repo')})"
-                            for t in sorted(others, key=lambda t: t.name)))
-    return ""
+    """The tasks another session owns, by name (all_tasks' order follows the file system's: flaky
+    in CI on 0.90's merge); those whose session `_owner_gone` says is gone apart, each with the
+    `wb adopt` that takes it here. In one list with the live ones, a Claude Code session's tasks
+    read as another live session's from OpenCode (the directory rule never crosses drivers, #1309),
+    and the driver left them alone, their reviews unwoken (#1482, 2026-11-26)."""
+    if not others:
+        return ""
+    others = sorted(others, key=lambda t: t.name)
+    gone = [t for t in others if t.spec.get("session") and _owner_gone(t.spec)]
+    live = [t for t in others if t not in gone]
+    lines = [f"{what} (other sessions'): " + ", ".join(f"{t.name} ({t.spec.get('repo')})" for t in live)
+             ] if live else []
+    for tool in ("claude", "opencode"):
+        if mine := [t for t in gone if store.driver_of(t.spec) == tool]:
+            lines.append(f"{what} (a gone {'OpenCode' if tool == 'opencode' else 'Claude Code'} "
+                         "session's): " + ", ".join(f"{t.name} ({t.spec.get('repo')}; "
+                                                    f"{_adopt_hint(t.name)} takes it here)" for t in mine))
+    return "\n".join(lines)
+
+
+# An OpenCode session keeps its tasks when the user runs /clear or /new, which start a new session
+# with a new id (Claude Code's mod keeps every id of the process, register.tsx; OpenCode has no
+# such thing): the new one lists them as open elsewhere and can't adopt them while the old one
+# lives, so the line names the way back, OpenCode's /sessions (#1498, 2026-11-26)
+OPENCODE_WAY_BACK = "; /sessions goes back to the OpenCode session one is open in (/clear and /new start a new one)"
+
+
+def _elsewhere_line(others, kind) -> str:
+    """wb status's `open elsewhere` lines; from an OpenCode driver, the live sessions' line ends with
+    OPENCODE_WAY_BACK when a live OpenCode session holds one of them. A gone session's task has its
+    own line and `wb adopt` instead, so the way back never follows that line (both on one merge,
+    2026-11-26: #1482's gone lines, #1498's way back)."""
+    line = _others_line(others, "open elsewhere")
+    live = [t for t in others if not (t.spec.get("session") and _owner_gone(t.spec))]
+    if line and kind == "opencode" and any(store.driver_of(t.spec) == "opencode" for t in live):
+        first, nl, rest = line.partition("\n")              # the live line comes first
+        line = first + OPENCODE_WAY_BACK + nl + rest
+    return line
 
 
 STATUS_MODEL = 24  # wb status's model column
@@ -3114,7 +3168,8 @@ def cmd_status(a):
     tasks = [need(a.name)] if a.name else [t for t in store.all_tasks()  # replays: wb bench report
                                            if a.all or (t.status.get("phase") not in store.CLOSED
                                                         and not t.spec.get("bench"))]
-    tasks, others = (tasks, []) if a.name else _scope(tasks, *_caller(a))
+    caller = (None, None, None) if a.name else _caller(a)
+    tasks, others = (tasks, []) if a.name else _scope(tasks, *caller)
     parked = [] if a.name or a.all else [t for t in tasks if store.parked(t.status)]
     tasks = [t for t in tasks if t not in parked]
     others = [t for t in others if a.all or not store.parked(t.status)]
@@ -3123,7 +3178,7 @@ def cmd_status(a):
     if not tasks:
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
         _say(parked_line)
-        _say(_others_line(others, "open elsewhere"))
+        _say(_elsewhere_line(others, caller[2]))
         if not a.name:
             _run_lines(a)
         return
@@ -3147,7 +3202,7 @@ def cmd_status(a):
     if a.name and (line := use_line(tasks[0])):
         print(line)
     _say(parked_line)
-    _say(_others_line(others, "open elsewhere"))
+    _say(_elsewhere_line(others, caller[2]))
 
 
 def _run_lines(a) -> None:
@@ -3302,9 +3357,13 @@ def _park_waiting(a) -> str:
 @one_at_a_time
 def cmd_stop(a):
     if a.all:
-        # everything, without --repo/--session: the bench's driver too, first, so it starts nothing
+        # everything, unscoped: the bench's driver too, first, so it starts nothing. Unscoped is
+        # _caller's scope, not the flags: an OpenCode driver's bare `wb stop --all` (its quit) is
+        # that session's, and killed a bench run another session or a terminal started (#1500,
+        # 2026-11-26); a terminal, or --all-sessions, still stops it
         driver, far = None, ""
-        if not (a.repo or a.session):
+        scope = _caller(a)
+        if not (scope[0] or scope[1]):
             try:
                 driver = bench.stop_driver()
             except RuntimeError as e:  # another machine's run: that one's to stop there, and the
@@ -3312,7 +3371,7 @@ def cmd_stop(a):
         # each run's driver next (#1278), so it starts no item; its items stop with the rest
         drivers = [f"wb run {r.name}" for r in runs._runs_in_scope(a)
                    if r.open() and runs.stop(r, "stopped with every agent (wb stop --all)", items=False) is not None]
-        mine, others = _scope(_open_tasks(), *_caller(a))
+        mine, others = _scope(_open_tasks(), *scope)
         stopped = ([f"wb bench (pid {driver})"] if driver else []) + drivers + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
@@ -4008,13 +4067,22 @@ def _runs_held(m: models.Model, seen: dict | None = None) -> bool:
     return seen[m.provider, m.key]
 
 
+def _catalog_miss(mid: str) -> str:
+    """wb route's refusal of an id the catalog doesn't list: for a provider OpenCode holds no key
+    for, its fix too (models.no_key_note): ROUTE_CATALOG alone led to another provider's model
+    (#1529, 2026-11-26)."""
+    if pid := models.keyless_provider(mid):
+        return f"{ROUTE_CATALOG}; {models.no_key_note(pid)}"
+    failed = models.hosted_error()
+    return ROUTE_CATALOG + (f" (its read failed: {failed})" if failed else "")
+
+
 def _route_api(mid: str, role: str) -> models.Model:
     """The API model a role may name: OpenCode's exact id (fragments never match an API id), of
     kind api, with a key a task runs with (_runs_held); else exit 3 with discovery's why."""
     m = models.lookup(mid)
     if m is None:
-        why = models.hosted_error()
-        die(ROUTE_CATALOG + (f" (its read failed: {why})" if why else ""), 3)
+        die(_catalog_miss(mid), 3)
     if m.kind != "api":
         die(f"{mid} is a GPU model: wb route {role} --gpu {mid} pins it", 3)
     st = models.status(m)
@@ -4183,7 +4251,7 @@ def _route_show(as_json: bool) -> None:
             # the cached catalog: the pane draws from this, and never waits on OpenCode (#1023)
             m = models.lookup(row["api"], cached=True) if row.get("api") else None
             api = None if not row.get("api") else \
-                {"available": False, "resident": False, "why": "not in OpenCode's catalog now"} \
+                {"available": False, "resident": False, "why": models.unlisted_why(row["api"])} \
                 if m is None else models.status(m)
             out["roles"][r] = {**row, "label": routes.LABELS[r], "api_status": api,
                                "gpu_found": None if row["gpu"] == routes.AUTO else row["gpu"] in models.discover()}
@@ -4197,13 +4265,14 @@ def _route_show(as_json: bool) -> None:
     for r in routes.ROLES:
         row = doc["roles"][r]
         gone = row.get("api") and models.lookup(row["api"]) is None
+        gone = gone and f" ({models.unlisted_why(row['api'])})"  # a missing key says so (#1529)
         if row["via"] == "api":
-            bits = [f"API {row['api']} ({_who(row['api'])})" + (" (not in OpenCode's catalog now)" if gone else ""),
+            bits = [f"API {row['api']} ({_who(row['api'])})" + (gone or ""),
                     routes.thinking_said(row), *([f"backends {', '.join(row['order'])}"] if row.get("order") else [])]
         else:
             bits = ["GPU (the router picks)" if row["gpu"] == routes.AUTO else f"GPU {row['gpu']} (pinned)"]
             if row.get("api"):
-                bits.append(f"API kept: {row['api']}" + (" (not in OpenCode's catalog now)" if gone else ""))
+                bits.append(f"API kept: {row['api']}" + (gone or ""))
             if row["thinking"] == "on":
                 bits.append("thinking on")
             elif row.get("thinking_review") == "on":  # kept for API, as routes.summary says it (#1059)
@@ -4476,14 +4545,21 @@ def _route_driver(a) -> None:
             pin = routes.read().get("driver")
         except routes.RoutesError as e:
             die(routes.unreadable(e), 3)
-        print(json.dumps({"driver": pin or routes.DRIVER_SESSION}) if a.json else
-              f"driver: {pin} ({routes.DRIVER_APPLIED})" if pin else
+        # whether it runs, which the plugin's /workbench reads before it switches (#1530)
+        why = driver.pin_why(pin) if pin else ""
+        print(json.dumps({"driver": pin or routes.DRIVER_SESSION,
+                          **({"runs": not why, "why": why} if pin else {})}) if a.json else
+              f"driver: {pin} ({routes.DRIVER_APPLIED})" + (f"; can't run now: {why}" if why else "") if pin else
               "driver: each OpenCode session's own (/models), no pin")
         return
     pin = a.target
     if pin != routes.DRIVER_SESSION and routes.driver_ref(pin) is None:
         die(f"{pin!r} isn't an OpenCode model id: provider/model, #variant allowed (opencode models "
             f"lists them), or {routes.DRIVER_SESSION}", 3)
+    # a pin OpenCode can't route, refused before the dialog asks: switchModel takes any id, and
+    # every turn of the session failed (#1530, 2026-11-26)
+    if why := driver.pin_why(pin):
+        die(f"{pin} can't be the driver: {why}", 3)
     argv = ["route", "driver", pin]
 
     def changed(doc) -> routes.Change:
@@ -4518,8 +4594,7 @@ def _route_pairs(a) -> None:
             pairs.append((role, target, None))
             continue
         if models.lookup(target) is None:
-            why = models.hosted_error()
-            die(f"{role} {target}: {ROUTE_CATALOG}" + (f" (its read failed: {why})" if why else ""), 3)
+            die(f"{role} {target}: {_catalog_miss(target)}", 3)
         m = _route_api(target, role)
         if m.provider == routes.OPENROUTER:  # its backends (--order) are chosen in a wb route of their own
             die(f"{role} {m.id}: an OpenRouter role is set in a wb route of its own", 3)
@@ -4656,8 +4731,9 @@ def cmd_driver(a):
     if not found:
         print(f"no OpenCode session has driven here in the last {store.DRIVER_HOLD // 60} min "
               "(the plugin's heartbeat lists none)")
-    print(f"pin: {pin} ({routes.DRIVER_APPLIED})" if pin != routes.DRIVER_SESSION else
-          "pin: none (each session's own /models; wb route driver <id> sets one)")
+    why = driver.pin_why(pin)  # #1530
+    print(f"pin: {pin} ({routes.DRIVER_APPLIED})" + (f"; can't run now: {why}" if why else "")
+          if pin != routes.DRIVER_SESSION else "pin: none (each session's own /models; wb route driver <id> sets one)")
 
 
 def cmd_coding(a):
@@ -4714,12 +4790,31 @@ WORKFLOWS = {"off": ("Off", "Claude runs one task at a time; deepcode asks for a
              "on": ("On", "substantive requests run as deep workflows (wb run) on the user's agents, each "
                           "item on its role's model; the GPUs, the provider slots and the day cap decide.")}
 WORKFLOWS_LABEL = "Dynamic workflows (deepmode)"
+# #1507 (2026-11-26): the choice is kept under `deepmode`, not 2.1's `mode`. 2.1's on meant Claude
+# may start several tasks at once for a request; 2.2's runs every substantive request as a deep
+# workflow, budgeted at what is left of the day cap, so a 2.1 on read as 2.2's changed what every
+# request did without the user asked. A 2.1 on starts 2.2 off, and `wb deepmode --moved` (each
+# host, once a load) says so once, the story's `moved.deepmode`.
+DEEPMODE_KEY = "deepmode"
 
 
 def workflows_mode() -> str:
     doc = store.read_json(store.home() / "workflows.json", {})
-    mode = doc.get("mode") if isinstance(doc, dict) else None
+    mode = doc.get(DEEPMODE_KEY) if isinstance(doc, dict) else None
     return mode if mode in WORKFLOWS else "off"
+
+
+def deepmode_moved() -> str:
+    """The one line a 2.1 Dynamic workflows on gets (#1507), once: workflows.json holding 2.1's
+    `mode: on` and no `deepmode` is written as deepmode off, the choice 2.2 reads it as, under a
+    lock so two hosts loading at once say it once; "" for any other file."""
+    path = store.home() / "workflows.json"
+    with store.locked(store.home() / "locks" / "workflows.lock"):
+        doc = store.read_json(path, {})
+        if not isinstance(doc, dict) or DEEPMODE_KEY in doc or doc.get("mode") != "on":
+            return ""
+        store.write_json(path, {DEEPMODE_KEY: "off", "ts": store.now()})
+    return story.text("moved.deepmode")
 
 
 def cmd_workflows(a):
@@ -4729,8 +4824,14 @@ def cmd_workflows(a):
             die("--rule prints the deepcode rule; set deepmode without it")
         print(runs.DEEPCODE_RULE)
         return
+    if getattr(a, "moved", False):
+        if a.state:
+            die("--moved says once that 2.1's Dynamic workflows didn't carry over; set deepmode without it")
+        if line := deepmode_moved():
+            print(line)
+        return
     if a.state:
-        store.write_json(store.home() / "workflows.json", {"mode": a.state, "ts": store.now()})
+        store.write_json(store.home() / "workflows.json", {DEEPMODE_KEY: a.state, "ts": store.now()})
     label, why = WORKFLOWS[workflows_mode()]
     print(f"{WORKFLOWS_LABEL}: {label}{' (default)' if label == 'Off' else ''}. {why}")
 
@@ -4744,6 +4845,14 @@ def cmd_run(a):
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
+        # each open run's driver in the scope first, as wb stop --all's (#1278): left going, it
+        # read the taken-over item as done, started the next stage's agents after the user's stop,
+        # could send the item back to an agent (a refix) and reported the half-done code approved
+        # (#1471, the #1373 audit, 2026-11-26)
+        drivers = [f"wb run {r.name}" for r in runs._runs_in_scope(a)
+                   if r.open() and runs.stop(r, "handed back to Claude (wb takeover --all)", items=False) is not None]
+        if drivers:
+            print("stopped: " + "; ".join(drivers))
         tasks, others = _scope([t for t in store.all_tasks()
                                 if t.status.get("phase") not in store.CLOSED], *_caller(a))
         if not tasks:
@@ -5029,8 +5138,12 @@ def cmd_accept(a):
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
         # the task's own commit counts: by its recorded object, as --merge deleted the branch,
         # and every merged accept then said the repo had no CLAUDE.md (#269, the audit of 1.2)
-        note = claude_md_status(repo, gitops.git(repo, "rev-parse", "--short", tip).strip(),
-                                spec.get("subdir") or "")  # the package's own (#783)
+        rev, sub = gitops.git(repo, "rev-parse", "--short", tip).strip(), spec.get("subdir") or ""
+        note = claude_md_status(repo, rev, sub)  # the package's own (#783)
+        # a committed AGENTS.md is the agent's instructions, as wb start just said: told to
+        # write a CLAUDE.md at every accept, it contradicted start (#1513, 2026-11-26)
+        if note == "no CLAUDE.md" and (_agents_md_at(repo, rev, sub) or _agents_md_at(repo, rev)):
+            note = None
     except (gitops.GitError, OSError, ValueError):
         note = None
     if note == "no CLAUDE.md":  # how current it is, and "keep it current", went (#1322)
@@ -5644,6 +5757,8 @@ def cmd_discard(a):
     # --drop-steps deleted the approved steps with the branch: no longer kept work (#722)
     extra = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
     extra |= {"infra": outside} if outside else {}
+    # a best-of attempt another one beat: not the model's rejected work (#1473, 2026-11-26)
+    extra |= {"not_chosen": True} if runs.not_chosen(task) else {}
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
                     unrecorded={"outcome": "discarded", "step": measured,
                                 "extra": {"reason": a.reason, **extra}})
@@ -5694,13 +5809,15 @@ def cmd_models(a):
             mark = "→" if i == 0 and sc.state["available"] else " "
             print(f" {mark} {sc.model.id:34} {sc.line()}" + (
                 f" · out of the band on {sc.tries} task(s): one task in {router.EXPLORE_ONE_IN} "
-                "explores it" if sc.model.id in few else ""))
+                "explores it" if sc.model.id in few else "")
+                + (f" · waits on the driver's {', '.join(sc.waits_on)}" if sc.waits_on else ""))
         for m in found.values():
             if not router.allowed(m, size):
                 print(f"   {m.id:34} not for {size} tasks (wb model sizes)")
     print("\n" + "\n".join(_api_section(True)[0]))
     if a.set_default:
-        top, why = router.choose("significant", down=down, catalog=catalog)
+        # OpenCode's default outlives the driver's session: never moved off by it (#1476)
+        top, why = router.choose("significant", down=down, catalog=catalog, drivers=False)
         if top is None:
             die(why)
         try:
@@ -5823,7 +5940,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
                 mid = str(r.get("api") or "")
                 m = cat.get(mid)
                 st = models.status(m) if m else None
-                state = ("no API model set" if not mid else "not in OpenCode's catalog now" if not st
+                state = ("no API model set" if not mid else models.unlisted_why(mid) if not st
                          else "ready" if st["available"] else st["why"])
                 lines.append(f"  {role:12} {mid or 'api'}  {state} · thinking {r.get('thinking') or 'off'}{when}")
                 if m:  # what plan mode sizes a step to, before any wb start prints it (#1131, 2026-11-23)
@@ -5857,8 +5974,12 @@ def _api_list(text: str) -> None:
         hits = match(models.hosted(fresh=True))
     if not hits:
         err = models.hosted_error()
+        # OpenCode lists a provider's models only once it holds a key: "contains 'claude'" with
+        # no Anthropic key read as no such model (#1529, 2026-11-26)
         print(f"no API model in OpenCode's catalog contains {text!r}"
-              + (f" (the catalog can't be read: {err})" if err else ": wb models counts them per provider"))
+              + (f" (the catalog can't be read: {err})" if err else
+                 ": wb models counts them per provider; OpenCode lists a provider's models only once "
+                 "it holds a key (`opencode auth login <provider>` in a terminal adds one)"))
         return
     for m in hits[:API_LIST_MAX]:
         cost = m.config.get("cost")
@@ -7500,6 +7621,8 @@ def cmd_chat(a):
             ok, claim = chat.hold(a.id, a.pid or 0, a.busy, waiting=waiting)
         except ValueError as e:
             die(f"wb chat listener: {e}")
+        if not ok and claim is None:  # switched off (#1480): `wb chat on` turns it on
+            die("the web chat is off: `wb chat on` turns it on")
         if not ok:
             die(f"standing by: {(claim or {}).get('tool') or 'claude'} listens in {(claim or {}).get('cwd', '?')}")
         print("listening")
@@ -7543,11 +7666,30 @@ def cmd_chat(a):
 
 
 def reach_hint() -> str:
-    """The story's `link.reach` while the web app opens on this machine alone, else ""."""
+    """The story's `link.reach` while the web app opens on this machine alone and `wb chat reach
+    tailnet` can work here (this OS's own tailscale CLI: under WSL with Tailscale on Windows it is
+    refused, and `wb chat on` advised it anyway, #1524), else ""."""
+    if not chat.tailscale_cli():
+        return ""
     try:
         return story.text("link.reach") if chat.reach() == "local" else ""
     except chat.ConfigError:
         return ""
+
+
+def still_served(port: int) -> tuple[str, str] | None:
+    """`tailscale serve`'s https in front of the web app on ``port``, as (its URL, the command that
+    stops it), else None: reach `local` drops only the bind, and wb said "this machine only" while
+    every tailnet device still opened the app (#1512, 2026-11-26)."""
+    site = chat.served_site(port)
+    if not site:
+        return None
+    name, _, https = site.rpartition(":")
+    if not name or not https.isdigit():
+        name, https = site, "443"
+    exe = "tailscale.exe" if (chat.tailscale_cli(windows=True) or "").lower().endswith(".exe") else "tailscale"
+    return (f"https://{name}/" if https == "443" else f"https://{name}:{https}/",
+            f"{exe} serve --https={https} off")
 
 
 def chat_reach(to: str | None, port: int) -> None:
@@ -7560,18 +7702,24 @@ def chat_reach(to: str | None, port: int) -> None:
             now = chat.reach()
         except chat.ConfigError as e:
             die(str(e))
-        print(f"web app reach: {now}" + {"local": " (this machine only)", "tailnet": " (this machine and your tailnet)",
-                                          "custom": " (chat.json's own bind)"}[now])
+        still = still_served(port) if now == "local" else None
+        print(f"web app reach: {now}" + (f", but tailnet https via tailscale serve ({still[0]})" if still else
+                                          {"local": " (this machine only)", "tailnet": " (this machine and your tailnet)",
+                                           "custom": " (chat.json's own bind)"}[now]))
         return
     try:
-        got = chat.set_reach(to)
+        got = chat.set_reach(to, port)
     except ValueError as e:
         die(f"wb chat reach {to}: {e}")
     except chat.ConfigError as e:
         die(str(e))
     if to == "local":
-        print("web app reach: local (this machine only)" + ("" if got["from"] == "local" else
-              f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"))
+        drops = "" if got["from"] == "local" else f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"
+        if (still := still_served(port)):  # settings.REACH_LOCAL_HELP's cue: `still serves`
+            print(f"web app reach: local{drops}, but `tailscale serve` still serves it to your tailnet at {still[0]}: "
+                  f"`{still[1]}` stops that")
+        else:
+            print(f"web app reach: local (this machine only){drops}")
         return
     ts = got["ts"]
     name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts["ip"]
@@ -7912,11 +8060,18 @@ def cmd_setup(a):
     ~/.claude/skills: #1296, row 8)."""
     if _install_kind() == "opencode":
         # a generation directory OpenCode replaces on its next update and later removes: links, a
-        # service unit and options naming it would outlive it, and pin the plugin to an old wb
-        die(f"wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
-            f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
-            f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
-            f"setup --opencode there")
+        # service unit and options naming it would outlive it, and pin the plugin to an old wb.
+        # The checklist still: refused before it, First run's step 1 failed on the main OpenCode
+        # install and its API keys line was never said (#1496, 2026-11-26)
+        print(f"--  wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
+              f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
+              f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
+              f"setup --opencode there")
+        print("first run:")
+        for line in first_run(host="opencode"):
+            print(line)
+        print("next: wb doctor")
+        sys.exit(0)
     links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb")]
     if not a.opencode:
         links.append((context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench"))
@@ -7966,13 +8121,15 @@ def cmd_setup(a):
                   f"without it, #1200). {path_advice()}")
     if not a.no_service and (said := install_service(a.force)):
         print(said)
+        if said.startswith("ok") and (note := schedule.wsl_idle_note()):  # a WSL unit stops with the distro (#1511)
+            print(f"--  {note}")
     try:  # a minute or two, said up front; a task started meanwhile goes first
         for line in optimize.start(if_due=True):
             print(f"--  {line}")
     except (RuntimeError, OSError):
         pass
     print("first run:")  # what a working setup still needs, each with its fix (#111)
-    for line in first_run():
+    for line in first_run(host="opencode" if a.opencode else "claude-code"):
         print(line)
     if chat.is_on():  # where the web app is: setup printed no word of it (#1355)
         print("--  " + story.text("link.where", "opencode" if a.opencode else "claude-code"))
@@ -8096,11 +8253,13 @@ def api_key_lines(keys: dict | None) -> list[str]:
     return out + need
 
 
-def first_run() -> list[str]:
+def first_run(host: str = "claude-code") -> list[str]:
     """wb setup's checklist, one line each: OpenCode 2.x, a model server answering, a registered
     model, the API keys OpenCode holds (#1024), Landlock; a missing one says how to get it. It
     names no model: Claude picks one for this machine (wb scout), so a newer one slots in without a
-    code change. With an API key stored and no local model, the GPU lines read as optional."""
+    code change. With an API key stored and no local model, the GPU lines read as optional.
+    ``host``: "opencode" (wb setup --opencode, or from OpenCode's install) names /workbench in
+    OpenCode, not Claude Code (#1496)."""
     out = []
     good, said = _tool_version(runner.opencode_bin())
     major = re.search(r"(\d+)\.\d+", said) if good else None
@@ -8156,8 +8315,10 @@ def first_run() -> list[str]:
                    "(wb model add <p>/<m> --url <baseURL>)"
                    + (f"; {models.WSL_NAT}" if models.windows_host() else ""))
     out.append(f"ok  {len(found)} local model(s) registered" if found else NO_LOCAL_OPTIONAL if stored else
-               "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
-               "for this machine (wb scout)")
+               ("--  no local model registered yet: run /workbench in OpenCode (the Workbench agent), and "
+                "it picks one for this machine (wb scout)" if host == "opencode" else
+                "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
+                "for this machine (wb scout)"))
     # a provider of the user's that discovery passed over (another host, not opted in): its fix
     # here too, as wb doctor and wb models say it; wb setup said nothing of it (#1109, 2026-11-23).
     # One on a public host may be a hosted one added by hand: /connect too (#1109's review)
@@ -8573,8 +8734,12 @@ def cmd_update(a):
         if rebased:
             print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
     say_later()
-    if kind == "clone":  # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/
-        try:             # (#1321's findings 16 and N2): moved to HEAD's when that changed
+    # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/ (#1321's findings 16
+    # and N2): moved to HEAD's when that changed. Claude Code's marketplace clone too, which wb
+    # setup --opencode copies from as well: gated to "clone", its copy stayed at the setup commit
+    # while setup, doctor and /workbench-update said wb update refreshes it (#1479, 2026-11-26)
+    if kind in ("clone", "marketplace"):
+        try:
             for line in ocplugin.refresh():
                 print(line)
         except (RuntimeError, OSError, gitops.GitError) as e:
@@ -8854,12 +9019,14 @@ def cmd_doctor(a):
     for why in logout_stops():
         if chat.is_on() or "wb-chat" not in why or "runners" in why:
             print(f"--  {why}")
+    if (chat.is_on() or schedule.names()) and (note := schedule.wsl_idle_note()):  # #1511
+        print(f"--  {note}")
     good, said = chat_line()
     if good is None:
         print(f"--  {said}")
     else:
         line(good, said)
-        if good and shutil.which("tailscale") and (hint := reach_hint()):  # the phone's way in (#1355)
+        if good and (hint := reach_hint()):  # the phone's way in (#1355)
             print(f"--  {hint}")
     for good, said in schedule.doctor_lines():  # wb schedule (#1204)
         line(good, said)
@@ -9606,6 +9773,8 @@ def parser() -> argparse.ArgumentParser:
                            if word == "deepmode" else "the same as wb deepmode")
         s.add_argument("state", nargs="?", choices=["on", "off"])
         s.add_argument("--rule", action="store_true", help="the rule a host adds when the user types deepcode")
+        s.add_argument("--moved", action="store_true", help="once, for a host: the line saying a 2.1 Dynamic "
+                       "workflows on starts 2.2 with deepmode off (#1507); nothing otherwise")
         s.set_defaults(f=cmd_workflows)
     s = sub.add_parser("run", help="deep workflows (#1278): a flow's items as tasks on the user's agents, "
                        "driven in the background; Claude is woken at checkpoints and the end")

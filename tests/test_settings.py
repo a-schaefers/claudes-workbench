@@ -207,7 +207,9 @@ class Settings(Rows):
     def test_wbs_refusal_is_not_ok_and_says_wbs_line(self):
         got = settings.apply("api-significant", FREE_ID)  # the real wb: not in the catalog
         self.assertFalse(got["ok"])
-        self.assertEqual(got["said"], "wb: not in OpenCode's catalog: wb models lists the API models")
+        self.assertEqual(got["said"], "wb: not in OpenCode's catalog: wb models lists the API models; OpenCode "
+                         "lists a provider's models only once it holds its key, and it holds none for someprovider: "
+                         "run `opencode auth login someprovider` in a terminal and add it, or check the id")  # #1529
         self.assertNotIn("api", json.loads(self.routes.read_text())["roles"].get("significant", {}))
 
     def test_a_server_with_no_opencode_on_its_path_keeps_the_good_catalog_and_sets_an_api_model(self):
@@ -256,6 +258,24 @@ class Settings(Rows):
             with mock.patch.object(settings, "_read_json", lambda argv: (doc, "") if argv == ["route", "--json"] else real(argv)):
                 keys = {row["key"] for row in settings.rows(fresh=True)}
             self.assertEqual(("api-none" not in keys, "api-connected" in keys), (connected, connected), provs)
+
+    def test_a_role_on_an_api_model_that_cant_run_says_why_in_its_row(self):
+        # #1529 (2026-11-26): a role on Anthropic with no Anthropic key read "Complex coding runs on
+        # anthropic/claude-haiku-5-5", and nothing on the page said it couldn't
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {}}))
+        r, _ = settings._read_json(["route", "--json"])
+        why = "not in OpenCode's catalog now: OpenCode lists a provider's models only once it holds its key"
+        for status, says in (({"available": False, "resident": False, "why": why},
+                              f"Complex coding can't run on anthropic/claude-haiku-5-5: {why}."),
+                             ({"available": True, "resident": True, "why": "API (Anthropic)"},
+                              "Complex coding runs on anthropic/claude-haiku-5-5; your code goes to its provider.")):
+            roles = {**r["roles"], "significant": {**r["roles"]["significant"], "via": "api",
+                                                   "api": "anthropic/claude-haiku-5-5", "api_status": status}}
+            doc = {**r, "roles": roles}
+            real = settings._read_json
+            with mock.patch.object(settings, "_read_json", lambda argv: (doc, "") if argv == ["route", "--json"] else real(argv)):
+                row = next(x for x in settings.rows(fresh=True) if x["key"] == "role-significant")
+            self.assertEqual(row["says"], says, status)
 
     def test_turning_probe_on_without_probe_returns_the_note_for_claude(self):
         # #1279's addendum (the owner, 2026-11-24): the terminal still offers to help

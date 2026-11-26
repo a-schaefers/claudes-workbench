@@ -1128,10 +1128,8 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     if not mid:  # only with Agents on API: a role on API of its own has one (normalize)
         raise Refused(no_api_model(role))
     m = models.lookup(mid)
-    if m is None or m.kind != "api":
-        failed = models.hosted_error()
-        raise Refused(cant_run(role, mid, "not in OpenCode's catalog now" + (
-            f" (its read failed: {failed})" if failed else ""), "", doc))
+    if m is None or m.kind != "api":  # a provider with no key named as such (#1529)
+        raise Refused(cant_run(role, mid, models.unlisted_why(mid), "", doc))
     # a role on an unpriced model ran with no cap at all once #1016's path skipped this (wave 2's review)
     if why := meter.refusal(m, role, tokens=first):
         raise Refused(why)

@@ -48,20 +48,23 @@ export const noticesDue = (rows: ReadonlyArray<Record<string, unknown>>, started
   K.noticesDue({
     rows: rows.map(r => ({ task: String(r.task ?? ''), kind: String(r.kind ?? ''), ts: Number(r.ts) || 0,
       tasks: Array.isArray(r.tasks) ? r.tasks.map(String) : [] })),
-    startedAt, now,
+    startedAt, now, runs: false,
   })
 // One due notice judged (Kernel.Notice): still true, toasted, and the act: skip, none, steer,
 // hold, wake, ack or missed
 export const noticePlan = (facts: Parameters<typeof K.noticePlan>[0]): ReturnType<typeof K.noticePlan> => K.noticePlan(facts)
 // A run's own notices (#1278's S9: rows with `run` and no `task`, runs.Run.notify) through the
-// same two decisions: which are due a look (per run its newest within the hour; none is a
-// question), and one judged, its kind the phase it was raised in (`raisedIn`, the row's `phase`,
-// runs.NOTICE_PHASE; a row without one counts as raised in the run's phase now), so it is still
-// true only while the run is in that phase: a pause since resumed is acknowledged unsaid
+// same two decisions: which are due a look (per run its newest within twelve hours, the kernel's
+// `runs`, `oldestRunWakeMs`; none is a question), and one judged, its kind the phase it was raised
+// in (`raisedIn`, the row's `phase`, runs.NOTICE_PHASE; a row without one counts as raised in the
+// run's phase now), so it is still true only while the run is in that phase: a pause since resumed
+// is acknowledged unsaid. Not the hour a task's notice has: a task has rewake under it, a run none,
+// so a run done overnight (a scheduled flow's) never reached the morning's session (#1491, #1493,
+// 2026-11-26); twelve hours, not forever, so a run left unacknowledged isn't toasted at every load
 export const runNoticesDue = (rows: ReadonlyArray<Record<string, unknown>>, startedAt: number, now: number): ReturnType<typeof K.noticesDue>['due'] =>
   K.noticesDue({
     rows: rows.map(r => ({ task: String(r.run ?? ''), kind: String(r.kind ?? ''), ts: Number(r.ts) || 0, tasks: [] })),
-    startedAt, now,
+    startedAt, now, runs: true,
   }).due
 export const runNoticePlan = (f: { phase: string; raisedIn: string; ts: number; acked: number; own: boolean; wake: boolean;
   busy: boolean; toasted: boolean }): ReturnType<typeof K.noticePlan> =>

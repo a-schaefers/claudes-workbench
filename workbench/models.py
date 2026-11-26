@@ -279,7 +279,10 @@ def read_config() -> dict:
 
 
 def _providers_of(layer: dict) -> dict:
-    return layer.get("provider") or layer.get("providers") or {}
+    """A layer's providers under both shapes' keys, V2's entry winning for an id in both, as
+    OpenCode keeps it. Read as one or the other, a config beside an older `provider` block lost
+    every model of its `providers` block, which OpenCode 2.4.1 loads (#1508, 2026-11-26)."""
+    return {**_dict(layer.get("provider")), **_dict(layer.get("providers"))}
 
 
 def _provider_dirs() -> dict[str, Path]:
@@ -319,8 +322,8 @@ def agent_providers() -> dict:
         if path.resolve() in own:
             continue
         picked = {k: layer[k] for k in PROVIDER_KEYS if k in layer}
-        if "providers" in layer and "provider" not in layer:
-            picked["provider"] = layer["providers"]
+        if "providers" in layer:  # folded into the layer's V1 key, beside a V1 block too (#1508)
+            picked["provider"] = _providers_of(layer)
         out = _merge(out, _absolute_files(picked, path.parent))
     return out
 
@@ -974,6 +977,51 @@ def lookup(model_id: str, cached: bool = False) -> Model | None:
     return _hosted_exact(model_id)
 
 
+UNLISTED = "not in OpenCode's catalog now"
+
+
+def keyless_provider(model_id: str) -> str:
+    """The provider of an API id the catalog doesn't list when OpenCode holds no key for it (no
+    catalog row and no `auth list` row of it: hosted.json's `known`), else "". OpenCode's
+    model.list lists only providers that can authenticate, so a role on Anthropic with only a
+    DeepInfra key read "not in OpenCode's catalog now" on every surface, a retired or mistyped
+    id to Claude, who offered another provider's model, never `opencode auth login` (#1529,
+    2026-11-26). hosted.json as it is, never an OpenCode start: the pane's cached reads call it
+    too. Never a provider of this machine's (the GPU side) nor one the config leaves unloaded,
+    nor after a failed read."""
+    doc = _read_hosted()
+    pid, _, name = (model_id or "").partition("/")
+    known = doc.get("known")
+    if not name or doc.get("error") or not isinstance(known, list) or pid in known \
+            or pid in _dict(doc.get("providers")):
+        return ""
+    try:
+        cfg = read_config()
+        gpu = _sides(cfg, _overrides())[0]
+    except (RuntimeError, OSError):
+        return ""
+    enabled = cfg.get("enabled_providers")
+    if pid in gpu or pid in (cfg.get("disabled_providers") or []) or (enabled and pid not in enabled):
+        return ""
+    return pid
+
+
+def no_key_note(pid: str) -> str:
+    """keyless_provider's fix: the catalog can't tell a provider with no key from a mistyped one
+    (#1529), so the id is named for a check too."""
+    from . import keyhole  # keyhole imports this module lazily too
+    return (f"OpenCode lists a provider's models only once it holds its key, and it holds none for "
+            f"{pid}: run `{keyhole.login(pid)}` in a terminal and add it, or check the id")
+
+
+def unlisted_why(model_id: str) -> str:
+    """Why an API id a lookup missed can't run: UNLISTED, with its read's failure, or with the
+    missing key's fix (keyless_provider, #1529)."""
+    if err := hosted_error():
+        return f"{UNLISTED} (its read failed: {err})"
+    return f"{UNLISTED}: {no_key_note(pid)}" if (pid := keyless_provider(model_id)) else UNLISTED
+
+
 def gpu_side(model_id: str) -> bool:
     """Whether an id is the GPU side's whether or not discover() still lists it: its provider is
     configured on this machine (or opted in) and its name is no Ollama cloud name. hosted() never
@@ -1464,7 +1512,13 @@ def _build_hosted() -> dict:
         return provs[pid]
 
     data = listed.get("data") if isinstance(listed, dict) else listed
-    for e in data if isinstance(data, list) else []:
+    data = data if isinstance(data, list) else []
+    # the providers `auth list` or the catalog names, whether hosted() lists them or not (a
+    # server OpenCode found on this machine): what tells a provider OpenCode holds no key for
+    # from an id the catalog dropped (keyless_provider, #1529)
+    doc["known"] = sorted({*auth, *(e["providerID"] for e in data
+                                    if isinstance(e, dict) and isinstance(e.get("providerID"), str))})
+    for e in data:
         if not (isinstance(e, dict) and isinstance(e.get("providerID"), str) and isinstance(e.get("id"), str)):
             continue
         pid = e["providerID"]
@@ -1516,7 +1570,29 @@ def _build_hosted() -> dict:
                 continue
             provider(pid, url, prov.get("npm"), name=OLLAMA_CLOUD, key="ollama")
             found[mid] = {**spec, "name": str(spec.get("id") or name), "free": False, "cloud": True}
+    # a key from $VAR that this environment lacks: `auth list` lists no variable its reader's
+    # environment lacks, so this read says nothing of it. The web app's service (or a timer's
+    # fire) read "no key" over the terminal's env row, and Settings, the role change and the
+    # terminal's own reads said so until a fresh read there (#1495, 2026-11-26): the row stays.
+    # Its models too: OpenCode 2.4.1 lists an env provider's models only while its variable is
+    # set, so the row alone left the role's model unknown, a fire's spend_skip found no model to
+    # skip for and every start in it failed, and wb schedule add's note went unsaid (#1496)
+    old = _read_hosted()
+    kept = _dict(old.get("models"))
+    for pid, row in (old.get("providers") or {}).items():
+        if pid in gpu or not loads(pid) or not _env_unseen(row.get("key")) or (provs.get(pid) or {}).get("key"):
+            continue
+        provs[pid] = {**row, **(provs.get(pid) or {}), "key": row["key"]}
+        for mid, e in kept.items():
+            if mid.split("/", 1)[0] == pid and mid not in found and not (extra.get(mid) or {}).get("skip"):
+                found[mid] = e
     return doc
+
+
+def _env_unseen(key) -> bool:
+    """A key source "env:<VAR>" whose variable this process's environment lacks (#1495)."""
+    key = str(key or "")
+    return key.startswith("env:") and not os.environ.get(key[4:], "").strip()
 
 
 def _read_hosted() -> dict:
@@ -1974,7 +2050,9 @@ def _fresh_key(m: Model) -> tuple[str, str]:
     name = (hit[1].get(m.provider) or {}).get("name") or provider_name(m)
     doc = _read_hosted()
     row = (doc.get("providers") or {}).get(m.provider)
-    if row is not None and key != row.get("key"):  # the provider's source: never a model's "none"
+    # the provider's source: never a model's "none", nor "" over a variable this environment
+    # lacks, which `auth list` can't see (#1495)
+    if row is not None and key != row.get("key") and not (not key and _env_unseen(row.get("key"))):
         doc = json.loads(json.dumps(doc))
         doc["providers"][m.provider].update(key=key, name=name)
         try:

@@ -8,7 +8,7 @@
 //
 // The TUI part imports this only in setup (tui.ts), never at load: it imports OpenTUI and Solid,
 // which only OpenCode's TUI provides.
-import { createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
+import { createEffect, createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
 import { useKeyboard } from '@opentui/solid'
 import { readFileSync } from 'node:fs'
 import { apprentice, Play, restTarget, SPLASH_MS, splashOn } from './spans.ts'
@@ -153,18 +153,28 @@ function Resting(props: { readonly theme: SplashHost['theme'] }): JSX.Element {
   )
 }
 
+/** Nothing drawn: `watch` called with the panel as it changes (its focus), splash or page, and
+ * with null once it closes. */
+function Watch(props: { readonly panel: Panel; readonly watch: (panel: Panel | null) => void }): JSX.Element {
+  createEffect(() => props.watch(props.panel))
+  onCleanup(() => props.watch(null))
+  return null as unknown as JSX.Element
+}
+
 /**
  * Workbench's panel: `page` after the splash. The Tasks page (#1312) passes itself and where it
  * puts the apprentice and the modeline in a panel of that many rows and columns (`target`,
  * splash.ts `Target`), so the words fall into the modeline's row; without one they rise away.
- * Returns the slot's removal.
+ * `watch`: the panel's input as it changes while it shows, the splash's time too (pane.tsx hands
+ * the keyboard back to the prompt through it, #1509). Returns the slot's removal.
  */
 export function mountSplash(host: SplashHost, home: string, page?: (panel: Panel) => JSX.Element,
-  target?: (rows: number, cols: number) => Target): () => void {
+  target?: (rows: number, cols: number) => Target, watch?: (panel: Panel | null) => void): () => void {
   return host.ui.slot({
     append: 'session.panel',
     render: panel => (
       <Show when={panel.name === PANEL}>
+        {watch ? <Watch panel={panel} watch={watch} /> : null}
         <SplashThen host={host} home={home} target={target}>
           {page ? page(panel) : <Resting theme={host.theme} />}
         </SplashThen>

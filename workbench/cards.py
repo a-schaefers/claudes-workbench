@@ -277,12 +277,18 @@ def copy_shipped(shipped: Path, dest: Path, force: bool = False) -> str:
 
 
 def reset_shipped(shipped: Path, mine: Path) -> str:
-    """Put the shipped one back: the user's copy moved aside to <file>.bak, never deleted."""
+    """Put the shipped one back: the user's copy moved aside to <file>.bak (.bak.2, .bak.3, … when
+    taken), never deleted."""
     if not mine.is_file():
         raise RuntimeError(f"no {mine.stem} of yours ({mine.parent}): the shipped one is used already")
     if not shipped.is_file():
         raise RuntimeError(f"{mine} is your own, with nothing shipped by its name to go back to")
-    bak = mine.with_name(mine.name + ".bak")
+    # a free name: a second reset replaced the first's .bak, so a copy edited, reset, copied and
+    # edited again lost the first edit (#1520, 2026-11-26)
+    bak, n = mine.with_name(mine.name + ".bak"), 1
+    while bak.exists():
+        n += 1
+        bak = mine.with_name(f"{mine.name}.bak.{n}")
     os.replace(mine, bak)
     return f"reset {mine.stem}: the shipped one is used again; yours is kept as {bak}"
 

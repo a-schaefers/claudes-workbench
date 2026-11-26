@@ -22,8 +22,26 @@ import Kernel.Tables (tables)
 props :: { seeds :: Array Int, n :: Int } -> { cases :: Int, failures :: Array String }
 props { seeds, n } =
   { cases: length seeds * max 0 n
-  , failures: tableFailures <> concatMap (\seed -> run seed n) seeds
+  , failures: tableFailures <> runNoticeFailures <> concatMap (\seed -> run seed n) seeds
   }
+
+-- | A 270-minute-old run notice in its phase is due: a scheduled flow done overnight wakes the
+-- | session that opens near its repo in the morning, and the hour dropped it (#1493, 2026-11-26).
+-- | A task's notice that old is not, nor a run's past twelve hours; one whose run left the phase
+-- | that raised it is acknowledged unsaid.
+runNoticeFailures :: Array String
+runNoticeFailures =
+  check (map _.task (due true 270.0) == [ "nightly" ]) "a 270-minute-old run notice in its phase is not due"
+    <> check ((plan "review").act == "wake") "a 270-minute-old run notice in its phase does not wake"
+    <> check (due false 270.0 == []) "a task's notice 270 minutes old is due"
+    <> check (due true 721.0 == []) "a run notice past twelve hours is due"
+    <> check ((plan "closed").act == "ack") "a run notice whose run left its phase is not acknowledged unsaid"
+  where
+  now = 1.0e12
+  due runs minutes = (noticesDue { rows: [ { task: "nightly", kind: "run_done", ts: (now - minutes * 60000.0) / 1000.0, tasks: [] } ]
+    , startedAt: now, now, runs }).due
+  plan phase = noticePlan { kind: "review", hasId: false, phase, questionOpen: false, ts: (now - 270.0 * 60000.0) / 1000.0
+    , acked: 0.0, own: true, wake: true, busy: false, toasted: false, heldAsk: false }
 
 -- | What the tables themselves must say, whatever the facts: a closed task is never active, the
 -- | one phase both active and needing Claude is `asking`, a parked mark counts only in phases
@@ -169,15 +187,15 @@ judgeAway f =
     where
     p = phaseOf { phase: t.phase, parked: t.parked }
 
-type DueFacts = { rows :: Array { task :: String, kind :: String, ts :: Number, tasks :: Array String }, startedAt :: Number, now :: Number }
+type DueFacts = { rows :: Array { task :: String, kind :: String, ts :: Number, tasks :: Array String }, startedAt :: Number, now :: Number, runs :: Boolean }
 
--- | The notices due: each pick within the hour and its own task's, increasing, every question of
+-- | The notices due: each pick within the hour (a run's, twelve hours) and its own task's, increasing, every question of
 -- | the task in the hour picked, and at most one other, its newest notice, last; `noticed` at or
 -- | past every notice of the task, a batch's for each task it names.
 judgeDue :: DueFacts -> Array String
 judgeDue f =
   check (all (\d -> all (\k -> maybe false (\r -> r.task == d.task && r.ts * 1000.0 >= since) (at k)) d.picks) d0.due)
-    "a pick is another task's, or over an hour old"
+    "a pick is another task's, or older than its bound"
     <> check (all (\d -> sort d.picks == d.picks && nub d.picks == d.picks) d0.due) "picks out of order"
     <> check (all (\d -> length (filter (\k -> not (question k)) d.picks) <= 1) d0.due) "two notices of a task due besides its questions"
     <> check (all (\d -> maybe true (\k -> k == lastOf d.task) (last d.picks)) d0.due) "a task's newest notice in the hour is not its last pick"
@@ -185,7 +203,7 @@ judgeDue f =
       "noticed is behind a notice"
   where
   d0 = noticesDue f
-  since = max f.startedAt f.now - 3600000.0
+  since = max f.startedAt f.now - (if f.runs then 12.0 * 3600000.0 else 3600000.0)
   at k = index f.rows (floor k)
   question k = maybe false (\r -> r.kind == "question") (at k)
   lastOf t = foldl (\acc i -> if maybe false (\r -> r.task == t && r.ts * 1000.0 >= since) (index f.rows i) then toNumber i else acc) (-1.0)
@@ -235,8 +253,10 @@ judgeRewake f =
   age = f.now - f.updatedAt
 
 rowsFrom :: Int -> { s :: Int, facts :: DueFacts }
-rowsFrom s0 = { s: built.s, facts: { rows: built.rows, startedAt: 1.0e12 - toNumber (s0 `mod` 3) * 3600000.0, now: 1.0e12 } }
+rowsFrom s0 = { s: built.s, facts: { rows: built.rows, startedAt: 1.0e12 - toNumber (s0 `mod` 3) * 3600000.0, now: 1.0e12, runs } }
   where
+  runs = s0 `mod` 4 == 0
+  spread = if runs then 86400 else 7200 -- each side of its bound
   built = foldl add { s: next s0, rows: [] } (range 1 (s0 `mod` 9))
   add acc _ =
     let
@@ -246,7 +266,7 @@ rowsFrom s0 = { s: built.s, facts: { rows: built.rows, startedAt: 1.0e12 - toNum
     in
       { s: c
       , rows: acc.rows <> [ { task: pick [ "a", "b", "c" ] a, kind: pick [ "question", "review", "checkin", "stuck" ] b
-                            , ts: (1.0e12 - toNumber (c `mod` 7200) * 1000.0) / 1000.0
+                            , ts: (1.0e12 - toNumber (c `mod` spread) * 1000.0) / 1000.0
                             , tasks: if c `mod` 5 == 0 then [ pick [ "a", "d" ] b ] else [] } ]
       }
 

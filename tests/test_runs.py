@@ -181,6 +181,35 @@ class ReportTasks(Base):
                                                         "FAKE_RESULT_FIX": ""})
         self.assertEqual(wait_phase("t-ok", ("review", "failed", "stuck"))["round"], 1)
 
+    def test_a_repair_round_after_a_compaction_continues_the_session(self):
+        # #1478: a fresh session got "Resend the whole object" with neither the object nor its reading
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        self.report("t-rc", "--schema", "verdict",
+                    env={"FAKE_RESULT": '{"verdict": "maybe"}', "FAKE_RESULT_FIX": json.dumps(VERDICT),
+                         "FAKE_COMPACTED": "1", "FAKE_RUNS": str(runs)})
+        st = wait_phase("t-rc", ("review", "failed", "stuck"))
+        task = store.Task("t-rc")
+        self.assertEqual(st["phase"], "review", task.report(st["round"]))
+        rows = [json.loads(x) for x in runs.read_text().splitlines()]
+        self.assertEqual([r["session"] for r in rows], [False, True])
+        self.assertTrue(rows[1]["prompt"].startswith("rejected:"), rows[1]["prompt"][:200])
+        self.assertNotIn("fresh", [e["kind"] for e in store.read_jsonl(task.dir / "events.jsonl")[0]])
+        self.assertEqual(json.loads((task.dir / runner.RESULT).read_text()), VERDICT)
+
+    def test_a_report_that_reads_past_the_explore_limit_reaches_review_not_stuck(self):
+        # #1489: a report can't edit, so the explore guard nudged it to "make the first edit" at 40
+        # calls on the GPU and stopped it at 80
+        self.report("t-rr", "--schema", "verdict",
+                    env={"FAKE_RESULT": json.dumps(VERDICT), "FAKE_REPORT_READS": "85"})
+        st = wait_phase("t-rr", ("review", "failed", "stuck"))
+        task = store.Task("t-rr")
+        self.assertEqual((st["phase"], st["round"]), ("review", 1), st.get("last"))
+        self.assertEqual(json.loads((task.dir / runner.RESULT).read_text()), VERDICT)
+        events = store.read_jsonl(task.dir / "events.jsonl")[0]
+        self.assertEqual([e for e in events if e["kind"] == "steer"], [])
+        self.assertTrue(runner.REPORT_NUDGE.startswith(runner.NUDGE.split(" Stop planning")[0]))
+        self.assertNotIn("edit", runner.REPORT_NUDGE)
+
     def test_submit_result_is_checked_by_the_server_and_the_runner_reads_it(self):
         log = Path(self.tmp.name) / "submit.log"
         self.report("t-sub", "--schema", "verdict", env={"FAKE_RESULT": json.dumps(VERDICT), "FAKE_SUBMIT": "1",
@@ -552,6 +581,33 @@ class Customized(Base):
         code, _, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run", "--param", "style=x")
         self.assertEqual((code, err.strip()), (1, "wb: --param style: one of unit, prop, not 'x'"))
 
+    def test_a_run_started_in_a_subdirectory_reads_the_repo_from_its_top_and_starts_each_item_in_its_package(self):
+        # #1494 (2026-11-26): from repo/src every flow command and deepcode was refused "is no git
+        # repository", and with --repo <top> a package's own CLAUDE.md, test and skills were lost
+        plan = Path(self.tmp.name) / "tests.json"
+        plan.write_text(json.dumps(self.TESTS))
+        code, out, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo / "src"), "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("2 item(s) from {params.src}", out)  # src/*.py, a path from the top
+        pkg = self.repo / "packages" / "p"
+        pkg.mkdir(parents=True)
+        (pkg / "CLAUDE.md").write_text("# p\nA package.\n")
+        (pkg / "x.py").write_text("x\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm",
+                        "a package"], check=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        with mock.patch.object(runs, "spawn", return_value=0):  # the item started here, below
+            code, _, err = wb("run", "start", "pkg", "--plan", str(plan), "--repo", str(pkg),
+                              "--param", "src=packages/p/*.py")
+        self.assertEqual(code, 0, err)
+        run = runs.Run("pkg")
+        self.assertEqual((run.spec["repo"], run.spec["package_dir"]), (str(self.repo.resolve()), str(pkg.resolve())))
+        stage, it = runs.stages(run.flow)[0], runs.state(run)["write"][0]
+        self.assertEqual(runs._start(run, stage, it, 1), ("running", ""))
+        self.assertEqual(store.Task("pkg-write-1").spec.get("subdir"), "packages/p")
+        wait_phase("pkg-write-1", {"review", "failed", "stuck"}, timeout=90)
+
     def test_the_slash_command_line_reads_as_its_fixture_says(self):
         cases = json.loads((ROOT / "tests/fixtures/flow_args.json").read_text())["cases"]
         for c in cases:
@@ -605,6 +661,25 @@ class Customized(Base):
         self.assertTrue(path.with_name("audit.json.bak").exists())
         self.assertIn("audit (shipped): ", wb("run", "flows")[1])
         self.assertEqual(wb("flow", "reset", "audit")[0], 1)
+
+    def test_a_second_reset_of_a_flow_or_card_keeps_the_first_ones_copy_beside_its_own(self):
+        # #1520 (2026-11-26): the second reset replaced the first's .bak, the first edit lost
+        flow = Path(os.environ["WB_FLOWS"]) / "build.json"
+        card = Path(os.environ["WB_ROLES"]) / "find.md"
+        for v in ("V1", "V2", "V3"):
+            self.assertEqual(wb("flow", "copy", "build")[0], 0)
+            flow.write_text(json.dumps({**json.loads(flow.read_text()), "description": f"MY {v} EDIT"}))
+            self.assertEqual(wb("card", "copy", "find")[0], 0)
+            card.write_text(card.read_text() + f"\nMY {v} EDIT\n")
+            code, out, err = wb("flow", "reset", "build")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(wb("card", "reset", "find")[0], 0)
+        self.assertIn(f"yours is kept as {flow}.bak.3", out)  # the line names the file it wrote
+        for mine in (flow, card):
+            kept = {p.name: p.read_text() for p in mine.parent.glob(mine.name + ".bak*")}
+            self.assertEqual(sorted(kept), [f"{mine.name}.bak", f"{mine.name}.bak.2", f"{mine.name}.bak.3"])
+            for v, name in zip(("V1", "V2", "V3"), sorted(kept)):
+                self.assertIn(f"MY {v} EDIT", kept[name])
 
 
 class ScheduledFlows(Base):
@@ -770,6 +845,37 @@ class Runs(Base):
         self.assertIn("closed aud", run_wb("run", "close", "aud"))
         self.assertEqual(runs.Run("aud").status["phase"], "closed")
 
+    def test_the_hand_back_stops_the_runs_driver_and_no_item_starts_after_it(self):
+        # #1471 (the #1373 audit, 2026-11-26): `wb takeover --all` (the mod's hand-back) left the
+        # run's driver going, which read the taken-over item at review as done, started its
+        # reviewer after the user's stop, could refix it back to an agent while Claude edited it,
+        # and reported the half-done code approved
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"bld-code-1": "hang"})
+        run_wb("run", "start", "bld", "--flow", "build", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        deadline = time.time() + 30
+        while not (store.Task("bld-code-1").exists and store.Task("bld-code-1").status.get("session")):
+            self.assertLess(time.time(), deadline, "the coder never started")
+            time.sleep(0.2)
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        self.assertIn("stopped: wb run bld", out)
+        self.assertIn("took over bld-code-1", out)
+        run = runs.Run("bld")
+        self.assertEqual((run.status["phase"], run.status.get("pid")), ("stopped", None))
+        self.assertEqual([r["task"] for r in run.journal() if r.get("kind") == "item"], ["bld-code-1"])
+        self.assertFalse([r for r in run.journal() if r.get("kind") in ("refix", "notice")
+                          or r.get("notice") == "run_done"])
+        self.assertEqual([r["kind"] for r in self.run_notices("bld")], [])
+        # a run still open (one item taken over by name): the item is no longer the run's, so
+        # nothing reviews the diff Claude is editing; once the run ended its report keeps it
+        self.assertEqual([(i.state, i.why) for i in runs.state(run)["code"]], [("done", "")])
+        run.set_status(phase="running")
+        st = runs.state(run)
+        self.assertEqual([(i.state, i.why) for i in st["code"]], [("not_run", runs.TAKEN_OVER)])
+        self.assertEqual(st["review"], [])
+        run.set_status(phase="stopped")
+        run_wb("discard", "bld-code-1")
+
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
         seq.write_text(json.dumps([
@@ -804,6 +910,31 @@ class Runs(Base):
         self.assertIn("has code waiting on you: bld-code-1", err)
         run_wb("discard", "bld-code-1")
         self.assertIn("closed bld", run_wb("run", "close", "bld"))
+
+    def test_a_code_item_at_review_stays_claudes_when_its_card_stops_loading_mid_run(self):
+        # #1470: is_code read the card on every pass, so a user's card edited past loading made
+        # the code at review read as a report: wb run close and the driver's _take discarded it
+        mine = Path(self.tmp.name) / "roles"
+        os.environ["WB_ROLES"] = str(mine)
+        self.assertEqual(wb("card", "copy", "build")[0], 0)
+        flow = {"v": 1, "name": "cc", "stages": [{"id": "code", "card": "build", "items": ["first"]},
+                                                 {"id": "claude", "final": True, "from": "code"}]}
+        run_wb("run", "start", "cc", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.wait_run("cc", ("review", "failed", "paused", "checkpoint", "stopped"))
+        self.assertEqual(store.Task("cc-code-1").status["phase"], "review")
+        with open(mine / "build.md", "a") as f:
+            f.write("x" * (cards.BODY_MAX + 600))
+        with self.assertRaises(RuntimeError):
+            cards.load("build")
+        run = runs.Run("cc")
+        self.assertEqual(runs.state(run)["code"][0].state, "done")  # still the code's, never a report's
+        run.set_status(phase="running")
+        runs.tick(run)
+        rc, _, err = wb("run", "close", "cc")
+        self.assertEqual(rc, 1)
+        self.assertIn("has code waiting on you: cc-code-1", err)
+        self.assertEqual(store.Task("cc-code-1").status["phase"], "review")
+        self.assertNotIn("null", [r.get("kind") for r in run.journal()])
 
     def test_a_gpu_budget_pauses_before_a_start_and_amend_then_resume_goes_on(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
@@ -991,11 +1122,13 @@ class Runs(Base):
         self.assertEqual(rep["not_run"], [{"key": "judge:1.2", "why": "unjudged: judge:b1 returned nothing for it"}])
         self.assertIn("judge:1.2: unjudged", run_wb("run", "report", "bj"))
 
-    def test_best_of_has_a_chooser_read_every_attempts_diff_and_claude_gets_its_pick_with_the_attempts_kept(self):
+    def test_best_of_has_a_chooser_read_every_attempts_diff_and_review_and_claude_gets_its_pick_and_the_reviews(self):
         # best-of ran 3 builders and a reviewer per diff, and Claude read every review and most
         # diffs: N times the handoff (#1134's study); the chooser sees them side by side
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Pick the best attempt": {
-            "best": "a2", "ranking": ["a2", "a1", "a3"], "why": "a2 is the smallest"}})
+            "best": "a2", "ranking": ["a2", "a1", "a3"], "why": "a2 is the smallest"},
+            "Review this attempt": {"verdict": "changes", "must_fix": ["REVIEWER-ASK-XYZ in answer.txt"],
+                                    "nits": [], "summary": "close"}})
         run_wb("run", "start", "bo", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
                "--repo", str(self.repo))
         self.assertEqual(self.wait_run("bo", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
@@ -1004,6 +1137,16 @@ class Runs(Base):
         for a, n in (("a1", 1), ("a2", 2), ("a3", 3)):
             self.assertIn(f"### {a} (task bo-code-{n}; no tests)\n```diff\n", prompt)
         self.assertIn("+42", prompt)
+        # #1504 (2026-11-26): the three reviews were paid for and reached neither the chooser nor
+        # Claude: the chooser reads each under its attempt, and the report carries them
+        self.assertEqual(prompt.count('Its review: {"verdict": "changes", "must_fix": ["REVIEWER-ASK-XYZ in answer.txt"], '
+                                      '"summary": "close"}'), 3, prompt)
+        said = run_wb("run", "report", "bo")
+        self.assertIn("results (3):\n  review:1#a1: ", said)
+        self.assertEqual(said.count("REVIEWER-ASK-XYZ"), 3, said)
+        got = json.loads(run_wb("run", "report", "bo", "--json"))["results"]
+        self.assertEqual([(r["key"], r["result"]["must_fix"], r["trail"][0]["key"]) for r in got],
+                         [(f"review:1#a{n}", ["REVIEWER-ASK-XYZ in answer.txt"], f"1#a{n}") for n in (1, 2, 3)])
         sch = json.loads((runs.run_dir("bo") / "schemas" / f"choose-1.json").read_text())
         self.assertEqual(sch["properties"]["best"]["enum"], ["a1", "a2", "a3"])
         rep = runs.report_of("bo")
@@ -1016,6 +1159,56 @@ class Runs(Base):
                          [("bo-code-1", "review"), ("bo-code-2", "review"), ("bo-code-3", "review")])
         for n in (1, 2, 3):
             run_wb("discard", f"bo-code-{n}")
+
+    def test_a_best_of_attempt_discarded_as_another_was_accepted_is_not_scored_as_the_models_rejected_work(self):
+        # #1473 (the #1373 audit, 2026-11-26): wb run close wants every attempt accepted or
+        # discarded, and each losing attempt's row was a judged discard with credit 0, so every
+        # best-of run scored the role's model 1 of N and the router steered away from it
+        from workbench import router, tuning
+        flow = {"v": 1, "name": "bo2", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "items": ["the answer"], "attempts": 2,
+             "prompt": "Write the answer to answer.txt."},
+            {"id": "claude", "final": True, "from": "code"}]}
+        run_wb("run", "start", "bo2", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("bo2", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        self.assertEqual([(r["key"], r["task"]) for r in runs.Run("bo2").journal() if r.get("kind") == "item"],
+                         [("1#a1", "bo2-code-1"), ("1#a2", "bo2-code-2")])
+        run_wb("accept", "bo2-code-1", "-m", "feat: the answer")
+        run_wb("discard", "bo2-code-2", "--reason", "a1 was chosen")
+        rows = {r["task"]: r for r in store.results()}
+        lost = rows["bo2-code-2"]
+        self.assertTrue(lost.get("not_chosen"))
+        self.assertFalse(tuning.judged(lost))
+        self.assertNotIn("not_chosen", rows["bo2-code-1"])
+        m = runner.models.resolve(lost["model"])
+        self.assertEqual(router.score(m, lost["size"]).tries, 1)
+        self.assertIn("closed bo2", run_wb("run", "close", "bo2"))
+
+    def test_a_review_item_starts_on_the_change_it_reviews_and_a_chooser_on_the_runs_base(self):
+        # #1503 (2026-11-26): every review started at the run's base, the change only a diff in
+        # its prompt, so reviewers searched for it and retyped it to run a test, on the base
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Pick the best attempt": {
+            "best": "a1", "ranking": ["a1", "a2", "a3"], "why": "a1"}})
+        run_wb("run", "start", "rb", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("rb", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        run = runs.Run("rb")
+        base = run.spec["base"]
+        git = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True, text=True)
+        reviews = runs.state(run)["review"]
+        self.assertEqual(len(reviews), 3)
+        for it in reviews:
+            code, rv = store.Task(it.input["task"]), store.Task(it.task)
+            tree = code.status["review_trees"][str(it.input["round"])]["tree"]
+            got = rv.spec["base"]
+            self.assertEqual((git("rev-parse", f"{got}^{{tree}}").stdout.strip(), git("rev-parse", f"{got}^").stdout.strip()),
+                             (tree, base), it.key)
+            self.assertEqual(git("show", f"{got}:answer.txt").stdout.strip(), "42")
+        (pick,) = [n for n in runs.run_tasks(run) if n.startswith("rb-choose-")]
+        self.assertEqual(store.Task(pick).spec["base"], base)  # its attempts share no tree
+        for n in (1, 2, 3):
+            run_wb("discard", f"rb-code-{n}")
+        self.assertEqual(git("for-each-ref", "refs/workbench/review/").stdout, "")  # gone with them
 
     def test_an_item_stuck_on_its_role_is_tried_again_from_the_base_on_the_next_escalate_role_before_claude_is_asked(self):
         # #1134's study: escalating attempts across roles; Claude checkpointed only when the last fails
@@ -1037,6 +1230,60 @@ class Runs(Base):
         rep = runs.report_of("esc")
         self.assertEqual([(c["key"], c["task"]) for c in rep["code"] if c.get("phase") == "review"], [("code:1#e1", "esc-code-2")])
         run_wb("discard", "esc-code-2")
+
+    def test_a_crashed_code_item_checkpoints_claude_once_while_the_runs_other_items_go_on_to_review(self):
+        # #1510: one crashed item's checkpoint stopped every other start until wb run resume, so a
+        # scheduled fix or build flow sat idle all night and skipped each later night's fire
+        flow = {"v": 1, "name": "nf", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "items": ["f1", "f2", "f3", "f4"], "prompt": "Write {item} to answer.txt."},
+            {"id": "claude", "final": True, "from": "code"}]}
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"nf-code-1": "crash"})
+        run_wb("run", "start", "nf", "--plan", self.plan(flow), "--repo", str(self.repo))
+        names = [f"nf-code-{n}" for n in (2, 3, 4)]
+        deadline = time.time() + 120
+        while time.time() < deadline and not all(store.Task(n).exists and store.Task(n).status.get("phase") == "review"
+                                                 for n in names):
+            time.sleep(0.3)
+        st = runs.Run("nf").status
+        self.assertEqual([store.Task(n).status.get("phase") for n in names], ["review"] * 3, st)
+        self.assertEqual(store.Task("nf-code-1").status["phase"], "failed")
+        self.assertEqual((st["phase"], st["cause"]), ("checkpoint", "item"))
+        (said,) = [r for r in self.run_notices("nf") if r["kind"] == "run_checkpoint"]
+        self.assertIn("nf-code-1 (code 1) is failed", said["text"])
+        self.assertIn("resumed nf", run_wb("run", "resume", "nf"))
+        self.assertEqual(self.wait_run("nf", ("review", "failed", "paused", "stopped"))["phase"], "review")
+        for n in ("nf-code-1", *names):
+            run_wb("discard", n)
+
+    def test_a_claude_stage_whose_inputs_finish_under_an_items_checkpoint_is_raised_once_claude_resumes(self):
+        # #1510's review: the merge stage's checkpoint replaced the crashed item's, the resume acked
+        # its notice and its journalled notice row kept tick from raising it again: the run sat
+        # running for ever, its driver alive and nothing due, and Claude never heard the merge was his
+        flow = {"v": 1, "name": "pq", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "items": ["f1", "f2"], "prompt": "Write {item} to answer.txt."},
+            {"id": "merge", "claude": True, "from": "code"},
+            {"id": "claude", "final": True, "from": "merge"}]}
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"pq-code-1": "crash"})
+        run_wb("run", "start", "pq", "--plan", self.plan(flow), "--repo", str(self.repo))
+        deadline = time.time() + 120  # until the code stage is complete: f1 null, f2 done
+        while time.time() < deadline and (runs.Run("pq").status.get("stages") or {}).get("code", {}).get("running", 1):
+            time.sleep(0.3)
+        time.sleep(1)  # the pass that found it complete, and would have raised the merge, has ended
+        st = runs.Run("pq").status
+        self.assertEqual((st["phase"], st.get("cause")), ("checkpoint", "item"), st)
+        self.assertIn("pq-code-1 (code 1) is failed", st["why"])
+        self.assertIn("resumed pq", run_wb("run", "resume", "pq"))
+        st = self.wait_run("pq", ("checkpoint", "review", "failed", "stopped"), timeout=60)
+        self.assertEqual((st["phase"], st["why"]), ("checkpoint", "stage merge is Claude's"), st)
+        self.assertEqual([r["stage"] for r in runs.Run("pq").journal() if r.get("kind") == "notice"
+                          and r.get("notice") == "run_checkpoint" and "stage" in r], ["merge"])
+        due = runs.due("pq")
+        self.assertIsNotNone(due)
+        self.assertIn("stage merge is yours", due["text"])
+        run_wb("run", "stop", "pq")
+        for n in ("pq-code-1", "pq-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
 
     def test_asks_left_past_refix_max_escalate_with_the_attempt_kept_and_the_last_roles_failure_asks_claude(self):
         asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
@@ -1097,6 +1344,39 @@ class Runs(Base):
         self.assertEqual(runs.report_of("cap")["not_run"],
                          [{"key": "find:3", "why": "past the stage's max_items (2)"},
                           {"key": "judge:1", "why": "skipped (wb run amend --skip)"}])
+
+    def test_a_refixs_reviews_count_once_to_max_items_and_a_started_review_is_never_cut(self):
+        # #1484 (2026-11-26): counted by index, item 1's superseded review and its refix's next
+        # one pushed review 2, already running, past max_items 2: not_run, its result dropped
+        flow = {"v": 1, "name": "rcap", "stages": [
+            {"id": "code", "kind": "code", "items": ["a", "b"]},
+            {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 2},
+             "max_items": 2, "prompt": "{diff}"},
+            {"id": "claude", "final": True, "from": "review"}]}
+        with mock.patch.object(runs, "spawn", return_value=0):  # no driver: the state alone
+            run_wb("run", "start", "rcap", "--plan", self.plan(flow), "--repo", str(self.repo))
+        run = runs.Run("rcap")
+        for k in ("1", "2"):
+            run.log(kind="item", stage="code", key=k, n=int(k), task=f"rcap-code-{k}")
+            run.log(kind="output", stage="code", key=k, state="done", task=f"rcap-code-{k}")
+            run.log(kind="item", stage="review", key=k, n=int(k), task=f"rcap-review-{k}")
+            t = store.Task(f"rcap-review-{k}")
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": t.name, "run": "rcap", "stage": "review", "item": k})
+            store.write_json(t.dir / "status.json", {"phase": "running"})
+        run.log(kind="refix", stage="review", src="1", task="rcap-code-1", count=1, round=1)
+        run.log(kind="output", stage="review", key="1", state="superseded", why="refix 1 sent to rcap-code-1",
+                task="rcap-review-1")
+        self.assertEqual([(i.key, i.state) for i in runs.state(run)["review"]],
+                         [("1", "superseded"), ("1~r1", "waiting"), ("2", "running")])
+        spec = run.spec  # past the cap, an item not yet started is still cut, named
+        run.log(kind="item", stage="code", key="3", n=3, task="rcap-code-3")
+        spec["flow"]["stages"][0]["items"] = ["a", "b", "c"]
+        spec["flow"]["stages"][1]["max_items"] = 1
+        store.write_json(run.dir / "run.json", spec)
+        run.log(kind="output", stage="code", key="3", state="done", task="rcap-code-3")
+        self.assertEqual([(i.key, i.state, i.why) for i in runs.state(run)["review"]][2:],
+                         [("2", "running", ""), ("3", "not_run", "past the stage's max_items (1)")])
 
     def test_a_name_is_a_run_or_a_task_never_both(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
@@ -1225,6 +1505,50 @@ class RunsApi(Base):
         self.assertEqual(run.status["phase"], "review")                 # nothing else to run: Claude's
         self.assertEqual([r["kind"] for r in self.notices("nopr")], ["run_done"])
         self.assertEqual(runs.report_of("nopr")["not_run"][0]["key"], "find:1")
+
+    def test_a_code_item_refused_at_its_start_is_no_change_at_review_and_names_no_task(self):
+        # #1531 (2026-11-26): _start logs the item's task before wb start runs, so a code item
+        # refused there (a role with no key, here no price: the same exit 3) read "1 change(s)
+        # at review", and the report named a task that never was
+        self.roles(SPEND_NONE, 5)
+        with mock.patch.object(runs, "spawn", return_value=0):  # the passes run here
+            code, _, err = wb("run", "start", "rr2", "--flow", "build", "--param", "request=Write 42 to answer.txt",
+                              "--budget-usd", "0.5", "--repo", str(self.repo))
+        self.assertEqual(code, 0, err)
+        run = runs.Run("rr2")
+        runs.tick(run)
+        (it,) = runs.state(run)["code"]
+        self.assertEqual((it.state, store.Task(it.task).exists), ("not_run", False))
+        self.assertEqual(run.status["phase"], "review")
+        self.assertEqual(runs.report_of("rr2")["code"], [])
+        (done,) = self.notices("rr2")
+        self.assertIn("1 not run", done["text"])
+        self.assertNotIn("change(s) at review", done["text"])
+        self.assertNotIn("code (", run_wb("run", "report", "rr2"))
+
+    def test_a_run_whose_stage_role_cant_run_is_refused_before_any_driver_as_wb_start_refuses_it(self):
+        # #1532 (2026-11-26): stage_model's None read as the GPU, so the plan said "code
+        # significant (GPU) · estimate $0" for a role on a provider with no key, a driver started,
+        # and every item was refused, said only by the end-of-run notice
+        self.roles("anthropic/claude-haiku-5-5", 5)
+        for dry in ((), ("--dry-run",)):
+            with mock.patch.object(runs, "spawn", return_value=0) as spawned:
+                code, out, err = wb("run", "start", "nk", "--flow", "build", "--param", "request=x",
+                                    "--repo", str(self.repo), *dry)
+            self.assertEqual(code, 3, (out, err))
+            spawned.assert_not_called()
+            self.assertIn("wb: stage code: significant role: anthropic/claude-haiku-5-5 can't run: not in "
+                          "OpenCode's catalog now: ", err)
+            self.assertIn("`opencode auth login anthropic`", err)
+            self.assertNotIn("(GPU)", out)
+            self.assertFalse(runs.Run("nk").exists)
+        # with no hosted.json yet, a working API role is said as API, never the GPU's $0
+        models.hosted_path().unlink()
+        self.roles(SPEND_FLASH, 5)
+        code, out, err = wb("run", "start", "ok", "--flow", "build", "--param", "request=x",
+                            "--repo", str(self.repo), "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("on significant (API)", out)
 
     def test_the_providers_slots_and_a_users_task_waiting_for_one_come_before_a_runs_next_item(self):
         run, _ = self.start("slot", "--budget-usd", "1")
@@ -1411,6 +1735,20 @@ class RunsApi(Base):
         self.assertIn("wb: --context-file", err)
         self.assertNotIn("Traceback", err)
 
+    def test_a_context_past_its_cut_is_said_at_start_and_in_each_spec_it_goes_in(self):
+        # #1519 (2026-11-26): run.json kept it cut, so the spec's cut note never showed and
+        # nothing said the agents missed all past 4,000 characters
+        ctx = Path(self.tmp.name) / "ctx.md"
+        ctx.write_text("x" * 5_990 + "TAILMARKER")
+        flow = {**AUDIT, "stages": [{**AUDIT["stages"][0], "prompt": "Audit area {item} now.\n{context}"},
+                                    *AUDIT["stages"][1:]]}
+        run, out = self.start("long", "--context-file", str(ctx), flow=flow)
+        self.assertIn("context: 6,000 characters, the first 4,000 go in each spec's {context}", out)
+        self.assertEqual(len(run.spec["context"]), 6_000)
+        spec = runs._spec_of(run, runs.stages(run.flow)[0], runs.state(run)["find"][0])
+        self.assertIn("\n[… 2,000 characters cut]", spec)
+        self.assertNotIn("TAILMARKER", spec)
+
 
 class Driver(Base):
     """How the driver runs wb for its items (runs._wb)."""
@@ -1464,17 +1802,20 @@ class Wiring(Base):
             store.write_json(t.dir / "status.json", status)
         return t
 
-    def test_an_open_runs_item_wakes_its_driver_but_its_question_still_wakes_claude(self):
+    def test_an_open_runs_item_wakes_its_driver_with_its_question_too_and_only_a_checkin_wakes_claude(self):
+        # #1506: the driver refuses an item's ask at its next pass, so a question that woke Claude
+        # cost a turn on an answer that lost the race or found the ask closed
         run = self.open_run()
         t = self.item("wr-find-1")
         t.notify("review", "the report")
         t.notify("question", "which file?", id="q1")
-        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["question"])
-        (routed,) = store.read_jsonl(runs.run_dir("wr") / "notify.jsonl")[0]
-        self.assertEqual(routed["kind"], "review")
+        t.notify("checkin", "how is it going?")
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["checkin"])
+        routed = store.read_jsonl(runs.run_dir("wr") / "notify.jsonl")[0]
+        self.assertEqual([r["kind"] for r in routed], ["review", "question"])
         runs.Run("wr").set_status(phase="review")
         t.notify("review", "again")  # the run no longer open: Claude's again
-        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["question", "review"])
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["checkin", "review"])
         self.assertTrue(run.exists)
 
     def test_a_routed_notice_leaves_its_noticed_mark_and_the_driver_acknowledges_it(self):

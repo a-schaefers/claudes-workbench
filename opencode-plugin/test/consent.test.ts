@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { codingGate, gateOf } from '../../mod/hooks/core.ts'
@@ -181,6 +181,26 @@ test('the typed start (#1335) asks on an API model with its typed argv, writes t
     expect(calls).toEqual([['ses_a', 'route', '--dry-run', '--json', '--start', ...argv], ['ses_a', 'start', ...argv]])
     expect(inputs).toEqual([undefined, 'Do x.\n'])                   // the dry run reads no stdin (wb's rule)
     expect(existsSync(join(home, 'route-ok.ses_a.json'))).toBe(true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// #1477 (2026-11-26): a subagent's typed start ran wb as its own child session, so its task was
+// another session's to the lead; wb runs it, and takes its yes, as the root, the form in the child
+test('a subagent\'s typed start asks in its own session and runs wb, and writes the yes, as its lead\'s', async () => {
+  const home = scratch()
+  try {
+    const calls: string[][] = [], asked: string[] = []
+    const d = deps(home, 'yes', GATED, calls)
+    const start = tools({ ...d, root: async s => s === 'ses_kid' ? 'ses_lead' : s,
+      asker: { ask: async s => { asked.push(s); return 'yes' } } }).find(t => t.name === 'start')!
+    expect(await start.execute({ name: 't', spec: 'Do x.\n', model: 'deepseek/x' }, { sessionID: 'ses_kid' }))
+      .toEqual({ content: 'ran start' })
+    expect(asked).toEqual(['ses_kid'])
+    expect(calls.map(c => c[0])).toEqual(['ses_lead', 'ses_lead'])
+    expect(existsSync(join(home, 'route-ok.ses_lead.json'))).toBe(true)
+    expect(existsSync(join(home, 'route-ok.ses_kid.json'))).toBe(false)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -405,6 +425,65 @@ test('the TUI makes the form with the server\'s id, says shown on a conflict too
   await handlers.close!({ data: { sessionID: 's', formID: 'frm_3', message: 'm' } })
   expect(cancelled).toEqual(['frm_3'])
   expect(consentTui({})).toBeUndefined()
+})
+
+// #1486 (2026-11-26): OpenCode's background service sets the plugin up once per location, and the
+// TUI's `shown` and the form's reply reached the service's other location's instance, which had no
+// waiter for the form: every form failed closed with NO_FORM though the user had answered it
+test('a form one location\'s instance asks is shown and answered through another location\'s instance of the same server', async () => {
+  const home = scratch()
+  try {
+    const wb = join(home, 'wb')
+    writeFileSync(wb, `#!/bin/sh\ncase "$*" in *--dry-run*) printf '%s' '${GATED.out}';; *) printf 'ran %s' "$1";; esac\n`)
+    chmodSync(wb, 0o755)
+    type Shown = (input: unknown) => Promise<{ ok: boolean }>
+    const instance = (onEmit: (name: string, data: Record<string, unknown>) => void) => {
+      const queue: unknown[] = [], pulls: ((v: IteratorResult<unknown>) => void)[] = []
+      const added: { name: string; execute: (i: unknown, c: { sessionID: string }) => Promise<{ content: string }> }[] = []
+      const me = {
+        shown: undefined as Shown | undefined,
+        push: (e: unknown) => { const p = pulls.shift(); if (p) p({ done: false, value: e }); else queue.push(e) },
+        added,
+        ctx: {
+          options: { wb, env: { WB_HOME: home } },
+          rpc: { register: async (_def: unknown, h: { shown: Shown }) => {
+            me.shown = h.shown
+            return { dispose: async () => {}, events: { emit: async (name: string, data: Record<string, unknown>) => onEmit(name, data) } }
+          } },
+          event: { subscribe: () => ({ [Symbol.asyncIterator]: () => ({
+            next: () => queue.length ? Promise.resolve({ done: false, value: queue.shift() })
+              : new Promise<IteratorResult<unknown>>(r => pulls.push(r)),
+            return: async () => ({ done: true, value: undefined }) }) }) },
+          session: { get: async () => ({ location: { directory: home } }) },
+          tool: {
+            transform: async (cb: (e: { namespace: (n: unknown) => void; add: (t: never) => void }) => void) =>
+              cb({ namespace: () => {}, add: t => added.push(t) }),
+            hook: async () => {},
+          },
+          permission: { hook: async () => {} },
+        },
+      }
+      return me
+    }
+    // the repo's instance asks; the TUI's shown and the bus's reply reach the home directory's
+    const other = instance(() => {})
+    const asking = instance((name, data) => {
+      if (name !== 'ask') return
+      void (async () => {
+        expect((await other.shown!({ formID: data.formID })).ok).toBe(true)
+        other.push({ type: 'form.replied', data: { id: data.formID, sessionID: data.sessionID, answer: { [ANSWER]: 'yes' } } })
+      })()
+    })
+    const stopOther = await consent(other.ctx as never)
+    const stopAsking = await consent(asking.ctx as never)
+    const route = asking.added.find(t => t.name === 'route')!
+    expect(await route.execute({ args: ['trivial', 'x'] }, { sessionID: 'ses_a' })).toEqual({ content: 'ran route' })
+    expect(existsSync(join(home, 'route-ok.ses_a.json'))).toBe(true)
+    await stopOther!()
+    await stopAsking!()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 test('the server part wires the tools, the RPC and both hooks, and nothing without OpenCode\'s domains', async () => {

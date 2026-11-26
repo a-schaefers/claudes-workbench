@@ -1,7 +1,9 @@
 import { expect, test } from 'bun:test'
 import * as core from '../../mod/hooks/core.ts'
-import { autoCeiling, AWAY_NOTE, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, routesSaid, Upkeep,
-  upkeep, WAKE_OFF_NOTE, WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
+import { ChatLane, lane } from '../chat.ts'
+import { autoCeiling, AWAY_NOTE, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openRuns, openTasks, promptTokens, routesSaid, Upkeep,
+  TASKS_NOTE, upkeep, WAKE_OFF_NOTE, WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
+import { CLAUDE_CODE } from '../../mod/hooks/story.ts'
 
 // The driver's conversation kept (#1315), against an in-memory WB_HOME, a fake wb and a fake
 // session API: `BUN_BE_BUN=1 opencode test opencode-plugin/test/upkeep.test.ts`.
@@ -53,7 +55,7 @@ function entriesHost(list: { key: string; value: unknown }[] = []) {
 function rules(files: Record<string, string>) {
   files[`${HOME}/notes.md`] = 'Always run the tests.\n'
   files[`${HOME}/coding.json`] = JSON.stringify({ mode: 'only' })
-  files[`${HOME}/workflows.json`] = JSON.stringify({ mode: 'on' })
+  files[`${HOME}/workflows.json`] = JSON.stringify({ deepmode: 'on' })
   files['/h/.config/workbench/routes.json'] = JSON.stringify({ roles: { significant: { via: 'api', api: 'p/m' } } })
 }
 
@@ -123,6 +125,37 @@ test('the blocks follow the kernel: no roles block without an API role, the defa
   expect(blocksOf(core, want, true, '', '').map(b => b[0])).toEqual(['workbench-mode'])
   expect(blocksOf(core, want, false, '', '')).toEqual([])
   expect(blocksOf(core, { ...want, coding: 'ask' }, false, '', 't1').map(b => b[0])).toEqual(['claude-coding', 'workbench'])
+})
+
+test('#1515: the open-tasks note follows a task with wb wait, never a bare wb watch, in the mod\'s words', () => {
+  // wb watch follows a task until it closes: a driver that ran it on a task at review waited out
+  // its shell's timeout. wb wait ends when the task needs the driver
+  const note = TASKS_NOTE('t1   review')
+  expect(note.includes('`wb wait <name>`')).toBe(true)
+  expect(note.includes('`wb watch <name>`')).toBe(false)
+  expect(note.endsWith(`\n${CLAUDE_CODE['tasks.pickup']}`)).toBe(true) // the mod's block ends with the same line
+})
+
+test('#1491: a run waiting at review with no task open is said in the workbench entry, its lines alone', async () => {
+  // wb status prints a run's lines after `no open tasks`: dropping the whole text, and asking wb
+  // status only with a task open, hid a run done overnight (a scheduled flow's) from the session
+  const status = 'no open tasks (wb status --all shows closed ones)\nrun aud · flow triage · review · $0 of $0\n  why: its final stage is Claude\'s'
+  const w = world({}, { status })
+  w.files[`${HOME}/runs/aud/status.json`] = JSON.stringify({ phase: WAITING })
+  w.files[`${HOME}/runs/old/status.json`] = JSON.stringify({ phase: 'closed' })
+  const { host } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  await u.refresh('s1')
+  const said = u.sess('s1').put?.get('workbench') ?? ''
+  expect(said.split('\n').slice(1, 3)).toEqual(['run aud · flow triage · review · $0 of $0', "  why: its final stage is Claude's"])
+  expect(said.includes('no open tasks')).toBe(false)
+  expect(openRuns(w.io, HOME)).toEqual([`aud:${WAITING}`])            // a closed run is nothing open
+  // nothing open in wb's answer (another session's run): no entry
+  const quiet = world({}, { status: 'no open tasks (wb status --all shows closed ones)' })
+  quiet.files[`${HOME}/runs/aud/status.json`] = JSON.stringify({ phase: WAITING })
+  const v = new Upkeep(core, entriesHost().host, quiet.io, HOME)
+  await v.refresh('s1')
+  expect(v.sess('s1').put?.has('workbench') ?? false).toBe(false)
 })
 
 test("without OpenCode's entries API the blocks go into the session's own requests' system prompt", async () => {
@@ -195,6 +228,31 @@ test('a prompt the user typed is them back at the terminal: that turn gets no we
   await hooks.get('prompt')!({ sessionID: 's1', prompt: { text: 'carry on' } })
   expect(calls).toEqual(['remove web-chat'])
   await stop!()
+})
+
+// #1492 (2026-11-26): `back` asked whether a TUI showed the session, but the TUI shows a new
+// session only after its first prompt, so a user back from the phone typing in a new session got
+// the away block telling the driver to answer on the phone
+test('a prompt typed in a new session no TUI has shown yet, with the chat lane up, gets no web-chat block', async () => {
+  const w = world({ [`${HOME}/chat/away.json`]: JSON.stringify({ at: 999 }) }, { 'chat away': 'away' })
+  const { host, calls } = entriesHost()
+  const hooks = new Map<string, (e: unknown) => unknown>()
+  ;(host.session as { hook: unknown }).hook = async (name: string, cb: (e: unknown) => unknown) => {
+    hooks.set(name, cb)
+    return { dispose: async () => {} }
+  }
+  ;(host.session as { get: unknown }).get = async () => ({ data: { agent: 'workbench', location: { directory: '/r' } } })
+  ;(host as { options: unknown }).options = { env: { WB_HOME: HOME } }
+  // the lane chat() always makes on this server, which no TUI has told of ses_new
+  lane(() => new ChatLane({ run: async () => ({ ok: true, out: '' }), read: () => undefined, size: () => -1, now: () => 1, pid: 1, home: HOME }))
+  try {
+    const stop = await upkeep(host, core, w.io)
+    await hooks.get('prompt')!({ sessionID: 'ses_new', prompt: { text: 'carry on' } })
+    expect(calls.filter(c => c.startsWith('put ')).map(c => c.slice(0, c.indexOf(':')))).toEqual(['put workbench-mode'])
+    await stop!()
+  } finally {
+    delete (globalThis as Record<string, unknown>).__workbenchChatLane
+  }
 })
 
 test("the workbench-wake block says wakes are off while the plugin's wake option is off, in the mode or with a task open", async () => {
@@ -323,6 +381,20 @@ test("a session's open tasks are those wb start recorded for it, active or waiti
   w.files[`${HOME}/tasks/e/status.json`] = JSON.stringify({ phase: RUNNING })
   w.files[`${HOME}/tasks/e/task.json`] = JSON.stringify({ name: 'e', session: 's1', bench: true })
   expect(openTasks(core, w.io, HOME, 's1').map(t => t.name)).toEqual(['a', 'b'])
+})
+
+test('a task that records no session is the open task of a session near it by directory, never one elsewhere or in ~ (#1493)', () => {
+  // a `wb start` typed in a terminal, or a scheduled flow's: notices.ts wakes the session in its
+  // repo for it, and the session's context names it (wb status as the session, in its directory)
+  const w = world({})
+  task(w.files, 'mine', RUNNING)
+  w.files[`${HOME}/tasks/t9/status.json`] = JSON.stringify({ phase: WAITING })
+  w.files[`${HOME}/tasks/t9/task.json`] = JSON.stringify({ name: 't9', cwd: '/src/app', repo: '/src/app' })
+  const at = (dir: string) => openTasks(core, w.io, HOME, 's1', { dir, home: '/home/u', fold: false }).map(t => t.name)
+  expect(at('/src/app/web')).toEqual(['mine', 't9'])
+  expect(at('/src/other')).toEqual(['mine'])
+  expect(at('/home/u')).toEqual(['mine'])
+  expect(openTasks(core, w.io, HOME, 's1').map(t => t.name)).toEqual(['mine'])
 })
 
 test('the setup takes the kernel from the membrane and registers the prompt, context and compaction hooks', async () => {

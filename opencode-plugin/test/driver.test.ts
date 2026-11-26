@@ -38,6 +38,12 @@ test('a model id is parsed as OpenCode parses provider/id#variant', () => {
   for (const bad of ['', 'nomodel', '/x', 'p/', 'p/x#', 'p/x#a#b', 'p#q/x']) expect(parseRef(bad)).toBeUndefined()
 })
 
+// #1477 (2026-11-26): wb maps a subagent's own shell to its lead by the beat (store.opencode_root)
+test('a subagent session\'s row in the beat names its parent, a lead\'s none', () => {
+  const beat = beatOf(1, undefined, 0, [{ id: 'kid', parentID: 'lead' }, { id: 'lead' }, { id: 'odd', parentID: '' }], new Map())
+  expect(beat.sessions).toEqual({ kid: { parent: 'lead' }, lead: {}, odd: {} })
+})
+
 test('a beat holds every session listed, its last primary request over its selection', () => {
   const used = new Map<string, Used>([['s2', { model: 'ollama/big', used: 99 }]])
   const beat = beatOf(42, '/db', 7, [
@@ -152,6 +158,38 @@ test('the driver is recorded from primary requests only, and a /models pick move
   await stop()
 })
 
+test('two locations\' setups in one server write one beat that carries both sessions\' driver (#1502)', async () => {
+  // OpenCode sets the plugin up once per location and runs a session's model.request hook only in
+  // its own: a Map and a timer per setup wrote the one beat file with one location's `used`, so
+  // the other repository's local driver read as idle and free_gpu unloaded it (2026-11-26)
+  const hooks: ((input: never) => void)[] = []
+  const sessions = { data: [{ id: 'sA', location: { directory: '/repo1' } }, { id: 'sB', location: { directory: '/repoB' } }] }
+  const host = (): DriverHost => ({
+    options: {}, app: { channel: 'latest' },
+    rpc: { register: async () => ({ dispose: async () => {} }) },
+    session: {
+      list: async () => sessions as never,
+      hook: async (_name, cb) => { hooks.push(cb as never); return { dispose: async () => {} } },
+    },
+  })
+  const wb = fakeWb()
+  const stopA = await startDriver(host(), wb.run, 4242)
+  const stopB = await startDriver(host(), wb.run, 4242)
+  hooks[0]!({ sessionID: 'sA', kind: 'primary', model: { providerID: 'ollama', id: 'a' } } as never)
+  hooks[1]!({ sessionID: 'sB', kind: 'primary', model: { providerID: 'ollama', id: 'b' } } as never)
+  await new Promise<void>((r) => setTimeout(() => r(), 1_300))
+  const beats = wb.calls.filter(c => c.args.join(' ') === 'driver beat')
+  expect(beats.length).toBe(1)  // one beat a process, never one per location
+  const sent = JSON.parse(beats[0]!.input!).sessions
+  expect([sent.sA.model, sent.sB.model]).toEqual(['ollama/a', 'ollama/b'])
+  expect(typeof sent.sA.used === 'number' && typeof sent.sB.used === 'number').toBe(true)
+  // the first location's cleanup leaves the other's beat going; the last one's stops it
+  await stopA()
+  expect((globalThis as Record<string, unknown>).__workbenchDriver === undefined).toBe(false)
+  await stopB()
+  expect((globalThis as Record<string, unknown>).__workbenchDriver).toBeUndefined()
+})
+
 test('the pin applies routes.json\'s driver unless it is session or already the session\'s', async () => {
   const picks: object[] = []
   const host: DriverHost = {
@@ -168,6 +206,22 @@ test('the pin applies routes.json\'s driver unless it is session or already the 
   // a wb that can't say: nothing switched
   const broken = async () => ({ code: 3, stdout: '', stderr: 'routes.json can\'t be read' })
   expect(await applyPin(host, 's', broken, new Map())).toEqual({ applied: false, why: 'routes.json can\'t be read' })
+})
+
+test('a pin wb says can\'t run is never switched to, and its why comes back (#1530)', async () => {
+  // OpenCode 2.4.1 switches a session to any id, so a pin with no key failed every turn after /workbench
+  const picks: object[] = []
+  const host: DriverHost = {
+    options: {}, rpc: { register: async () => ({ dispose: async () => {} }) },
+    session: { switchModel: async (input) => { picks.push(input) } },
+  }
+  const why = 'no key for anthropic'
+  const wb = fakeWb({ 'route driver': JSON.stringify({ driver: 'anthropic/m', runs: false, why }) })
+  expect(await applyPin(host, 's', wb.run, new Map())).toEqual(
+    { applied: false, model: 'anthropic/m', why: `anthropic/m not applied: ${why}` })
+  expect(picks).toEqual([])
+  const runs = fakeWb({ 'route driver': JSON.stringify({ driver: 'p/m', runs: true, why: '' }) })
+  expect(await applyPin(host, 's', runs.run, new Map())).toEqual({ applied: true, model: 'p/m' })
 })
 
 test('the driver RPC answers wb driver --json for the session, --once when asked', async () => {

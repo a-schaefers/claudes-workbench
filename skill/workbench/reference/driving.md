@@ -122,6 +122,7 @@ You are the driver, not a spectator. When something tells you the agent is headi
   The same once a session when it makes 40 tool calls without changing a file (an API model's
   more, by its window): "make the first edit now … or finish"; a second time in that session is
   stopped, "…, even after a nudge", and so is a fresh session's first if no file changed since.
+  Never a report task (`--report`): it can't edit, and its nudge says to send the result.
 - A note the runner never delivered (the round stopped first) is in the stuck report. `wb resume`
   carries it; `wb feedback` and `wb next` drop it and say so: put it in the feedback if it still
   matters.
