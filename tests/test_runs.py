@@ -1226,6 +1226,26 @@ class RunsApi(Base):
         self.assertEqual([r["kind"] for r in self.notices("nopr")], ["run_done"])
         self.assertEqual(runs.report_of("nopr")["not_run"][0]["key"], "find:1")
 
+    def test_a_code_item_refused_at_its_start_is_no_change_at_review_and_names_no_task(self):
+        # #1531 (2026-11-26): _start logs the item's task before wb start runs, so a code item
+        # refused there (a role with no key, here no price: the same exit 3) read "1 change(s)
+        # at review", and the report named a task that never was
+        self.roles(SPEND_NONE, 5)
+        with mock.patch.object(runs, "spawn", return_value=0):  # the passes run here
+            code, _, err = wb("run", "start", "rr2", "--flow", "build", "--param", "request=Write 42 to answer.txt",
+                              "--budget-usd", "0.5", "--repo", str(self.repo))
+        self.assertEqual(code, 0, err)
+        run = runs.Run("rr2")
+        runs.tick(run)
+        (it,) = runs.state(run)["code"]
+        self.assertEqual((it.state, store.Task(it.task).exists), ("not_run", False))
+        self.assertEqual(run.status["phase"], "review")
+        self.assertEqual(runs.report_of("rr2")["code"], [])
+        (done,) = self.notices("rr2")
+        self.assertIn("1 not run", done["text"])
+        self.assertNotIn("change(s) at review", done["text"])
+        self.assertNotIn("code (", run_wb("run", "report", "rr2"))
+
     def test_the_providers_slots_and_a_users_task_waiting_for_one_come_before_a_runs_next_item(self):
         run, _ = self.start("slot", "--budget-usd", "1")
         m = models.lookup(SPEND_FLASH)

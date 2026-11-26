@@ -1728,7 +1728,10 @@ def report_of(name: str) -> dict:
             continue
         for it in items or ():
             k = f"{s['id']}:{it.key}"
-            if is_code(s) and it.task:
+            # only a task there is: _start logs the item's task before wb start runs, so a code
+            # item refused at its start (a role with no key) read "1 change(s) at review", and
+            # the report named a task that never was (#1531, 2026-11-26), as cmd_close filters
+            if is_code(s) and it.task and store.Task(it.task).exists:
                 rep["code"].append({"key": k, "task": it.task, "phase": store.Task(it.task).status.get("phase")})
             if it.state == "done" and s["id"] == feeds and not is_code(s):
                 rep["final"].append({"key": k, "result": it.output, "trail": trail(it)})
