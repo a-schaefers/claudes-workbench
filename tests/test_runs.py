@@ -633,6 +633,25 @@ class Customized(Base):
         self.assertIn("audit (shipped): ", wb("run", "flows")[1])
         self.assertEqual(wb("flow", "reset", "audit")[0], 1)
 
+    def test_a_second_reset_of_a_flow_or_card_keeps_the_first_ones_copy_beside_its_own(self):
+        # #1520 (2026-11-26): the second reset replaced the first's .bak, the first edit lost
+        flow = Path(os.environ["WB_FLOWS"]) / "build.json"
+        card = Path(os.environ["WB_ROLES"]) / "find.md"
+        for v in ("V1", "V2", "V3"):
+            self.assertEqual(wb("flow", "copy", "build")[0], 0)
+            flow.write_text(json.dumps({**json.loads(flow.read_text()), "description": f"MY {v} EDIT"}))
+            self.assertEqual(wb("card", "copy", "find")[0], 0)
+            card.write_text(card.read_text() + f"\nMY {v} EDIT\n")
+            code, out, err = wb("flow", "reset", "build")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(wb("card", "reset", "find")[0], 0)
+        self.assertIn(f"yours is kept as {flow}.bak.3", out)  # the line names the file it wrote
+        for mine in (flow, card):
+            kept = {p.name: p.read_text() for p in mine.parent.glob(mine.name + ".bak*")}
+            self.assertEqual(sorted(kept), [f"{mine.name}.bak", f"{mine.name}.bak.2", f"{mine.name}.bak.3"])
+            for v, name in zip(("V1", "V2", "V3"), sorted(kept)):
+                self.assertIn(f"MY {v} EDIT", kept[name])
+
 
 class ScheduledFlows(Base):
     """#1295: `wb schedule add --flow` fires `wb run start` itself, no Claude on the unit's PATH."""

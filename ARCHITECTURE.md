@@ -9558,7 +9558,7 @@ fix; schemas `agent/schemas/` findings (`maxItems` 12), verdict, judgments, revi
 `.workbench/flows/` is listed (`wb run flows`) as "read it first"; `--flow` never takes it, `--plan` does.
 **Shadowed shipped ones** (#1295): a user's card, schema or flow with a shipped name wins (`cards.card_path`,
 `runs.flow_names`), so `wb card copy|reset <name> [--schema]` and `wb flow copy|reset <name>` make the copy (its
-`from` the shipped file's git blob sha, `cards.blob_sha`, computed without git) and set it aside (`.bak`, never
+`from` the shipped file's git blob sha, `cards.blob_sha`, computed without git) and set it aside (`.bak`, then `.bak.2`, `.bak.3`… when taken, #1520: never
 deleted); `wb card list` and `wb run flows` mark a copy `shadows shipped`, and `; shipped changed since` once a `wb
 update` moved the shipped blob (`cards.shadow_mark`), so an improved shipped one is never lost unseen behind an
 older copy (Goose's prompt templates' customized and reset).
@@ -9787,7 +9787,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb run close <run>` | | Refused while a code item is open (accept or discard it); stops the driver, discards report items never taken, writes `result.json`, phase `closed`. |
 | `wb run flows` | `--repo DIR`, `--json` (`runs.flow_rows`: `{name, where, description, mark, command, params}`, the hosts' read for the flows' slash commands) | Every flow: yours (`$WB_FLOWS`; `shadows shipped`, `; shipped changed since` when the shipped file's blob is no longer the copy's `from`: `cards.shadow_mark`), shipped (`agent/flows/`), a repo's `.workbench/flows/` (read it first, then `--plan`), each `/<command>` it has (never a repo's). |
 | `wb flow copy <name>` | `--force` | #1295: the shipped flow to `$WB_FLOWS/<name>.json` as yours, with `from` (its git blob sha, `cards.blob_sha`); refused when nothing shipped has the name, or yours is there without `--force` (`cards.copy_shipped`). |
-| `wb flow reset <name>` | | The shipped flow again: yours moved to `<name>.json.bak`, never deleted (`cards.reset_shipped`); refused with no copy of yours, or nothing shipped by its name. |
+| `wb flow reset <name>` | | The shipped flow again: yours moved to `<name>.json.bak` (`.bak.2`, … when taken, #1520), never deleted, the line naming it (`cards.reset_shipped`); refused with no copy of yours, or nothing shipped by its name. |
 | `wb card list` | `--schema` | Every role card (`cards.rows`): yours (`$WB_ROLES`) or shipped, with the same marks as `wb run flows`, and its description; `--schema` the schemas (`$WB_ROLES/schemas`, `agent/schemas`). |
 | `wb card copy <name>` | `--force`, `--schema` | A shipped card (or schema) to yours to edit, with `from` (a card's frontmatter key, a schema's top-level one, which `schema.load` drops); as `wb flow copy`. |
 | `wb card reset <name>` | `--schema` | The shipped card (or schema) again: yours moved to `.bak`; as `wb flow reset`. |
@@ -10069,9 +10069,9 @@ $WB_HOME (~/.local/state/workbench)
   savings.json ($WB_SAVINGS)     {"kwh_price": N} (wb savings --price; off removes it; other keys kept)
   AGENTS.md ($WB_AGENTS_MD)      the user's own file for agents, every project's (*What the agent knows*, #1061); wb only reads it
   flows/*.json ($WB_FLOWS)       the user's deep-workflow flows, before the shipped agent/flows/ (*Deep workflows*, #1278); wb writes one only at wb flow
-                                 import or copy (a copy's `from`: the shipped file's git blob sha, #1295), and reset moves it to <name>.json.bak
+                                 import or copy (a copy's `from`: the shipped file's git blob sha, #1295), and reset moves it to <name>.json.bak (.bak.2, … when taken, #1520)
   roles/*.md ($WB_ROLES)         the user's role cards, before the shipped agent/roles/; roles/schemas/*.json, before agent/schemas/ (#1278); wb card
-                                 copy [--schema] writes one with `from` (a card's frontmatter key, a schema's top-level key, dropped by schema.load), reset moves it to .bak
+                                 copy [--schema] writes one with `from` (a card's frontmatter key, a schema's top-level key, dropped by schema.load), reset moves it to .bak (.bak.2, … when taken)
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
                                  "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "roles": {"significant"|"trivial"|"writing":
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
