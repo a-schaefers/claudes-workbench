@@ -5,10 +5,12 @@ so `python3 -m unittest` runs it for a TypeScript, Python or docs change. CI's k
 Each failure names its fix. The Checker class breaks a copy of the tree in each way a check must
 catch (never the tree itself) and asserts that the break fails by name."""
 import hashlib
+import importlib
 import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -21,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import kernel  # noqa: E402
-from workbench import store  # noqa: E402
+from workbench import spend, store  # noqa: E402
 
 FIX = "run python3 scripts/kernel.py build"
 
@@ -115,6 +117,14 @@ class Tables(unittest.TestCase):
         self.assertEqual(v["closed"], sorted(store.CLOSED))
         self.assertEqual(v["noAnswer"], "No answer arrived in time.")
         self.assertIsInstance(v["chatStaleMs"], float)
+        self.assertEqual(v["wakeOpening"], spend.WAKE_OPENING)
+
+    def test_spends_wake_pattern_is_built_from_the_opening_the_mod_writes(self):
+        # the mod's wakes start with core.ts's WAKE_OPENING, from Tables, from spend.WAKE_OPENING:
+        # one string, so a reworded wake can't stop charging turns to their task (#557, #1356)
+        self.assertEqual(spend.WAKE.match(f"{spend.WAKE_OPENING} `fix-it` is ready").group(1), "fix-it")
+        self.assertEqual(spend.WAKE.match("The workbench plugin sent a message: [workbench] Task `a-b` x").group(1), "a-b")
+        self.assertIsNone(spend.WAKE.match("[workbench]xTask `a` x"))
 
     def test_a_string_with_a_quote_a_backslash_or_non_ascii_is_a_purescript_literal(self):
         self.assertEqual(kernel.purs_string('a"b\\c'), '"a\\"b\\\\c"')
@@ -170,6 +180,22 @@ class Imports(unittest.TestCase):
             errors = kernel.lint_sources(Path(tmp))
         self.assertEqual(errors, ["kernel/src/Helper/Clock.purs:6: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)",
                                   "kernel/src/Helper/Clock.purs:4: imports Effect.Unsafe, denied (kernel/BOUNDARY.md, *Denied imports*)"])
+
+    def test_a_comment_inside_an_import_or_a_foreign_import_hides_neither_from_the_source_lint(self):
+        # the 2026-11-25 adversarial review: `import {- -} Effect.Unsafe` passed the offline lint,
+        # and only kernel.py's corefn lint, which needs the toolchain, caught it
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "kernel" / "src" / "Helper"
+            src.mkdir(parents=True)
+            (src / "Clock.purs").write_text(
+                "module Helper.Clock where\n\nimport Prelude\nimport {- {- nested -} -} Effect.Unsafe (unsafePerformEffect)\n"
+                "{- a -} import -- why\n  Unsafe.Coerce (unsafeCoerce)\nimport Data.Array ((-->))\n"
+                "foreign {- x -} import now :: Number\n")
+            errors = kernel.lint_sources(Path(tmp))
+        self.assertEqual(errors, ["kernel/src/Helper/Clock.purs:8: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)",
+                                  "kernel/src/Helper/Clock.purs:4: imports Effect.Unsafe, denied (kernel/BOUNDARY.md, *Denied imports*)",
+                                  "kernel/src/Helper/Clock.purs:5: imports Unsafe.Coerce, denied (kernel/BOUNDARY.md, *Denied imports*)"])
+        self.assertEqual(kernel.uncommented("a -- b\nc {- d\n-} e --> f"), "a     \nc     \n   e --> f")
 
 
 def con(q: str) -> dict:
@@ -333,6 +359,96 @@ class Toolchain(unittest.TestCase):
                 self.assertRegex(integrity, r"^sha256-[A-Za-z0-9+/]+=*$")
 
 
+class Props(unittest.TestCase):
+    """`kernel.py props`: Props.purs's seeded properties under Bun, run by `check` (#1356)."""
+
+    def test_props_run_on_bun_else_opencodes_bun_and_refuse_by_name_with_neither(self):
+        def which(found):
+            return lambda name: f"/bin/{name}" if name in found else None
+        with mock.patch("shutil.which", which({"bun", "opencode"})):
+            self.assertEqual(kernel.bun(), ("/bin/bun", {}))
+        with mock.patch("shutil.which", which({"opencode"})):
+            self.assertEqual(kernel.bun(), ("/bin/opencode", {"BUN_BE_BUN": "1"}))
+        with mock.patch("shutil.which", which(set())), self.assertRaises(kernel.Refused) as e:
+            kernel.props(into="/nonexistent")
+        self.assertIn("props need Bun: neither bun nor opencode", str(e.exception))
+
+    def test_props_test_runs_the_plans_seeds_and_count_within_ten_seconds(self):
+        text = (kernel.paths()["test"] / kernel.PROPS_TEST).read_text()
+        self.assertIn("const SEEDS = [20261124, 1, 2]", text)
+        self.assertIn("const N = 1000", text)
+        self.assertIn("}, 10_000)", text)
+        self.assertIn("module Props (props) where", (kernel.paths()["test"] / "Props.purs").read_text())
+
+    def test_check_runs_the_props(self):
+        with mock.patch.object(kernel, "offline_errors", return_value=[]), \
+                mock.patch.object(kernel, "ensure", return_value=Path("/c")), \
+                mock.patch.object(kernel, "compile_kernel", return_value=(b"js", b"dts")), \
+                mock.patch.object(kernel, "budget_errors", return_value=[]), \
+                mock.patch.object(kernel, "props", side_effect=kernel.Refused("props failed (exit 1):\nseed 1 case 7")):
+            self.assertIn("props failed (exit 1):\nseed 1 case 7", kernel.check(say=lambda _: None))
+
+
+def golden_dump() -> list:
+    """Every golden, as Bun reads golden/index.ts: the cases are TypeScript, so Bun (bun, or
+    OpenCode's) evaluates them rather than a parser here."""
+    runner, env = kernel.bun()
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "dump.ts"
+        index = ROOT / "mod" / "hooks" / "golden" / "index.ts"
+        script.write_text(f"import {{ GOLDENS }} from {json.dumps(str(index))}\nconsole.log(JSON.stringify(GOLDENS))\n")
+        r = subprocess.run([runner, "run", str(script)], cwd=tmp, env={**os.environ, **env},
+                           capture_output=True, text=True, timeout=120)
+    if r.returncode:
+        raise AssertionError(f"Bun could not read the goldens: {r.stderr[-2000:]}")
+    return json.loads(r.stdout)
+
+
+def twin(name: str):
+    """A golden case's `twin`: `kernel.<name>` is scripts/kernel.py's, `<mod>.<name>` workbench's."""
+    mod, _, attr = name.rpartition(".")
+    return getattr(kernel if mod == "kernel" else importlib.import_module(f"workbench.{mod}"), attr)
+
+
+def twin_failures(goldens: list) -> list[str]:
+    out = []
+    for g in goldens:
+        for i, c in enumerate(g["cases"], 1):
+            if "twin" not in c:
+                continue
+            f = twin(c["twin"])
+            got = (f() if callable(f) else f) if c["in"] is None else f(**c["in"])
+            if got != c["out"]:
+                out.append(f"{g['module']} #{i} {c['fn']} ({c['why']}): its twin {c['twin']} gave {got!r}, the golden says {c['out']!r}")
+    return out
+
+
+class Twins(unittest.TestCase):
+    """Each golden case with a `twin` holds on that Python name too, called with the case's `in` as
+    keyword arguments (a value export's twin with none): the kernel and wb's own code give one
+    answer (kernel/BOUNDARY.md, *Move protocol*)."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            kernel.bun()
+        except kernel.Refused:
+            raise unittest.SkipTest("the goldens are TypeScript: Bun reads them (bun, or OpenCode's)") from None
+        cls.goldens = golden_dump()
+
+    def test_every_golden_with_a_twin_holds_on_its_python_twin(self):
+        self.assertIn("kernel.tables_values", [c.get("twin") for g in self.goldens for c in g["cases"]])
+        self.assertEqual(twin_failures(self.goldens), [])
+
+    def test_a_golden_its_twin_disagrees_with_fails_naming_both_answers(self):
+        wrong = [{"module": "Kernel.Tables", "cases": [{"fn": "tables", "in": None, "why": "stale", "twin": "kernel.tables_values",
+                                                        "out": {**kernel.tables_values(), "chatStaleMs": 1}}]}]
+        got = twin_failures(wrong)
+        self.assertEqual(len(got), 1)
+        self.assertIn("Kernel.Tables #1 tables (stale): its twin kernel.tables_values gave", got[0])
+        self.assertIn("'chatStaleMs': 1,", got[0])
+
+
 class Checker(unittest.TestCase):
     """Each way the boundary can break, made in a copy: each must fail by name."""
 
@@ -341,7 +457,7 @@ class Checker(unittest.TestCase):
         self.root = self.tmp / "tree"
         for d in ("kernel", "mod/hooks/golden"):
             shutil.copytree(ROOT / d, self.root / d)
-        for f in ("kernel.js", "kernel.d.ts", "core.ts"):
+        for f in ("kernel.js", "kernel.d.ts", "core.ts", "register.tsx", "tasks.ts"):
             shutil.copy(ROOT / "mod/hooks" / f, self.root / "mod/hooks" / f)
         shutil.copytree(ROOT / "opencode-plugin", self.root / "opencode-plugin")
         self.assertEqual(kernel.offline_errors(self.root), [], "the copy starts clean")
@@ -381,6 +497,10 @@ class Checker(unittest.TestCase):
             "module Helper.Clock (sneaky) where\n\nimport\n  Effect.Unsafe (unsafePerformEffect)\n")
         self.assertIn("kernel/src/Helper/Clock.purs:3: imports Effect.Unsafe, denied", self.errors())
 
+    def test_an_effect_in_the_props(self):
+        self.edit("kernel/test/Props.purs", "import Prelude\n", "import Prelude\nimport Effect.Console (log)\n")
+        self.assertIn("kernel/test/Props.purs:8: imports Effect.Console, denied", self.errors())
+
     def test_a_foreign_import(self):
         self.edit("kernel/src/Kernel/Phase.purs", "import Prelude\n", "import Prelude\nforeign import now :: Number\n")
         self.assertIn("a foreign import", self.errors())
@@ -414,9 +534,15 @@ class Checker(unittest.TestCase):
         self.assertIn("opencode-plugin/notices.ts:1: a phase literal", self.errors())
 
     def test_a_replaced_name_still_defined(self):
-        self.edit("kernel/BOUNDARY.md", "| born:#1356 | core.ts; register.tsx and tasks.ts from #1325's M1 |\n| `phaseOf`",
-                  "| mod/hooks/core.ts:ACTIVE | core.ts |\n| `phaseOf`")
+        self.edit("kernel/BOUNDARY.md", "mod/hooks/tasks.ts:CLOSED | core.ts;", "mod/hooks/tasks.ts:CLOSED, mod/hooks/core.ts:ACTIVE | core.ts;")
         self.assertIn("mod/hooks/core.ts:ACTIVE is still defined", self.errors())
+
+    def test_a_hand_copy_of_a_table_back_in_the_mod(self):
+        self.edit("mod/hooks/register.tsx", "import { ACTIVE, CHAT_STALE_MS, NEEDS,", "import { ACTIVE, CHAT_STALE_MS,")
+        self.edit("mod/hooks/register.tsx", "\nexport function attachedLines", "\nconst NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])\nexport function attachedLines")
+        self.assertIn("mod/hooks/register.tsx:NEEDS is still defined", self.errors())
+        self.edit("mod/hooks/tasks.ts", "import { CLOSED } from './core'\n", "export const CLOSED = new Set(['accepted', 'discarded'])\n")
+        self.assertIn("mod/hooks/tasks.ts:CLOSED is still defined", self.errors())
 
     def test_an_export_over_budget(self):
         self.edit("kernel/BOUNDARY.md", "| exports | 12 |", "| exports | 1 |")

@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import cards, gitops, meter, models, routes, store
+from . import cards, gitops, meter, models, routes, spend, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED = PKG_ROOT / "agent" / "flows"
@@ -493,8 +493,8 @@ class Run:
     def notify(self, kind: str, text: str, **extra) -> dict:
         """A run notice in the global notify.jsonl, `{ts, run, kind, text}`: the one wake Claude
         gets for a run's checkpoint, pause, stop, failure or end, its text the wake whole (it opens
-        `[workbench] Run `<run>``, spend.WAKE's), so a host relays it as it is. Journaled too."""
-        text = f"[workbench] Run `{self.name}` {HEADLINE[kind]}: {text}"
+        `[workbench] Run `<run>``, spend.RUN_WAKE's), so a host relays it as it is. Journaled too."""
+        text = f"{spend.RUN_WAKE_OPENING} `{self.name}` {HEADLINE[kind]}: {text}"
         row = store.append_jsonl(store.home() / "notify.jsonl",
                                  {"ts": store.now(), "run": self.name, "kind": kind, "text": text, **extra},
                                  after=self.acked)

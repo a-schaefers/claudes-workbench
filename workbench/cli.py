@@ -28,8 +28,8 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, cards, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, optimize, patches, progress, results, router, routes, runs, savings, scan, skills, stats,
-               store, transcript, tuning, verify, webpush)
+               media, models, ocplugin, optimize, patches, progress, results, router, routes, runs, savings, scan,
+               skills, stats, store, transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from . import keyhole
@@ -1989,6 +1989,10 @@ def cmd_start(a):
         **({"claude_pid": int(pid), "claude_start": models._started(int(pid)),
             "claude_machine": store.machine()}
            if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
+        # or the OpenCode driver session whose tool or shell ran it (#1309): its id, never a pid
+        # (shells run in OpenCode's long-lived service), and `driver` saying whose it is
+        **({"session": oc, "driver": store.driver_record(oc)}
+           if not sid and (oc := store.opencode_session()) else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         # the weights behind the id: a record on other weights under it isn't this model's (#726)
         **({"weights_id": w} if (w := models.identity(m)) else {}),
@@ -2720,7 +2724,11 @@ def cmd_adopt(a):
     ran `wb start` ended, every live session near the task, and the one resumed with `claude
     --resume`, owned it for good, and both woke for its review. The resumed session (its id is the
     task's `session`) stamps its new process the same way. Refused (exit 1) while the recorded
-    process lives and isn't the claimer."""
+    process lives and isn't the claimer. From an OpenCode driver (#1309): `_adopt_opencode`."""
+    if a.pid is None and store.caller_kind() == "opencode":
+        return _adopt_opencode(a)
+    if not a.session:  # argparse's own words: required under Claude Code, as before #1309
+        die("wb adopt: the following arguments are required: --session", 2)
     task = need(a.name)
     pid = a.pid or (int(p) if (p := os.environ.get("CLAUDE_PID", "")).isdigit() else os.getppid())
     start = models._started(pid)
@@ -2734,13 +2742,49 @@ def cmd_adopt(a):
             return
         if not spec.get("session"):
             die(f"{a.name} records no session: it goes by directory")
-        if not _gone(old, spec.get("claude_start"), spec.get("claude_machine")):
+        if store.driver_of(spec) == "opencode":  # an OpenCode session's: by its heartbeat (#1309)
+            if not _owner_gone(spec):
+                die(f"{a.name} belongs to an OpenCode session ({spec['session']}) not known to be gone")
+            spec.pop("driver")
+        elif not _gone(old, spec.get("claude_start"), spec.get("claude_machine")):
             die(f"{a.name} belongs to a live Claude Code session (pid {old}"
                 + (" on another machine" if store.elsewhere({"machine": spec.get("claude_machine")})
                    else "") + ")")
         if spec.get("session") not in a.session:
             spec["session"] = a.session[0]
         spec.update(claude_pid=pid, claude_start=start, claude_machine=store.machine())
+        store.write_json(task.dir / "task.json", spec)
+    print(f"adopted {a.name}")
+
+
+def _adopt_opencode(a):
+    """`wb adopt <task>` from an OpenCode driver's tool or shell (#1309): the task becomes this
+    session's (`--session`, else OPENCODE_SESSION_ID): task.json `session` and `driver`
+    (store.driver_record), a Claude Code task's `claude_pid`, `claude_start` and `claude_machine`
+    dropped. Refused (exit 1) while the recorded owner may live: an OpenCode session not `gone`
+    by the heartbeat (store.driver_state), a Claude Code process not gone (`_gone`). Unlike the
+    directory rule, it takes a task across drivers: a user who moves a project from Claude Code
+    to OpenCode, or back, hands its tasks over with it."""
+    sid = (a.session or [store.opencode_session()])[0]
+    if not store.SESSION_RE.fullmatch(sid or ""):
+        die("wb adopt: no OpenCode session to give the task to (--session ID)")
+    task = need(a.name)
+    with store.locked(runner.lock_file(a.name, "cmd")):
+        spec = dict(task.spec)
+        if spec.get("session") == sid and store.driver_of(spec) == "opencode":
+            print(f"{a.name} is this session's already")
+            return
+        if not spec.get("session"):
+            die(f"{a.name} records no session: it goes by directory")
+        if not _owner_gone(spec):
+            if store.driver_of(spec) == "opencode":
+                die(f"{a.name} belongs to an OpenCode session ({spec['session']}) not known to be gone")
+            pid = spec.get("claude_pid")  # none recorded: unknown, not gone, as _gone says
+            die(f"{a.name} belongs to a Claude Code session not known to be gone (no pid recorded)"
+                if pid is None else f"{a.name} belongs to a live Claude Code session (pid {pid})")
+        for k in ("claude_pid", "claude_start", "claude_machine"):
+            spec.pop(k, None)
+        spec.update(session=sid, driver=store.driver_record(sid))
         store.write_json(task.dir / "task.json", spec)
     print(f"adopted {a.name}")
 
@@ -2782,7 +2826,7 @@ def cmd_wait(a):
     if a.name and (a.repo or a.session or a.all_sessions or getattr(a, "backlog", None)):
         die("--repo, --session, --all-sessions and --backlog go with a bare wb wait")
     batch = getattr(a, "backlog", None)  # one batch's tasks alone: a scheduled run's (#1204)
-    where, sessions = (None, None) if a.name or batch else _caller(a)
+    where, sessions, kind = (None, None, None) if a.name or batch else _caller(a)
     while True:
         for t in [need(a.name)] if a.name else store.all_tasks():
             if t.status.get("phase") in LIVE:
@@ -2799,7 +2843,7 @@ def cmd_wait(a):
         # acknowledged a notice its owner's mod then never woke for (#696)
         theirs = ({t.name for t in store.all_tasks() if t.spec.get("backlog") != batch} if batch
                   else set() if a.name or not (where or sessions) else {
-                      t.name for t in _scope(store.all_tasks(), where, sessions)[1]})
+                      t.name for t in _scope(store.all_tasks(), where, sessions, kind)[1]})
         for row in reversed(rows):
             if a.name and row["task"] != a.name or row["task"] in theirs:
                 continue
@@ -2907,7 +2951,16 @@ def _gone(pid, start=None, machine=None) -> bool:
     return not models._alive(pid, start if isinstance(start, str) else None)
 
 
-def _scope(tasks, where, sessions=None):
+def _owner_gone(spec: dict) -> bool:
+    """Whether the driver session a task records is gone, so the directory rule may hand it on:
+    a Claude Code task's process (`_gone`), an OpenCode task's session by its store's heartbeat
+    (store.driver_state: only `gone`, never `unknown`, #1309)."""
+    if store.driver_of(spec) == "opencode":  # against the store it recorded, never another's
+        return store.driver_state(spec.get("session"), spec.get("driver")) == "gone"
+    return _gone(spec.get("claude_pid"), spec.get("claude_start"), spec.get("claude_machine"))
+
+
+def _scope(tasks, where, sessions=None, kind=None):
     """The tasks of one Claude Code session, as the mod names it: `sessions` (`--session`, every
     id its process has had: /clear starts another) and `where` (`--repo`, its directory). A task
     `wb start` recorded a session for (task.json `session`) is that session's, wherever it ran;
@@ -2923,7 +2976,10 @@ def _scope(tasks, where, sessions=None):
     The others belong to another session, which its mod wakes and its quit commands stop (the
     2026-11-16 audit: two projects at once, one session's /workbench-quit stopped the other's
     agents; the 0.90 review: a task started from ~ belonged to every session under it, and one
-    started after a `cd` elsewhere to none). Returns (mine, others)."""
+    started after a `cd` elsewhere to none). ``kind``: the driver the sessions are (`claude` when
+    None, as the mod's; `opencode`, #1309): a task of the other driver's is never claimed by
+    directory, only by its own id, so the Claude Code mod and an OpenCode session never take each
+    other's tasks, the gone ones included (`wb adopt` hands one across). Returns (mine, others)."""
     if not where and not sessions:
         return list(tasks), []
     # real paths on both sides, in lower case where the file system ignores case (macOS): a
@@ -2950,8 +3006,9 @@ def _scope(tasks, where, sessions=None):
         # there adopts it, which near (never there) left nobody's (#1403, 2026-11-25). Only
         # here: a task without a session started in ~ stays no ~ session's (the 0.90 review)
         if sessions and sid:
-            ok = sid in sessions or (near or here is not None and cwd == here) and _gone(
-                t.spec.get("claude_pid"), t.spec.get("claude_start"), t.spec.get("claude_machine"))
+            store.driver_fill(t)  # an OpenCode task with no server recorded, from today's beat
+            ok = sid in sessions or (near or here is not None and cwd == here) \
+                and store.driver_of(t.spec) == (kind or "claude") and _owner_gone(t.spec)
         elif here is None or (not cwd and not repo):
             ok = True
         else:
@@ -2966,18 +3023,23 @@ def _caller(a) -> tuple:
     every id its process has had (`claude-sessions/<CLAUDE_PID>`, store.claude_sessions) and the
     directory it runs in; `--all-sessions`, or a terminal, every session's. Plain `wb status`,
     which the skill and the compaction note send Claude to, listed every session's open tasks
-    as one, so one session could review, accept or discard another's (#693)."""
+    as one, so one session could review, accept or discard another's (#693). From an OpenCode
+    driver's tool or shell (store.opencode_session), that session's: its one id (an OpenCode
+    session keeps it) and the directory (#1309). The third value is the driver (_scope's `kind`):
+    `--session` given under an OpenCode driver is OpenCode's, else Claude Code's, as the mod's."""
     repo, sessions = getattr(a, "repo", None), getattr(a, "session", None)
+    kind = "opencode" if store.caller_kind() == "opencode" else "claude"
     if repo or sessions or getattr(a, "all_sessions", False):
-        return repo, sessions
+        return repo, sessions, kind
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not sid:
-        return None, None
+        oc = store.opencode_session()
+        return (os.getcwd(), [oc], "opencode") if oc else (None, None, None)
     pid = os.environ.get("CLAUDE_PID", "")
     # this process's ids only: a dead one's under the same pid were taken for its own (#787)
     ids = list(dict.fromkeys([*(store.claude_sessions(pid, start=models._started(int(pid)))
                                 if pid.isdigit() else []), sid]))
-    return os.getcwd(), ids
+    return os.getcwd(), ids, "claude"
 
 
 def _others_line(others, what):
@@ -3807,7 +3869,7 @@ def cmd_settings(a):
         said = done["said"]
         print(said if said.startswith("wb:") else f"wb: {said}", file=sys.stderr)
         sys.exit(3)
-    settings.record(before, a.key, a.value, done, "claude" if os.environ.get("CLAUDECODE") == "1" else "terminal")
+    settings.record(before, a.key, a.value, done, store.caller_kind())  # agent, claude, opencode (#1309), terminal
     print(done["said"])
     if done.get("help"):
         print(done["help"])
@@ -3828,7 +3890,17 @@ API_RUNS = True
 
 def gate_refusal(what: str, command: str) -> str:
     """The refusal under Claude Code when the mod's dialog approved none of this (#1014), as
-    patches' for a send (#1005): nothing Claude can type is the user's yes."""
+    patches' for a send (#1005): nothing Claude can type is the user's yes. Under an OpenCode
+    driver (#1309) the same, naming the workbench plugin: nothing the driver types is either. In an
+    agent's shell (WB_TASK, #1310) no dialog is the agent's: its reviewer or the user decides."""
+    if store.caller_kind() == "agent":
+        return (f"in an agent's shell {what} only on the user's yes in the driver's dialog, and the "
+                f"user approved none for this change, so nothing changed. Ask the reviewer "
+                f"(ask_reviewer); or the user runs it in a terminal of their own: {command}")
+    if store.caller_kind() == "opencode":
+        return (f"in OpenCode {what} only through the workbench plugin's dialog, and the user "
+                f"approved none for this change, so nothing changed (is the plugin loaded?). Or "
+                f"the user runs it in a terminal of their own: {command}")
     return (f"in Claude Code {what} only through the workbench mod's dialog, and the user approved "
             f"none for this change, so nothing changed (is the mod loaded? wb doctor says). Or the "
             f"user runs it in a terminal of their own: {command}")
@@ -3978,9 +4050,10 @@ def start_line(name: str, m: models.Model) -> str:
 
 
 def start_gate(name: str, m: models.Model) -> None:
-    """Under Claude Code an API --model starts only on the mod's dialog's yes (#1014); exit 3
-    otherwise. GPU models pass as before."""
-    if m.kind != "api" or os.environ.get("CLAUDECODE") != "1":
+    """Under Claude Code, an OpenCode driver or an agent's shell (store.under_model: #1309,
+    #1310), an API --model starts only on the host's dialog's yes (#1014); exit 3 otherwise. GPU
+    models pass as before."""
+    if m.kind != "api" or not store.under_model():
         return
     if not routes.approved({"start": {"task": name, "model": m.id}, "change": start_line(name, m)}):
         die(gate_refusal("an API model starts", f"wb start {name} … --model {m.id}"), 3)
@@ -4097,7 +4170,7 @@ def _route_show(as_json: bool) -> None:
         made = [(row[t], row.get(b)) for t, b in keys if isinstance(row.get(t), (int, float))]
         if made:
             ts, by = max(made, key=lambda x: x[0])
-            bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
+            bits.append(f"set by {_by_word(by)} {time.strftime('%m-%d', time.localtime(ts))}")
         if fb := row.get("fallback"):  # #1196: where its code goes when its provider is down or out of credit
             bits.append(f"fallback {routes.fallback_name(fb, row['gpu'])}" + (
                 f" ({_who(fb)})" if fb != routes.FALLBACK_GPU else "")
@@ -4414,18 +4487,20 @@ def _route_apply(a, argv: list[str], changed) -> None:
         else:
             print(ch.line or "unchanged")
         return
-    # the web app's Settings (#1279): its server runs wb with WB_ACTOR=web and Claude's variables
-    # scrubbed (settings.child_env), the user's click the yes as their terminal is; CLAUDECODE
-    # wins, so Claude setting WB_ACTOR changes nothing
-    by = "claude" if os.environ.get("CLAUDECODE") == "1" else \
-        "web" if os.environ.get("WB_ACTOR") == "web" else "terminal"
+    # agent (#1310), claude, opencode (an OpenCode driver, #1309) or terminal; or the web app's
+    # Settings (#1279): its server runs wb with WB_ACTOR=web and Claude's variables and an OpenCode
+    # driver's id scrubbed (settings.child_env), the user's click the yes as their terminal is; an
+    # agent's WB_TASK, CLAUDECODE and an OpenCode driver's id win, so a model setting WB_ACTOR
+    # changes nothing
+    by = store.caller_kind()
+    by = "web" if by == "terminal" and os.environ.get("WB_ACTOR") == "web" else by
     try:
         with routes.editing(lenient=True) as held:  # the gate compares the line computed under the lock
             ch = noted(changed(held[0]), held[1])
             if not ch.line:
                 print(f"unchanged: {routes.summary(held[0])}")
                 raise _Unchanged
-            if ch.gated and by == "claude":
+            if ch.gated and store.under_model():  # a model's call, never the web's click
                 ok = routes.approved({"argv": argv, "change": ch.line})
                 if not ok:
                     die(gate_refusal("a role changes", "wb " + shlex.join(argv)), 3)
@@ -6019,6 +6094,12 @@ SCOUT_API_DAYS = 30    # wb scout: an API model's record, over this many days (#
 SCOUT_SPEND_DAYS = 7   # and the API spend
 
 
+def _by_word(by) -> str:
+    """Who a role's `by`/`gpu_by` says set it: Claude, the OpenCode driver (#1309), an agent
+    (#1310), else you."""
+    return {"claude": "Claude", "opencode": "the driver", "agent": "an agent"}.get(by, "you")
+
+
 def _role_where(doc: dict, r: str) -> str:
     """A role as wb scout says it: `GPU (router)`, `GPU <id> (pinned)` or `API <id>, set by you
     11-20, thinking off` (what the model does with it: routes.thinking_said, #1263)."""
@@ -6029,7 +6110,7 @@ def _role_where(doc: dict, r: str) -> str:
         return "API: no model (can't start)"
     out = f"API {row['api']}"
     if isinstance(row.get("ts"), (int, float)):
-        out += (f", set by {'Claude' if row.get('by') == 'claude' else 'you'} "
+        out += (f", set by {_by_word(row.get('by'))} "
                 f"{time.strftime('%m-%d', time.localtime(row['ts']))}")
     return out + f", {routes.thinking_said(row)}"
 
@@ -7570,9 +7651,20 @@ def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
     development (2026-11-16: the plugin install copies only mod/, so these two come from here);
-    then the web app's service (install_service), unless --no-service."""
-    links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb"),
-             (context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench")]
+    then the web app's service (install_service), unless --no-service. With --opencode, the
+    OpenCode path's fallback (#1311): the wb link and the OpenCode plugin's entry
+    (ocplugin.install), never Claude Code's skill link, which OpenCode would also list (it scans
+    ~/.claude/skills: #1296, row 8)."""
+    if _install_kind() == "opencode":
+        # a generation directory OpenCode replaces on its next update and later removes: links, a
+        # service unit and options naming it would outlive it, and pin the plugin to an old wb
+        die(f"wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
+            f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
+            f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
+            f"setup --opencode there")
+    links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb")]
+    if not a.opencode:
+        links.append((context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench"))
     bad = False
     for at, to in links:
         if at.is_symlink() and at.resolve() == to.resolve():
@@ -7590,13 +7682,28 @@ def cmd_setup(a):
         at.parent.mkdir(parents=True, exist_ok=True)
         at.symlink_to(to)
         print(f"ok  {at} → {to} " + (f"(was {was})" if was is not None else "(made)"))
+    if a.opencode:
+        try:
+            for said in ocplugin.install():
+                print(said)
+        except RuntimeError as e:  # own_config's refusal: the change, to make by hand
+            bad = True
+            print(f"BAD {e}")
+        try:  # the clone holding this user's patches, as wb patch init's is: a later init from a
+            # marketplace install reuses it, never a second clone splitting them (#1321's finding 14)
+            patches.note_install(PKG_ROOT)
+        except (gitops.GitError, OSError):
+            pass
     old = context.claude_home() / "skills/delegate"  # /delegate became /workbench (2026-11-17)
     if old.is_symlink() and not old.exists() and os.readlink(old).rstrip("/").endswith("skill/delegate"):
         old.unlink()
         print(f"ok  {old} removed: /delegate is now /workbench")
     bindir = str(Path.home() / ".local/bin")
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-        if mod_listed():  # the plugin's bin/ and the mod's lookup cover Claude Code (#1190)
+        if a.opencode:  # the plugin runs the wb its options name, whatever OpenCode's PATH
+            print(f"--  {bindir} isn't on PATH: OpenCode's plugin runs {PKG_ROOT / 'bin/wb'} (its "
+                  f"options), so only your own terminal lacks it. {path_advice(claude=False)}")
+        elif mod_listed():  # the plugin's bin/ and the mod's lookup cover Claude Code (#1190)
             print(f"--  {bindir} isn't on PATH: Claude Code runs wb from the plugin's bin/ and the "
                   f"marketplace clone, so only your own terminal lacks it. {path_advice(claude=False)}")
         else:
@@ -7958,14 +8065,32 @@ def _mod_behind() -> str | None:
 
 
 def _install_kind() -> str:
-    """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "clone":
+    """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "opencode":
+    OpenCode's install, a package in its package cache that OpenCode replaces, no git clone
+    (ocplugin.runs_from_cache: git's errors were said for it, #1311's third review); "clone":
     one the user owns (a developer's, or wb patch init's). Under either plugins root the mod's
     gateConf counts: <CLAUDE_CONFIG_DIR or ~/.claude>/plugins, and CLAUDE_CODE_PLUGIN_CACHE_DIR,
     where Claude Code keeps the marketplace clone when it is set: read there as the user's own,
     wb update skipped the rescue and Claude Code's re-clone wiped the local commits (#1099,
     2026-11-23)."""
+    if ocplugin.runs_from_cache():
+        return "opencode"
     here = PKG_ROOT.resolve()
     return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in _plugin_roots()) else "clone"
+
+
+def _claude_has_workbench() -> bool:
+    """Whether Claude Code has workbench: the mod installed, or its marketplace known in either
+    plugins root (known_marketplaces.json's `workbench`)."""
+    if mod_listed():
+        return True
+    for r in _plugin_roots():
+        try:
+            if "workbench" in store.read_json(r / "known_marketplaces.json", {}):
+                return True
+        except (OSError, ValueError, TypeError):
+            pass
+    return False
 
 
 def _plugin_roots() -> list[Path]:
@@ -8014,6 +8139,10 @@ def cmd_update(a):
     and a clone's patches on branch `local` rebased onto the news (#1005).
     --check only says whether there is news; --if-due asks the network at most weekly."""
     kind = _install_kind()
+    if kind == "opencode":  # nothing of wb's to pull or rebase: never a git error (#1311's third review)
+        print(f"OpenCode's install at {PKG_ROOT}: {ocplugin.updated_by()}" if a.check else
+              f"wb update leaves OpenCode's install at {PKG_ROOT} to OpenCode: {ocplugin.updated_by()}")
+        return
     if kind == "clone" and not a.check and patches.branch(PKG_ROOT) == patches.PATCH_BRANCH:
         patches.note_install(PKG_ROOT)  # the mod reads which clone holds the patches (#1005)
     path = store.home() / "update.json"
@@ -8057,8 +8186,12 @@ def cmd_update(a):
     # every check that can refuse comes before any task is stopped: --stop stopped every
     # session's tasks, then died on a dirty clone, a missing claude, a failed fetch, or found
     # nothing new, each task resumed in a fresh session on the same code (#775)
+    # a clone OpenCode's plugin loads, which Claude Code doesn't have (wb setup --opencode, the
+    # OpenCode path's fallback): pulled and rebased alone. Claude's steps refused it without
+    # claude, and with claude failed on a marketplace it doesn't know (#1321's findings 4 and 15)
+    claude_steps = not (kind == "clone" and ocplugin.loaded_from() and not _claude_has_workbench())
     steps = [["claude", "plugin", "marketplace", "update", "workbench"],
-             ["claude", "plugin", "update", "workbench@workbench"]]
+             ["claude", "plugin", "update", "workbench@workbench"]] if claude_steps else []
     behind = None  # a marketplace copy is one commit deep: its news can't be counted beforehand
     rebased = None  # a clone's patches on `local`, rebased onto the news (#1005)
     settled = patches.Settled(set(), [], [], [])  # what became of the pull requests wb patch send opened
@@ -8077,7 +8210,7 @@ def cmd_update(a):
     if (market := _marketplace_clone()) and (refusal := patches.marketplace_refusal(  # saved first,
             market, None if market == PKG_ROOT else PKG_ROOT)):  # then refused (#1005, #1326)
         die(refusal)
-    if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
+    if claude_steps and not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
         die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "
             "in Claude Code, or put claude on PATH)")
     if kind == "clone":
@@ -8177,11 +8310,18 @@ def cmd_update(a):
             n = f" ({int(gitops.git(PKG_ROOT, 'rev-list', '--count', f'{before}..{to}'))} commit(s))"
         except (gitops.GitError, ValueError):
             n = ""
-        print(f"updated {kind} {before[:7]}..{after[:7]}{n}; /reload-plugins or a restart picks up "
-              "the pane")
+        print(f"updated {kind} {before[:7]}..{after[:7]}{n}; " + ("/reload-plugins or a restart picks up "
+              "the pane" if claude_steps else "OpenCode loads its plugin from this clone: restart "
+              "OpenCode if it doesn't pick it up"))
         if rebased:
             print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
     say_later()
+    if kind == "clone":  # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/
+        try:             # (#1321's findings 16 and N2): moved to HEAD's when that changed
+            for line in ocplugin.refresh():
+                print(line)
+        except (RuntimeError, OSError, gitops.GitError) as e:
+            print(f"couldn't refresh the OpenCode plugin's copy (wb setup --opencode does): {e}")
     if kind == "clone":  # a pull request merged: its pr/ branch, worktree and body go (#1005)
         try:
             for line in [*patches.closed_lines(PKG_ROOT, settled), *patches.retire_sent(PKG_ROOT),
@@ -8195,6 +8335,10 @@ def cmd_patch(a):
     """wb patch: the user's own fixes to workbench, as commits on branch `local` of a clone they
     own, kept across wb update and offered upstream (#1005)."""
     kind = _install_kind()
+    if kind == "opencode":  # every action reads or moves a clone's branch `local`
+        die(f"wb patch works on a clone of workbench: this wb is OpenCode's install at {PKG_ROOT}, "
+            f"which OpenCode replaces when it updates (git clone https://github.com/{ocplugin.REPO}, "
+            f"then bin/wb setup --opencode there)")
     if a.action == "init":
         if kind == "clone":
             print(patches.clone_note(PKG_ROOT))
@@ -8207,7 +8351,7 @@ def cmd_patch(a):
         live = [t for t in store.all_tasks() if runner_alive(t)]
         if live:  # it moves the code, the git shim and the lane out from under them
             die(f"tasks are running ({_running(live, a)}): run wb patch init when they finish")
-        patches.init(PKG_ROOT, patches.source_dir(a.dir))
+        patches.init(PKG_ROOT, patches.source_dir(a.dir, PKG_ROOT))
     elif a.action == "list":
         patches.list_patches(PKG_ROOT, kind)
     elif a.action == "drop":
@@ -8415,6 +8559,13 @@ def cmd_doctor(a):
     old = bool(have) and have < gitops.GIT_FLOOR  # #527: init -b and the rest, unchecked
     line(good and not old, said + (f": workbench needs git {'.'.join(map(str, gitops.GIT_FLOOR))} "
                                    "or newer; upgrade it" if old else ""))
+    try:  # the OpenCode path's installs (#1311): optional, so none only informs
+        oc_lines = ocplugin.doctor_lines()
+    except RuntimeError as e:  # a config file that doesn't parse or can't be read (#1311's review)
+        oc_lines = [(None, f"the OpenCode plugin: {e}")]
+    # the OpenCode path alone: Claude Code's wb link and skill aren't BAD there (#1321's finding 26)
+    kind = _install_kind()
+    opencode_only = not mod_listed() and (kind == "opencode" or any(good is not None for good, _ in oc_lines))
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
     # (the 2026-11-16 audit: doctor said ok beside "the mod can't run it")
     on_path, wb_bin = shutil.which("wb"), os.environ.get("WB_BIN")
@@ -8430,6 +8581,12 @@ def cmd_doctor(a):
         print("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/; for "
               "your own terminal, " + (path_advice(claude=False) if linked
                                        else "link bin/wb into a PATH directory (wb setup)"))
+    elif opencode_only:  # the plugin runs the wb it names or brings (#1311)
+        print("--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below says "
+              "which); for your own terminal, " + (
+                  path_advice(claude=False) if linked else
+                  f"a clone's: git clone https://github.com/{ocplugin.REPO}, then bin/wb setup --opencode "
+                  "there" if kind == "opencode" else "link bin/wb into a PATH directory (wb setup --opencode)"))
     else:
         line(False, f"wb isn't on PATH: Claude runs it by name in Bash; the mod runs {mod_wb(wb_bin, on_path, linked)}; "
              + (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
@@ -8676,21 +8833,32 @@ def cmd_doctor(a):
               "(no-new-privileges stops snap-confine): install them another way, or turn the lane "
               'off with commands.json "paths": ["*"]')
     skill = context.claude_home() / "skills/workbench/SKILL.md"
-    line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
-         f"/workbench isn't in {skill.parent.parent}: wb setup links it")
-    elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
     listed = mod_listed()  # information only: a mod loaded another way isn't listed here
+    if skill.exists() or not opencode_only:
+        line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
+             f"/workbench isn't in {skill.parent.parent}: wb setup links it")
+    else:  # OpenCode alone, set up by wb setup --opencode, which links no Claude Code skill
+        print(f"--  /workbench isn't in {skill.parent.parent}: Claude Code's path only (wb setup links it)")
+    elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
     stale = _mod_behind() if listed else None
     print(f"--  the Claude Code mod is installed as of {stale}, older than this clone's mod: wb update "
           "refreshes it" if stale else
           "ok  the Claude Code mod is installed (workbench@workbench)" if listed else
           "--  the Claude Code mod (the pane, the wake-ups) isn't among Claude Code's installed "
           "plugins: claude plugin install workbench@workbench, unless it loads another way")
-    try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
-        for row in patches.doctor_lines(PKG_ROOT, _install_kind()):
-            print(row)
-    except (gitops.GitError, OSError) as e:
-        print(f"--  install: {PKG_ROOT}, which git can't read: {e}")
+    for good, said in oc_lines:
+        if good is None:
+            print(f"--  {said}")
+        else:
+            line(good, said)
+    if kind == "opencode":  # no clone: git's error was said (#1311's third review)
+        print(f"ok  install: OpenCode's, at {PKG_ROOT}: {ocplugin.updated_by()}")
+    else:
+        try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
+            for row in patches.doctor_lines(PKG_ROOT, kind):
+                print(row)
+        except (gitops.GitError, OSError) as e:
+            print(f"--  install: {PKG_ROOT}, which git can't read: {e}")
     for row in experiment_lines():
         print(f"--  experiment {row}")
     sys.exit(0 if ok else 1)
@@ -9307,8 +9475,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("adopt", help="the mod's: make a task whose Claude Code process is gone "
                        "this session's")
     s.add_argument("name")
-    s.add_argument("--session", action="append", required=True, metavar="ID",
-                   help="this process's session ids, the current one first")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="this process's session ids, the current one first (required under "
+                   "Claude Code; from an OpenCode driver, default $OPENCODE_SESSION_ID)")
     s.add_argument("--pid", type=int, help="the claiming Claude Code process (default: "
                    "$CLAUDE_PID, else wb's parent)")
     s.set_defaults(f=cmd_adopt)
@@ -9480,6 +9649,9 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_trial)
     s = sub.add_parser("setup", help="link wb onto PATH and /workbench into Claude Code's skills, "
                                      "from this copy, and keep the web app up (its systemd or launchd service)")
+    s.add_argument("--opencode", action="store_true", help="for OpenCode alone: link wb and add this "
+                   "copy's OpenCode plugin to OpenCode's config, with this wb in its options "
+                   f"(OpenCode's own install, {ocplugin.ADD}, brings its wb: after it, this names a clone's)")
     # a link of wb's that points elsewhere is replaced by default (#1322); --force now only
     # replaces a web app service unit link that points elsewhere, kept and used without it
     s.add_argument("--force", action="store_true", help="replace the web app's service unit link "

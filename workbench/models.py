@@ -226,7 +226,10 @@ def _layers() -> list[tuple[Path, dict]]:
     out = []
     for path in opencode_config_files():
         try:
-            out.append((path, json.loads(_strip_jsonc(path.read_text()))))
+            doc = json.loads(_strip_jsonc(path.read_text()))
+            if not isinstance(doc, dict):  # a list or a number: every reader's .get crashed wb
+                raise ValueError("its top level isn't an object")  # doctor (#1311's review)
+            out.append((path, doc))
         except ValueError as e:  # one bad hand edit crashed every model command with a traceback
             raise RuntimeError(f"{path} doesn't parse ({e}); fix it by hand "
                                "(wb doctor checks it)") from None  # (the 2026-11-16 audit)
@@ -827,10 +830,12 @@ def _exported_key(pid: str) -> str:
     2026-11-22); only `key` rows (V1's `api`), the active one first, never an OAuth token:
     refreshing a copy would log the user's own OpenCode out. Run outside the lane, with the
     user's environment, --standalone (the background service isn't needed, and one on another
-    home holds its port); parsed in memory, never printed."""
+    home holds its port), as every wb call to OpenCode runs (_opencode_env: the OpenCode plugin
+    removed, #1311's third review); parsed in memory, never printed."""
     from .runner import opencode_bin  # runner imports this module
+    where, env = _opencode_env()
     try:
-        r = subprocess.run([*opencode_bin(), "auth", "export", pid, "--standalone"],
+        r = subprocess.run([*opencode_bin(), "auth", "export", pid, "--standalone"], cwd=where, env=env,
                            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         _auth_failed("timed out")
@@ -1086,7 +1091,29 @@ def _opencode_env() -> tuple[Path, dict]:
     env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
     if os.environ.get("WB_OPENCODE_CONFIG"):
         env["OPENCODE_CONFIG"] = os.environ["WB_OPENCODE_CONFIG"]
-    return where, env
+    return where, plugin_off(env)
+
+
+def plugin_off(env) -> dict:
+    """``env`` (an environment for one of wb's own OpenCode calls) with the OpenCode plugin
+    removed, as in every task's layer: each such call starts a private server that loads the
+    user's global `plugins`, so the plugin's setup ran in model_list's, in `auth export` and `auth
+    list` at every API task's start and in wb start, doctor and route (#1311's reviews,
+    2026-11-25), and model_list waits for plugins to load. "-workbench" goes last in
+    OPENCODE_CONFIG_CONTENT, which loads after every file, after the user's own content `plugins`
+    (kept); content that doesn't parse is left for OpenCode to refuse."""
+    from .ocplugin import PLUGIN_OFF  # ocplugin imports this module
+    env = dict(env)
+    raw = env.get("OPENCODE_CONFIG_CONTENT")
+    try:
+        content = json.loads(_strip_jsonc(raw)) if raw else {}
+    except ValueError:
+        content = None
+    if isinstance(content, dict):
+        theirs = content.get("plugins")
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            {**content, "plugins": [*(theirs if isinstance(theirs, list) else []), PLUGIN_OFF]})
+    return env
 
 
 def _opencode_json(*args: str):

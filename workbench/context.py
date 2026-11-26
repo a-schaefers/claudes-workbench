@@ -25,7 +25,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import audio, chat, gitops, hardware, images, lane, models, privacy, routes, skills, store
+from . import audio, chat, gitops, hardware, images, lane, models, ocplugin, privacy, routes, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
@@ -51,6 +51,7 @@ DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent"
 AGENT = "wb-code"
 AGENT_OFF = {AGENT: {"disabled": True}}
 AGENT_ENTRY = {AGENT: {"mode": "primary", "description": "Workbench's agent: the task's rules alone"}}
+PLUGIN_OFF = ocplugin.PLUGIN_OFF  # "-workbench": the task layer's removal of the OpenCode plugin (#1311)
 # A command written `NAME=value cmd`: OpenCode matches each simple command's raw text, so `FOO=1
 # ls` was refused while `ls` and `env FOO=1 ls` ran. It is how CLAUDE.md files and READMEs spell
 # tests (`PYTHONPATH=. pytest`, `CI=1 npm test`), and a small model copying the project's command
@@ -1420,6 +1421,27 @@ VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env", "config.toml", "config"),
 # (else the agent could make it and plant a program there)
 MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
               "NIMBLE_DIR": "bin"}
+# OpenCode's package cache (packages/util/src/npm.ts: global.cache/npm/<key>/<generation>/
+# node_modules), under ~/.cache and where XDG_CACHE_HOME moves it (ocplugin.package_caches;
+# plugin_caches, below): kept out like NOT_WRITABLE's places only when it holds
+# the OpenCode plugin, or is about to (ocplugin.in_cache: a generation there, or a Git or npm
+# `plugins` entry). `opencode plugin add` installs the plugin there with wb itself (the root
+# package.json's `files`), and the user's OpenCode imports the plugin and runs that wb outside the
+# lane with no integrity check (npm.resolve; npm.add trusts an active generation), the next
+# round's lane.py among it: an agent could rewrite them (#1311's review, 2026-11-25). Made first
+# then, so a generation can't be planted before OpenCode installs it. Else ~/.cache stays whole:
+# split around npm/ always, every Linux agent's lane refused a tool's first new cache directory
+# (node-gyp's, ms-playwright's, deno's), the regression #1194's second review rejected for
+# macOS's Library/Caches (#1311's second review). Kept out, the agent's own OpenCode can't install
+# there either: a provider package it doesn't build in and the user's OpenCode hasn't fetched
+# (core/src/provider.ts, npm.add) fails the round's first request, and a plugin of the user's
+# that is missing, or follows a branch or @latest, isn't installed or updated in the round
+# (core/src/plugin/module.ts); the user's own OpenCode does both at its next start.
+# OPENCODE_CACHE_MADE is what the agent's own OpenCode makes in its cache directory beside npm/
+# (ripgrep, downloaded into bin/ when none is on PATH: core/src/ripgrep/binary.ts), made first:
+# the cache directory is split around npm/ then and refuses a new entry. bin/ itself stays in the lane,
+# a trade like pre-commit's hooks: what is there is a program the user's OpenCode runs later
+OPENCODE_CACHE_MADE = ("bin/",)
 # and what cargo makes at the top of its split home, made first so the split grants it: a split
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
@@ -1436,8 +1458,13 @@ NIMBLE_MADE = ("pkgs2/", "pkgcache/", "buildtemp/", "packages_temp.json", "nimbl
 MADE_TEXT = {"nimbledata2.json": '{"version": 1, "reverseDeps": {}}\n'}
 # What the common tools make in a cache home split around an active venv (poetry's, from
 # `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
-# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
-CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
+# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825).
+# And the other common tools' caches: with Landlock every OpenCode-plugin user's ~/.cache is split
+# around OpenCode's npm/ (plugin_caches), where node-gyp's, Playwright's and Deno's first run was
+# refused (#1311's third review, 2026-11-25); a tool not listed is still refused, named with its grant
+CACHE_MADE = ("uv", "pip", "go-build", "pre-commit", "node-gyp", "ms-playwright", "deno", "puppeteer",
+              "Cypress", "electron", "yarn", "pnpm", "node", "typescript", "bazel", "zig", "ccache",
+              "torch", "selenium")
 # and what Hugging Face's libraries make at their home's top (huggingface_hub's and datasets'
 # constants: HF_HUB_CACHE, HF_XET_CACHE, HF_ASSETS_CACHE, HF_DATASETS_CACHE, HF_MODULES_CACHE)
 HF_MADE = ("hub/", "xet/", "assets/", "datasets/", "modules/")
@@ -1757,12 +1784,19 @@ def tool_home_of(real: str) -> str | None:
     return below[0] if len(below) == 1 else None
 
 
+def plugin_caches() -> list[Path]:
+    """OpenCode's package caches when the lane keeps them out (the OpenCode plugin is there or
+    about to be, ocplugin.in_cache: the comment above OPENCODE_CACHE_MADE), else []."""
+    return ocplugin.package_caches() if ocplugin.in_cache() else []
+
+
 def not_writable_paths() -> list[Path]:
     """NOT_WRITABLE's places under the home and VAR_NOT_WRITABLE's in the homes those variables
-    name, made or not."""
+    name, made or not, and OpenCode's package caches when they hold the OpenCode plugin
+    (plugin_caches)."""
     return [*(Path.home() / h for h in NOT_WRITABLE),
             *(Path(os.environ[v]) / n for v, names in VAR_NOT_WRITABLE.items()
-              if os.environ.get(v) for n in names)]
+              if os.environ.get(v) for n in names), *plugin_caches()]
 
 
 def not_writable(made_only: bool = True) -> set[str]:
@@ -1855,15 +1889,6 @@ def writable(task: store.Task) -> list[str] | None:
         if os.path.isdir(c):  # split around bin/ whenever it exists (MADE_FIRST, below)
             _make_first(c, NIMBLE_MADE)
     hidden = _hidden() | {h for h in api_hidden(task) if os.path.lexists(h)}  # #1021
-    for d, names in SPLIT_MADE.items():  # only a home a secret splits: else it is granted whole
-        c = os.path.realpath(home / d)
-        if os.path.isdir(c) and any(_under(h, c) for h in hidden):
-            _make_first(c, names)
-    for v, sub, d in SPLIT_MADE_VARS:  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
-        c = os.environ.get(v) or ""
-        c = os.path.realpath(os.path.join(c, sub)) if os.path.isabs(c) else ""
-        if c and os.path.isdir(c) and any(_under(h, c) for h in hidden):
-            _make_first(c, SPLIT_MADE[d])
     for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
         r = os.environ.get(k) if k.isupper() else str(home / k)
         if r and os.path.isabs(r) and os.path.isdir(r):  # made, so it is split out: else the
@@ -1871,6 +1896,25 @@ def writable(task: store.Task) -> list[str] | None:
                 os.makedirs(os.path.join(r, n), exist_ok=True)
             except OSError:
                 pass
+    for npm in plugin_caches():  # the OpenCode plugin's there or about to be: made first, so
+        try:                      # split out, and OpenCode's own bin/ beside it (#1311's review)
+            npm.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        _make_first(str(npm.parent), OPENCODE_CACHE_MADE)
+    # with Landlock a NOT_WRITABLE place splits its home like a secret (~/.cache around
+    # OpenCode's npm/ when it holds the plugin, #1311's review): what the common tools make at
+    # its top is made first too
+    split_by = hidden | (set() if lane.kind() == "seatbelt" else not_writable())
+    for d, names in SPLIT_MADE.items():  # only a home something splits: else it is granted whole
+        c = os.path.realpath(home / d)
+        if os.path.isdir(c) and any(_under(h, c) for h in split_by):
+            _make_first(c, names)
+    for v, sub, d in SPLIT_MADE_VARS:  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
+        c = os.environ.get(v) or ""
+        c = os.path.realpath(os.path.join(c, sub)) if os.path.isabs(c) else ""
+        if c and os.path.isdir(c) and any(_under(h, c) for h in split_by):
+            _make_first(c, SPLIT_MADE[d])
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
     envs = set(python_envs())
@@ -4033,4 +4077,9 @@ def layer(task: store.Task) -> dict:
     rules += report_rules(task)  # last: the last match wins (#1278)
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
             "permissions": rules, "skills": [*handed, *map(str, own)],
-            "agents": json.loads(json.dumps(AGENT_OFF))}  # made afresh in the content (AGENT)
+            "agents": json.loads(json.dumps(AGENT_OFF)),  # made afresh in the content (AGENT)
+            # the OpenCode plugin is the driver's, never an agent's (#1311, 2026-11-25): removed by
+            # its id after the user's global `plugins` add it, so OpenCode never runs its setup
+            # here (it still imports the module, which does nothing at import time); restated in
+            # the content after the user's own (runner.rules_env)
+            "plugins": [PLUGIN_OFF]}

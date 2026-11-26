@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
-from . import gitops, hardware, store
+from . import gitops, hardware, ocplugin, store
 
 PATCH_BRANCH = "local"  # the branch a clone install keeps its patches on
 BEFORE = "refs/workbench/before-update"  # the tip before wb moved the branch; its reflog, the earlier ones
@@ -86,10 +86,31 @@ def _net_env(repo) -> dict:
     return env
 
 
-def source_dir(arg=None) -> Path:
-    """Where `wb patch init` puts the clone: --dir, else WB_SOURCE, else ~/.local/share/workbench/source."""
+def source_dir(arg=None, root=None) -> Path:
+    """Where `wb patch init` puts the clone: --dir, else (given the marketplace clone ``root``)
+    patches.json's `source` when it is a clone of root's origin, else WB_SOURCE, else
+    ~/.local/share/workbench/source. The recorded clone first, as the mod's gate reads it: wb
+    setup --opencode's clone was passed over and a second one made, the patches split between the
+    two (#1321's finding 14)."""
+    if not arg and root is not None and (noted := _noted_source(root)) is not None:
+        return noted
     v = arg or os.environ.get("WB_SOURCE")
     return Path(os.path.abspath(os.path.expanduser(v))) if v else Path.home() / ".local/share/workbench/source"
+
+
+def _noted_source(root) -> Path | None:
+    """patches.json's `source`, when it is another clone (its own top level) of root's origin."""
+    noted = store.read_json(noted_path(), {}) or {}
+    src = noted.get("source") if isinstance(noted, dict) else None
+    if not isinstance(src, str) or not os.path.isabs(src) or not os.path.isdir(src):
+        return None
+    d = Path(src)
+    if d.resolve() == Path(root).resolve() or Path(_out(d, "rev-parse", "--show-toplevel", check=False)
+                                                   or "/nonexistent").resolve() != d.resolve():
+        return None
+    url = _out(root, "config", "--get", "remote.origin.url", check=False)
+    theirs = _out(d, "config", "--get", "remote.origin.url", check=False)
+    return d if url and theirs and _same_origin(theirs, url) else None
 
 
 def branch(root) -> str:
@@ -949,9 +970,12 @@ def upstream(root, kind, commit, slug) -> None:
     note_install(root)
     with _noting() as noted:  # the local commit wb update later drops when its pull request merges
         _table(noted, "prepared")[slug] = _ident(root, sha)
+    # the kernel's own check when the patch touches kernel/ (#1356): the suite holds the committed
+    # bundle offline, but only kernel.py check rebuilds it and runs its props (the toolchain once)
+    kernel = _git(root, "diff", "--quiet", f"{sha}^", sha, "--", "kernel", check=False).returncode != 0
     print("next (none of this has run):")
-    print(f"  cd {wt} && python3 -m unittest" + (" && claude plugin validate mod && claude plugin test mod"
-                                                 if mod else ""))
+    print(f"  cd {wt} && python3 -m unittest" + (" && python3 scripts/kernel.py check" if kernel else "")
+          + (" && claude plugin validate mod && claude plugin test mod" if mod else ""))
     if not repo:
         print(f"{remote} ({_shown_url(url)}) isn't on GitHub, and wb patch send sends only there: send it "
               "the way that project takes changes")
@@ -1181,10 +1205,22 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
         raise PatchError(f"{pr} changes .github/workflows/, and GitHub refuses that push over https without "
                          "the token's workflow scope, so nothing was sent: the user runs "
                          "! gh auth refresh -h github.com -s workflow")
-    if os.environ.get("CLAUDECODE") == "1" and not _approved(slug, title, body_file, draft, anyway):
+    # an OpenCode driver's shell too (#1309), and an agent's (#1310): store.under_model. Each
+    # sent with no one asked
+    if store.under_model() and not _approved(slug, title, body_file, draft, anyway):
         again = " ".join(["wb patch send", slug, "--title", _quote(title), "--body-file",
                           shlex.quote(os.path.abspath(body_file)), *(["--draft"] if draft else []),
                           *(["--anyway"] if anyway else [])])
+        if store.caller_kind() == "agent":  # its reviewer or the user decides (#1310)
+            raise PatchError("in an agent's shell wb patch send goes only on the user's yes in the driver's "
+                             "dialog, and the user approved none for this send, so nothing was sent. Ask "
+                             "the reviewer (ask_reviewer); or the user runs it in a terminal of their own: "
+                             f"{again}")
+        if store.caller_kind() == "opencode":
+            raise PatchError("in OpenCode wb patch send goes only through the workbench plugin's dialog, "
+                             "and the user approved none for this send, so nothing was sent (is the plugin "
+                             "installed and loaded?). Or the user runs it in a terminal of their own, "
+                             f"outside OpenCode: {again}")
         raise PatchError("in Claude Code wb patch send goes only through the workbench mod's dialog, and "
                          "the user approved none for this send, so nothing was sent (is the mod installed "
                          "and loaded? wb doctor says). Or the user runs it in a terminal of their own, "
@@ -1591,12 +1627,18 @@ def init(root: Path, dest: Path) -> None:
             if branch(dest) != PATCH_BRANCH:
                 _git(dest, "branch", "-q", "-D", PATCH_BRANCH, check=False)
         raise PatchError(f"{e}; nothing else changed: the marketplace install is as it was{keep}") from None
+    # OpenCode's plugin, when it loads from (or runs the wb of) the clone Claude Code deletes at
+    # the switch, moves to the new one too: init re-linked Claude Code's side alone (#1321, N2)
+    opencode = ocplugin.loaded_from(root)
     for step in (["claude", "plugin", "marketplace", "add", str(dest)], [str(dest / "bin/wb"), "setup", "--force"],
-                 ["claude", "plugin", "update", "workbench@workbench"]):
+                 ["claude", "plugin", "update", "workbench@workbench"],
+                 *([[str(dest / "bin/wb"), "setup", "--opencode", "--no-service"]] if opencode else [])):
         err = _run(step, dest)
         if err is not None:
             done = (f"; {dest} is ready and nothing else changed: wb patch init --dir {dest} again goes on "
                     "from there" if step[0] == "claude" and step[3] == "add" else
+                    f"; Claude Code runs from {dest} now, so finish OpenCode's side by hand: {dest}/bin/wb "
+                    "setup --opencode" if "--opencode" in step else
                     f"; Claude Code's marketplace is {dest} already, so finish by hand: "
                     f"{dest}/bin/wb setup --force && claude plugin update workbench@workbench")
             raise PatchError(f"{' '.join(Path(step[0]).name if i == 0 else s for i, s in enumerate(step[:4]))} "
@@ -1609,4 +1651,5 @@ def init(root: Path, dest: Path) -> None:
         what += [f"branch {b} (branch-{b.replace('/', '-')}/)" for b in found.branches]
         print(f"not carried over, kept only in {saved}: {', '.join(what)}")
     print("patches are commits on it (wb patch list); wb update rebases them onto upstream's news. "
-          "/reload-plugins (or a restart) loads the mod from it")
+          "/reload-plugins (or a restart) loads the mod from it"
+          + ("; OpenCode loads its plugin from it too" if opencode else ""))

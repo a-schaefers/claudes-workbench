@@ -1169,17 +1169,17 @@ class Wiring(Base):
         run = self.open_run(alive=False)
         for n in ("wr-find-1", "wr-find-2"):
             run.log(kind="item", stage="find", key=n[-1], n=int(n[-1]), task=n)
-        m = spend.WAKE.match("[workbench] Run `wr` needs Claude: stage merge is yours")
-        self.assertEqual(spend._woken(m, {"wr-find-1", "wr-find-2", "wr-x", "other"}), {"wr-find-1", "wr-find-2"})
-        m = spend.WAKE.match("[workbench] Task `other` is ready for review")
-        self.assertEqual(spend._woken(m, {"wr-find-1", "other"}), {"other"})
+        said = "The workbench plugin sent a message: [workbench] Run `wr` needs Claude: stage merge is yours"
+        self.assertEqual(spend._woken(said, {"wr-find-1", "wr-find-2", "wr-x", "other"}), {"wr-find-1", "wr-find-2"})
+        self.assertEqual(spend._woken("[workbench] Task `other` is ready for review", {"wr-find-1", "other"}),
+                         {"other"})
+        self.assertEqual(spend._woken("see [workbench] Run `wr` above", {"wr-find-1"}), set())
         run.set_status(phase="closed", updated_at=0)
         st = run.status
         st["updated_at"] = 0
         store.write_json(run.dir / "status.json", st)
         self.assertEqual(runs.archive(30), 1)  # an old transcript's wake, its run archived since
-        m = spend.WAKE.match("[workbench] Run `wr` is done: 2 result(s)")
-        self.assertEqual(spend._woken(m, {"wr-find-1", "wr-x"}), {"wr-find-1"})
+        self.assertEqual(spend._woken("[workbench] Run `wr` is done: 2 result(s)", {"wr-find-1", "wr-x"}), {"wr-find-1"})
 
     def test_wb_top_json_carries_each_run_not_closed_with_its_drivers_life(self):
         # plan §5 (#1278, S8): the seam the pane's and the web's run strip read

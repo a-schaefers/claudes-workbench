@@ -86,12 +86,30 @@ class RequiredCheck(unittest.TestCase):
         # toolchain, and the goldens must hold under OpenCode's Bun as under Claude Code
         kernel = job("check.yml", "kernel")
         steps = ["scripts/install-opencode.sh", "actions/cache@", "python3 scripts/kernel.py fetch",
-                 "python3 scripts/kernel.py check", "BUN_BE_BUN=1 opencode test opencode-plugin/test"]
+                 "python3 scripts/kernel.py check", "BUN_BE_BUN=1 opencode test opencode-plugin/test",
+                 "BUN_BE_BUN=1 opencode check -p opencode-plugin"]  # the plugin's types (#1311)
         at = [kernel.find(s) for s in steps]
         self.assertNotIn(-1, at, steps)
-        self.assertEqual(at, sorted(at), "in this order: Bun, the cache, fetch, check, the Bun goldens")
+        self.assertEqual(at, sorted(at), "in this order: Bun, the cache, fetch, check, the Bun goldens, the types")
         self.assertIn("hashFiles('kernel/toolchain.json', 'kernel/spago.lock')", kernel)
         self.assertNotIn("paths:", kernel)
+
+    def test_the_macos_nightly_checks_the_kernel_on_one_shard_and_opencode_yml_runs_the_goldens(self):
+        # #1356: the bundle's bytes must not depend on the platform, and BUN_BE_BUN, undocumented,
+        # must still hold on the newest OpenCode
+        mac = job("nightly.yml", "macos")
+        steps = ["actions/cache@", "python3 scripts/kernel.py fetch", "python3 scripts/kernel.py check"]
+        at = [mac.find(s) for s in steps]
+        self.assertNotIn(-1, at, steps)
+        self.assertEqual(at, sorted(at))
+        self.assertGreater(at[0], mac.find("python3 -X faulthandler -m unittest -v"), "after the suite")
+        for s in steps:
+            line_start = mac.rfind("\n      - ", 0, mac.find(s))
+            self.assertIn("if: matrix.shard == 1", mac[line_start:mac.find(s)], f"{s}: shard 1 only")
+        self.assertIn("hashFiles('kernel/toolchain.json', 'kernel/spago.lock')", mac)
+        oc = job("opencode.yml", "check")
+        self.assertIn("BUN_BE_BUN=1 opencode test opencode-plugin/test", oc)
+        self.assertLess(oc.find("scripts/install-opencode.sh newest"), oc.find("BUN_BE_BUN=1 opencode test"))
 
 
 def job(workflow: str, name: str) -> str:
@@ -121,7 +139,7 @@ class ReleaseGates(unittest.TestCase):
         self.assertEqual(re.search(r"OPENCODE_SHA256: '(\w+)'", wsl)[1],
                          re.search(r"OPENCODE_SHA256: '(\w+)'", text("check.yml"))[1])  # Linux x64's
         script = (ROOT / "scripts" / "ci-wsl.sh").read_text()
-        for want in ("sudo -u ci", "install-opencode.sh", "python3 -m unittest"):
+        for want in ("sudo -u ci", "install-opencode.sh", 'exec scripts/suite.sh "$WB_TEST_SHARD" 4'):
             self.assertIn(want, script)
 
     def test_the_macos_nightly_is_sharded_names_each_test_and_every_suite_job_fails_a_hang(self):
@@ -138,6 +156,24 @@ class ReleaseGates(unittest.TestCase):
                 self.assertIn("WB_TEST_HANG_SECS:", job(workflow, name))
         self.assertIn("WB_TEST_HANG_SECS", job("nightly.yml", "wsl").split("WSLENV:")[1].split("\n")[0])
         self.assertIn("WB_TEST_HANG_SECS", (ROOT / "scripts" / "ci-wsl.sh").read_text())
+
+    def test_the_nightlys_linux_and_wsl_suites_run_in_shards_of_four_processes(self):
+        # both ran the suite in one process and were cancelled at their 60 minutes in the last two
+        # runs before 2.1 (run 45707953076, 2026-11-25)
+        for name in ("check", "wsl"):
+            with self.subTest(job=name):
+                got = job("nightly.yml", name)
+                for want in ("shard: [1, 2, 3]", "fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/3"):
+                    self.assertIn(want, got)
+        self.assertIn('run: exec scripts/suite.sh "$WB_TEST_SHARD" 4\n', job("nightly.yml", "check"))
+        self.assertNotIn("python3 -m unittest", job("nightly.yml", "check"))
+        # the mod's test once, not once a shard
+        self.assertEqual(job("nightly.yml", "check").count("if: matrix.shard == 1\n"), 3)
+        self.assertIn("claude plugin validate mod && claude plugin test mod", job("nightly.yml", "check"))
+        self.assertIn("WB_TEST_SHARD", job("nightly.yml", "wsl").split("WSLENV:")[1].split("\n")[0])
+        script = (ROOT / "scripts" / "ci-wsl.sh").read_text()
+        self.assertIn("WB_TEST_SHARD", script.split("--preserve-env=")[1].split(" ")[0])
+        self.assertNotIn("python3 -m unittest", script)
 
     def test_the_release_checklist_names_each_platform_and_the_nightly(self):
         checklist = (ROOT / "docs" / "release-checklist.md").read_text()

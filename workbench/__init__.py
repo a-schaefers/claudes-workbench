@@ -7,4 +7,4 @@ then asks for Claude's review. Everything a task is lives in one directory of fi
 the Claude Code mod and the agent's ask_reviewer tool all read and write the same state.
 """
 
-__version__ = "2.0"
+__version__ = "2.1"
