@@ -1,0 +1,15 @@
+{
+  "about": "A flow's slash command line (#1295) as --param words: runs.parse_args, the one parser both hosts' commands hand the line to (wb run start --args). `want` is the words, or `error` a part of the refusal.",
+  "cases": [
+    {"params": {"request": "string"}, "args": "add a --json flag to wb status", "want": ["request=add a --json flag to wb status"]},
+    {"params": {"request": "string"}, "args": "request=keep the k= prefix off", "want": ["request=keep the k= prefix off"]},
+    {"params": {"areas": "list"}, "args": "  workbench/cli.py, workbench/runs.py ", "want": ["areas=workbench/cli.py, workbench/runs.py"]},
+    {"params": {"areas": "list", "focus": "string"}, "args": "areas=a,b focus=\"lost writes\"", "want": ["areas=a,b", "focus=lost writes"]},
+    {"params": {"areas": "list", "focus": "string"}, "args": "focus=races", "want": ["focus=races"]},
+    {"params": {"areas": "list", "focus": "string"}, "args": "a,b races", "error": "the arguments are k=v words"},
+    {"params": {"areas": "list", "focus": "string"}, "args": "colour=red", "error": "k one of areas, focus"},
+    {"params": {"areas": "list", "focus": "string"}, "args": "focus=\"unclosed", "error": "the arguments"},
+    {"params": {}, "args": "", "want": []},
+    {"params": {}, "args": "anything", "error": "takes no arguments"}
+  ]
+}

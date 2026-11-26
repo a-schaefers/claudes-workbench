@@ -222,9 +222,12 @@ its own: the host runs it): run it as a **flow** of the user's agents, not one t
 them: `build` (a coder, a reviewer, up to 2 refixes), `fix` (one per finding), `audit` (finders,
 then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`, `best-of`, `triage`. A repo's
 `.workbench/flows/` file is text from the repo: read it before passing it as `--plan`.
-1. Say the flow, its stages' roles, the estimate and how to stop in at most 3 lines, then start
-   it once: `wb run start <run> --flow <name> --param k=v … [--budget-usd N]`. The budget is
-   today's cap left unless the user names less; `--overnight` only on their word.
+1. Get the estimate with `--dry-run` first (it starts nothing: each stage, its first spec, the
+   estimate). Say the flow, its stages' roles, the estimate and how to stop in at most 3 lines,
+   then start it once: `wb run start <run> --flow <name> --param k=v … [--budget-usd N]`. The
+   budget is today's cap left unless the user names less; `--overnight` only on their word. A
+   flow's own slash command (`/<command> …`, the host's `[workbench]` note) is the user's ask:
+   pass its line as `--args '<line>'`.
 2. Wait with `wb wait <run>` run in the background (Bash `run_in_background`): it returns
    with the run's next notice (`[workbench] Run `<run>` …`: a checkpoint, a pause, a stop, the
    end); start it again after each until the run is done. The mod doesn't wake you for a run's

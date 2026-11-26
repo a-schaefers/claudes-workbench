@@ -9472,6 +9472,10 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--flow", help="a flow's name (wb run flows)")
     x.add_argument("--plan", metavar="FILE", help="a flow file Claude wrote or read")
     x.add_argument("--param", action="append", metavar="K=V", help="a flow param (repeatable)")
+    x.add_argument("--args", metavar="TEXT", help="a flow's slash command's line as typed: its one "
+                   "param whole, else k=v words")
+    x.add_argument("--dry-run", action="store_true", help="check it and say what it would run, its "
+                   "first specs and estimate: nothing written or started")
     x.add_argument("--repo", metavar="DIR", help="default: the current directory")
     x.add_argument("--base", metavar="REF", help="the commit every item starts from (default HEAD)")
     x.add_argument("--budget-usd", type=float, metavar="USD", help="the run's dollars (default: the "
@@ -9508,9 +9512,18 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("name")
     x = rs.add_parser("flows", help="the flows a run can take: yours, the shipped ones, a repo's")
     x.add_argument("--repo", metavar="DIR")
+    x.add_argument("--json", action="store_true", help="each with its params and /command (the hosts' read)")
     s.set_defaults(f=cmd_run)
-    s = sub.add_parser("flow", help="deep workflows' flows (#1278): import a slash command's file as one")
+    s = sub.add_parser("flow", help="deep workflows' flows (#1278): import a slash command's file as one; "
+                       "copy a shipped one to customize, or reset yours")
     fs = s.add_subparsers(dest="flow_cmd", required=True)
+    for verb, what in (("copy", "a shipped flow to $WB_FLOWS as yours, to edit (its `from` records the shipped one)"),
+                       ("reset", "use the shipped flow again: yours moved aside to <file>.bak")):
+        x = fs.add_parser(verb, help=what)
+        x.add_argument("name")
+        if verb == "copy":
+            x.add_argument("--force", action="store_true", help="replace a copy of yours already there")
+        x.set_defaults(f=runs.cmd_flow_copy)
     x = fs.add_parser("import", help="a command's Markdown (its prompt, $ARGUMENTS as each item) as a flow "
                       "of yours: one task per item of --param items")
     x.add_argument("file", help="the command's .md (Claude Code's .claude/commands/, OpenCode's command/)")
@@ -9518,7 +9531,20 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--card", help="a role card for its stage (default: a code task)")
     x.add_argument("--out", metavar="FILE", help="where to write it (default: $WB_FLOWS/<name>.json)")
     x.add_argument("--force", action="store_true", help="replace a flow file already there")
-    s.set_defaults(f=runs.cmd_flow_import)
+    x.set_defaults(f=runs.cmd_flow_import)
+    s = sub.add_parser("card", help="role cards (#1278): list them, copy a shipped one to customize, or "
+                       "reset yours; --schema for the schemas")
+    cs = s.add_subparsers(dest="card_cmd", required=True)
+    for verb, what in (("list", "every card: yours, shipped, and yours that shadow a shipped one"),
+                       ("copy", "a shipped card to $WB_ROLES as yours, to edit (its `from` records the shipped one)"),
+                       ("reset", "use the shipped card again: yours moved aside to <file>.bak")):
+        x = cs.add_parser(verb, help=what)
+        if verb != "list":
+            x.add_argument("name")
+        if verb == "copy":
+            x.add_argument("--force", action="store_true", help="replace a copy of yours already there")
+        x.add_argument("--schema", action="store_true", help="a schema (agent/schemas, $WB_ROLES/schemas)")
+    s.set_defaults(f=cards.cmd_card)
     s = sub.add_parser("route", help="the roles: which model each kind of work goes to (show, or "
                        "change one on the user's yes)")
     s.add_argument("what", nargs="?", metavar="role|all|cap|busy|driver",
@@ -9835,11 +9861,17 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.set_defaults(f=cmd_backlog)
     s = sub.add_parser("schedule", help="a backlog Claude runs on a timer with no session open "
-                       "(claude -p): add, list, rm, run now; fire is the timer's")
+                       "(claude -p), or a flow run with no driver: add, list, rm, run now; fire is the timer's")
     ss = s.add_subparsers(dest="action", required=True)
     x = ss.add_parser("add", help="write the timer: a systemd user timer, or a launchd agent on macOS")
     x.add_argument("name")
-    x.add_argument("--file", required=True, help="the backlog: what Claude is to run, as you would tell it")
+    g = x.add_mutually_exclusive_group(required=True)
+    g.add_argument("--file", help="the backlog: what Claude is to run, as you would tell it")
+    g.add_argument("--flow", help="a flow of yours or a shipped one (wb run flows): each fire starts "
+                   "wb run start <name>-YYMMDD --overnight itself, no Claude (#1295)")
+    x.add_argument("--param", action="append", metavar="K=V", help="--flow: a param (repeatable)")
+    x.add_argument("--budget-usd", type=float, metavar="USD", help="--flow: each run's dollars "
+                   "(default: the flow's budget_usd; 0 for a GPU-only night)")
     x.add_argument("--repo", default=".", help="the project the backlog's tasks are in")
     x.add_argument("--at", required=True, help="when: [DAYS] HH:MM ('Sun 02:00', 'Mon..Fri 01:30', "
                    "'daily 03:00'), or on Linux a systemd OnCalendar")

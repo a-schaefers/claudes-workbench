@@ -5,8 +5,12 @@ when you start a single report task by hand.
 
 ## A flow
 JSON, `"v": 1`. Keys: `name` (as a run's name), `description`, `params` (`{name: string|int|list|
-json|file|runs}`; `runs` is an earlier run's final results), `budget_usd`, `budget_min`,
-`context` (text every item may carry), `stages`. Each stage:
+json|file|files|runs}`, or `{name: {type, description, default, choices, optional}}`: a param
+left out takes its `default`, or is absent when `optional`; `choices` for a string or int; `runs`
+is an earlier run's final results; `files` a pathspec, matched against the files committed at
+the base, each an item `{file, name, stem, dir}`), `budget_usd`, `budget_min`, `context` (text
+every item may carry), `command` (one lowercase word: the flow as `/<command>` in both hosts;
+not on a repo's flow), `stages`. Each stage:
 
 - `id`: a lowercase letter, then letters or digits, at most 8. Its items are tasks
   `<run>-<id>-<n>`.
@@ -34,10 +38,27 @@ json|file|runs}`; `runs` is an earlier run's final results), `budget_usd`, `budg
   stuck or failed always does (with `escalate`, only once its last role has).
 - `"claude": true` with `from`: a checkpoint of yours. You merge, then `wb run feed`.
 - `max_items` (200): past it, items are `not_run`, named in the report.
+- `unless_exists`: on a stage whose `items` is a `files` param, a path template
+  (`tests/{item.stem}_test.py`; `{item.file|name|stem|dir}`, `{params.<k>}`): an item whose path
+  exists at the base is `not_run`, "exists at base: <path>", and costs nothing.
 
 The last stage is `{"id": "...", "final": true, "from": "<stage>"}`: yours. After a code stage
 comes only a report over its `{diff}`, or the final: nothing builds on code you haven't accepted.
-`wb run start` refuses a flow that breaks any of this, naming each problem.
+`wb run start` refuses a flow that breaks any of this, naming each problem; `wb run start <run>
+--plan <file> --dry-run` checks it and shows each stage, its first spec and the estimate, running
+nothing.
+
+## Customizing a shipped one
+`wb flow copy <name>` and `wb card copy <name> [--schema]` put a shipped flow, card or schema in
+your place to edit (it records the shipped one it came from); `wb run flows` and `wb card list`
+mark it `shadows shipped`, and `shipped changed since` once an update changed the shipped one:
+read the new one and merge, or `wb flow reset <name>` / `wb card reset <name>` to use it again
+(yours is kept as `.bak`).
+
+## Scheduled
+`wb schedule add <name> --flow <flow> [--param k=v] [--budget-usd N] --repo DIR --at 'Sun 02:00'`:
+each fire starts the run itself (`<name>-YYMMDD`, `--overnight`), with no session to drive it; its final stage (and
+a `claude` checkpoint) waits for you in the morning.
 
 ## A slash command as a flow
 `wb flow import X.md [--name N] [--card C]`: a command file's prompt (Claude Code's
