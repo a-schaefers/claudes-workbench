@@ -45,6 +45,16 @@ export const line = (from: string, to: string | ((w: Where) => string), files: r
 const SKILL = ['SKILL.md']
 const CC_LINK = '`readlink -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/workbench"`'
 
+// Where the user types a command that asks them something (sudo's password, gh's login). Claude
+// Code's `!` runs it in the user's terminal; OpenCode's `!` (shell mode, typed at the prompt's
+// start) runs it with no terminal: a pipe, stdin closed, under a daemon in a session of its own
+// (2.4.1's process-daemon, service/pipe/unix.rs and client.rs), so nothing can ask. Its terminal
+// pane (`terminal.toggle`, `<leader>t`, the leader ctrl+x by default) is a real terminal, and wb
+// there is the user's: no OPENCODE_SESSION_ID (#1321, finding 17; patches.PANE_OR_TERMINAL, wb's
+// own hints, says the same)
+export const PANE_OR_TERMINAL = "in OpenCode's terminal pane (ctrl+x t) or a terminal of their own"
+export const BANG = "OpenCode's `!` runs a command with no terminal"
+
 const cli = (w: Where): string => (w.onPath
   ? '`wb` is the workbench CLI (on PATH as `wb`; `wb --help`).'
   : `\`wb\` is the workbench CLI, \`${w.wb}\` (run it by that path wherever this says \`wb\` and your shell's PATH has none; \`--help\`).`)
@@ -128,8 +138,6 @@ export const HOST_LINES: readonly Rule[] = [
     "then the `wb patch send` it printed, through `workbench_patch_send` (`slug`, `title`, `body_file`, `draft` if they want one), never the shell. It asks the user to approve that send in a form,"),
   line('Then run the printed `wb patch send <slug> --title "…" --body-file <f>` (`--draft` if they want one); the mod\'s dialog shows the title and the body\'s start, and the user approves it there. Run it as a command of its own, the flags spelled out (`--title`, `--body-file`, never shortened, never a `$VAR`): the dialog refuses what it can\'t show. If wb says the dialog approved none (the mod isn\'t loaded), the user runs that command in a terminal of their own.',
     "Then send what it printed through `workbench_patch_send` (`slug`, `title`, `body_file`, `draft` if they want one), never the shell; its form shows the title and the body's start, and the user approves it there. It refuses what it can't show. If it says no window was open to ask in, the user runs that command in a terminal of their own.", ['reference/patching.md']),
-  line("A pull request goes only through `wb patch send`, which refuses under Claude Code what the dialog didn't approve,",
-    "A pull request goes only through `workbench_patch_send`, and wb refuses a send its form didn't approve,", ['reference/patching.md']),
   // agents read OpenCode's global AGENTS.md (context.py, the project-config note), as the driver does
   line("It never gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`: those are yours. When you will review against one of those global rules,",
     "It never gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`; it does get OpenCode's global `~/.config/opencode/AGENTS.md`, as you do. When you will review against a global rule it doesn't get,"),
@@ -157,6 +165,7 @@ export const HOST_LINES: readonly Rule[] = [
   { from: /\nWithout the mod, the user may ask for the same in words; run those commands then\./, to: '', files: SKILL },
   line('once (a marketplace install can\'t keep one: Claude Code re-clones it)',
     "once (OpenCode's own install of workbench can't keep one: wb patch names the clone to make and its `bin/wb setup --opencode`)"),
+  line('the login is theirs (`! gh auth login`)', `the login is theirs, typed ${PANE_OR_TERMINAL} (\`gh auth login\`; ${BANG})`),
 
   // reference/driving.md
   line("(`~/.claude/CLAUDE.md`, `wb notes`, the repo's CLAUDE.md)", "(`~/.config/opencode/AGENTS.md`, `wb notes`, the repo's CLAUDE.md)", ['reference/driving.md']),
@@ -177,15 +186,67 @@ export const HOST_LINES: readonly Rule[] = [
   line("(each directory's: the mod's,", "(each directory's: the Claude Code mod's,", ['reference/patching.md']),
 
   // reference/models.md
-  line("with Claude Code's `!` prefix", "with OpenCode's `!` prefix", ['reference/models.md']),
+  // OpenCode's `!` can't prompt (`BANG`): sudo's password goes to a terminal
+  line("with Claude Code's `!` prefix or in a terminal of their own if sudo can't ask there",
+    `${PANE_OR_TERMINAL} (${BANG}, so sudo couldn't ask)`, ['reference/models.md']),
   line('Claude sets it up on request;', 'You set it up on request;', ['reference/models.md']),
   line('tell the user to restart Claude Code or run `/reload-plugins` after)',
     "OpenCode reloads the plugin by itself after it; an install OpenCode made from Git it updates itself, as wb update says)", ['reference/models.md']),
 
-  // reference/patching.md
-  line('Then the user runs `/reload-plugins`.', 'Then, on Claude Code, the user runs `/reload-plugins`.', ['reference/patching.md']),
+  // reference/patching.md: Claude Code's facts, OpenCode's here (#1321, finding 7)
+  // the clone a patch lives in: OpenCode's own install can't keep one, and `wb patch` refuses there
+  // (cli.cmd_patch); wb setup --opencode keeps a Git entry's source, so the plugin's own code stays
+  // that install's until the entry names the clone (ocplugin.install)
+  { from: /1\. Once, on a marketplace install: `wb patch init`[\s\S]*?`--track` gets it from `wb update` or `wb patch init`\)\./,
+    to: '1. Once, a clone the user owns: patches are commits on its branch `local`. OpenCode\'s own install\n'
+      + "   of workbench (from Git, in OpenCode's package cache) can't keep one, as OpenCode replaces it\n"
+      + '   when it updates: `wb patch` refuses there and prints the two commands that make one, a `git\n'
+      + "   clone` and that clone's `bin/wb setup --opencode`; run them on the user's yes. The plugin then\n"
+      + "   runs the clone's `wb`, and its own code stays OpenCode's install while OpenCode's `plugins`\n"
+      + '   entry names that install (`wb doctor` says which copy loads, from which file): for a patch\n'
+      + "   under `opencode-plugin/`, that entry comes out of OpenCode's config (on the user's yes) and\n"
+      + "   the clone's `bin/wb setup --opencode` runs again, which loads the clone's. Run from Claude\n"
+      + "   Code's marketplace install (a machine with both), `wb patch init` (on the user's yes; it\n"
+      + '   refuses while tasks run) moves it to a full clone, `~/.local/share/workbench/source` or\n'
+      + "   `--dir`/`WB_SOURCE`, OpenCode's plugin too when it ran from there, and the user runs\n"
+      + '   `/reload-plugins` in Claude Code. On a clone the user already owns, `wb patch init` says so:\n'
+      + '   work on branch `local` there (`git -C <root> switch -c local --track origin/main`; one made\n'
+      + '   without `--track` gets it from `wb update` or `wb patch init`).',
+    files: ['reference/patching.md'] },
   line('copies the committed HEAD into the plugin cache), then `/reload-plugins`.',
-    "copies the committed HEAD into the plugin cache), then `/reload-plugins`; one under `opencode-plugin/` reaches OpenCode through `wb update` too (it loads a copy of what is committed, and reloads it by itself).", ['reference/patching.md']),
+    "copies the committed HEAD into the plugin cache), then `/reload-plugins`; one under `opencode-plugin/` reaches OpenCode through `wb update` too while OpenCode loads the plugin from this clone (step 1): a copy of what is committed, which it reloads by itself.", ['reference/patching.md']),
+  // the plugin's form asks only for wb patch send (consent.ts): gh's and git's own sends, an MCP
+  // tool's, go out on the user's yes in words; while they are away the form waits (no NOT_SENT_AWAY)
+  { from: /The mod holds every send to\s+workbench upstream[\s\S]*?until they are back at the terminal\./,
+    to: 'Nothing goes to\nworkbench upstream (an issue, a comment, a fork, a push, a pull request) without '
+      + "the user's yes\nto that one thing, asked each time: a yes is never remembered. A pull request goes only "
+      + 'through\n`workbench_patch_send`, which asks them in a form, and wb refuses a send its form didn\'t '
+      + 'approve,\nso never send one with gh, git or a GitHub MCP tool yourself. The form is only for that send: '
+      + 'an\nissue or a comment (step 1) goes out through gh, on their yes in words to the text you showed\nthem. '
+      + 'Show them what goes public first, so the form only confirms what they have read. A "Don\'t\nsend" is a '
+      + "no: tell them it wasn't sent and leave it, unless they bring it up. If they are away on\nthe web chat, "
+      + 'tell them there what it would send: the form waits in the terminal for their answer.',
+    files: ['reference/patching.md'] },
+  // the marketplace clone's rescue is Claude Code's, met here only with both installed (#1321's
+  // "checked and fine": it never fires on an OpenCode clone)
+  line("It found local changes in Claude Code's clone,", "On a machine with Claude Code's install too, it found local changes in Claude Code's clone,",
+    ['reference/patching.md']),
+  line('nothing sent, so no dialog asks;', 'nothing sent, so no form asks;', ['reference/patching.md']),
+  // gh's login asks the user (a browser, a code): OpenCode's `!` has no terminal for it (`BANG`)
+  line("the login is the user's own: `! gh auth login --hostname github.com --git-protocol <ssh|https>` as wb prints it",
+    `the login is the user's own, typed ${PANE_OR_TERMINAL}, never with \`!\` (${BANG}): \`gh auth login --hostname github.com --git-protocol <ssh|https>\` as wb prints it`,
+    ['reference/patching.md']),
+  line('Over https, `! gh auth setup-git` too,', 'Over https, `gh auth setup-git` there too,', ['reference/patching.md']),
+  line("needs the token's workflow scope: `! gh auth refresh -h github.com -s workflow`.",
+    "needs the token's workflow scope: `gh auth refresh -h github.com -s workflow`, typed there too.", ['reference/patching.md']),
+  // Claude Code's GitHub plugin: on OpenCode, a GitHub MCP server in its own config
+  { from: /- \*\*The GitHub plugin for Claude Code is optional\*\*[\s\S]*?a pull request still goes through `wb patch send`\./,
+    to: "- **A GitHub MCP server is optional**, never needed for a pull request. If the user wants one,\n"
+      + "  it goes in their OpenCode config's `mcp`, with a personal access token they create on GitHub\n"
+      + '  and set in their own shell profile (never from `gh auth token` unless they ask for exactly\n'
+      + '  that); `opencode mcp list` checks it connects. Its tools that write to upstream are sends like\n'
+      + "  gh's: each on the user's yes; a pull request still goes through `workbench_patch_send`.",
+    files: ['reference/patching.md'] },
 
   // what recurs
   // (after every line above, which match Claude Code's words) the web chat's replies: chat.ts's tool (#1319)

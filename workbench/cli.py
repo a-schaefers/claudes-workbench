@@ -3926,9 +3926,9 @@ def gate_refusal(what: str, command: str, tool: str = "workbench_route") -> str:
                 f"user approved none for this change, so nothing changed. Ask the reviewer "
                 f"(ask_reviewer); or the user runs it in a terminal of their own: {command}")
     if store.caller_kind() == "opencode":
-        return (f"in OpenCode {what} only through the workbench plugin's dialog, and the user "
+        return (f"in OpenCode {what} only through the workbench plugin's form, and the user "
                 f"approved none for this change, so nothing changed (the plugin's {tool} tool asks "
-                f"them; is the plugin loaded?). Or the user runs it in a terminal of their own: {command}")
+                f"them; is the plugin loaded?). Or the user runs it {patches.PANE_OR_TERMINAL}: {command}")
     return (f"in Claude Code {what} only through the workbench mod's dialog, and the user approved "
             f"none for this change, so nothing changed (is the mod loaded? wb doctor says). Or the "
             f"user runs it in a terminal of their own: {command}")

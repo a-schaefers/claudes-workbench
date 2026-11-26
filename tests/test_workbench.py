@@ -26751,9 +26751,10 @@ class LocalPatches(Base):
             (Path(self.tmp.name) / "os-release").write_text('NAME="Alpine Linux"\nID=alpine\n')
             self.assertEqual(patches._os_release()["ID"], "alpine")
 
-    def test_from_an_opencode_driver_a_prompting_step_goes_to_a_terminal_and_names_opencodes_model(self):
+    def test_from_an_opencode_driver_a_prompting_step_goes_to_its_terminal_pane_and_names_opencodes_model(self):
         # #1321 (findings 17, 27): the hints said `! cmd` and "Claude", Claude Code's; OpenCode's `!`
-        # had no terminal for sudo's password or gh's login, and no Claude drove it
+        # has no terminal for sudo's password or gh's login (2.4.1 too), its terminal pane does, and
+        # no Claude drove it
         real = shutil.which
         with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"), \
                 mock.patch.object(patches, "_os_release", lambda: {"ID": "arch"}), \
@@ -26761,18 +26762,19 @@ class LocalPatches(Base):
                 mock.patch.object(patches.hardware, "system", lambda: "linux"), \
                 mock.patch.object(patches.shutil, "which", lambda n: None if n != "git" else real(n)):
             missing = patches.gh_state()["hint"]
-        self.assertIn("OpenCode's model asks first, then the user runs, in a terminal of their own: sudo pacman "
-                      "-S github-cli", missing)
+        self.assertIn("OpenCode's model asks first, then the user runs, in OpenCode's terminal pane (ctrl+x t) or "
+                      "a terminal of their own: sudo pacman -S github-cli", missing)
         self.gh_auth(hosts=False)
         https = mock.patch.object(patches, "_guess_protocol", lambda root=None: "https")
         https.start(); self.addCleanup(https.stop)
         with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"):
             login = patches.gh_state()["hint"]
             crash = patches.driver_name()
-        self.assertIn("the user runs, in a terminal of their own: gh auth login --hostname github.com "
-                      "--git-protocol https (a browser or one-time code; OpenCode's model never handles the token)",
-                      login)
-        self.assertIn("then, in a terminal of their own: gh auth setup-git, so git pushes", login)
+        self.assertIn("the user runs, in OpenCode's terminal pane (ctrl+x t) or a terminal of their own: gh auth "
+                      "login --hostname github.com --git-protocol https (a browser or one-time code; OpenCode's "
+                      "model never handles the token)", login)
+        self.assertIn("then, in OpenCode's terminal pane (ctrl+x t) or a terminal of their own: gh auth setup-git, "
+                      "so git pushes", login)
         self.assertNotIn("! ", missing + login)
         self.assertEqual(crash, "OpenCode's model")
         self.assertIn("the user runs: ! gh auth login", patches.gh_state()["hint"])  # Claude Code's, as it was
@@ -26945,9 +26947,11 @@ class LocalPatches(Base):
         os.environ["OPENCODE_SESSION_ID"] = "ses_x"
         ok = store.home() / "send-ok.ses_x.json"            # its session's own (#1363)
         out = self.send(body)
-        self.assertIn("in OpenCode wb patch send goes only through the workbench plugin's dialog", out)
+        self.assertIn("in OpenCode wb patch send goes only through the workbench plugin's form", out)
         self.assertIn("the plugin's workbench_patch_send tool asks them", out)
-        self.assertIn(f'outside OpenCode: wb patch send fix-thing --title "Fix it" --body-file {body}', out)
+        # its terminal pane is the user's own terminal (#1321, finding 17): never "outside OpenCode"
+        self.assertIn("Or the user runs it in OpenCode's terminal pane (ctrl+x t) or a terminal of their own: "
+                      f'wb patch send fix-thing --title "Fix it" --body-file {body}', out)
         self.assertEqual(self.gh_argv(), [])
         self.assertFalse(self.sent())
         store.write_json(ok, {"slug": "fix-thing", "title": "Fix it", "body_file": str(body),
@@ -41245,10 +41249,11 @@ class OpenCodeDriver(Base):
         self.assertTrue(store.under_model())
         code, out, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.assertEqual((code, out), (3, ""))
-        self.assertIn("in OpenCode a role changes only through the workbench plugin's dialog, and the user "
+        self.assertIn("in OpenCode a role changes only through the workbench plugin's form, and the user "
                       "approved none for this change, so nothing changed (the plugin's workbench_route tool "
-                      "asks them; is the plugin loaded?). Or the user runs it in a terminal of their own: wb "
-                      "route trivial deepseek/deepseek-flash --day-usd 5", err)
+                      "asks them; is the plugin loaded?). Or the user runs it in OpenCode's terminal pane "
+                      "(ctrl+x t) or a terminal of their own: wb route trivial deepseek/deepseek-flash "
+                      "--day-usd 5", err)
         self.assertFalse(self.path.exists())
         os.environ["OPENCODE_SESSION_ID"] = "not an id!"           # a malformed id is still gated
         self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 3)
@@ -41349,7 +41354,7 @@ class OpenCodeDriver(Base):
         with self.assertRaises(SystemExit) as out, redirect_stderr(err):
             cli.start_gate("t-api", m)
         self.assertEqual(out.exception.code, 3)
-        self.assertIn("in OpenCode an API model starts only through the workbench plugin's dialog", err.getvalue())
+        self.assertIn("in OpenCode an API model starts only through the workbench plugin's form", err.getvalue())
         self.assertIn("the plugin's workbench_start tool asks them", err.getvalue())
         store.write_json(self.ok, {"start": {"task": "t-api", "model": "acme/coder-flash"},
                                    "change": cli.start_line("t-api", m), "at": time.time()})
