@@ -91,7 +91,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-11',
+  shape: 'tasks-12',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
