@@ -19,23 +19,32 @@ type Row = { task :: String, kind :: String, ts :: Number, tasks :: Array String
 oldestWakeMs :: Number
 oldestWakeMs = 60.0 * 60.0 * 1000.0
 
+-- | A run's own notice, the same: a scheduled flow finishes overnight and the session near its
+-- | repo opens in the morning, so the hour dropped the one wake it gives (#1493, 2026-11-26). The
+-- | host's noticePlan still judges it true only while the run is in the phase that raised it, as
+-- | `wb wait <run>` does; twelve hours, not forever, so a run left unacknowledged is not toasted
+-- | at every load.
+oldestRunWakeMs :: Number
+oldestRunWakeMs = 12.0 * 60.0 * 60.0 * 1000.0
+
 -- | The notices due a look, from notify.jsonl's rows (oldest first), the load's start and the
 -- | time (ms): per task, in the order the tasks first come due, its every question and its newest
 -- | notice (`picks`: the rows' indices; two questions asked at once are both open, and the newest
--- | alone hid the first, its agent blocked, the 2026-11-16 audit), none older than an hour; and
--- | `noticed`, each task's newest notice however old, a batch's counting for every task it names
--- | (rewake's mark: news Claude had, not a lost one).
+-- | alone hid the first, its agent blocked, the 2026-11-16 audit), none older than an hour
+-- | (`runs`, the rows a run's own: twelve hours, `oldestRunWakeMs`); and `noticed`, each task's
+-- | newest notice however old, a batch's counting for every task it names (rewake's mark: news
+-- | Claude had, not a lost one).
 noticesDue
-  :: { rows :: Array Row, startedAt :: Number, now :: Number }
+  :: { rows :: Array Row, startedAt :: Number, now :: Number, runs :: Boolean }
   -> { due :: Array { task :: String, picks :: Array Number }
      , noticed :: Array { task :: String, ts :: Number }
      }
-noticesDue { rows, startedAt, now } =
+noticesDue { rows, startedAt, now, runs } =
   { due: map (\d -> { task: d.task, picks: map _.at d.picks }) (foldl pickRow { due: [], at: 0.0 } rows).due
   , noticed: foldl mark [] rows
   }
   where
-  since = max startedAt now - oldestWakeMs
+  since = max startedAt now - (if runs then oldestRunWakeMs else oldestWakeMs)
   pickRow acc r =
     { at: acc.at + 1.0
     , due:

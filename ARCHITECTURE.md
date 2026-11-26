@@ -1159,7 +1159,8 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   `-2` … `-99` once `runs.taken` has one, hence `FLOW_NAME_MAX` 14 for its 24), no `claude -p`: on the
   OpenCode-only path every fire of a backlog failed for want of claude. The run's own driver, budget and
   `--overnight` carry the night, its final stage (and any `claude` checkpoint, said at add) waits for a
-  session, which claims it by directory (the run has no session; its cwd is the repo). A fire while the last
+  session, which claims it by directory (the run has no session; its cwd is the repo), its notice due twelve
+  hours, not a task's one, so the session opened there in the morning is told (#1493). A fire while the last
   fire's run still has a live driver is a `skipped` row. Its row names the run, and `wb schedule list` shows it
   as it stands (`runs.status_line`); `wb doctor` asks its unit's PATH for opencode alone (`schedule.needs`).
   wb's own timers still, not OpenCode's automations, for the reason above. A repo's flow is never scheduled.
@@ -8376,7 +8377,8 @@ one shared types module).
   session its own id's tasks, never a live session's nor another driver's by directory, nothing in
   `~` or `/` by directory but where `wb start` ran, `/x/ab` never inside `/x/a`, that `awayNow`
   holds for six hours, then while one of the session's tasks is open, that `noticesDue` picks only
-  a task's own rows within the hour, in order, its questions and one newest notice, `noticed` never
+  a task's own rows within the hour (a run's, twelve hours: a 270-minute-old run notice in its phase is
+  due and wakes, #1493), in order, its questions and one newest notice, `noticed` never
   behind a notice, that `noticePlan` delivers a notice at most once while it is true (acked: skipped,
   untoasted; only a true one of this session's with wakes on wakes or steers; none mid-turn but a
   question steered), that `rewakePlan` is due only for a candidate, never busy, too soon, past
@@ -9361,7 +9363,8 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
 - **A run's own notices** (#1278's S9, `deliverRuns`, `parseRunLines`: rows with `run` and no `task`):
   delivered to the session here that ran `wb run start` (run.json `session` with `session_kind`
   `opencode`, judged as a task's; a run with no session, a scheduled flow's, by its `cwd` and `repo`
-  as a sessionless task's), by core.ts's `runNoticesDue` and `runNoticePlan` (still true while
+  as a sessionless task's), by core.ts's `runNoticesDue` (twelve hours, not an hour: a flow done
+  overnight is told in the morning, #1493) and `runNoticePlan` (still true while
   the run is in the row's `phase`), `wb ack <run> <ts> --run`, then a queued synthetic, `noticeId("run:<run>",
   kind, ts)`, its text the row's whole, the toast `run <run> <RUN_HEADLINE>`; refused, `wb ack <run> <prev>
   --run --if <ts>` and the next look tries again (no net for a run). *Deep workflows* has the row.
@@ -9732,7 +9735,8 @@ text}`, no `task`: `phase` (`runs.NOTICE_PHASE`) is the run's phase it was raise
 only while the run is in it (a pause since resumed, a checkpoint since fed, is acknowledged unsaid). Both hosts
 deliver them (#1278's S9) as a task's, to the session the run is `mine` to (run.json's `session` and
 `session_kind`, else by directory: a scheduled run's is the session near its repo; the kernel's `owns`), once,
-while still true: core.ts's `runNoticesDue` (the kernel's `noticesDue` over the run rows, keyed by run) and
+while still true: core.ts's `runNoticesDue` (the kernel's `noticesDue` over the run rows, keyed by run, `runs`:
+due twelve hours, `oldestRunWakeMs`, not a task's hour, as the hour dropped a flow done overnight, #1493) and
 `runNoticePlan` (`noticePlan`, its kind the raised-in phase), the mod's `deliverRuns` (register.tsx) and the
 plugin's `NoticeLane.deliverRuns` (notices.ts), held through a busy turn, the text the wake whole, a toast
 `workbench: run <run> <RUN_HEADLINE>`. The claim is `wb ack <run> <ts> --run` (`Run.claim_ack`, the

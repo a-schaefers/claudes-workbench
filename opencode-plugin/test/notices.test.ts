@@ -374,6 +374,21 @@ test('a run or task that records no session wakes a session here in its repo onc
   expect(w.admitted.map(s => [s.sessionID, s.metadata?.task ?? s.metadata?.run])).toEqual([['ses_repo', 't9'], ['ses_repo', 'nightly-1']])
 })
 
+test('a scheduled flow done overnight still wakes the session that opens its repo in the morning, while the run waits in that phase (#1493)', async () => {
+  // the kernel dropped a run notice an hour old, and runs have no rewake net: the flow done at
+  // night was never told (#1493, 2026-11-26)
+  const w = world()
+  const ts = w.now / 1000 - 270 * 60
+  w.sessions.ses_repo = { id: 'ses_repo', location: { directory: '/src/app' } }
+  w.files[`${HOME}/runs/nightly-1/run.json`] = JSON.stringify({ name: 'nightly-1', flow: 'nightly', cwd: '/src/app', repo: '/src/app' })
+  w.files[`${HOME}/runs/nightly-1/status.json`] = JSON.stringify({ phase: P.review })
+  w.notify({ run: 'nightly-1', kind: 'run_done', phase: P.review, ts, text: 'DONE' })
+  w.lane.started('ses_repo')
+  await w.lane.ended('ses_repo')
+  expect(w.acks()).toEqual([`ack nightly-1 ${ts} --run`])
+  expect(w.admitted.map(s => [s.sessionID, s.metadata?.run])).toEqual([['ses_repo', 'nightly-1']])
+})
+
 test('a run\'s notice no longer true is acknowledged unsaid, and a busy session gets it once the turn ends', async () => {
   const w = world()
   const ts = w.now / 1000

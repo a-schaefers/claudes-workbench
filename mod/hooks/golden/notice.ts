@@ -20,24 +20,30 @@ const at = (s: number) => (now - s) / 1000
 export default {
   module: 'Kernel.Notice',
   cases: [
-    { fn: 'noticesDue', in: { rows: [], startedAt: now, now }, out: { due: [], noticed: [] }, why: 'no notices: nothing due' },
+    { fn: 'noticesDue', in: { rows: [], startedAt: now, now, runs: false }, out: { due: [], noticed: [] }, why: 'no notices: nothing due' },
     {
       fn: 'noticesDue',
-      in: { rows: [row('a', 'checkin', 3 * min), row('b', 'review', 2 * min), row('a', 'question', 2 * min), row('a', 'question', min), row('a', 'review', 0)], startedAt: now - hour, now },
+      in: { rows: [row('a', 'checkin', 3 * min), row('b', 'review', 2 * min), row('a', 'question', 2 * min), row('a', 'question', min), row('a', 'review', 0)], startedAt: now - hour, now, runs: false },
       out: { due: [{ task: 'a', picks: [2, 3, 4] }, { task: 'b', picks: [1] }], noticed: [{ task: 'a', ts: at(0) }, { task: 'b', ts: at(2 * min) }] },
       why: 'per task its every question and its newest notice, in the order the tasks came due (the 2026-11-16 audit)',
     },
     {
       fn: 'noticesDue',
-      in: { rows: [row('a', 'review', 2 * hour), row('c', 'stuck', 30 * min, ['c', 'd'])], startedAt: now - 3 * hour, now },
+      in: { rows: [row('a', 'review', 2 * hour), row('c', 'stuck', 30 * min, ['c', 'd'])], startedAt: now - 3 * hour, now, runs: false },
       out: { due: [{ task: 'c', picks: [1] }], noticed: [{ task: 'a', ts: at(2 * hour) }, { task: 'c', ts: at(30 * min) }, { task: 'd', ts: at(30 * min) }] },
       why: 'over an hour old wakes no one but still counts as noticed; a batch counts for every task it names',
     },
     {
       fn: 'noticesDue',
-      in: { rows: [row('a', 'review', 10 * min)], startedAt: now + 20 * min, now },
+      in: { rows: [row('a', 'review', 10 * min)], startedAt: now + 20 * min, now, runs: false },
       out: { due: [{ task: 'a', picks: [0] }], noticed: [{ task: 'a', ts: at(10 * min) }] },
       why: 'the hour runs from the later of the load’s start and now',
+    },
+    {
+      fn: 'noticesDue',
+      in: { rows: [row('nightly', 'run_done', 270 * min), row('old', 'run_done', 13 * hour)], startedAt: now, now, runs: true },
+      out: { due: [{ task: 'nightly', picks: [0] }], noticed: [{ task: 'nightly', ts: at(270 * min) }, { task: 'old', ts: at(13 * hour) }] },
+      why: 'a run’s notice is due twelve hours, so a flow done overnight is told in the morning (#1493)',
     },
     { fn: 'noticePlan', in: plan, out: { current: true, toast: true, act: 'wake' }, why: 'a review of this session’s, still true, idle: toast and wake' },
     { fn: 'noticePlan', in: { ...plan, toasted: true }, out: { current: true, toast: false, act: 'wake' }, why: 'toasted once only' },
