@@ -6041,6 +6041,44 @@ class RepoProfile(Base):
                          "make lint && (pytest || pytest --lf)")
         self.assertEqual(context.with_repo_test("npm ci\nnpm run lint", "npm test"), "(npm ci\nnpm run lint) && npm test")
 
+    def test_a_comment_in_the_repos_standing_test_never_hides_the_tasks_own_test(self):
+        # #1475 (2026-11-26): `echo lint  # team lint && exit 1` was all comment after `lint`, so
+        # every task's tests passed without running; a `#` in the task's own test too
+        for standing, test in (("echo lint  # team lint", "exit 1"), ("echo lint", "true; exit 1  # note"),
+                               ("echo a\necho lint # last", "exit 1")):
+            line = context.with_repo_test(standing, test)
+            for sh in filter(None, (shutil.which("bash"), shutil.which("zsh"))):
+                self.assertEqual(subprocess.run([sh, "-c", line], capture_output=True).returncode, 1,
+                                 f"{sh}: {line!r}")
+            self.assertEqual(subprocess.run(["bash", "-c", context.with_repo_test(standing.replace("echo lint", "false"), "true")],
+                                            capture_output=True).returncode, 1)
+
+    def test_a_root_entrys_standing_test_runs_from_its_key_directory_in_a_package_task(self):
+        # #1490 (2026-11-26): a root key's ./scripts/lint.sh ran in the package, exit 127 on the
+        # base and in every round, auto-fix spent on correct code (#1376 fixed only `setup`)
+        pkg = self.repo / "pkg"
+        pkg.mkdir()
+        (pkg / "CLAUDE.md").write_text("# pkg\n")
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts" / "lint.sh").write_text("#!/bin/sh\ntest -d pkg\n")  # only at the top
+        (self.repo / "scripts" / "lint.sh").chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        self.commands({"test": "./scripts/lint.sh"})
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-pkgtest", "--spec", str(self.spec), "--repo", str(pkg), "--model", "mimo",
+               "--test", "test ! -d scripts")  # the task's own still in the package
+        self.assertEqual(store.Task("t-pkgtest").spec["test_cmd"], "(cd .. && ./scripts/lint.sh) && test ! -d scripts")
+        st = wait_phase("t-pkgtest", {"review", "stuck", "failed"})
+        self.assertIs(st["base_check"]["ok"], True, st["base_check"])
+        self.assertEqual((st["phase"], st["auto_fixes"]), ("review", 0))
+        self.assertIs(st["tests"]["ok"], True)
+        # a standing test's own cd stays its own; from the top, nothing moves
+        self.assertEqual(context.with_repo_test("cd web && npm run lint", "pytest"), "(cd web && npm run lint) && pytest")
+        self.assertEqual(context.with_repo_test("make lint", None, "../.."), "(cd ../.. && make lint)")
+        self.assertEqual(context.with_repo_test("make lint", "make lint", ".."), "(cd .. && make lint) && make lint")
+        self.assertEqual(context.repo_test_at(self.repo, ""), "")
+
     def test_the_repos_skills_are_handed_to_every_task_there_and_a_missing_one_is_named(self):
         lib = Path(os.environ["WB_SKILLS"])
         write_skill(lib / "house-style", "house-style", "Use when writing this repo's code.")
