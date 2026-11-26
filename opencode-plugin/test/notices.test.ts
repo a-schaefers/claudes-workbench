@@ -4,6 +4,7 @@ import {
 } from '../notices.ts'
 import { QUIET_MS } from '../jobs.ts'
 import { shown } from '../notices-tui.ts'
+import { ChatLane, lane as chatLane } from '../chat.ts'
 import { ACTIVE, CLOSED, NEEDS } from '../../mod/hooks/core.ts'
 
 // Each phase, and the notice kinds that share its word, by name from core.ts's sets: a quoted phase
@@ -423,6 +424,34 @@ test('a scheduled flow done overnight still wakes the session that opens its rep
   await w.lane.ended('ses_repo')
   expect(w.acks()).toEqual([`ack nightly-1 ${ts} --run`])
   expect(w.admitted.map(s => [s.sessionID, s.metadata?.run])).toEqual([['ses_repo', 'nightly-1']])
+})
+
+// #1542 (2026-11-26): `started` put every executing session into `lately`, and `nearest` took
+// one no TUI showed: a script's `opencode run` in the repo acked the run's one wake and got an
+// unwatched turn on it, and the user's TUI opened there later got nothing
+test('a sessionless run\'s wake never goes to a session no TUI shows (a script\'s opencode run), and the TUI session opened near the repo later gets it (#1542)', async () => {
+  const w = world()
+  const ts = w.now / 1000 - 6 * 3600
+  w.sessions.ses_script = { id: 'ses_script', location: { directory: '/src/app' } }
+  w.sessions.ses_tui = { id: 'ses_tui', location: { directory: '/src/app' } }
+  w.files[`${HOME}/runs/nightly-1/run.json`] = JSON.stringify({ name: 'nightly-1', flow: 'nightly', cwd: '/src/app', repo: '/src/app' })
+  w.files[`${HOME}/runs/nightly-1/status.json`] = JSON.stringify({ phase: P.review })
+  w.notify({ run: 'nightly-1', kind: 'run_done', phase: P.review, ts, text: 'DONE' })
+  // the lane chat() makes on this server: only what a TUI said it shows counts
+  const chat = chatLane(() => new ChatLane({ run: async () => ({ ok: true, out: '' }), read: () => undefined, size: () => -1, now: () => w.now, pid: 1, home: HOME }))
+  try {
+    w.lane.started('ses_script')
+    await w.lane.ended('ses_script')
+    expect([w.acks(), w.admitted, w.toasts]).toEqual([[], [], []])
+    w.tick(3600_000)
+    chat.lane.shown('ses_tui')
+    w.lane.started('ses_tui')
+    await w.lane.ended('ses_tui')
+    expect(w.acks()).toEqual([`ack nightly-1 ${ts} --run`])
+    expect(w.admitted.map(s => [s.sessionID, s.metadata?.run])).toEqual([['ses_tui', 'nightly-1']])
+  } finally {
+    delete (globalThis as Record<string, unknown>).__workbenchChatLane
+  }
 })
 
 test('a run\'s notice no longer true is acknowledged unsaid, and a busy session gets it once the turn ends', async () => {

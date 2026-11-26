@@ -1646,6 +1646,18 @@ def _check_group(group: str | None) -> None:
         die("a group name is lowercase letters, digits and hyphens, at most 32")
 
 
+def _start_branch(a, repo: Path) -> str | None:
+    """The branch a task started from (task.json base_branch). A run's driver starts each item
+    with --base <sha>, which names none, so an item merged into whatever branch was checked out
+    by accept, a feature branch nobody chose (#1541, 2026-11-26): it takes the run's. A run.json
+    from before base_branch was recorded keeps the sha's None."""
+    if getattr(a, "run", None):
+        spec = runs.Run(a.run).spec
+        if "base_branch" in spec:
+            return spec["base_branch"]
+    return gitops.start_branch(repo, a.base)
+
+
 def _cant_run(m: models.Model, state: dict) -> str:
     """wb start's refusal of a model status() says can't run, with its next step."""
     fix = models.remedy(m, state)
@@ -2033,7 +2045,8 @@ def cmd_start(a):
         # (shells run in OpenCode's long-lived service), and `driver` saying whose it is
         **({"session": oc, "driver": store.driver_record(oc)}
            if not sid and (oc := store.opencode_session()) else {}),
-        "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
+        # where wb accept --merge lands; a run's item, the run's (#1541: its --base is a sha)
+        "base_branch": _start_branch(a, repo),
         # the weights behind the id: a record on other weights under it isn't this model's (#726)
         **({"weights_id": w} if (w := models.identity(m)) else {}),
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": models.task_label(m),
@@ -4855,7 +4868,13 @@ def cmd_takeover(a):
             print("stopped: " + "; ".join(drivers))
         tasks, others = _scope([t for t in store.all_tasks()
                                 if t.status.get("phase") not in store.CLOSED], *_caller(a))
-        if not tasks:
+        # a task an earlier /workbench-quit parked stays the user's to pick up by name: the
+        # hand-back took it over too, and the driver was told to finish and accept it without
+        # asking (#1540, the 2.2 bar, 2026-11-26). Its line never starts "took over", which the
+        # mod's and the plugin's turn key on
+        held = [t.name for t in tasks if store.parked(t.status)]
+        tasks = [t for t in tasks if not store.parked(t.status)]
+        if not tasks and not held:
             print("no open delegated tasks to take over")
         refused = 0
         for t in tasks:  # each refusal said (die's line) and the rest still taken: one refused
@@ -4871,6 +4890,9 @@ def cmd_takeover(a):
                                                 user=a.user))
             except SystemExit as e:
                 refused = max(refused, e.code if isinstance(e.code, int) else 1)
+        if held:
+            print("left parked by an earlier quit (leave them unless the user asks): "
+                  + ", ".join(held))
         _say(_others_line(others, "left alone"))
         if refused:
             sys.exit(refused)

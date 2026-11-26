@@ -9552,6 +9552,25 @@ class Steering(Base):
         run_wb("takeover", "t-rev")                            # picked up: Claude's again
         self.assertFalse(store.parked(store.Task("t-rev").status))
 
+    def test_the_hand_back_leaves_a_task_an_earlier_quit_parked_for_the_user(self):
+        # #1540 (the 2.2 bar, 2026-11-26): wb takeover --all (the hand-back) took over the tasks
+        # an earlier /workbench-quit had parked too, and the driver was told to finish and accept
+        # each one without asking
+        self.start("t-old", "ok", "--test", TEST_CMD)
+        wait_phase("t-old", {"review"})
+        run_wb("stop", "--all", "--park-waiting", "--repo", os.getcwd())
+        self.start("t-new", "slow")
+        self.wait_session("t-new")
+        out = run_wb("takeover", "--all", "--user")
+        self.assertRegex(out, r"(?m)^took over t-new")          # the mod's and plugin's turn
+        self.assertNotIn("took over t-old", out)
+        self.assertIn("left parked by an earlier quit (leave them unless the user asks): "
+                      "t-old", out)
+        st = store.Task("t-old").status
+        self.assertTrue(store.parked(st))
+        self.assertFalse(st.get("taken_over"))
+        self.assertTrue(store.Task("t-new").status["taken_over"])
+
     def test_wb_doctor_names_the_tasks_left_waiting_on_claude_for_days(self):
         # #541: a task left stuck, failed or in review for weeks was named nowhere
         self.start("t-idle", "ok")
@@ -9615,7 +9634,9 @@ class Steering(Base):
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         self.assertEqual(store.Task("t-mine").status["phase"], "stuck")
         out = run_wb("takeover", "--all", "--repo", here)
-        self.assertIn("took over t-mine", out)
+        # the quit parked it: the hand-back leaves it so (#1540)
+        self.assertIn("left parked by an earlier quit (leave them unless the user asks): "
+                      "t-mine", out)
         self.assertIn("left alone (other sessions'): t-theirs", out)
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         with self.assertRaises(SystemExit):
@@ -22972,6 +22993,31 @@ class ScheduledRuns(Base):
             run_wb("schedule", "rm", "night")
             self.assertFalse((home / "Library/LaunchAgents/workbench.schedule.night.plist").exists())
 
+    def test_on_macos_a_repo_in_documents_is_noted_at_add_and_in_doctor_until_a_fire_runs(self):
+        # #1539, 2026-11-26: macOS privacy keeps a launchd job out of ~/Documents (GitHub Desktop's
+        # clone folder), so the schedule never fired, and wb said nothing at add, in doctor or list
+        from workbench import schedule
+        home = Path(self.tmp.name) / "home"
+        (home / "Documents").mkdir(parents=True)
+        self.repo = self.repo.rename(home / "Documents" / "proj")
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                mock.patch.object(Path, "home", return_value=home):
+            out = self.add()
+            note = (f"note: {os.path.realpath(self.repo)} is in ~/Documents: macOS privacy keeps the timer's "
+                    f"fire out, so it never runs (wb schedule run from Terminal still does): give "
+                    f"{os.path.realpath(sys.executable)} Full Disk Access (System Settings, Privacy & "
+                    f"Security), or move it out of ~/Documents")
+            self.assertIn(note, out)
+            self.assertIn("scheduled night", out)                      # a note, never a refusal
+            ((ok, said),) = schedule.doctor_lines()
+            self.assertFalse(ok)
+            self.assertIn("is in ~/Documents: macOS privacy keeps the timer's fire out", said)
+            self.assertEqual(self.fire(), 0)                            # it got in: granted
+            ((ok, said),) = schedule.doctor_lines()
+            self.assertTrue(ok, said)
+        with mock.patch.object(Path, "home", return_value=home):       # never off macOS
+            self.assertIsNone(schedule.protected(self.repo))
+
     def test_a_fire_runs_claude_headless_on_the_backlog_and_records_the_run(self):
         from workbench import schedule
         self.add()
@@ -23080,6 +23126,30 @@ class ScheduledRuns(Base):
         self.assertEqual(self.fire(), 0)
         self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
         self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_a_key_stored_after_wb_schedule_adds_note_lets_the_next_fire_run(self):
+        # #1538, 2026-11-26: the note said `opencode auth login xenv` stores the key, but the
+        # fire's cached lookup kept hosted.json's env row, so every fire skipped on advice followed
+        from workbench import models, schedule
+        catalog = Path(self.tmp.name) / "catalog.json"
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", {"type": "env", "name": "XENV_API_KEY"})]}))
+        os.environ.update(WB_FAKE_CATALOG=str(catalog), WB_FAKE_API="xenv=env", XENV_API_KEY="xenv-not-a-real-key")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"significant": {
+            "via": "api", "api": "xenv/grok-9"}}}))
+        self.assertEqual(models.hosted(fresh=True)["xenv/grok-9"].key, "env:XENV_API_KEY")
+        self.assertIn("`opencode auth login xenv` stores it, else such a fire is skipped", self.add())
+        # the user stores it, and the timer's environment has no variable: auth list shows the stored key
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", STORED)]}))
+        os.environ.pop("XENV_API_KEY")
+        os.environ.pop("WB_FAKE_API")
+        models._AUTH_FRESH.clear()                                     # a fire is a process of its own
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "env:XENV_API_KEY")  # no fresh read
+        self.assertIsNone(schedule.spend_skip())
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "stored")   # written back
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
 
     def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
         # the review of #1204: every fire on a date was batch night-<date>, so a second one took

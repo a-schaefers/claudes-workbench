@@ -1777,9 +1777,12 @@ def listener() -> dict | None:
     (`machine`, on a shared state directory) listens, as the mod has it: its pid means nothing in
     this process table, and the page said "Waiting for a Claude session" while that machine's
     session got every message (the review of #922). The mod writes the file only on a change, so
-    its age can't say either."""
+    its age can't say either. None while the chat is switched off, whichever host wrote the claim:
+    the Claude Code mod's poll wrote its claim back after `wb chat off` (its link cached up), and
+    /api/health said Claude listened while /api/wait's messages waited their hour (#1537,
+    2026-11-26; #1480 had guarded only OpenCode's `hold`)."""
     st = store.read_json(chat_dir() / "listener.json", None)
-    if not st:
+    if not st or not is_on():
         return None
     if isinstance(st.get("machine"), str) and st["machine"] and st["machine"] != store.machine():
         return st
