@@ -10,8 +10,9 @@
 // again with no reload, a draft kept, and a change this page didn't make is toasted on any view.
 (() => {
   'use strict'
-  const GROUPS = [['shared', 'Agents and roles'], ['gpu', 'GPU'], ['api', 'API'], ['workflows', 'Deep workflows'],
-    ['terminal', 'Terminal'], ['experimental', 'Experimental']]
+  const GROUPS = [['shared', 'Agents and roles'], ['gpu', 'GPU'], ['api', 'API'],
+    ['setup', 'What your agents get'], ['workflows', 'Deep workflows'], ['terminal', 'Terminal'],
+    ['experimental', 'Experimental']]
   const SEG_MAX = 4                     // a segmented control up to this many choices, a <select> past it
   const OTHER = '\u0000other'           // the select's "Other model…" (never a model id: a NUL)
   const UNITS: Record<string, string[]> = { usd: ['$', '/day'] }

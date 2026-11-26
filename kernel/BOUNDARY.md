@@ -36,7 +36,7 @@ defined (`tests/test_kernel.py`).
 | `modesPlan` | Kernel.Mode | the sessions kept in workbench mode: whether this process's is, and the record to keep | mod/hooks/register.tsx:MODES_KEEP_MS | core.ts; register.tsx (`keepMode`, `modeKept`); the OpenCode plugin from #1312 |
 | `compactPlan` | Kernel.Mode | a task boundary: the mark kept, whether to read the context's usage now, and whether to compact | mod/hooks/register.tsx:COMPACT_AT | core.ts; register.tsx (`poll`, `compactAtBoundary`); opencode-plugin/upkeep.ts (`look`, `compactAtBoundary`, #1315) |
 | `awayNow` | Kernel.Away | whether the user is away from the terminal: the web chat used lately, or one of the session's tasks open since | mod/hooks/register.tsx:AWAY_MS | core.ts; register.tsx; the OpenCode plugin from #1319 |
-| `gateOf` | Kernel.Gate | which gate one simple command meets: cd, a send, an outward gh or git form, a role change (route, start with a model, settings set) or none; whether it hands work out; what it writes | mod/hooks/register.tsx:commandAt, mod/hooks/register.tsx:RESERVED, mod/hooks/register.tsx:PREFIXES, mod/hooks/register.tsx:HANDS_OUT, mod/hooks/register.tsx:GH_WRITES, mod/hooks/register.tsx:GIT_VALUED, mod/hooks/register.tsx:apiWrites, mod/hooks/register.tsx:wordOf, mod/hooks/register.tsx:wbArgs, mod/hooks/register.tsx:sendsOut, mod/hooks/register.tsx:sendArgs, mod/hooks/register.tsx:cdTarget, mod/hooks/register.tsx:settingsSet, mod/hooks/register.tsx:COPIES, mod/hooks/register.tsx:COPY_VALUED, mod/hooks/register.tsx:targets | core.ts; register.tsx (delegates, runs, upstreamAim, sendQuestion, routeCalls, writesTo); the OpenCode plugin's shell gate from #1314 |
+| `gateOf` | Kernel.Gate | which gate one simple command meets: cd, a send, an outward gh or git form, a role change (route, start with a model, settings set) or none; whether it hands work out; what it writes | mod/hooks/register.tsx:commandAt, mod/hooks/register.tsx:RESERVED, mod/hooks/register.tsx:PREFIXES, mod/hooks/register.tsx:HANDS_OUT, mod/hooks/register.tsx:GH_WRITES, mod/hooks/register.tsx:GIT_VALUED, mod/hooks/register.tsx:apiWrites, mod/hooks/register.tsx:wordOf, mod/hooks/register.tsx:wbArgs, mod/hooks/register.tsx:sendsOut, mod/hooks/register.tsx:sendArgs, mod/hooks/register.tsx:cdTarget, mod/hooks/register.tsx:settingsSet, mod/hooks/register.tsx:COPIES, mod/hooks/register.tsx:COPY_VALUED, mod/hooks/register.tsx:targets | core.ts; mod/hooks/shell.ts (delegates, runs, upstreamAim: both hosts' reading of a line, #1296); register.tsx (sendQuestion, routeCalls, writesTo); the OpenCode plugin's shell gate from #1314 and its upstream gate (`upstream.ts`, through shell.ts) |
 | `codingGate` | Kernel.Coding | an edit of a task's code under the user's coding mode and the task's allowances: pass, start, ask, refuse | born:#1325 | core.ts; register.tsx (codingRefusal); OpenCode's edit gate |
 | `editTools` | Kernel.Coding | each host's file tools and the field that names the file | mod/hooks/register.tsx:EDIT_TOOLS | core.ts (editFields); register.tsx (codingRefusal's caller, callRows) |
 
@@ -72,7 +72,8 @@ Final, from #1356's production plan (#1354), with the owner's ruling on the gate
   (`taskOfPath`), reading `coding.json`, the dialog and `wb coding allow` stay in each host. The
   mode machine and `compactPlan` came in by the same ruling (below); `taskParts` stays out.
 - **Stays in TypeScript:** parsing a command line (shellparse's `simpleCommands`, and `runs`:
-  `bash -c`, `eval` and what a shell is fed, read inside; OpenCode scans its own), reading an
+  `bash -c`, `eval` and what a shell is fed, read inside, in `mod/hooks/shell.ts`; OpenCode scans
+  its own, but for its upstream gate, which reads with that one, #1296), reading an
   interpreter's code (`spawns`, `OUTWARD_TEXT`, `ROUTE_TEXT`, `WRITES_CODE`: text), the paths a gate
   resolves (`cd`'s, `-C`'s), the mode (wording and `$`), the web chat's asks (#1350-1352 delete most of them),
   formatting (`usd`, `providerWord`, `money`, `absolutePath`).
@@ -149,7 +150,9 @@ What a host does with each outcome, the same on both: follows `cd` from the sess
 directory or the upstream; refuses a `send` it can't show (`lack`, or inside text a shell is fed);
 dry-runs `route`, `start` and `settings` and asks on a gated change, one to a call, refusing one
 inside text a shell is fed; refuses a command that writes an approval file (`writes`). The OpenCode
-plugin's shell gate (#1314) feeds it its own scan's simple commands.
+plugin's shell gate (#1314) feeds it its own scan's simple commands; its upstream gate (#1296) feeds
+it the mod's reading of the whole line (`mod/hooks/shell.ts`), as nothing in wb stands behind a gh
+write or a git push and OpenCode's scan hands a `--body "$(cat <<EOF …)"` over unread.
 
 ## Budget
 

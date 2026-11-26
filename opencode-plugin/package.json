@@ -24,6 +24,7 @@
     "consent-tui.ts",
     "tools.ts",
     "gates.ts",
+    "upstream.ts",
     "words.ts",
     "calls.ts",
     "notices.ts",

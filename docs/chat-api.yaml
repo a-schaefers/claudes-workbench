@@ -1014,7 +1014,7 @@ components:
           type: string
         group:
           type: string
-          enum: [shared, gpu, api, workflows, terminal, experimental]
+          enum: [shared, gpu, api, setup, workflows, terminal, experimental]
         label:
           type: string
         kind:

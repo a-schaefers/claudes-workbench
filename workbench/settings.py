@@ -43,7 +43,7 @@ from pathlib import Path
 
 from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savings, store
 
-GROUPS = ("shared", "gpu", "api", "workflows", "terminal", "experimental")  # display order
+GROUPS = ("shared", "gpu", "api", "setup", "workflows", "terminal", "experimental")  # display order
 KINDS = ("choice", "number", "info", "action", "note")
 ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_apply)
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
@@ -506,11 +506,35 @@ def _build() -> dict:
                                        row.get("thinking_review") or "off"))
             out.append(_info("api-spend", "api", "Spend today", _spend_line(r)))
 
+    out += setup_rows()
     out.append(_choice("splash", "terminal", "Opening animation", SPLASH, "on" if cli.splash_on() else "off"))
     out.append(_probe_row())
     order = {g: i for i, g in enumerate(GROUPS)}
     out.sort(key=lambda x: order[x["group"]])  # stable: each group's rows keep their order
     return {"at": time.monotonic(), "rows": out, "routes": r, "models": m}
+
+
+def setup_rows() -> list[dict]:
+    """The "What your agents get" group (#1295, P1): read-only info rows from context.agent_setup,
+    what reaches every agent before a task's own files and what is kept from them, so the user
+    (and Claude) can see a global OpenCode skill, instruction or plugin tool that reaches them."""
+    try:
+        said = context.setup_said(context.agent_setup())
+    except (OSError, RuntimeError) as e:
+        return [_note("setup-why", "setup", f"What your agents get can't be read: {e}")]
+    lines = [("setup-instructions", "Instructions", said["instructions"],
+              "and each project's CLAUDE.md, AGENTS.md and rules"),
+             ("setup-skills", "Skills", said["skills"],
+              f"and what Claude hands a task from {said['library'] or 'the skill library'}"),
+             ("setup-plugins", "Plugins", said["plugins"], "allowed: yours"),
+             ("setup-runs", "Also running", said["runs"], ""),
+             ("setup-kept", "Kept from agents", said["kept"], "")]
+    out = [_info(key, "setup", label, f"{label}: {', '.join(got)}" + (f"; {tail}." if tail else ".")
+                 if got else f"{label}: {tail.removeprefix('and ')}.")
+           for key, label, got, tail in lines if got or key in ("setup-instructions", "setup-skills")]
+    out.append(_info("setup-size", "setup", "Size", f"About {said['tokens'] / 1000:.1f}K tokens, with "
+                     "OpenCode's own prompt and tools, before a task's project files and spec."))
+    return out
 
 
 def _fresh(fresh: bool) -> dict:

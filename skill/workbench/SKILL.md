@@ -436,7 +436,11 @@ line, and you describe it in the spec instead; never change the role or pass `--
 Put the project's compiler, typecheck or lint ahead of the tests in `--test` (`mypy && pytest`):
 its errors reach the agent as auto-fix rounds, not your review. Only one the project runs or
 configures, or a syntax-only check, and only when it passes on the base: `reference/checks.md`
-has each language's, the first time a task needs one.
+has each language's, the first time a task needs one. A repo whose commands.json entry has a
+`test` runs it before your `--test` (the start line's `tests` shows both): don't repeat it; its
+`skills` are handed to every task there. `wb doctor`'s `agents get` line is what else reaches every
+agent from the user's own OpenCode setup (its AGENTS.md, skills, plugins): read it before you
+blame a model for an instruction you never gave.
 In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`package: …` printed)
 runs the agent, a `--setup` and the tests in that package (a commands.json setup from its own
 key's directory); the diff stays the whole repo's.
