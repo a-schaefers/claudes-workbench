@@ -8573,8 +8573,12 @@ def cmd_update(a):
         if rebased:
             print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
     say_later()
-    if kind == "clone":  # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/
-        try:             # (#1321's findings 16 and N2): moved to HEAD's when that changed
+    # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/ (#1321's findings 16
+    # and N2): moved to HEAD's when that changed. Claude Code's marketplace clone too, which wb
+    # setup --opencode copies from as well: gated to "clone", its copy stayed at the setup commit
+    # while setup, doctor and /workbench-update said wb update refreshes it (#1479, 2026-11-26)
+    if kind in ("clone", "marketplace"):
+        try:
             for line in ocplugin.refresh():
                 print(line)
         except (RuntimeError, OSError, gitops.GitError) as e:

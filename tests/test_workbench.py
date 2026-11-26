@@ -25822,6 +25822,41 @@ class Update(Base):
         self.assertEqual((second / "server.ts").read_text(), "// two\n")
         self.assertFalse(self.calls.exists())                     # OpenCode's alone: no claude step
 
+    def test_an_update_of_claude_codes_marketplace_clone_moves_opencodes_plugin_to_the_new_copy(self):
+        # #1479: wb setup --opencode from the marketplace install loads a copy of its
+        # opencode-plugin/, and setup, doctor and /workbench-update say wb update refreshes it; the
+        # refresh ran on a user's clone only, so the copy stayed at the setup commit for good
+        from workbench import ocplugin
+        tmp = Path(self.tmp.name)
+        os.environ["HOME"] = str(tmp / "home")
+        git = lambda d, *a: subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa
+                                           check=True, capture_output=True)
+        (self.origin / "opencode-plugin").mkdir()
+        shutil.copy(ROOT / "opencode-plugin/package.json", self.origin / "opencode-plugin/package.json")
+        (self.origin / "opencode-plugin/server.ts").write_text("// one\n")
+        git(self.origin, "add", "-A"); git(self.origin, "commit", "-qm", "the plugin")
+        git(self.copy, "pull", "-q", "--ff-only")
+        # Claude Code's marketplace update: a pull of its clone
+        (tmp / "fakebin/claude").write_text(
+            f'#!/bin/sh\necho "$@" >> {self.calls}\n'
+            f'[ "$2" = marketplace ] && git -C {shlex.quote(str(self.copy))} pull -q --ff-only\nexit 0\n')
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(ocplugin, "PKG_ROOT", self.copy), \
+                mock.patch.object(ocplugin, "DIR", self.copy / "opencode-plugin"):
+            self.assertEqual(cli._install_kind(), "marketplace")
+            ocplugin.install()
+            first = json.loads(conf.read_text())["plugins"][0]["package"]
+            (self.origin / "opencode-plugin/server.ts").write_text("// two\n")
+            git(self.origin, "commit", "-qam", "the plugin changed")
+            out = self.update()
+            second = Path(json.loads(conf.read_text())["plugins"][0]["package"])
+            head = git(self.copy, "rev-parse", "HEAD").stdout.decode().strip()
+            self.assertIn("updated marketplace ", out)
+            self.assertIn(f"→ {second} (was {first})", out)
+            self.assertEqual(ocplugin.copy_info(second)["commit"], head)
+            self.assertEqual((second / "server.ts").read_text(), "// two\n")
+            self.assertFalse(any("older than" in line for _, line in ocplugin.doctor_lines()))
+
     def test_a_clone_only_opencodes_plugin_loads_updates_without_claude(self):
         # #1321's findings 4 and 15: wb setup --opencode's clone, which Claude Code doesn't have,
         # was refused without claude ("claude isn't on PATH"), and with claude failed on a
