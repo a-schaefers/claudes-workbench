@@ -2946,6 +2946,9 @@ def cmd_watch(a):
         if not tasks:
             die("no tasks yet")
         task = (live or tasks)[-1]
+    if a.export:  # the OpenCode plugin's child sessions (#1331): the messages, one JSON object
+        print(json.dumps({"task": task.name, **transcript.exports(task)}, ensure_ascii=False))
+        return
     try:
         transcript.follow(task, verbose=a.verbose, once=a.once or a.json, as_json=a.json,
                           color=False if a.no_color else None, last=a.last if a.json else 0,
@@ -9346,6 +9349,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--no-color", action="store_true")
     s.add_argument("--json", action="store_true", help=argparse.SUPPRESS)  # the mod's pane
     s.add_argument("--last", type=int, default=0, help=argparse.SUPPRESS)  # with --json: the newest N lines
+    s.add_argument("--export", action="store_true", help=argparse.SUPPRESS)  # the OpenCode plugin's child sessions
     s.set_defaults(f=cmd_watch)
 
     s = sub.add_parser("status", help="open tasks at a glance")

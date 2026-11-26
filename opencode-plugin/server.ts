@@ -19,6 +19,7 @@ import { notices } from './notices.ts'
 import { upkeep, type UpkeepHost } from './upkeep.ts'
 import { registerCommands, type CommandHost } from './commands.ts'
 import { startPane, type PaneHost } from './pane.ts'
+import { startChildren } from './children.ts'
 
 export const ID = 'workbench'
 
@@ -54,6 +55,7 @@ const plugin: ServerPlugin = {
     const stopCommands = await registerCommands(ctx as unknown as CommandHost).catch(() => undefined)
     if (stopCommands) stops.push(stopCommands)
     stops.push(await startPane(ctx as ServerContext & PaneHost))  // the panel's data and /workbench (#1312)
+    stops.push(await startChildren(ctx))  // the agent sessions' messages, for the TUI's child sessions (#1331)
     return async () => { for (const stop of stops.reverse()) await stop().catch(() => {}) }
   },
 }

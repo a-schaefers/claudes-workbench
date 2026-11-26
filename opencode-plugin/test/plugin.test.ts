@@ -43,7 +43,7 @@ test('under WB_TASK neither part does anything at all (#1363)', async () => {
   }
 })
 
-test('the server part registers the status method, the Workbench agent and its skills (#1335), the driver\'s (#1316), the upkeep\'s hooks and the commands (#1315), and the panel\'s (#1312)', async () => {
+test('the server part registers the status method, the Workbench agent and its skills (#1335), the driver\'s (#1316), the upkeep\'s hooks and the commands (#1315), the panel\'s (#1312) and the child sessions\' (#1331)', async () => {
   const was = process.env.WB_TASK
   delete process.env.WB_TASK
   const registered: string[] = []
@@ -68,7 +68,8 @@ test('the server part registers the status method, the Workbench agent and its s
   expect(registered).toEqual(['workbench', 'status', 'status', 'skill.transform', 'agent.transform', 'session.hook',
     'session.hook', 'workbench-driver', 'driver', 'pin', 'driver', 'pin',  // the driver's model.request hook
     'session.hook', 'session.hook', 'session.hook', 'command.transform',  // the upkeep's three hooks, the commands (#1315)
-    'workbench-pane', 'tasks', 'live', 'diff', 'link', 'tasks', 'live', 'diff', 'link', 'command.transform'])  // the panel's, /workbench (#1312)
+    'workbench-pane', 'tasks', 'live', 'diff', 'link', 'tasks', 'live', 'diff', 'link', 'command.transform',  // the panel's, /workbench (#1312)
+    'workbench-children', 'sessions', 'sessions'])  // the agent sessions' messages, for the TUI's child sessions (#1331)
   // one cleanup for every part's stop (the agent's event stream and the driver's beat among them)
   expect(typeof stop).toBe('function')
   await (stop as () => Promise<void>)()
