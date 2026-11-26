@@ -1,7 +1,10 @@
 # The web chat in real browsers (tests/e2e_chat.mts: WebKit as an iPhone, Chromium as a Pixel:
 # reloads, receipts, reconnecting, dialogs) on each pull request and push to main that changes the
-# chat, its server, its page or the test. Not a required check: check.yml is the merge gate; this
-# says whether the page still works where the Python tests can't look (#91, 2026-11-19).
+# chat, its server, its page or the test, or a module whose output the page draws (Settings' rows,
+# the runs, Stats, the savings and story the server reads, their wire types: a shape the page
+# couldn't draw went unchecked till a later page change, #1528, 2026-11-26). Not a required check:
+# check.yml is the merge gate; this says whether the page still works where the Python tests can't
+# look (#91, 2026-11-19).
 # Playwright isn't a workbench dependency: the version pinned here is installed beside the run,
 # with the Node types the tests are type-checked against (scripts/web.py tests, #1323); Node runs
 # the TypeScript tests as they are, its types stripped.
@@ -15,6 +18,13 @@ on:
       - 'workbench/chat.py'
       - 'workbench/webpush.py'
       - 'workbench/chat_static/**'
+      - 'workbench/settings.py'
+      - 'workbench/runs.py'
+      - 'workbench/stats.py'
+      - 'workbench/top.py'
+      - 'workbench/savings.py'
+      - 'workbench/story.py'
+      - 'mod/types/wire.d.ts'
       - 'tests/e2e_*'
       - 'tests/tsconfig.json'
       - 'scripts/web.py'
@@ -25,6 +35,13 @@ on:
       - 'workbench/chat.py'
       - 'workbench/webpush.py'
       - 'workbench/chat_static/**'
+      - 'workbench/settings.py'
+      - 'workbench/runs.py'
+      - 'workbench/stats.py'
+      - 'workbench/top.py'
+      - 'workbench/savings.py'
+      - 'workbench/story.py'
+      - 'mod/types/wire.d.ts'
       - 'tests/e2e_*'
       - 'tests/tsconfig.json'
       - 'scripts/web.py'

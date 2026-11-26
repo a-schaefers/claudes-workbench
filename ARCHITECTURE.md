@@ -7383,7 +7383,8 @@ printed once to serve.log (`web chat: a push to <host> failed: <reason>`); `webp
 Python) and `NODE_EXTRA_CA_CERTS`'s CAs, and drops `VERIFY_X509_STRICT` (#1385). A test's `chat.push_hint` (`cert`, `clock` for a 403, `unreached`, `refused`) tells the
 page what to say (#539).
 
-A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The tests*).
+A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The tests*), as does one to a module whose
+output the page draws: `settings.py`, `runs.py`, `stats.py`, `top.py`, `savings.py`, `story.py`, `mod/types/wire.d.ts` (#1528).
 
 **The page's TypeScript** (#1323, the owner, 2026-11-24: "either typescript or purescript, no more
 javascript"). `chat_static/src/` holds the sources: `app.ts`, `stats.ts`, `settings.ts` (the pages,
@@ -10623,7 +10624,8 @@ OSError`, 2026-11-22). Job limits 60 min, `check.yml`'s shards 30. Linux jobs in
 a profile without a git identity gets a scratch one. Credential-read enforcement needs Landlock (Seatbelt's real test,
 `test_seatbelt_holds_the_lane_on_a_real_mac`, runs on the macOS job, #1194), the Snap launcher test
 Linux; the killed-runner test checks kernel cleanup on Linux, cleanup after reaping on both. `chat.yml` runs the browser test (`PLAYWRIGHT_VERSION`) when
-`chat.py`, `webpush.py`, `chat_static/`, the tests (`tests/e2e_*`, `tests/tsconfig.json`), `scripts/web.py`,
+`chat.py`, `webpush.py`, `chat_static/`, a module whose output the page draws (`settings.py`, `runs.py`, `stats.py`,
+`top.py`, `savings.py`, `story.py`, `mod/types/wire.d.ts`: #1528), the tests (`tests/e2e_*`, `tests/tsconfig.json`), `scripts/web.py`,
 `scripts/install-tsc.sh` or itself change, after type-checking the tests against `@types/node` (`NODE_TYPES_VERSION`,
 installed beside Playwright: `web.py tests`); not required. A newer push cancels a branch's run,
 never main's (shields.io shows a cancelled run as failing). Dependabot moves the SHA pins. Not in CI: a real model. The real run, after a change to how OpenCode is invoked or read: a scratch repo from `wb init` with a committed CLAUDE.md, `wb start <t> --trial --size trivial --spec <f> --repo <dir> --test '<cmd>'`, `wb watch <t>`, `wb report <t>`, then `wb discard <t>`; it takes the GPU and writes the real state directory, and `--trial` keeps it out of the router's evidence and the lessons.
@@ -11541,7 +11543,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `gitops.drop_reviews` there, or each review round's `refs/workbench/review/<task>/<n>` outlives it (#1198).
 - **A new tuned knob** → `tuning.KNOBS`, `tuning.value(task, name)`, a ceiling in `drive`; an evidence flag (`fills`,
   `passed`) → `tuning.acted` and its row field (`peak_share`, `self_review_due`).
-- **`chat.py` or `chat_static/`** → the browser test. **`window.WB`** (`app.ts`) → `stats.ts`, `settings.ts`, *The
+- **`chat.py` or `chat_static/`** → the browser test. **A new module whose output the page draws** → chat.yml's `paths`,
+  under `push` and `pull_request` (#1528). **`window.WB`** (`app.ts`) → `stats.ts`, `settings.ts`, *The
   views' API*, `src/types.d.ts`'s `WbApi`. **`chat_static/src/*.ts`** → its `chat_static/<name>.js`, rebuilt
   (`python3 scripts/web.py build`) in the same commit (CI's `kernel` job fails otherwise); a new script → its own
   `src/<name>.ts`, `index.html` (or the worker's registration), the project's `files` in `src/tsconfig.json` or
