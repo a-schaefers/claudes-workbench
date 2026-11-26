@@ -1992,6 +1992,11 @@ def cmd_start(a) -> None:
         except (OSError, UnicodeDecodeError) as e:
             _die(f"--context-file {a.context_file}: {getattr(e, 'strerror', None) or e}")
     ctx = ctx or flow.get("context") or ""
+    if len(ctx) > CUTS["context"]:
+        # run.json keeps it whole and each spec's {context} is cut there, said (runs._text): cut
+        # here first, the spec's cut note never showed and past 4,000 characters went unsaid
+        # (#1519, 2026-11-26)
+        said.append(f"context: {len(ctx):,} characters, the first {CUTS['context']:,} go in each spec's {{context}}")
     est_usd, est_min, later = estimate(flow, params, exists)
     roles = ", ".join(dict.fromkeys(f"{s['id']} {stage_role(s)}" + (" (API)" if stage_model(s) else " (GPU)")
                                     + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
@@ -2009,7 +2014,7 @@ def cmd_start(a) -> None:
         (d / sub).mkdir()
     spec = {"name": a.name, "flow": flow, "flow_name": flow["name"], "flow_sha": flow_sha(flow),
             "params": params, **({"exists": exists} if exists else {}),
-            "context": ctx[:CUTS["context"]], "repo": str(repo),
+            "context": ctx, "repo": str(repo),
             **({"package_dir": str(start_dir)} if start_dir != repo else {}), "base": base,
             "base_ref": a.base, "cwd": os.getcwd(), "budget_usd": usd_, "budget_min": mins,
             "overnight": bool(a.overnight), "trial": bool(a.trial), "no_claude_md": bool(a.no_claude_md),

@@ -1438,6 +1438,20 @@ class RunsApi(Base):
         self.assertIn("wb: --context-file", err)
         self.assertNotIn("Traceback", err)
 
+    def test_a_context_past_its_cut_is_said_at_start_and_in_each_spec_it_goes_in(self):
+        # #1519 (2026-11-26): run.json kept it cut, so the spec's cut note never showed and
+        # nothing said the agents missed all past 4,000 characters
+        ctx = Path(self.tmp.name) / "ctx.md"
+        ctx.write_text("x" * 5_990 + "TAILMARKER")
+        flow = {**AUDIT, "stages": [{**AUDIT["stages"][0], "prompt": "Audit area {item} now.\n{context}"},
+                                    *AUDIT["stages"][1:]]}
+        run, out = self.start("long", "--context-file", str(ctx), flow=flow)
+        self.assertIn("context: 6,000 characters, the first 4,000 go in each spec's {context}", out)
+        self.assertEqual(len(run.spec["context"]), 6_000)
+        spec = runs._spec_of(run, runs.stages(run.flow)[0], runs.state(run)["find"][0])
+        self.assertIn("\n[… 2,000 characters cut]", spec)
+        self.assertNotIn("TAILMARKER", spec)
+
 
 class Driver(Base):
     """How the driver runs wb for its items (runs._wb)."""
