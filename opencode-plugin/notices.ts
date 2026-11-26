@@ -24,7 +24,7 @@ import { findWb, wbEnv, wbHome, type Options } from './wb.ts'
 import { ACTIVE, NEEDS, NO_ANSWER, WAKE_OPENING, noticePlan, noticesDue, owns, rewakePlan, runNoticePlan, runNoticesDue } from '../mod/hooks/core.ts'
 import type { NoticeRow, StatusFile, TaskFile } from '../mod/types/wire.d.ts'
 import { Jobs } from './jobs.ts'
-import { whenShownHere } from './chat.ts'
+import { shownHere, whenShownHere } from './chat.ts'
 
 export const SCAN_MS = 15_000          // the timer's look: held notices, the rewake net, the jobs
 export const EARS_RETRY_MS = 2_000     // wb events respawned this long after it ends, doubling to a minute
@@ -278,7 +278,10 @@ export class NoticeLane {
   // the one that ran last, whose directory the kernel's owns finds near it (its cwd or repo; a
   // session in ~ or / claims none). It went to none, so its done or checkpoint wake never came,
   // though Claude Code delivers it by directory (#1493, 2026-11-26); `wb ack`'s compare-and-set
-  // keeps it to one session among several near it. One with no cwd or repo goes to none.
+  // keeps it to one session among several near it. One with no cwd or repo goes to none. A
+  // session that only ran, no TUI showing it (a script's or git hook's `opencode run`), is never
+  // one: it took a run's one wake and started an unwatched turn on it (#1542, 2026-11-26); the
+  // notice stays unseen for the first shown session near it (`typed` passed whenShownHere).
   async nearest(spec: TaskFile): Promise<string> {
     const cwd = String(spec.cwd ?? ''), repo = String(spec.repo ?? ''), subdir = String(spec.subdir ?? '')
     if ((!cwd && !repo) || !this.sessions) return ''
@@ -288,6 +291,7 @@ export class NoticeLane {
       const root = sid ? await this.root(sid) : ''
       if (!root || tried.has(root)) continue
       tried.add(root)
+      if (root !== this.typed && !shownHere(root)) continue
       const dir = (await this.sessions.get({ sessionID: root }).catch(() => undefined))?.location?.directory
       if (!dir) continue
       let here = dir
