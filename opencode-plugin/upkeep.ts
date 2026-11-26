@@ -22,7 +22,9 @@
 //   (unset: half; 0: never) of the way to OpenCode's own automatic compaction.
 // The facts are the host's: the task files under $WB_HOME (a task is the session's when `wb start`
 // recorded it there, task.json `session`, #1309), notes.md, coding.json, workflows.json, the roles
-// (`wb route`, read when routes.json changes) and `wb status` as the session. The kernel comes from
+// (`wb route`, read when routes.json changes), `wb status` and `wb chat away` as the session (the
+// `web-chat` block while the user is away, removed when they are back), and the plugin's `wake`
+// option (`workbench-wake` while it is "off", as notices.ts reads it). The kernel comes from
 // the membrane (../mod/hooks/core.ts), imported when the server part sets this up: a copy of the
 // plugin without it (an older wb setup --opencode copy) skips this part and keeps the rest.
 // Nothing runs at import time.
@@ -30,6 +32,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type * as Core from '../mod/hooks/core.ts'
 import { AGENT } from './agent.ts'
+import { REPLY_ID, typedByUser } from './chat.ts'
 import { sessionRunner, whereOf, type SessionRun } from './commands.ts'
 import { wbEnv, wbHome, type Options } from './wb.ts'
 
@@ -80,6 +83,16 @@ export const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb
 export const ROUTES_NOTE = (routes: string) => `Roles (the user's, \`wb route\`):\n${routes}\n` +
   'Never pass --model for an API model or change a role without the user\'s yes (wb refuses it without ' +
   'their yes); recommend only.'
+// The mod's AWAY_NOTE and WAKE_OFF_NOTE in OpenCode's words: the web chat's tool, the plugin's
+// `wake` option (notices.ts), the TUI's toasts
+export const AWAY_NOTE =
+  'The user is away from the terminal: they last used the web chat. Tell them there (the ' +
+  `${REPLY_ID} tool) when something they asked for is done or needs them; \`wb chat log\` shows the ` +
+  'thread. Typing in the terminal, or answering a prompt there, ends this.'
+export const WAKE_OFF_NOTE =
+  'Wakes are off (the workbench plugin\'s `wake` option): no [workbench] message will say when a task ' +
+  'needs you. After `wb start`, tell the user it runs and that a toast says when it is ready; pick it ' +
+  'up when they ask (`wb report <name>`), and wait (`wb wait <name>`) only if they ask you to.'
 export const TASKS_NOTE = (status: string) =>
   `Tasks delegated to agents with wb (your Workbench instructions) are open:\n${status}\n` +
   'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.'
@@ -152,8 +165,9 @@ export function routesSaid(text: string | undefined): boolean {
 
 // The blocks a session should have, by key, in the kernel's order: `want` as the mod's `wanted`
 // reads it, the roles as `wb route` says them, the open tasks as `wb status` does
-export function blocksOf(k: Kernel, want: Said, delegating: boolean, routes: string, tasks: string): [string, string][] {
-  const plan = k.tellPlan({ first: true, want, was: want, known: false, any: true, delegating, away: false })
+// and `away` while the user is away (the entry removed when they are back: "… no longer applies")
+export function blocksOf(k: Kernel, want: Said, delegating: boolean, routes: string, tasks: string, away = false): [string, string][] {
+  const plan = k.tellPlan({ first: true, want, was: want, known: false, any: true, delegating, away })
   const out: [string, string][] = []
   for (const say of plan.say) {
     const key = KEYS[say]
@@ -163,8 +177,8 @@ export function blocksOf(k: Kernel, want: Said, delegating: boolean, routes: str
     else if (say === 'notes') out.push([key, NOTES_NOTE(want.notes)])
     else if (say === 'workflows') out.push([key, WORKFLOWS_RULE])
     else if (say === 'routes' && routes) out.push([key, ROUTES_NOTE(routes)])
-    // `away` and `wakeOff` are never wanted here: the web chat tells the driver itself (chat.ts),
-    // and the notices (#1313) have no wake setting to turn off
+    else if (say === 'away') out.push([key, AWAY_NOTE])
+    else if (say === 'wakeOff') out.push([key, WAKE_OFF_NOTE])
   }
   if (tasks) out.push([TASKS_KEY, TASKS_NOTE(tasks)])
   return out
@@ -284,16 +298,27 @@ export class Upkeep {
     return this.routesText
   }
 
+  // Whether the user is away for this session (wb's `chat.away`: the web chat used last, within
+  // six hours or while the session has a task open): `wb chat away` as the session, only when
+  // chat/away.json has a time at all (no time is never away: no wb run at every prompt)
+  async away(sessionID: string): Promise<boolean> {
+    if (!(Number(json(this.io.read(join(this.home, 'chat', 'away.json'))).at) > 0)) return false
+    const r = await this.io.run(['chat', 'away'], { session: sessionID })
+    return r.ok && r.out.trim() === 'away'
+  }
+
   // What the session should be told now (the mod's `wanted`), and its blocks: one at a time per
-  // session, so a prompt's and an idle look's never put and remove across each other
-  refresh(sessionID: string): Promise<void> {
+  // session, so a prompt's and an idle look's never put and remove across each other. `back`: the
+  // prompt it is for was typed by the user, who is then not away (chat.ts's `wb chat back` for it
+  // runs beside this, not before)
+  refresh(sessionID: string, back = false): Promise<void> {
     const s = this.sess(sessionID)
-    const next = s.chain.then(() => this.refreshNow(sessionID, s))
+    const next = s.chain.then(() => this.refreshNow(sessionID, s, back))
     s.chain = next.catch(() => {})
     return next
   }
 
-  private async refreshNow(sessionID: string, s: Sess): Promise<void> {
+  private async refreshNow(sessionID: string, s: Sess, back: boolean): Promise<void> {
     const delegating = s.agent === AGENT
     const tasks = openTasks(this.k, this.io, this.home, sessionID)
     const any = delegating || tasks.length > 0
@@ -302,7 +327,7 @@ export class Upkeep {
     const routes = any ? await this.routes() : ''
     const want: Said = {
       notes: delegating ? (read('notes.md') ?? '').trim() : '',
-      wakeOff: false,
+      wakeOff: any && this.host.options?.wake === 'off', // notices.ts's `wake` option (the mod's)
       coding: coding in CODING_RULES ? coding : 'decide',
       routes,
       workflows: any && json(read('workflows.json')).mode === 'on' ? 'on' : 'off',
@@ -317,7 +342,8 @@ export class Upkeep {
         if (r.ok && r.out && !r.out.startsWith('no open tasks')) s.tasksText = r.out
       }
     }
-    s.blocks = blocksOf(this.k, want, delegating, routes, s.tasksText)
+    const away = any && !back && await this.away(sessionID)
+    s.blocks = blocksOf(this.k, want, delegating, routes, s.tasksText, away)
     await this.sync(sessionID, s)
   }
 
@@ -463,9 +489,9 @@ export async function upkeep(host: UpkeepHost, k?: Kernel, io?: Io): Promise<(()
   }, wbHome(env))
   const regs = [
     // a prompt: the session's blocks before its turn
-    await host.session.hook('prompt', async (e: { sessionID: string }) => {
+    await host.session.hook('prompt', async (e: { sessionID: string; prompt?: { text?: string }; metadata?: Record<string, unknown> }) => {
       if (!e?.sessionID) return
-      await within(u.learn(e.sessionID).then(() => u.refresh(e.sessionID)), REFRESH_WAIT_MS)
+      await within(u.learn(e.sessionID).then(() => u.refresh(e.sessionID, typedByUser(e))), REFRESH_WAIT_MS)
     }),
     await host.session.hook('context', (input) => u.context(input)),
     await host.session.hook('compaction', (input) => u.compaction(input)),
