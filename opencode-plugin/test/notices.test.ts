@@ -377,6 +377,16 @@ test('a run\'s own notice wakes the session that started it once, its text whole
   expect(w.admitted.length).toBe(1)                                 // once
 })
 
+test('#1491: a run\'s notice hours old still wakes its session once: a run has no rewake under the hour\'s cutoff', async () => {
+  const w = world()
+  const ts = w.now / 1000 - 7 * 3600
+  runFiles(w, 'aud', P.review)
+  w.notify({ run: 'aud', kind: 'run_done', phase: P.review, ts, text: '[workbench] Run `aud` is done' })
+  await w.lane.scan()
+  expect(w.acks()).toEqual([`ack aud ${ts} --run`])
+  expect(w.admitted.map(a => a.text)).toEqual(['[workbench] Run `aud` is done'])
+})
+
 test('a run\'s notice no longer true is acknowledged unsaid, and a busy session gets it once the turn ends', async () => {
   const w = world()
   const ts = w.now / 1000

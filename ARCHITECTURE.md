@@ -1160,7 +1160,11 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   `-2` … `-99` once `runs.taken` has one, hence `FLOW_NAME_MAX` 14 for its 24), no `claude -p`: on the
   OpenCode-only path every fire of a backlog failed for want of claude. The run's own driver, budget and
   `--overnight` carry the night, its final stage (and any `claude` checkpoint, said at add) waits for a
-  session, which claims it by directory (the run has no session; its cwd is the repo). A fire while the last
+  session, which claims it by directory (the run has no session; its cwd is the repo): in Claude Code its
+  notice wakes the next session there however old it is, and both hosts' context names the run with no task
+  open (#1491: the notice aged out past the hour, a run having no rewake, and the run's `wb status` lines,
+  after `no open tasks`, were dropped). OpenCode's plugin wakes only the session that ran `wb run start`, so
+  there the morning's session hears of it from its `workbench` entry. A fire while the last
   fire's run still has a live driver is a `skipped` row. Its row names the run, and `wb schedule list` shows it
   as it stands (`runs.status_line`); `wb doctor` asks its unit's PATH for opencode alone (`schedule.needs`).
   wb's own timers still, not OpenCode's automations, for the reason above. A repo's flow is never scheduled.
@@ -7894,7 +7898,8 @@ follow the skill, every plan is a handoff plan, the SKILL.md path); `user-notes`
 with notes; `dynamic-workflows` with Dynamic workflows on, delegating or a task open (*Dynamic workflows*); `web-chat` while away (`awayNow`; AWAY_NOTE: "The user is away from the terminal: they
 last used the web chat", reply with `wb chat reply`); `workbench-wake` with `wake` off, delegating
 or a `mine` task open (WAKE_OFF_NOTE: no wake will come, tell the user); `workbench` when `wb
-status` with `scope()` exits 0 listing open tasks (plus the story's `tasks.pickup`, the OpenCode plugin's
+status` with `scope()` exits 0 listing open tasks or runs (with no task open, the run lines after `no open tasks`
+alone: dropped whole, a run at review was never said, #1491; plus the story's `tasks.pickup`, the OpenCode plugin's
 `TASKS_NOTE` line word for word: `wb report`, and `wb wait` to follow one, never `wb watch`, which follows a
 task until it closes, so a driver on one at review waited out its shell's timeout, #1515; a failure toasts
 once). None without a person.
@@ -8967,7 +8972,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       (`workbench-wake`, WAKE_OFF_NOTE: no `[workbench]` message will come, a toast will) while the
       config entry's options `wake` is `"off"`, as notices.ts reads it,
       while in the mode or with a task of its own open; plus `workbench`, `wb status` as the session
-      in its directory, while it has open tasks (read again when their names or phases change).
+      in its directory, while it has open tasks or any run is open (`openRuns`: runs/*/status.json not
+      closed; `openListed`: with no task open the run lines alone, #1491), read again when their names
+      or phases change.
       `refresh` reads those facts (`openTasks`: `tasks/*/status.json` active or waiting, `task.json`
       `session` the session's, no bench replay; `notes.md`, `coding.json`, `workflows.json`) at a
       prompt (waited for at most `REFRESH_WAIT_MS` 3 s, `within`), a switch of agent (the event, which
@@ -9350,8 +9357,8 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   stays the once-only guarantee.
 - **A run's own notices** (#1278's S9, `deliverRuns`, `parseRunLines`: rows with `run` and no `task`):
   delivered to the session here that ran `wb run start` (run.json `session` with `session_kind`
-  `opencode`, judged as a task's), by core.ts's `runNoticesDue` and `runNoticePlan` (still true while
-  the run is in the row's `phase`), `wb ack <run> <ts> --run`, then a queued synthetic, `noticeId("run:<run>",
+  `opencode`, judged as a task's), by core.ts's `runNoticesDue` (each run's newest however old, #1491) and
+  `runNoticePlan` (still true while the run is in the row's `phase`), `wb ack <run> <ts> --run`, then a queued synthetic, `noticeId("run:<run>",
   kind, ts)`, its text the row's whole, the toast `run <run> <RUN_HEADLINE>`; refused, `wb ack <run> <prev>
   --run --if <ts>` and the next look tries again (no net for a run). *Deep workflows* has the row.
 - **The net** (`rewake`, the kernel's `rewakePlan`): a task of a session here waiting on its driver
@@ -9714,7 +9721,9 @@ text}`, no `task`: `phase` (`runs.NOTICE_PHASE`) is the run's phase it was raise
 only while the run is in it (a pause since resumed, a checkpoint since fed, is acknowledged unsaid). Both hosts
 deliver them (#1278's S9) as a task's, to the session the run is `mine` to (run.json's `session` and
 `session_kind`, else by directory: a scheduled run's is the session near its repo; the kernel's `owns`), once,
-while still true: core.ts's `runNoticesDue` (the kernel's `noticesDue` over the run rows, keyed by run) and
+while still true, however old (a run has no rewake, so the hour a task's notice is due within left a run done
+overnight unsaid, #1491): core.ts's `runNoticesDue` (the kernel's `noticesDue` over the run rows, keyed by run:
+each run's newest, `noticed`) and
 `runNoticePlan` (`noticePlan`, its kind the raised-in phase), the mod's `deliverRuns` (register.tsx) and the
 plugin's `NoticeLane.deliverRuns` (notices.ts), held through a busy turn, the text the wake whole, a toast
 `workbench: run <run> <RUN_HEADLINE>`. The claim is `wb ack <run> <ts> --run` (`Run.claim_ack`, the

@@ -2844,7 +2844,8 @@ async function deliver($: any, now: number) {
 // A run's own notices (#1278's S9: run_checkpoint, run_done, run_paused, run_stopped, run_failed;
 // rows with `run` and no `task`, runs.Run.notify): the one wake a run gives, to the session it is
 // `mine` to as a task's is (run.json: the session that ran `wb run start`, else by directory: a
-// scheduled run's is the session near its repo in the morning), once (`wb ack --run`, the
+// scheduled run's is the session near its repo in the morning, however old its notice: a run has no
+// rewake, core.ts runNoticesDue, #1491), once (`wb ack --run`, the
 // compare-and-set `wb wait <run>` shares), and only while still true, the run in the phase it
 // was raised in (core.ts runNoticePlan). Its text is the wake whole: it opens `[workbench] Run
 // `<run>``, spend.RUN_WAKE's, and names its next step. A run's items' notices are its driver's
@@ -3541,12 +3542,16 @@ export const register: Register = (on, options) => {
     }
     const { ok, out: status, aborted } = await runWb($, ['status', ...(await scope($))])
     if (!ok && !aborted) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
-    if (!ok || status.startsWith('no open tasks')) return { blocks }
+    // with no task open, a run's lines still count: wb status prints them after `no open tasks`, and
+    // dropping the whole text hid a run waiting at review after /clear or overnight, a scheduled
+    // flow's (#1491, 2026-11-26); the OpenCode plugin's upkeep reads them the same way
+    const open = status.startsWith('no open tasks') ? (status.match(/^run [\s\S]*/m)?.[0] ?? '') : status
+    if (!ok || !open) return { blocks }
     return {
       blocks: [...blocks, {
         name: 'workbench',
         // the pick-up line is the story's, the OpenCode plugin's word for word (#1515)
-        text: `Tasks delegated to agents with wb (the /workbench skill) are open:\n${status}\n${SAY['tasks.pickup']}`,
+        text: `Tasks delegated to agents with wb (the /workbench skill) are open:\n${open}\n${SAY['tasks.pickup']}`,
       }],
     }
   })

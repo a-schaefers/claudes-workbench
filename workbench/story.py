@@ -99,8 +99,8 @@ TEXTS: dict[str, str] = {
     "moved.deepmode": "Deepmode is off: in 2.2, on runs every substantive request as a deep workflow (wb run) on "
                       "your agents, within the day cap, so 2.1's Dynamic workflows on didn't carry over. "
                       "/deepmode on turns it on.",
-    "tasks.pickup": "Pick them up from here: `wb report <name>` for one, `wb wait <name>` to follow it until it "
-                    "needs you.",
+    "tasks.pickup": "Pick them up from here: `wb report <name>` for one (`wb run report <name>` for a run), "
+                    "`wb wait <name>` to follow it until it needs you.",
     "refusal.question": "The user is away: ask in the web chat ({reply}) and end your turn.",
     "refusal.plan": "Post the plan in the web chat and end your turn; approval is at the terminal.",
     "refusal.consent": "{Who} is waiting on a workbench dialog in the terminal: answer it there.",

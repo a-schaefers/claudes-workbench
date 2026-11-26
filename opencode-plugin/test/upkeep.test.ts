@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import * as core from '../../mod/hooks/core.ts'
-import { autoCeiling, AWAY_NOTE, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, routesSaid, Upkeep,
+import { autoCeiling, AWAY_NOTE, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openRuns, openTasks, promptTokens, routesSaid, Upkeep,
   TASKS_NOTE, upkeep, WAKE_OFF_NOTE, WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
 import { CLAUDE_CODE } from '../../mod/hooks/story.ts'
 
@@ -133,6 +133,28 @@ test('#1515: the open-tasks note follows a task with wb wait, never a bare wb wa
   expect(note.includes('`wb wait <name>`')).toBe(true)
   expect(note.includes('`wb watch <name>`')).toBe(false)
   expect(note.endsWith(`\n${CLAUDE_CODE['tasks.pickup']}`)).toBe(true) // the mod's block ends with the same line
+})
+
+test('#1491: a run waiting at review with no task open is said in the workbench entry, its lines alone', async () => {
+  // wb status prints a run's lines after `no open tasks`: dropping the whole text, and asking wb
+  // status only with a task open, hid a run done overnight (a scheduled flow's) from the session
+  const status = 'no open tasks (wb status --all shows closed ones)\nrun aud · flow triage · review · $0 of $0\n  why: its final stage is Claude\'s'
+  const w = world({}, { status })
+  w.files[`${HOME}/runs/aud/status.json`] = JSON.stringify({ phase: WAITING })
+  w.files[`${HOME}/runs/old/status.json`] = JSON.stringify({ phase: 'closed' })
+  const { host } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  await u.refresh('s1')
+  const said = u.sess('s1').put?.get('workbench') ?? ''
+  expect(said.split('\n').slice(1, 3)).toEqual(['run aud · flow triage · review · $0 of $0', "  why: its final stage is Claude's"])
+  expect(said.includes('no open tasks')).toBe(false)
+  expect(openRuns(w.io, HOME)).toEqual([`aud:${WAITING}`])            // a closed run is nothing open
+  // nothing open in wb's answer (another session's run): no entry
+  const quiet = world({}, { status: 'no open tasks (wb status --all shows closed ones)' })
+  quiet.files[`${HOME}/runs/aud/status.json`] = JSON.stringify({ phase: WAITING })
+  const v = new Upkeep(core, entriesHost().host, quiet.io, HOME)
+  await v.refresh('s1')
+  expect(v.sess('s1').put?.has('workbench') ?? false).toBe(false)
 })
 
 test("without OpenCode's entries API the blocks go into the session's own requests' system prompt", async () => {

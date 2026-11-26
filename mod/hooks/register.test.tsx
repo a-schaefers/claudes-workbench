@@ -641,6 +641,39 @@ test('a run\'s notice no longer true is acknowledged unsaid, and one held for th
   expect(files['/wb/runs/waits/acked']).toBe(String(ts0))
 })
 
+test('#1491: a run done hours before the session started wakes it once, and its first context names the run with no task open', async ($, on) => {
+  // a scheduled flow fires with no Claude: by the morning its run_done was 7 h old, past the hour a
+  // task's notice is due within, and a run has no rewake under it; and wb status's run lines come
+  // after `no open tasks`, so the context block was dropped whole
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  run(files, 'aud', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })      // no session: by directory
+  const old = ts0 - 7 * 3600
+  const text = '[workbench] Run `aud` is done: 2 result(s), 0 filtered, 0 null, 0 not run · $0. Read it: wb run report aud'
+  notice(files, { ts: old, run: 'aud', kind: 'run_done', phase: 'review', text })
+  fakeTasks(on, files, [])
+  const STATUS = 'no open tasks (wb status --all shows closed ones)\n' +
+    'run aud · flow triage · review · triage 1 done · $0 of $0\n  why: its final stage is Claude\'s'
+  const acks: string[][] = []
+  const ack = wbAckRun(files, acks)
+  on('process.run', (_: any, e: any) => e.argv[1] === 'status'
+    ? { value: { exitCode: 0, stdout: STATUS, stderr: '' } } : ack(_, e))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench')?.text ?? ''
+  expect(block).toContain('run aud · flow triage · review · triage 1 done')
+  expect(block).toContain("why: its final stage is Claude's")
+  expect(block).not.toContain('no open tasks')
+  await clock.advance(3000)
+  expect(woken).toEqual([text])                                     // an idle poll's one wake
+  expect(acks).toEqual([['ack', 'aud', String(old), '--run']])
+  await clock.advance(120_000)
+  expect(woken).toHaveLength(1)                                     // once
+})
+
 test('a new Claude Code process in the project adopts the tasks of one that is gone', async ($, on) => {
   // the 0.90 review: Claude Code exited (a crash, an update) and plain `claude` in the same repo
   // got a new session id: none of the earlier process's tasks woke it, and its quit skipped them
