@@ -8320,7 +8320,7 @@ $WB_HOME (~/.local/state/workbench)
   workflows.json                 Dynamic workflows (deepmode; wb deepmode, wb workflows, #1041, #1278): {mode: on|off, ts}; none: off
   runs/<run>/                    a deep workflow's (wb run, *Deep workflows*, #1278): run.json {name, flow (whole), flow_name, flow_sha, params, context,
                                  repo, base, base_ref, cwd, budget_usd, budget_min, overnight, trial, no_claude_md, created, driver {python, machine},
-                                 session?, claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,
+                                 session? (Claude Code's, or an OpenCode driver's with session_kind: opencode, #1309), claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,
                                  why, pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
                                  budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|fed|amend|notice|resumed|reaped,
                                  stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), ok?}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json

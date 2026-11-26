@@ -1249,6 +1249,18 @@ class Wiring(Base):
         self.assertEqual(run.status["phase"], "stopped")
         self.assertFalse(runs.driver_alive(run))
 
+    def test_an_opencode_sessions_wb_stop_all_takes_its_own_run_and_leaves_another_sessions(self):
+        # 2.2's merge: cli._caller gained the driver kind and _runs_in_scope crashed unpacking it;
+        # a run an OpenCode session started records that session (#1309), as a task does
+        mine, other = self.open_run("mine"), self.open_run("other")
+        spec = mine.spec | {"session": "ses_a", "session_kind": "opencode", "cwd": os.getcwd()}
+        store.write_json(runs.run_dir("mine") / "run.json", spec)
+        env = {"OPENCODE_SESSION_ID": "ses_a", "CLAUDECODE": "", "CLAUDE_CODE_SESSION_ID": "", "WB_TASK": ""}
+        with mock.patch.dict(os.environ, env):
+            run_wb("stop", "--all")
+        self.assertEqual(runs.Run("mine").status["phase"], "stopped")
+        self.assertEqual(runs.Run("other").status["phase"], "running")
+
     def test_deepmode_is_workflows_new_name_and_prints_the_deepcode_rule(self):
         self.assertEqual(run_wb("deepmode"), "Dynamic workflows (deepmode): Off (default). Claude runs one task at "
                                              "a time; deepcode asks for a deep workflow once.\n")

@@ -1492,6 +1492,10 @@ def cmd_start(a) -> None:
             "overnight": bool(a.overnight), "trial": bool(a.trial), "no_claude_md": bool(a.no_claude_md),
             "created": store.now(), "driver": {"python": sys.executable, "machine": store.machine()},
             **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
+            # or an OpenCode driver session's (#1309, as wb start's task.json): `wb run stop` and
+            # `wb stop --all` there take its runs, the Claude Code mod's never by directory
+            **({"session": oc, "session_kind": "opencode"}
+               if not sid and (oc := store.opencode_session()) else {}),
             **({"claude_pid": int(pid), "claude_start": models._started(int(pid))}
                if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {})}
     store.write_json(d / "run.json", spec)
@@ -1514,7 +1518,7 @@ def cmd_start(a) -> None:
 
 def _runs_in_scope(a) -> list[Run]:
     from . import cli
-    where, sessions = cli._caller(a)
+    where, sessions, _ = cli._caller(a)
     out = []
     for n in all_runs():
         run = Run(n)
