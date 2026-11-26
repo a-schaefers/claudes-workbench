@@ -603,6 +603,13 @@ export function whenShownHere(sid: string, ms?: number): Promise<boolean> {
   const s = (globalThis as Record<string, unknown>)[KEY] as Shared | undefined
   return s ? s.lane.whenShown(sid, ms) : Promise.resolve(true)
 }
+// Whether a TUI on this server has shown ``sid`` (whenShownHere's, at once): notices.ts's
+// `nearest` takes no session a script's `opencode run` made, whose execution only ran (#1542,
+// 2026-11-26); true with no chat lane here, as whenShownHere's
+export function shownHere(sid: string): boolean {
+  const s = (globalThis as Record<string, unknown>)[KEY] as Shared | undefined
+  return s ? s.lane.shownAt.has(sid) : true
+}
 
 // The TUI part's half (tui.ts): the session its route shows, said to the server part when it
 // changes and again every SHOWN_AGAIN_MS. Returns the cleanup.

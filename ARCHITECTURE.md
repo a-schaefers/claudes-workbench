@@ -9529,7 +9529,9 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   `wb adopt`'s to move. A task (or run) that records no session (a scheduled flow's run, a `wb
   start` typed in a terminal) goes by directory (`nearest`, #1493: it went to none, so its done or
   checkpoint wake never came): the root session the user last typed in here, else those whose
-  executions started here, newest first, the first whose directory (`session.get`'s `location`,
+  executions started here and a TUI has shown (`shownHere`, chat.ts's `shownAt`, true with no chat
+  lane: a script's or git hook's `opencode run` once acked a run's one wake and got an unwatched
+  turn on it, #1542), newest first, the first whose directory (`session.get`'s `location`,
   realpathed) the kernel's `owns` finds near its `cwd` or `repo` (a session in `~` or `/` claims
   none; one with neither key goes to none); `wb ack`'s compare-and-set keeps it to one session, or
   one host. A session new here (its first execution, a new typed one) has notify.jsonl read again.
@@ -9636,7 +9638,8 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   the `workbench-chat` RPC (`WorkbenchChat`, `shown {sessionID}` → `ChatLane.shown`), and a prompt
   waits up to `SHOWN_WAIT_MS` 30 s for its session to be shown (`whenShown`: the TUI moves to a new
   session only after its first prompt); one never shown moves nothing. notices.ts's offer target
-  (`prompted`) asks the same (`whenShownHere`; true with no chat lane); upkeep.ts's `back` never
+  (`prompted`) asks the same (`whenShownHere`; true with no chat lane), and its `nearest` asks it at
+  once (`shownHere`, #1542); upkeep.ts's `back` never
   does (upkeep.ts, above: a new session's first prompt is shown only after it). The listener: `wb chat url --json` (on or off, every `CHECK_MS` 60 s, which brings
   the server up as the mod's link does), `wb chat back`, and `wb chat listener <session> --pid
   <server pid>` (`chat.hold`: refused while another live claim stands, a Claude Code session's or
