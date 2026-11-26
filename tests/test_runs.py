@@ -1017,6 +1017,30 @@ class Runs(Base):
         for n in (1, 2, 3):
             run_wb("discard", f"bo-code-{n}")
 
+    def test_a_best_of_attempt_discarded_as_another_was_accepted_is_not_scored_as_the_models_rejected_work(self):
+        # #1473 (the #1373 audit, 2026-11-26): wb run close wants every attempt accepted or
+        # discarded, and each losing attempt's row was a judged discard with credit 0, so every
+        # best-of run scored the role's model 1 of N and the router steered away from it
+        from workbench import router, tuning
+        flow = {"v": 1, "name": "bo2", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "items": ["the answer"], "attempts": 2,
+             "prompt": "Write the answer to answer.txt."},
+            {"id": "claude", "final": True, "from": "code"}]}
+        run_wb("run", "start", "bo2", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("bo2", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        self.assertEqual([(r["key"], r["task"]) for r in runs.Run("bo2").journal() if r.get("kind") == "item"],
+                         [("1#a1", "bo2-code-1"), ("1#a2", "bo2-code-2")])
+        run_wb("accept", "bo2-code-1", "-m", "feat: the answer")
+        run_wb("discard", "bo2-code-2", "--reason", "a1 was chosen")
+        rows = {r["task"]: r for r in store.results()}
+        lost = rows["bo2-code-2"]
+        self.assertTrue(lost.get("not_chosen"))
+        self.assertFalse(tuning.judged(lost))
+        self.assertNotIn("not_chosen", rows["bo2-code-1"])
+        m = runner.models.resolve(lost["model"])
+        self.assertEqual(router.score(m, lost["size"]).tries, 1)
+        self.assertIn("closed bo2", run_wb("run", "close", "bo2"))
+
     def test_an_item_stuck_on_its_role_is_tried_again_from_the_base_on_the_next_escalate_role_before_claude_is_asked(self):
         # #1134's study: escalating attempts across roles; Claude checkpointed only when the last fails
         flow = {"v": 1, "name": "esc", "params": {}, "stages": [

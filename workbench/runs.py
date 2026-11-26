@@ -1102,6 +1102,27 @@ def run_tasks(run: Run) -> list[str]:
     return [r["task"] for r in run.journal() if r.get("kind") == "item" and r.get("task")]
 
 
+def not_chosen(task: store.Task) -> bool:
+    """Whether ``task`` is an attempt of a compare item (key `<item>#a<n>`) that lost: another
+    attempt at the same item in its stage was accepted. best-of's `wb run close` wants every
+    attempt accepted or discarded, and each losing one was recorded as the model's rejected work,
+    so every run scored the role's model 1 of N and the router steered away from it (#1473, the
+    #1373 audit, 2026-11-26)."""
+    name = task.spec.get("run")
+    if not (isinstance(name, str) and RUN_RE.match(name) and Run(name).exists):
+        return False
+    rows = [r for r in Run(name).journal() if r.get("kind") == "item" and isinstance(r.get("task"), str)]
+    me = next((r for r in rows if r["task"] == task.name), None)
+    key = str((me or {}).get("key") or "")
+    if "#a" not in key:
+        return False
+    item = key.rsplit("#a", 1)[0]
+    return any(r["task"] != task.name and r.get("stage") == me.get("stage")
+               and "#a" in (k := str(r.get("key") or "")) and k.rsplit("#a", 1)[0] == item
+               and store.Task(r["task"]).exists and store.Task(r["task"]).status.get("phase") == "accepted"
+               for r in rows)
+
+
 def tasks_of(name: str) -> set[str]:
     """Run ``name``'s tasks by its journal, open or archived by wb gc (an old transcript's wake
     is charged after gc moved its run): none for a name that is no run."""

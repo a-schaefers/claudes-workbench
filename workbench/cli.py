@@ -5673,6 +5673,8 @@ def cmd_discard(a):
     # --drop-steps deleted the approved steps with the branch: no longer kept work (#722)
     extra = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
     extra |= {"infra": outside} if outside else {}
+    # a best-of attempt another one beat: not the model's rejected work (#1473, 2026-11-26)
+    extra |= {"not_chosen": True} if runs.not_chosen(task) else {}
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
                     unrecorded={"outcome": "discarded", "step": measured,
                                 "extra": {"reason": a.reason, **extra}})

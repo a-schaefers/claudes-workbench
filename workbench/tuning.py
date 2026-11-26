@@ -104,9 +104,12 @@ def judged(row: dict) -> bool:
     Claude put down to its own spec (--spec-gap), which would score the agent for Claude's miss;
     nor one after a stop from outside the step (stopped_outside, #1245); nor a task whose agent
     never ran (`ran` false: its setup or its model's load failed), which scored the model 0/3 for
-    a lockfile problem or a sleeping server and locked it out of routing (#581). A row from
-    before `ran` was recorded: not accepted, and no token written."""
-    if (row.get("outcome") == "discarded" and row.get("spec_gaps")) or stopped_outside(row):
+    a lockfile problem or a sleeping server and locked it out of routing (#581); nor a compare
+    attempt discarded as another was accepted (`not_chosen`: best-of's losers, which scored the
+    model 1 of N on every run, #1473). A row from before `ran` was recorded: not accepted, and
+    no token written."""
+    if (row.get("outcome") == "discarded" and (row.get("spec_gaps") or row.get("not_chosen"))) \
+            or stopped_outside(row):
         return False
     if "ran" in row:
         return bool(row["ran"])
