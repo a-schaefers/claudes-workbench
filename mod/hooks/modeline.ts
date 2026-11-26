@@ -10,6 +10,10 @@ export const MODELINE = "Claude's Workbench"
 
 /** The link a modeline shows: `wb chat url --json` as the mod last read it (WbChat's `link`). */
 export type Link = WbChat['link']
+/** What `wb chat url --json` says, read as a Link (OpenCode's panel's, pane.ts `linkOf`), and the
+ * link it is when that can't be read: the plugin spells no phase, and `failed` is one (#1312). */
+export const LINK_STATES: ReadonlySet<string> = new Set(['up', 'started', 'off', 'blocked', 'failed'])
+export const linkDown = (why: string): Link => ({ state: 'failed', why })
 
 const width = (s: string) => [...s].length
 // cut to n columns, an ellipsis last when cut (every character the modeline draws is one column)
@@ -19,10 +23,11 @@ const cut = (s: string, n: number) => (width(s) <= n ? s : n <= 0 ? '' : [...s].
  * What the modeline draws in a pane `cols` wide: `bar`, its bar row's text (in from each edge by
  * the bar's padding), and `rows`, the link's own rows under it when not even `[•_•] <url>` fits
  * there: the link cut by characters, `cols` a row and never at a word, so it stays one link.
+ * `name`: the pane's name (OpenCode's panel says `Workbench` alone, #1312).
  */
-export function modeline(link: Link, cols: number): { bar: string; rows: string[] } {
+export function modeline(link: Link, cols: number, name: string = MODELINE): { bar: string; rows: string[] } {
   const room = Math.max(1, cols - 2) // paddingX 1
-  const head = `${FACE.rest} ${MODELINE}`
+  const head = `${FACE.rest} ${name}`
   const url = link.url ?? ''
   if ((link.state === 'up' || link.state === 'started') && url) {
     const whole = `${head} - ${url}`

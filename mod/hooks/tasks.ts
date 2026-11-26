@@ -13,7 +13,11 @@
 // time against this machine's typical length as words with a tilde, never a bar, and only with
 // TYPICAL_MIN timed tasks behind it. No percentage of a task: nobody knows how much of one is done.
 import type { WbTask } from '../types'
-import { CLOSED, openCounts, phaseOf } from './core'
+import type { Pose } from './apprentice'
+import { ACTIVE, CLOSED, NEEDS, openCounts, phaseOf } from './core'
+
+/** A task's phase while its status.json has none yet (the mod's scan and OpenCode's panel). */
+export const UNWRITTEN = 'queued'
 
 /** One run of a row's text in one style. */
 export type Part = { text: string; color?: string; dim?: boolean; bold?: boolean; underline?: boolean }
@@ -236,13 +240,13 @@ const textOf = (parts: Part[]) => parts.map(p => p.text).join('')
 // what it is doing now, for line 2, on one line; null for none (a passing review, a parked or
 // closed task). An ask_reviewer question, a failure's error and a test command can span lines (the
 // #1048 review): a newline would break the row in two and the pane's exact row count with it.
-const doingOf = (t: TaskFacts): string | null => {
-  const said = doingText(t)
+const doingOf = (t: TaskFacts, who: string): string | null => {
+  const said = doingText(t, who)
   return said === null ? null : said.replace(/\s+/g, ' ').trim()
 }
-const doingText = (t: TaskFacts): string | null => {
+const doingText = (t: TaskFacts, who: string): string | null => {
   if (CLOSED.has(t.phase) || t.parked) return null
-  if (phaseOf(t).stopped) return t.last ? `${t.last} · Claude steers it next` : 'Claude steers it next'
+  if (phaseOf(t).stopped) return t.last ? `${t.last} · ${who} steers it next` : `${who} steers it next`
   if (t.phase === 'review') return t.tests === 'pass' || /Claude reviews next$/.test(t.last) || !t.last ? null : t.last
   if (t.phase === 'asking') {
     const asked = [...(t.recent ?? [])].reverse().find(l => l.startsWith('asks: '))
@@ -254,7 +258,8 @@ const DOING_STYLE: Record<string, Style> = {
   testing: { color: 'suggestion' }, asking: { color: 'warning' }, stuck: { color: 'error' }, failed: { color: 'error' },
 }
 
-function rowOf(t: TaskFacts, now: number, spin: string, followed: string, grouped: boolean, usd: (x: number) => string): Row {
+function rowOf(t: TaskFacts, now: number, spin: string, followed: string, grouped: boolean, usd: (x: number) => string,
+  who: string): Row {
   const long = stageOf(t, false), short = stageOf(t, true)
   let elapsed: string
   if (t.phase === 'review') {
@@ -276,7 +281,7 @@ function rowOf(t: TaskFacts, now: number, spin: string, followed: string, groupe
     spend: typeof t.spend === 'number' ? (t.est && t.spend ? '≈' : '') + usd(t.spend) : t.spend === 'plan' ? 'plan' : t.spend === 'none' ? 'no price' : '',
     spendS: typeof t.spend === 'number' ? usd(t.spend) : '',
     elapsed, elapsedStyle: late ? { color: late } : { dim: true },
-    eta: etaOf(t, now), doing: doingOf(t), doingStyle: DOING_STYLE[t.phase] ?? { dim: true },
+    eta: etaOf(t, now), doing: doingOf(t, who), doingStyle: DOING_STYLE[t.phase] ?? { dim: true },
     ctx: ctxOf(t), tools: t.tools || 0, tok: t.tokOut > 0 ? tokens(t.tokOut) : '',
   }
 }
@@ -452,9 +457,10 @@ function closedLine(tasks: TaskFacts[], cols: number, now: number): Part[] {
 
 /** Every row of the task list, at most `cols` columns each: a block a request (its header, then
  * each task's line 1 and, unless compact, line 2), the block's closed tasks folded to one dim line,
- * an empty row between blocks. `usd`: how spend is written (the pane passes wave 2's usd()). */
+ * an empty row between blocks. `usd`: how spend is written (the pane passes wave 2's usd()); `who`:
+ * the one that steers a stopped task (Claude Code's Claude, the default; OpenCode's Workbench, #1312). */
 export function taskRows(list: TaskFacts[], o: { cols: number; now: number; spin: string;
-  followed: string; compact: boolean; usd?: (x: number) => string }): Part[][] {
+  followed: string; compact: boolean; usd?: (x: number) => string; who?: string }): Part[][] {
   return taskLines(list, o).map(l => l.parts)
 }
 
@@ -462,7 +468,7 @@ export function taskRows(list: TaskFacts[], o: { cols: number; now: number; spin
  * whether it is that task's first line: the pane presses a task's first line to follow it, and
  * draws its other lines after its last one. */
 export function taskLines(list: TaskFacts[], o: { cols: number; now: number; spin: string;
-  followed: string; compact: boolean; usd?: (x: number) => string }): { parts: Part[]; task: string; first: boolean }[] {
+  followed: string; compact: boolean; usd?: (x: number) => string; who?: string }): { parts: Part[]; task: string; first: boolean }[] {
   const usd = o.usd ?? plainUsd
   const out: { parts: Part[]; task: string; first: boolean }[] = []
   const add = (parts: Part[], task = '', first = false) => out.push({ parts, task, first })
@@ -474,7 +480,7 @@ export function taskLines(list: TaskFacts[], o: { cols: number; now: number; spi
     if (!o.compact && out.length) add([{ text: '' }])
     if (grouped) add(header(b.group, b.tasks, o.cols, o.compact, usd))
     if (open.length) {
-      const rows = open.map(t => rowOf(t, o.now, o.spin, o.followed, grouped, usd))
+      const rows = open.map(t => rowOf(t, o.now, o.spin, o.followed, grouped, usd, o.who ?? 'Claude'))
       const L = layout(rows, o.cols, grouped)
       rows.forEach((r, i) => {
         const last = i === rows.length - 1
@@ -507,4 +513,92 @@ export function capRow(list: TaskFacts[], spent: number, cap: number | null, col
   const capText = Number.isInteger(cap) ? `$${cap}` : usd(cap)
   return clipParts([{ text: `API today ${today} of the ${capText} day cap  `, dim: true },
     { text: bar(share, 10), color }], cols)
+}
+
+// ---------------------------------------------------------------- the task followed, and the apprentice
+// Both hosts' panes (#1312: the OpenCode plugin's panel draws from these, as register.tsx does)
+
+/** API dollars are estimates at the catalog's prices unless the user set the model's (wb model price,
+ * #1135, 2026-11-23: the catalog ran about 2x DeepInfra's bill): `prices` is meter.basis's, missing
+ * on rows from before it (the catalog's) */
+export const isEst = (prices: unknown) => prices !== 'yours' && prices !== 'provider'
+
+type Json = Record<string, any>
+/** The Tasks view's facts of a task (#1048), from the task.json (`sp`) and status.json (`st`)
+ * already read: nothing new is read for them */
+export function viewFacts(sp: Json, st: Json) {
+  const num = (x: unknown) => (Number.isFinite(Number(x)) ? Number(x) : 0)
+  const live = st.live_used && typeof st.live_used === 'object' ? st.live_used : {}
+  const api = st.api && typeof st.api === 'object' ? st.api : null
+  const typical = st.typical && typeof st.typical === 'object' ? st.typical : {}
+  const fresh = Number((st.tuned ?? {}).fresh_at)
+  return {
+    group: typeof sp.group === 'string' ? sp.group : '',
+    cards: Array.isArray(st.cards) ? st.cards.filter((c: unknown) => Number.isInteger(c)) as number[] : [],
+    tools: num(st.tools), tokOut: num(st.tok_out),
+    // the window's fill only while it is this session's: a fresh session's first step reads 0 (#262)
+    ctxUsed: live.session && live.session === st.session ? num(live.used) : 0,
+    window: num(st.window), freshAt: Number.isFinite(fresh) && fresh > 0 ? fresh : null,
+    autoFixes: num(st.auto_fixes), autoFixMax: num(sp.auto_fix), roundFor: String(st.round_for ?? ''),
+    reviews: num(st.reviews), steps: num(st.steps),
+    // runner.active_so_far's parts: the step's rounds so far, and the one under way from its start
+    activeS: Math.max(0, num(st.active_s) - num(st.step_active_s)), roundStartedAt: num(st.round_started_at) * 1000,
+    typicalMin: num(typical.min), typicalN: num(typical.n), lateMin: num(st.late_min),
+    spend: !api ? null : api.plan ? 'plan' as const : typeof api.usd === 'number' ? api.usd as number : 'none' as const,
+    est: !!api && isEst(api.prices),
+  }
+}
+
+type Focusable = Pick<TaskFacts, 'name' | 'phase' | 'createdAt' | 'updatedAt' | 'parked'>
+/** The task worth watching. The one followed stays while it runs: with two running, choosing by
+ * the latest status write swapped the pane between them on every tool call (the 2026-11-16
+ * audit). Else the newest started that runs (running, testing, asking before queued: a queued one
+ * shows nothing yet), else the newest waiting for Claude. A task the user pressed (`picked`,
+ * #1048) is followed while it is listed, whatever its phase. */
+export function focusOf<T extends Focusable>(list: T[], followed: string, picked = ''): T | undefined {
+  const chosen = picked ? list.find(t => t.name === picked) : undefined
+  if (chosen) return chosen
+  const kept = list.find(t => t.name === followed && ACTIVE.has(t.phase))
+  if (kept) return kept
+  const by = (ts: T[], k: 'createdAt' | 'updatedAt') => [...ts].sort((a, b) => b[k] - a[k])[0]
+  return by(list.filter(t => phaseOf(t).working), 'createdAt') ??
+    by(list.filter(t => ACTIVE.has(t.phase) && !phaseOf(t).working), 'createdAt') ??
+    by(list.filter(t => NEEDS.has(t.phase)), 'updatedAt')
+}
+
+export type Speech = { pose: Pose; say: string; more: string; color: string }
+/** The apprentice at the foot of the pane: how it stands and what it says of the followed task.
+ * `who`: the one that reviews and answers, as each host names it (Claude Code's Claude; OpenCode's
+ * Workbench agent, #1312). */
+export function speechOf(focus: Pick<TaskFacts, 'name' | 'phase' | 'tests' | 'last'> | undefined, doing: string,
+  list: readonly unknown[], on: boolean, who = 'Claude'): Speech {
+  if (!focus) {
+    const more = on ? `Ask ${who} for anything: the coding comes to me.` : '/workbench turns workbench mode on.'
+    if (list.length) return { pose: 'rest', say: 'All caught up.', more, color: 'inactive' }
+    return on
+      ? { pose: 'rest', say: 'Workbench mode is on.', more, color: 'claude' }
+      : { pose: 'sleep', say: 'No delegated tasks.', more, color: 'inactive' }
+  }
+  const n = focus.name
+  switch (focus.phase) {
+    // each handoff names who acts next: "done" read as tests passed, accepted or landed (#103)
+    case 'review': return { pose: 'tada', say: focus.tests === 'pass' ? `Local tests passed on ${n}.` : `${n} is done.`,
+      more: `${who} reviews next.`, color: 'success' }
+    case 'asking': return { pose: 'ask', say: `I asked ${who} about ${n}.`, more: `${who} answers next.`, color: 'warning' }
+    case 'stuck': return { pose: 'slump', say: `I'm stuck on ${n}.`, more: focus.last, color: 'error' }
+    case 'failed': return { pose: 'slump', say: `${n} failed.`, more: focus.last, color: 'error' }
+  }
+  // the hands move while it writes or tests; everything else is the model thinking or waiting
+  const working = /^(Writing|Running)/.test(doing)
+  return { pose: working ? 'work' : 'think', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
+}
+
+const BLINK_EVERY = 11 // frames
+const STROKE_EVERY = 6 // frames: the wrench comes up once in this many, else rests at its side
+/** The frame a pose shows at a tick: a stroke of the wrench now and then while working, else a
+ * blink now and then. */
+export const frameOf = (pose: Pose, tick: number): Pose => {
+  if (pose === 'work') return tick % STROKE_EVERY ? 'swing' : 'work'
+  if (pose === 'sleep' || pose === 'slump') return pose
+  return tick % BLINK_EVERY === 0 ? 'blink' : pose
 }

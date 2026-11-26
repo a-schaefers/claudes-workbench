@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { ago, bar, blocksOf, capRow, clip, compactWanted, ctxOf, etaOf, MARK, placeOf, stageOf, taskRows } from './tasks.js'
+import { ago, bar, blocksOf, capRow, clip, compactWanted, ctxOf, etaOf, focusOf, MARK, placeOf, speechOf, stageOf, taskRows } from './tasks.js'
 import type { Part, TaskFacts } from './tasks.js'
 
 // The Tasks view for parallel work (#1048): the design study's mockups, from the facts of its
@@ -298,6 +298,21 @@ test('a stuck task\'s second line says why and who acts next', () => {
     .toBe('  ⎿ model: out of memory · Claude steers it next')
   // parked by /workbench-quit: waiting on no one, so nothing to say
   expect(draw([fact({ name: 's', phase: 'stuck', parked: true, last: 'x' })], 71)).toHaveLength(1)
+})
+
+test('the one who acts next is named by the host: Claude in Claude Code, Workbench in OpenCode (#1312)', () => {
+  const rows = taskRows([G2[1]!], { cols: 71, now: NOW, spin: '✻', followed: '', compact: false, who: 'Workbench' })
+  expect(rows.map(text)[1]).toBe('  ⎿ no output for 10 minutes · Workbench steers it next')
+  const review = { name: 'r', phase: 'review', tests: 'pass', last: '' } as const
+  expect(speechOf(review, '', [review], true).more).toBe('Claude reviews next.')
+  expect(speechOf(review, '', [review], true, 'Workbench').more).toBe('Workbench reviews next.')
+  expect(speechOf(undefined, '', [], true, 'Workbench').more).toBe('Ask Workbench for anything: the coding comes to me.')
+})
+
+test('the task followed is the one picked, else the one kept while it runs', () => {
+  const list = [fact({ name: 'a' }), fact({ name: 'b', phase: 'review' })]
+  expect(focusOf(list, 'a', 'b')?.name).toBe('b')
+  expect(focusOf(list, 'a')?.name).toBe('a')
 })
 
 test('a queued task\'s stage follows its runner\'s words (GPU, slot, setting up, base check)', () => {

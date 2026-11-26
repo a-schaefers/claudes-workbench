@@ -31,6 +31,9 @@
     "spans.ts",
     "splash.tsx",
     "upkeep.ts",
-    "commands.ts"
+    "commands.ts",
+    "pane.ts",
+    "pane-view.ts",
+    "pane.tsx"
   ]
 }
