@@ -15,14 +15,14 @@
 //
 // The TUI part imports this only in setup (tui.ts), never at load: it imports OpenTUI and Solid,
 // which only OpenCode's TUI provides.
-import { createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
+import { createEffect, createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
 import { TextAttributes } from '@opentui/core'
 import { Apprentice, mountSplash, PANEL, replaySplash, type Panel, type SplashHost } from './splash.tsx'
 import { AGENT, WorkbenchPane, type Link, type Live, type PaneTask, type Tasks } from './pane.ts'
 import { WorkbenchDriver } from './driver.ts'
 import {
-  footer, lineRun, modelineOf, panelRows, pixels, Poll, runOf, scoped, separator, sidebar, spinAt, target, TOKEN, WHO, wrap,
-  type Here, type Run, type Token,
+  driverRow, footer, lineRun, MODELS, modelineOf, panelRows, pixels, Poll, runOf, scoped, separator, sidebar, spinAt, target,
+  TOKEN, WHO, wrap, type DriverInfo, type Here, type Run, type Token,
 } from './pane-view.ts'
 import { capRow, focusOf, frameOf, speechOf } from '../mod/hooks/tasks.ts'
 import { CLOSED } from '../mod/hooks/core.ts'
@@ -32,6 +32,7 @@ export const POLL_MS = 2000        // the tasks, while one is open or the panel 
 export const IDLE_MS = 10_000      // the tasks, otherwise
 export const TAIL_MS = 2000        // the followed task's transcript, while the panel is open
 export const FRAME_MS = 450        // the apprentice's frame (the mod's FRAME_MS)
+export const SETTLE_MS = 500       // after the agent's selection, the TUI's own model selection follows it before the notes are asked
 const HIDDEN = new Set(['activity', 'clock', 'meta', 'routed'])
 
 type Colour = { readonly r: number; readonly g: number; readonly b: number; readonly a: number }
@@ -58,8 +59,12 @@ export interface PaneHost {
       readonly commands: readonly { readonly id?: string; readonly title?: string; readonly group?: string; readonly palette?: true
         readonly bind?: string; readonly run: () => void }[]
     }): void
+    // a reachable command by id (OpenCode's own "Open plugins" action dispatches `plugins.list` so)
+    dispatch?(id: string): void
   }
   readonly ui: {
+    // the prompt's selected model, reactive (2.4.1; none in an older TUI): the next turn's driver
+    readonly model?: { current(): { readonly providerID: string; readonly modelID: string; readonly variant?: string } | undefined }
     readonly toast: { show(o: { readonly title?: string; readonly message: string; readonly variant?: 'info' | 'warning' }): void }
     readonly panel: {
       open(name: string): boolean
@@ -130,6 +135,11 @@ const hereOf = (host: Host, sessionID: string): Here => ({
   home: process.env.HOME ?? '', fold: process.platform === 'darwin',
 })
 const modeOf = (host: Host, sessionID: string | undefined) => !!sessionID && host.data.session.get(sessionID)?.agent === AGENT
+// the TUI's selected model as OpenCode writes a ref, `provider/id#variant`; '' in a TUI without `ui.model`
+const selectedRef = (host: Host): string => {
+  const m = host.ui.model?.current()
+  return m ? `${m.providerID}/${m.modelID}${m.variant ? `#${m.variant}` : ''}` : ''
+}
 
 /** The panel's page: the tasks, the followed task's transcript or diff, the apprentice, the cap
  * and the modeline, pinned to the panel's foot. */
@@ -142,15 +152,22 @@ function Page(props: { readonly host: Host; readonly feed: Feed; readonly panel:
   const [view, setView] = createSignal<'transcript' | 'diff'>('transcript')
   const [followed, setFollowed] = createSignal('')
   const [tick, setTick] = createSignal(0)
-  const [driver, setDriver] = createSignal('')
+  const [driver, setDriver] = createSignal<DriverInfo | null>(null)
   const state = () => props.feed.state[0]()
   const tasks = (): PaneTask[] => state()?.tasks ?? []
   const now = () => state()?.now ?? Date.now()
   const cols = () => Math.max(30, size().w)
   const focus = () => focusOf(tasks(), followed(), props.picked())
   props.feed.wantLink()
-  void (host.client.rpc(WorkbenchDriver).driver!({ sessionID: props.panel.sessionID }) as Promise<{ label?: string; kind?: string }>)
-    .then(d => setDriver(d?.kind && d.kind !== 'unknown' ? String(d.label ?? '') : ''), () => {})
+  // the driver row (#1316): wb's answer for the model the TUI has selected, asked again at each
+  // change of it (the row's "change", OpenCode's own /models, the pin), as OpenCode commits a pick
+  // to the session only at its next prompt (seen live, 2026-11-26); an answer to an older ask drops
+  let asked = 0
+  createEffect(() => {
+    const model = selectedRef(host), mine = ++asked
+    void (host.client.rpc(WorkbenchDriver).driver!({ sessionID: props.panel.sessionID, ...(model ? { model } : {}) }) as Promise<DriverInfo>)
+      .then(d => { if (mine === asked) setDriver(d && typeof d === 'object' ? d : null) }, () => {})
+  })
 
   // the tail: only while this page is drawn, so closing the panel stops it (#1332). One loop: a
   // press (a task, the separator, `d`) bumps `gen` and starts it again at once, and an answer
@@ -218,8 +235,8 @@ function Page(props: { readonly host: Host; readonly feed: Feed; readonly panel:
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}
       onSizeChange={function () { setSize({ w: this.width - 2, h: this.height }) }}>
-      <Show when={driver()}>
-        <text wrapMode="none" fg={theme.text.muted}>{`driver: ${driver()}`}</text>
+      <Show when={driverRow(driver(), cols())}>
+        <Runs theme={theme} runs={driverRow(driver(), cols()) ?? []} onPress={() => host.keymap.dispatch?.(MODELS)} />
       </Show>
       <box flexDirection="column" flexShrink={0} maxHeight={Math.max(3, Math.floor(size().h / 2))} overflow="hidden">
         <Index each={panelRows(tasks(), cols(), size().h, now(), followed())}>
@@ -340,13 +357,19 @@ export function mountPane(host: Host, home: string): () => void {
     const { sessionID, agent, previous } = e.data
     const route = host.ui.router.current()
     const here = route.type === 'session' && route.sessionID === sessionID
-    if (agent === AGENT && previous !== AGENT) {
-      if (here) open()
-      void (host.client.rpc(WorkbenchDriver).driver!({ sessionID, once: true }) as Promise<{ notes?: unknown }>)
-        .then(d => {
-          const notes = Array.isArray(d?.notes) ? d.notes.map(String).filter(Boolean) : []
-          if (notes.length && here) host.ui.toast.show({ title: 'Workbench', message: notes.join(' '), variant: 'info' })
-        }, () => {})
+    if (agent === AGENT && previous !== AGENT && here) {
+      open()
+      // asked only for the session on screen (--once records each note as said, so one asked for a
+      // session elsewhere would be spent unseen), of the model the TUI selects once it follows the
+      // new agent (SETTLE_MS)
+      setTimeout(() => {
+        const model = selectedRef(host)
+        void (host.client.rpc(WorkbenchDriver).driver!({ sessionID, once: true, ...(model ? { model } : {}) }) as Promise<{ notes?: unknown }>)
+          .then(d => {
+            const notes = Array.isArray(d?.notes) ? d.notes.map(n => String((n as { text?: unknown })?.text ?? n)).filter(Boolean) : []
+            if (notes.length) host.ui.toast.show({ title: 'Workbench', message: notes.join(' '), variant: 'info' })
+          }, () => {})
+      }, SETTLE_MS)
     } else if (previous === AGENT && agent !== AGENT) {
       if (here && panelOpen()) host.ui.panel.close()
       replaySplash(host)
