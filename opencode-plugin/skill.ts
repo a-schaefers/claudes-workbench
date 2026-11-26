@@ -151,6 +151,8 @@ export const HOST_LINES: readonly Rule[] = [
   // a Claude Code Workflow beside a flow: OpenCode's driver has no Workflow tool
   { from: /With `ultracode` and `deepcode` in one prompt,[\s\S]*?never redoes it\.\n/, to: '', files: SKILL },
   line('run in the background (Bash `run_in_background`)', "run in the background (the shell tool's `background: true`)"),
+  // a run's notices are the plugin's to deliver (notices.ts deliverRuns): the wait is for wakes off
+  line('Without the mod, wait with `wb wait <run>`', "With wakes off (the plugin's `wake` option), wait with `wb wait <run>`"),
   // wakes: the plugin's `[workbench]` messages (notices.ts, #1313), the mod's branch; no "without
   // the mod" branch: this prompt is the plugin's, so it is always there. With its `wake` option
   // off, none comes (`wakes`)

@@ -81,7 +81,7 @@ import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, focusOf as focusOfTasks, frameOf, isEst, speechOf, taskLines, viewFacts } from './tasks'
 // moved to tasks.ts, shared with the OpenCode plugin's panel (#1312); still exported from here
 export { isEst, viewFacts }
-import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, codingGate, compactPlan, editFields, gateOf, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, tellPlan, WAKE_OPENING } from './core'
+import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, codingGate, compactPlan, editFields, gateOf, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, runNoticePlan, runNoticesDue, tellPlan, WAKE_OPENING } from './core'
 import type { Gate as CommandGate } from './core'
 import type { Part as RowPart } from './tasks'
 
@@ -563,12 +563,13 @@ const CODING_RULES: Record<string, string> = {
 // Dynamic workflows (#1041), the user's choice (`wb workflows`): whether Claude may run several
 // tasks at once for one request. Off (the default) adds nothing: the skill says one at a time.
 // #1278: on, a substantive request is a deep workflow (wb run), its fan-out the run's, not tasks
-// Claude starts at once; and the mod wakes Claude for no run row yet, so the wake is a background
-// `wb wait <run>` (the review of #1278, 2026-11-25: told "don't poll", Claude was never woken)
+// Claude starts at once; its notices wake Claude as a task's do (deliverRuns, #1278's S9; before it
+// the wake was a background `wb wait <run>`: the review of #1278, 2026-11-25, told "don't poll",
+// Claude was never woken)
 const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb deepmode` shows it): run a substantive ' +
   'request as a deep workflow on their agents, as the /workbench skill\'s *Deep workflows* says: pick a flow ' +
-  '(`wb run flows`), say it in at most three lines, start it once with `wb run start`, then wait for its notices ' +
-  'with `wb wait <run>` in the background, again after each. Never fan out by starting several tasks at once ' +
+  '(`wb run flows`), say it in at most three lines, start it once with `wb run start`, then end your turn: its ' +
+  'notices (a checkpoint, a pause, the end) wake you as a task\'s do. Never fan out by starting several tasks at once ' +
   'yourself: the run starts its items, each on its own role\'s model, never one you pick, and the GPU lease, the ' +
   'provider slots and the day cap decide what runs together. Review each result on its own merits; merge logic ' +
   'first, then tests, then UI or docs.'
@@ -3176,9 +3177,11 @@ async function deliver($: any, now: number) {
   // Per task, its newest notice and every question, none over an hour old: the kernel's
   // noticesDue (Kernel.Notice). Every notice counts for rewake, however old, a batch's for each
   // task it names (`noticed`): news Claude had, not a lost one (the 2026-11-16 audit).
-  const { due: picked, noticed } = noticesDue(file.rows, mem.startedAt, now)
+  // a task's rows alone: a run's own (`run`, no `task`) are deliverRuns', and read as a task named
+  // '' they went to tasks//acked (#1278's S9)
+  const rows0 = file.rows.filter(r => typeof r.task === 'string' && r.task !== '')
+  const { due: picked, noticed } = noticesDue(rows0, mem.startedAt, now)
   for (const n of noticed) mem.noticed.set(n.task, Math.max(mem.noticed.get(n.task) ?? 0, n.ts))
-  const rows0 = file.rows
   const due = picked.map(d => [d.task, d.picks.map(i => rows0[i]!)] as const)
   // A wake held for the turn leaves the file unseen, so the poll after the turn sends it: a second
   // task's wake held while the first one's turn ran was never sent (the 2026-11-16 audit).
@@ -3252,7 +3255,61 @@ async function deliver($: any, now: number) {
       void wake($, name, text, prev, row.ts)
     }
   }
+  if (await deliverRuns($, now, file.rows)) held = true
   if (!held) mem.lastNotify = file.key
+}
+
+// A run's own notices (#1278's S9: run_checkpoint, run_done, run_paused, run_stopped, run_failed;
+// rows with `run` and no `task`, runs.Run.notify): the one wake a run gives, to the session it is
+// `mine` to as a task's is (run.json: the session that ran `wb run start`, else by directory: a
+// scheduled run's is the session near its repo in the morning), once (`wb ack --run`, the
+// compare-and-set `wb wait <run>` shares), and only while still true, the run in the phase it
+// was raised in (core.ts runNoticePlan). Its text is the wake whole: it opens `[workbench] Run
+// `<run>``, spend.RUN_WAKE's, and names its next step. A run's items' notices are its driver's
+// (runs/<run>/notify.jsonl), never here. Before this Claude was told to wait in the background
+// with `wb wait <run>`, the only wake a run had (the review of #1278, 2026-11-25). True when one
+// is held for the turn.
+const RUN_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/ // runs.RUN_RE
+const RUN_HEADLINE: Record<string, string> = { run_checkpoint: 'is at a checkpoint', run_done: 'is done',
+  run_paused: 'is paused', run_stopped: 'was stopped', run_failed: 'has failed' }
+type RunFile = { session?: string; session_kind?: string; cwd?: string; repo?: string; claude_pid?: number; claude_start?: string }
+async function deliverRuns($: any, now: number, rows: NoticeRow[]): Promise<boolean> {
+  const mine0 = rows.filter(r => typeof r.run === 'string' && !('task' in r))
+  if (!mine0.length) return false
+  let held = false
+  for (const d of runNoticesDue(mine0, mem.startedAt, now)) {
+    const name = d.task
+    if (!RUN_NAME.test(name)) continue
+    const dir = `${mem.root}/runs/${name}`
+    const ackPath = `${dir}/acked`
+    let acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
+    const picks = d.picks.map(i => mine0[i]!)
+    if (picks.every(r => r.ts <= acked)) continue
+    const spec = await readJson<RunFile>($, `${dir}/run.json`)
+    const keys = { session: spec.session, cwd: spec.cwd, repo: spec.repo, claude_pid: spec.claude_pid,
+      claude_start: spec.claude_start, driver: spec.session_kind === 'opencode' ? 'opencode' : spec.session ? 'claude' : '' }
+    await noteClaude($, keys, now)
+    const own = mine(keys)
+    const status = await readJson<{ phase?: string }>($, `${dir}/status.json`)
+    for (const row of picks) {
+      const key = `run:${name}:${row.ts}`
+      const plan = runNoticePlan({ phase: String(status.phase ?? ''), raisedIn: String(row.phase ?? ''), ts: Number(row.ts),
+        acked, own, wake: mem.wake, busy: mem.busy, toasted: mem.toasted.has(key) })
+      if (plan.act === 'skip') continue
+      if (plan.toast) {
+        mem.toasted.add(key)
+        $.ui.toast(`workbench: run ${name} ${RUN_HEADLINE[row.kind] ?? row.kind}`)
+      }
+      if (plan.act === 'none') continue // the toast only: its own session's, or wb wait's
+      if (plan.act !== 'wake' && plan.act !== 'ack') { held = true; continue } // mid-turn: once it ends
+      const prev = acked
+      if (plan.act === 'wake' && !(await take($, name, row.ts, true))) { acked = row.ts; continue } // taken by another
+      await raiseAck($, ackPath, row.ts)
+      acked = row.ts
+      if (plan.act === 'wake') void wake($, name, String(row.text ?? ''), prev, row.ts, true)
+    }
+  }
+  return held
 }
 
 // A notice's headline and next step, by its kind and cause: deliver's and rewake's (#1384)
@@ -3277,9 +3334,9 @@ async function nextOf($: any, row: NoticeRow, name: string): Promise<string> {
 // `wb wait`): two sessions woken by one `wb events` line each read `acked`, then wrote it, and
 // both woke Claude for one review (#687). False only when wb says another took it first; a wb
 // that can't run leaves the plain write after it to decide, as before.
-async function take($: any, name: string, ts: number): Promise<boolean> {
+async function take($: any, name: string, ts: number, run = false): Promise<boolean> {
   try {
-    return (await $.process.run([mem.wb, 'ack', name, String(ts)], { timeoutMs: 15_000 })).exitCode !== 3
+    return (await $.process.run([mem.wb, 'ack', name, String(ts), ...(run ? ['--run'] : [])], { timeoutMs: 15_000 })).exitCode !== 3
   } catch {
     return true
   }
@@ -3296,12 +3353,12 @@ async function raiseAck($: any, ackPath: string, ts: number) {
 // `ts`: a compare-and-set under wb's lock (`wb ack <task> <prev> --if <ts>`); the plain write put
 // the old mark back over a notice claimed since, delivered twice then (#786). A wb that can't
 // run leaves the check-then-write, as before.
-async function release($: any, name: string, prev: number, ts: number) {
+async function release($: any, name: string, prev: number, ts: number, run = false) {
   try {
-    const r = await $.process.run([mem.wb, 'ack', name, String(prev), '--if', String(ts)], { timeoutMs: 15_000 })
+    const r = await $.process.run([mem.wb, 'ack', name, String(prev), '--if', String(ts), ...(run ? ['--run'] : [])], { timeoutMs: 15_000 })
     if (r.exitCode === 0 || r.exitCode === 3) return
   } catch {}
-  const ackPath = `${mem.root}/tasks/${name}/acked`
+  const ackPath = `${mem.root}/${run ? 'runs' : 'tasks'}/${name}/acked`
   if (Number(await $.fs.read(ackPath).catch(() => '0')) === ts) await $.fs.write(ackPath, String(prev))
 }
 
@@ -3323,13 +3380,14 @@ async function asking($: any, name: string, id: string): Promise<boolean> {
 // settings hook's block, a Stop, a host's limit) never reached Claude, yet was acknowledged and
 // lost for good (the 2026-11-16 audit): the mark goes back, unless something acted on the task
 // since, and rewake tries again after a minute.
-async function wake($: any, name: string, text: string, prev: number, ts: number) {
+async function wake($: any, name: string, text: string, prev: number, ts: number, run = false) {
   mem.submitted = true
   const r = await $.prompt.submit({ text: await awayToo($, text) }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
   mem.submitted = false
   mem.dropped.set(name, await $.clock.now())
-  await release($, name, prev, ts)
+  await release($, name, prev, ts, run)
+  if (run) mem.lastNotify = '-' // a run has no rewake: the next poll reads notify.jsonl again and tries it
   warnOnce($, `drop:${name}`, `the wake for ${name} was dropped (${r.drop}); trying again in a minute`)
 }
 

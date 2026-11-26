@@ -76,8 +76,9 @@ export const CODING_RULES: Readonly<Record<string, string>> = {
 export const NOTES_NOTE = (notes: string) => `The user's delegation notes (\`wb notes\`):\n${notes}`
 export const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb deepmode` shows it): run a substantive ' +
   'request as a deep workflow on their agents, as your Workbench instructions\' *Deep workflows* says: pick a flow ' +
-  '(`wb run flows`), say it in at most three lines, start it once with `wb run start`, then wait for its notices ' +
-  'with `wb wait <run>` in the background (the shell tool\'s `background: true`), again after each. Never fan out ' +
+  '(`wb run flows`), say it in at most three lines, start it once with `wb run start`, then end your turn: its ' +
+  'notices (a checkpoint, a pause, the end) wake you as a task\'s do (with the plugin\'s `wake` option off, ' +
+  '`wb wait <run>` in the background, the shell tool\'s `background: true`). Never fan out ' +
   'by starting several tasks at once yourself: the run starts its items, each on its own role\'s model, never one ' +
   'you pick, and the GPU lease, the provider slots and the day cap decide what runs together. Review each result ' +
   'on its own merits; merge logic first, then tests, then UI or docs.'

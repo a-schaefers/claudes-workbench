@@ -220,7 +220,7 @@ curl -s "${auth[@]}" "$WORKBENCH_URL/api/wait?after=1795436900301-a1b2c3&timeout
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
   `messages` holds only its own messages and the driver's rows whose `to` names it. No
-  `push`, `savings`, `build`, `tasks`, `dictate`, `driver` or `settings`: those are the user's. `/api/send`'s `state` is the same view.
+  `push`, `savings`, `build`, `tasks`, `runs`, `dictate`, `driver` or `settings`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
 - **Files:** `GET /api/upload/<id>` and `/api/file/<id>` answer only for a file it uploaded or one
@@ -312,6 +312,11 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `build`: the page files' stamp (a page whose stamp differs reloads).
 - `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",
   provider_name}]` (none accepted, discarded or parked by `wb stop --all`).
+- `runs`: the deep workflows not closed (`wb run`), for the runs strip: `[{run, flow, phase, why,
+  stages: {<stage>: {done, running, null, filtered, not_run}}, spent_usd, budget_usd,
+  budget_min, gpu_min}]`, by their start. `phase` is `running`, `checkpoint`, `paused`, `stopped`,
+  `review` or `failed`; `budget_usd` null for none. Each run's
+  Stop and Summary are its Settings row (`run-<run>`, *GET /api/settings*).
 - `dictate`: true while the computer has a listener (a speech recognizer in `wb audio`'s
   audio.json) for `POST /api/transcribe/<id>`: the page shows its mic only then.
 - `driver`: the driver's state, the line the page keeps at the top of the chat (#1355): `{state:
@@ -461,29 +466,34 @@ sent for it (to every device, or with `endpoint` to that one) → `{}`.
 
 ### `GET /api/settings` (user only)
 The web app's Settings: `{"rows": [...], "changes": [...], "ts": <seconds>}`. Each row is `{key, group, label, kind,
-…}`: `group` one of `shared`, `gpu`, `api`, `terminal`, `experimental` (in that order); `kind` one
+…}`: `group` one of `shared`, `gpu`, `api`, `workflows`, `terminal`, `experimental` (in that order); `kind` one
 of `choice` (`value`, `choices: [{value, label, says}]`, `says`, `other`: any id is taken),
 `number` (`value`: a number or null for off, `unit`: `usd`, `says`), `info`
 (`text`), `action` (`text`, `choices` as buttons) or `note` (`text`, standing where its group's
 rows would be). A row may carry `help` (*POST /api/settings*), and `changed: {ts, by}`, its newest
 recorded change within 7 days (#1355). `changes`: the newest 10 recorded changes, newest first,
 `{ts, key, label, from, to, by}`. Read afresh on each request, so a change made at the terminal
-shows (#1392).
+shows (#1392). The `workflows` group holds deepmode (`workflows`), a `run-<run>` action per run not
+closed (its `text` the run's flow, phase, stage counts and spend; its choices `stop`, while it runs, and
+`summary`) and the flows there are (`flows`, info).
 
 ### `POST /api/settings` (user only)
 `{key, value}` (`value`: a string, a number, or null for a number row's off), JSON only (else 415
 `json only`). It runs that row's `wb` command as the user, not as the driver:
-- 200 `{"ok": true, "said": <wb's line>, "rows": [...], "changes": [...], "help"?: <note>}`. `help` comes when the
+- 200 `{"ok": true, "said": <wb's line>, "rows": [...], "changes": [...], "help"?: <note>, "detail"?: <text>}`. `help` comes when the
   value just chosen needs the driver's help to work (Agent code navigation on with probe not set
   up). The server returns it and records it (below), and the driver in the terminal offers to set it up
-  (installing nothing without the user's yes); showing it is the Settings view's job.
+  (installing nothing without the user's yes); showing it is the Settings view's job. `detail` comes
+  with a run's `summary`: `wb run report <run>` (cut past 16,000 characters), its agents' results among it
+  (show it as text, never markup); `said` is its first line.
 - 400 `{"error": "no such setting"}` for an unknown `key`; 400 `{"error": "not one of its
   choices"}` for a value the row doesn't take (nothing runs for either).
 - 409 `{"ok": false, "error": <wb's line>, "rows": [...]}` when wb refused.
 
 A change that went through is recorded (`settings-changes.jsonl` in the state directory: `{ts,
 key, label, from, to, said, help?, by: "web"}`), so the driver in the terminal hears of it; a
-choice or a number set to the value it had is no change, and isn't. The driver changes a row
+choice or a number set to the value it had is no change, and isn't; nor is a run's `stop` or `summary`
+(a `run-` row changes no setting: a stop from here is said to the run's session as its own notice). The driver changes a row
 through the same writer with `wb settings set`, on the user's yes in the conversation; its rows
 say who ran it (`by`: `claude` under Claude Code, `opencode` from an OpenCode session, `agent`,
 or `terminal`). Each recorded change moves the state's `settings`, so an open page draws it.

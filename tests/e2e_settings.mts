@@ -148,7 +148,7 @@ export async function check(page: any, ctx: E2eCtx) {
         above: !!(document.getElementById('settings-rows')!.compareDocumentPosition(document.getElementById('settings')!) & Node.DOCUMENT_POSITION_FOLLOWING),
         coding: !!document.querySelector('#settings-rows .set-card[data-group="shared"] .set-row[data-key="coding"] [role="radio"]') }))
       if (got.groups[0] !== 'shared:Agents and roles' || !got.coding || !got.above) throw new Error(JSON.stringify(got))
-      const order = ['shared', 'gpu', 'api', 'terminal', 'experimental']
+      const order = ['shared', 'gpu', 'api', 'workflows', 'terminal', 'experimental']
       const idx = got.groups.map((g: string) => order.indexOf(g.split(':')[0]))
       if (idx.some((v: number, i: number) => v < 0 || (i && v <= idx[i - 1]))) throw new Error('the groups out of order: ' + got.groups.join())
     })

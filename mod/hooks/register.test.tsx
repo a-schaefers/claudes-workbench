@@ -566,6 +566,80 @@ test('a task wb start ran in this session is its own wherever it ran, also after
   expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--park-waiting', '--repo', '/home/u', '--session', 'sess-1', '--session', 'sess-2'])
 })
 
+// A run's files as wb writes them (runs.cmd_start, Run.notify): run.json, status.json, and its own
+// notices in notify.jsonl (`run`, no `task`, `phase` the one it was raised in)
+function run(files: Record<string, string>, name: string, phase: string, extra: Record<string, any> = {}) {
+  files[`/wb/runs/${name}/run.json`] = JSON.stringify({ name, flow_name: 'audit', created: ts0 - 60, ...extra })
+  files[`/wb/runs/${name}/status.json`] = JSON.stringify({ phase, updated_at: ts0 })
+}
+// `wb ack --run`, as wb runs it on the test's files: runs/<run>/acked, exit 3 when taken already
+function wbAckRun(files: Record<string, string>, acks: string[][]) {
+  return (_: any, e: any) => {
+    if (e.argv[1] !== 'ack' || !e.argv.includes('--run')) return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    acks.push(e.argv.slice(1))
+    const path = `/wb/runs/${e.argv[2]}/acked`, ts = Number(e.argv[3])
+    const ok = Number(files[path] ?? 0) < ts
+    if (ok) files[path] = String(ts)
+    return { value: { exitCode: ok ? 0 : 3, stdout: '', stderr: '' } }
+  }
+}
+
+test('a run\'s own notice wakes the session that started it once, its text whole, taken with wb ack --run (#1278)', async ($, on) => {
+  // #1278's S9: a run's notice has `run` and no `task`; read as a task named '' it woke no one, and
+  // Claude had to wait on `wb wait <run>` in the background for the run's only wake
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  run(files, 'audit-1', 'review', { repo: '/tmp/r', cwd: '/tmp/r', session: 'sess-1' })
+  run(files, 'theirs', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-x' })
+  const text = '[workbench] Run `audit-1` is done: 7 result(s), 0 filtered, 0 null, 0 not run · $0. Read it: wb run report audit-1'
+  notice(files, { ts: ts0, run: 'audit-1', kind: 'run_done', phase: 'review', text })
+  notice(files, { ts: ts0, run: 'theirs', kind: 'run_done', phase: 'review', text: 'THEIRS' })
+  fakeTasks(on, files, [])
+  on('session.id', () => ({ value: 'sess-1' }))
+  const acks: string[][] = []
+  on('process.run', wbAckRun(files, acks))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toEqual([text])                                   // the run's text is the wake whole
+  expect(acks).toEqual([['ack', 'audit-1', String(ts0), '--run']])
+  expect(files['/wb/runs/audit-1/acked']).toBe(String(ts0))
+  expect(files['/wb/runs/theirs/acked']).toBe(undefined)          // another session's: its own (or wb wait's)
+  expect(toasts).toContain('workbench: run audit-1 is done')
+  expect(files['/wb/tasks//acked']).toBe(undefined)               // never read as a task named ''
+  await clock.advance(120_000)
+  expect(woken).toHaveLength(1)                                   // once
+})
+
+test('a run\'s notice no longer true is acknowledged unsaid, and one held for the turn is sent once it ends (#1278)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  run(files, 'resumed', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })      // paused, then wb run resume
+  run(files, 'waits', 'checkpoint', { repo: '/home/u/a', cwd: '/home/u/a' })     // no session: by directory
+  notice(files, { ts: ts0, run: 'resumed', kind: 'run_paused', phase: 'paused', text: '[workbench] Run `resumed` is paused: PAUSED' })
+  notice(files, { ts: ts0, run: 'waits', kind: 'run_checkpoint', phase: 'checkpoint', text: '[workbench] Run `waits` needs Claude: MERGE' })
+  fakeTasks(on, files, [])
+  const acks: string[][] = []
+  on('process.run', wbAckRun(files, acks))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'busy', turnId: 't1' })
+  await clock.advance(3000)
+  expect(woken).toEqual([])                                       // held while Claude is mid-turn
+  expect(files['/wb/runs/resumed/acked']).toBe(String(ts0))       // no longer true: acknowledged, unsaid
+  expect(files['/wb/runs/waits/acked']).toBe(undefined)
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  expect(woken.join('\n')).not.toContain('PAUSED')
+  expect(woken.filter(t => t.includes('MERGE'))).toHaveLength(1) // sent once the turn ended
+  expect(files['/wb/runs/waits/acked']).toBe(String(ts0))
+})
+
 test('a new Claude Code process in the project adopts the tasks of one that is gone', async ($, on) => {
   // the 0.90 review: Claude Code exited (a crash, an update) and plain `claude` in the same repo
   // got a new session id: none of the earlier process's tasks woke it, and its quit skipped them

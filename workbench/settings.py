@@ -41,9 +41,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import chat, cli, context, driver, ocplugin, progress, routes, savings, store
+from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savings, store
 
-GROUPS = ("shared", "gpu", "api", "terminal", "experimental")  # display order
+GROUPS = ("shared", "gpu", "api", "workflows", "terminal", "experimental")  # display order
 KINDS = ("choice", "number", "info", "action", "note")
 ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_apply)
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
@@ -77,6 +77,15 @@ CODING = [("only", "Only when I say", "You tell Claude when to write code."),
            "fix itself.")]
 WORKFLOWS = [("off", "Off (default)", "Claude runs one task at a time."),
              ("on", "On", "Claude may split a request into tasks that run at once, each on its own role's model.")]
+# The workflows group (#1278's S12): deepmode, a row per run not closed (runs.snapshot) with its
+# Stop and its Summary (the morning's look at an overnight run), and the flows there are. A run row
+# is no setting: neither is recorded as a change (record), and the web's Stop is said to the run's
+# session as its own notice (runs.cmd_stop under WB_ACTOR=web)
+RUN_STOP = ("stop", "Stop", "Stops the run (wb run stop): done work is kept, and the session that started it is told.")
+RUN_SUMMARY = ("summary", "Summary", "What the run has returned so far (wb run report), shown below.")
+RUN_DETAIL_CHARS = 16_000  # the Summary's text past this is cut: wb run report <run> has it all
+NOT_RECORDED = ("run-",)  # key prefixes whose action changes no setting (record)
+FLOWS_SAY = "Ask for one by name, or put deepcode in a message with your request."
 PROGRESS_OFF = ("off", "Off (default)", "No progress checks: each one wakes Claude, which spends its tokens.")
 THINK = [("off", "Off (default)", "Faster and cheaper; for tasks started after this."),
          ("on", "On", "Better on hard steps, slower and costs more; for tasks started after this.")]
@@ -373,6 +382,43 @@ def _optimize_row(m: dict) -> dict:
                          "says": "Measures this machine for its models (wb optimize start)."}]}
 
 
+def run_text(r: dict) -> str:
+    """A run's line as its row says it (runs.snapshot's row): flow, phase, each stage's counts,
+    spend against the budget, and why it isn't running."""
+    parts = [f"flow {r.get('flow') or '?'}", str(r.get("phase") or "?") + ("" if r.get("alive") or
+                                                                           r.get("phase") not in runs.OPEN else " (no driver)")]
+    for sid, c in (r.get("stages") or {}).items():
+        bits = [f"{v} {k.replace('_', ' ')}" for k, v in (c or {}).items() if v]
+        if bits:
+            parts.append(f"{sid}: " + ", ".join(bits))
+    b = r.get("budget_usd")
+    parts.append(savings.usd(r.get("spent_usd") or 0) + (f" of {savings.usd(b)}" if isinstance(b, (int, float)) else ""))
+    if r.get("gpu_min"):
+        parts.append(f"GPU {r['gpu_min']:g} min" + (f" of {r['budget_min']:g}" if r.get("budget_min") else ""))
+    why = r.get("why") if r.get("phase") != "running" else ""
+    return " · ".join(parts) + (f". {why}" if why else "")
+
+
+def _run_rows() -> list[dict]:
+    """A row per run not closed, and the flows there are (runs.flow_rows: shipped and the user's)."""
+    out = []
+    try:
+        snap = runs.snapshot()
+    except (OSError, ValueError):
+        snap = []
+    for r in snap:
+        stops = ([RUN_STOP] if r.get("phase") in runs.OPEN else []) + [RUN_SUMMARY]
+        out.append({"key": f"run-{r['run']}", "group": "workflows", "label": f"Run {r['run']}", "kind": "action",
+                    "text": run_text(r), "choices": [{"value": v, "label": lab, "says": says} for v, lab, says in stops]})
+    try:
+        names = [f["name"] for f in runs.flow_rows() if f.get("where") != "repo"]
+    except (OSError, ValueError):
+        names = []
+    if names:
+        out.append(_info("flows", "workflows", "Flows", f"Flows: {', '.join(names)}. {FLOWS_SAY}"))
+    return out
+
+
 def _build() -> dict:
     r, why = _read_json(["route", "--json"])
     m, mwhy = _read_json(["models", "--json"])
@@ -395,7 +441,8 @@ def _build() -> dict:
     if r is not None:
         out.append(_driver_row(r, m))
     out.append(_choice("coding", "shared", "Claude coding", CODING, cli.coding_mode()))
-    out.append(_choice("workflows", "shared", "Dynamic workflows", WORKFLOWS, cli.workflows_mode()))
+    out.append(_choice("workflows", "workflows", "Dynamic workflows", WORKFLOWS, cli.workflows_mode()))
+    out.extend(_run_rows())
     if r is not None:
         cap = r.get("day_usd")
         out.append(_number("cap", "shared", "API day cap", float(cap) if cap is not None else None, "usd",
@@ -545,6 +592,8 @@ def _argv(row: dict, value) -> list[str]:
         return ["optimize", "start"]
     if key == "driver":
         return ["route", "driver", value]
+    if head == "run":
+        return ["run", "stop" if value == "stop" else "report", rest]
     if head == "role":
         return ["route", rest, value]
     if head == "gpu":
@@ -575,7 +624,8 @@ def _row(key: str) -> dict:
 
 
 def apply(key: str, value, by: str = "web") -> dict:
-    """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?}. KeyError for no
+    """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?, "detail"?}
+    (`detail`: a run's Summary, its report, cut at RUN_DETAIL_CHARS). KeyError for no
     such row, ValueError for a value it doesn't take (nothing runs for either); `ok` false is wb's
     refusal, `said` its line. `help`, when the value chosen needs Claude's help to work (HELP).
     `by` (BY): "web", the user's click, never gated; "claude", run as its caller (child_env)."""
@@ -588,6 +638,11 @@ def apply(key: str, value, by: str = "web") -> dict:
         finally:
             drop()
     result = {"ok": ok, "said": _said(argv, ok, out, err)}
+    if ok and argv[:2] == ["run", "report"]:  # a run's Summary: its report, drawn under the row
+        text = out.strip()
+        result["said"] = text.splitlines()[0] if text else "nothing in yet"
+        result["detail"] = text if len(text) <= RUN_DETAIL_CHARS else \
+            text[:RUN_DETAIL_CHARS] + f"\n… (cut: wb run report {argv[2]} has the rest)"
     if ok and key in HELP and (note := HELP[key](argv[-1], result["said"])):
         result["help"] = note
     return result
@@ -624,6 +679,8 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
     tells Claude of the web's (#1283); Claude's own (by "claude") it made itself. None, nothing
     written, for a choice or a number set to the value it had: no change to tell anyone of."""
     if before.get("kind") in ("choice", "number") and _same(before.get("value"), value):
+        return None
+    if key.startswith(NOT_RECORDED):  # a run's Stop or Summary: no setting changed (its stop is a notice)
         return None
     entry = {"ts": store.now(), "key": key, "label": before.get("label") or key, "from": before.get("value"),
              "to": value, "said": done["said"], **({"help": done["help"]} if done.get("help") else {}), "by": by}

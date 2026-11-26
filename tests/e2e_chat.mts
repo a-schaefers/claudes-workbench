@@ -699,6 +699,44 @@ async function run(engine: string, device?: string) {
     wb('chat', 'reply', '--text', 'Done with fix-sheet.')
     await until(async () => await page.locator('#tasks').isHidden())
   })
+  await check('the runs strip names each run and its progress; a tap opens its Settings row, whose Summary and Stop run wb (#1278)', async () => {
+    // #1278's S12: a deep workflow seen from the phone: its flow, phase, stages and spend over the
+    // thread; its Summary (wb run report) drawn as text under its row, its Stop said to its session
+    const d = join(home, 'state/runs/night')
+    mkdirSync(d, { recursive: true })
+    const flow = JSON.parse(readFileSync(join(ROOT, 'agent/flows/audit.json'), 'utf8'))
+    writeFileSync(join(d, 'run.json'), JSON.stringify({ name: 'night', flow, flow_name: 'audit', params: { areas: ['a.py'] },
+      created: Date.now() / 1000 }))
+    writeFileSync(join(d, 'status.json'), JSON.stringify({ phase: 'running', why: '', updated_at: Date.now() / 1000,
+      stages: { find: { done: 1, running: 2, null: 0 } }, spent_usd: 0.25, budget_usd: 2 }))
+    try {
+      wb('chat', 'reply', '--text', 'Started run night.')  // a chat change wakes the stream
+      await until(async () => (await page.textContent('#runs')) === 'Run: night (audit) · running · find 1/3 · $0.25 of $2.00')
+      const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
+      if (!width) throw new Error('the page scrolls sideways')
+      await page.click('#runs')
+      await until(() => page.evaluate(() => document.body.dataset.view === 'settings'))
+      const row = page.locator('#settings-rows .set-row[data-key="run-night"]')
+      await until(async () => (await row.count()) === 1)
+      if (!(await row.textContent()).includes('flow audit · running (no driver) · find: 1 done, 2 running · $0.25 of $2.00'))
+        throw new Error('the row says: ' + await row.textContent())
+      if (!(await page.locator('.set-card[data-group="workflows"]').isVisible())) throw new Error('the workflows group is not shown')
+      await row.locator('button[data-value="summary"]').click()
+      await until(async () => (await row.locator('pre.set-detail').count()) === 1)
+      const detail = await row.locator('pre.set-detail').textContent()
+      if (!detail.startsWith('run night · flow audit · running')) throw new Error('the summary says: ' + detail)
+      await row.locator('button[data-value="stop"]').click()
+      await until(() => JSON.parse(readFileSync(join(d, 'status.json'), 'utf8')).phase === 'stopped')
+      const notices = readFileSync(join(home, 'state/notify.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
+      if (!notices.some(n => n.run === 'night' && n.kind === 'run_stopped')) throw new Error('the stop told no one')
+      await until(async () => (await row.locator('button[data-value="stop"]').count()) === 0)  // stopped: nothing to stop
+      await goTo('chat')
+      wb('chat', 'reply', '--text', 'Stopped run night.')  // the strip moves with the chat's state, as the tasks' does
+      await until(async () => (await page.textContent('#runs')).startsWith('Run: night (audit) · stopped'))
+    } finally { rmSync(d, { recursive: true, force: true }) }
+    wb('chat', 'reply', '--text', 'Run night closed.')
+    await until(async () => await page.locator('#runs').isHidden())
+  })
   await check("wb shot's pair: both images labelled, one above the other on a phone, a reply tied to their step", async () => {
     const d = join(home, 'state/tasks/fix-nav/shots/1')
     mkdirSync(d, { recursive: true })

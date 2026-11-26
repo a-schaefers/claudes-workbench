@@ -24297,11 +24297,12 @@ class DynamicWorkflows(Base):
     def test_a_fan_out_passes_one_group(self):
         # #1048: tasks started with one --group carry the group the pane draws under one header;
         # since #1278 a run's driver passes it (runs._start: --group <run>), and the mod's rule
-        # sends a fan-out to wb run, its wake a background wb wait (the review of #1278)
+        # sends a fan-out to wb run, whose notices wake Claude as a task's (the mod's deliverRuns,
+        # #1278's S9; a background wb wait before it, the review of #1278)
         mod = (Path(__file__).parent.parent / "mod/hooks/register.tsx").read_text()
         rule = " ".join(mod.split("const WORKFLOWS_RULE = ")[1].split("\nconst ")[0].split())
-        self.assertIn("start it once with `wb run start`", rule)
-        self.assertIn("`wb wait <run>` in the background", rule)
+        self.assertIn("start it once with `wb run start`, then end your turn", rule)
+        self.assertIn("wake you as a task\\'s do", rule)
         self.assertIn('"--group", run.name', (Path(__file__).parent.parent / "workbench/runs.py").read_text())
         with mock.patch.object(cli, "spawn_runner", lambda task: 0):
             for name in ("auth-logic", "auth-tests", "auth-docs"):

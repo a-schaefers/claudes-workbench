@@ -219,3 +219,31 @@ class AdminSet(Base):
         self.assertEqual([{k: v for k, v in x.items() if k != "ts"} for x in rec],
                          [{"key": "probe", "label": "Agent code navigation", "from": "off", "to": "on",
                            "said": "probe: on, but not set up", "help": "Offer to set it up.", "by": "web"}])
+
+
+class RunsOnThePage(Base):
+    """The runs strip's state and a run row's answer (#1278's S12)."""
+
+    def test_the_state_carries_each_run_not_closed_for_the_strip_without_where_it_ran(self):
+        from workbench import runs
+        for name, phase in (("night", "running"), ("gone", "closed")):
+            d = runs.run_dir(name)
+            d.mkdir(parents=True)
+            store.write_json(d / "run.json", {"name": name, "flow_name": "audit", "session": "S1", "cwd": "/x",
+                                              "budget_min": 30, "created": 1.0})
+            runs.Run(name).set_status(phase=phase, stages={"find": {"done": 1, "running": 2}}, spent_usd=0.25,
+                                      budget_usd=2.0, gpu_min=4.5)
+        self.assertEqual(chat.snapshot()["runs"], [{
+            "run": "night", "flow": "audit", "phase": "running", "why": "",
+            "stages": {"find": {"done": 1, "running": 2}}, "spent_usd": 0.25, "budget_usd": 2.0, "budget_min": 30,
+            "gpu_min": 4.5}])
+        self.assertNotIn("runs", chat.agent_snapshot("bot"))  # an agent's token sees no runs
+
+    def test_a_runs_summary_reaches_the_page_as_its_detail_and_is_never_recorded(self):
+        rows = [{"key": "run-night", "label": "Run night", "kind": "action", "choices": []}]
+        done = {"ok": True, "said": "run night · flow audit · running · $0", "detail": "run night · flow audit\nfinal (1):"}
+        with mock.patch.object(settings, "rows", return_value=rows), \
+                mock.patch.object(settings, "apply", return_value=done):
+            code, r = chat.admin_set("run-night", "summary")
+        self.assertEqual((code, r["said"], r["detail"]), (200, done["said"], done["detail"]))
+        self.assertFalse(chat.changes_path().exists())
