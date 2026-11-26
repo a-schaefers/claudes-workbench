@@ -552,6 +552,33 @@ class Customized(Base):
         code, _, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run", "--param", "style=x")
         self.assertEqual((code, err.strip()), (1, "wb: --param style: one of unit, prop, not 'x'"))
 
+    def test_a_run_started_in_a_subdirectory_reads_the_repo_from_its_top_and_starts_each_item_in_its_package(self):
+        # #1494 (2026-11-26): from repo/src every flow command and deepcode was refused "is no git
+        # repository", and with --repo <top> a package's own CLAUDE.md, test and skills were lost
+        plan = Path(self.tmp.name) / "tests.json"
+        plan.write_text(json.dumps(self.TESTS))
+        code, out, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo / "src"), "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("2 item(s) from {params.src}", out)  # src/*.py, a path from the top
+        pkg = self.repo / "packages" / "p"
+        pkg.mkdir(parents=True)
+        (pkg / "CLAUDE.md").write_text("# p\nA package.\n")
+        (pkg / "x.py").write_text("x\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm",
+                        "a package"], check=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        with mock.patch.object(runs, "spawn", return_value=0):  # the item started here, below
+            code, _, err = wb("run", "start", "pkg", "--plan", str(plan), "--repo", str(pkg),
+                              "--param", "src=packages/p/*.py")
+        self.assertEqual(code, 0, err)
+        run = runs.Run("pkg")
+        self.assertEqual((run.spec["repo"], run.spec["package_dir"]), (str(self.repo.resolve()), str(pkg.resolve())))
+        stage, it = runs.stages(run.flow)[0], runs.state(run)["write"][0]
+        self.assertEqual(runs._start(run, stage, it, 1), ("running", ""))
+        self.assertEqual(store.Task("pkg-write-1").spec.get("subdir"), "packages/p")
+        wait_phase("pkg-write-1", {"review", "failed", "stuck"}, timeout=90)
+
     def test_the_slash_command_line_reads_as_its_fixture_says(self):
         cases = json.loads((ROOT / "tests/fixtures/flow_args.json").read_text())["cases"]
         for c in cases:
