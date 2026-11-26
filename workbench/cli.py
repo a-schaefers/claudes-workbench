@@ -8669,8 +8669,8 @@ def main(argv=None):
         if argv is not None:  # in-process (the tests): a crash caught as SystemExit passed ~160
             raise             # refusal tests as if it were the refusal (#1005, 2026-11-22)
         traceback.print_exc()
-        print("wb crashed: a bug in workbench. Claude can fix it for you as a local patch (wb patch) "
-              f"and offer it upstream ({PKG_ROOT / 'CONTRIBUTING.md'})", file=sys.stderr)
+        print(f"wb crashed: a bug in workbench. {patches.driver_name()} can fix it for you as a local patch "
+              f"(wb patch) and offer it upstream ({PKG_ROOT / 'CONTRIBUTING.md'})", file=sys.stderr)
         sys.exit(1)
 
 

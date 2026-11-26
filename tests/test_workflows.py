@@ -64,15 +64,17 @@ class RequiredCheck(unittest.TestCase):
         checks = rules["required_status_checks"]["required_status_checks"]
         self.assertIn({"context": "check", "integration_id": GITHUB_ACTIONS_APP}, checks)
 
-    def test_check_is_green_only_when_every_shard_the_mod_and_the_kernel_are(self):
+    def test_check_is_green_only_when_every_shard_the_mod_the_kernel_and_the_opencode_plugin_are(self):
         # check.yml's suite in six shards (2026-11-21: 28 to 32 minutes in one job): a matrix job
         # reports as `suite (1)`…, so `check` is the one name the ruleset waits for. Skipped
-        # passes a required check, so it runs always() and fails unless all three succeeded
+        # passes a required check, so it runs always() and fails unless all four succeeded (the
+        # OpenCode plugin's job since #1328)
         gate = job("check.yml", "check")
-        self.assertIn("needs: [suite, mod, kernel]", gate)
+        self.assertIn("needs: [suite, mod, kernel, opencode-plugin]", gate)
         self.assertIn("if: always()", gate)
         for want in ("${{ needs.suite.result }}", "${{ needs.mod.result }}", "${{ needs.kernel.result }}",
-                     '[ "$SUITE" = success ]', '[ "$MOD" = success ]', '[ "$KERNEL" = success ]'):
+                     "${{ needs.opencode-plugin.result }}", '[ "$SUITE" = success ]', '[ "$MOD" = success ]',
+                     '[ "$KERNEL" = success ]', '[ "$PLUGIN" = success ]'):
             self.assertIn(want, gate)
         self.assertNotIn("continue-on-error", text("check.yml"))
         suite = job("check.yml", "suite")
@@ -81,18 +83,32 @@ class RequiredCheck(unittest.TestCase):
             self.assertIn(want, suite)
         self.assertIn("claude plugin validate mod && claude plugin test mod", job("check.yml", "mod"))
 
-    def test_the_kernel_job_rebuilds_against_the_commit_and_runs_the_goldens_under_bun(self):
+    def test_the_kernel_job_rebuilds_against_the_commit(self):
         # #1356: the committed mod/hooks/kernel.js must be what kernel/src builds with the pinned
-        # toolchain, and the goldens must hold under OpenCode's Bun as under Claude Code
+        # toolchain (its props under OpenCode's Bun, installed first)
         kernel = job("check.yml", "kernel")
         steps = ["scripts/install-opencode.sh", "actions/cache@", "python3 scripts/kernel.py fetch",
-                 "python3 scripts/kernel.py check", "BUN_BE_BUN=1 opencode test opencode-plugin/test",
-                 "BUN_BE_BUN=1 opencode check -p opencode-plugin"]  # the plugin's types (#1311)
+                 "python3 scripts/kernel.py check"]
         at = [kernel.find(s) for s in steps]
         self.assertNotIn(-1, at, steps)
-        self.assertEqual(at, sorted(at), "in this order: Bun, the cache, fetch, check, the Bun goldens, the types")
+        self.assertEqual(at, sorted(at), "in this order: Bun, the cache, fetch, check")
         self.assertIn("hashFiles('kernel/toolchain.json', 'kernel/spago.lock')", kernel)
         self.assertNotIn("paths:", kernel)
+
+    def test_the_opencode_plugin_job_runs_its_tests_and_types_under_the_pinned_opencodes_bun(self):
+        # #1328: the plugin's tests ran only inside the kernel's job, as an afterthought; its own
+        # job, as the mod has, runs the commands wb patch upstream names for a plugin patch, and
+        # the goldens must hold under OpenCode's Bun as under Claude Code (#1356)
+        from workbench import patches
+        plugin = job("check.yml", "opencode-plugin")
+        steps = ['scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256"',
+                 *patches.PLUGIN_TESTS.split(" && ")]
+        at = [plugin.find(s) for s in steps]
+        self.assertNotIn(-1, at, steps)
+        self.assertEqual(at, sorted(at), "in this order: OpenCode, the tests, the types")
+        self.assertNotIn("paths:", plugin)
+        self.assertNotIn("continue-on-error", plugin)
+        self.assertNotIn("opencode test", job("check.yml", "kernel"))
 
     def test_the_macos_nightly_checks_the_kernel_on_one_shard_and_opencode_yml_runs_the_goldens(self):
         # #1356: the bundle's bytes must not depend on the platform, and BUN_BE_BUN, undocumented,
