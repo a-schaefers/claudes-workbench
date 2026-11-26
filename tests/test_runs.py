@@ -805,6 +805,31 @@ class Runs(Base):
         run_wb("discard", "bld-code-1")
         self.assertIn("closed bld", run_wb("run", "close", "bld"))
 
+    def test_a_code_item_at_review_stays_claudes_when_its_card_stops_loading_mid_run(self):
+        # #1470: is_code read the card on every pass, so a user's card edited past loading made
+        # the code at review read as a report: wb run close and the driver's _take discarded it
+        mine = Path(self.tmp.name) / "roles"
+        os.environ["WB_ROLES"] = str(mine)
+        self.assertEqual(wb("card", "copy", "build")[0], 0)
+        flow = {"v": 1, "name": "cc", "stages": [{"id": "code", "card": "build", "items": ["first"]},
+                                                 {"id": "claude", "final": True, "from": "code"}]}
+        run_wb("run", "start", "cc", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.wait_run("cc", ("review", "failed", "paused", "checkpoint", "stopped"))
+        self.assertEqual(store.Task("cc-code-1").status["phase"], "review")
+        with open(mine / "build.md", "a") as f:
+            f.write("x" * (cards.BODY_MAX + 600))
+        with self.assertRaises(RuntimeError):
+            cards.load("build")
+        run = runs.Run("cc")
+        self.assertEqual(runs.state(run)["code"][0].state, "done")  # still the code's, never a report's
+        run.set_status(phase="running")
+        runs.tick(run)
+        rc, _, err = wb("run", "close", "cc")
+        self.assertEqual(rc, 1)
+        self.assertIn("has code waiting on you: cc-code-1", err)
+        self.assertEqual(store.Task("cc-code-1").status["phase"], "review")
+        self.assertNotIn("null", [r.get("kind") for r in run.journal()])
+
     def test_a_gpu_budget_pauses_before_a_start_and_amend_then_resume_goes_on(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
         run_wb("run", "start", "bud", "--plan", self.plan({**AUDIT, "name": "bud"}), "--param", "areas=a",

@@ -9585,7 +9585,9 @@ from the router, the slices and tuning.
 min}`. `permissions` and `model` are dropped and said (`cards.said_dropped`). The text is at most
 `cards.BODY_MAX` 3,000 bytes. A report card's text stands in HANDBOOK.md's place; a code card's goes after it
 under `## Your role` (`cards.handbook`). `steps` go on the task's own `wb-code` agent entry (`runner.rules_env`),
-so the layer's denies still come last. task.json `card` fixes the card at start.
+so the layer's denies still come last. task.json `card` fixes the card at start, and `wb run start` a code
+card's stage as `kind: code` in run.json's flow (`runs.settled`): a card edited past loading mid-run left a code
+item at review read as a report, discarded with its branch (#1470).
 
 **Flows** (`runs.validate`; `runs.FLOW_KEYS`, `STAGE_KEYS`, `PLACES`; the format in
 `skill/workbench/reference/deep.md`): `v` 1, params typed (`runs.PARAM_TYPES`, `parse_params`: a bare type, or
@@ -9784,7 +9786,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`); from the web app (`WB_ACTOR=web`, no model's variables) its why is `runs.WEB_STOP` and a `run_stopped` notice tells the run's session. Resume (refused closed or at `review`, `runs._ended`): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
 | `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items are `not_run`. |
 | `wb run feed <run> <stage> --file <json\|->` | | A `claude` checkpoint's merge: a JSON list, `inbox/<stage>-feed`; the run goes on. Refused on a closed run or one at `review`, before the inbox is written. |
-| `wb run close <run>` | | Refused while a code item is open (accept or discard it); stops the driver, discards report items never taken, writes `result.json`, phase `closed`. |
+| `wb run close <run>` | | Refused while a code item (a task not started as a report) is open (accept or discard it); stops the driver, discards report items never taken, writes `result.json`, phase `closed`. |
 | `wb run flows` | `--repo DIR`, `--json` (`runs.flow_rows`: `{name, where, description, mark, command, params}`, the hosts' read for the flows' slash commands) | Every flow: yours (`$WB_FLOWS`; `shadows shipped`, `; shipped changed since` when the shipped file's blob is no longer the copy's `from`: `cards.shadow_mark`), shipped (`agent/flows/`), a repo's `.workbench/flows/` (read it first, then `--plan`), each `/<command>` it has (never a repo's). |
 | `wb flow copy <name>` | `--force` | #1295: the shipped flow to `$WB_FLOWS/<name>.json` as yours, with `from` (its git blob sha, `cards.blob_sha`); refused when nothing shipped has the name, or yours is there without `--force` (`cards.copy_shipped`). |
 | `wb flow reset <name>` | | The shipped flow again: yours moved to `<name>.json.bak`, never deleted (`cards.reset_shipped`); refused with no copy of yours, or nothing shipped by its name. |
@@ -9893,7 +9895,7 @@ $WB_HOME (~/.local/state/workbench)
   progress.json                  progress checks' opt-in: {on, after?, ts}; none: off
   splash.json                    the pane's opening (wb splash): {on, ts}; on unless "on": false
   workflows.json                 Dynamic workflows (deepmode; wb deepmode, wb workflows, #1041, #1278): {mode: on|off, ts}; none: off
-  runs/<run>/                    a deep workflow's (wb run, *Deep workflows*, #1278): run.json {name, flow (whole), flow_name, flow_sha, params, exists? ({<stage>: [paths]}: the
+  runs/<run>/                    a deep workflow's (wb run, *Deep workflows*, #1278): run.json {name, flow (whole, each code card's stage `kind: code`: `runs.settled`), flow_name, flow_sha (the flow as given), params, exists? ({<stage>: [paths]}: the
                                  `unless_exists` paths at base, runs.existing, #1295), context,
                                  repo, base, base_ref, cwd, budget_usd, budget_min, overnight, trial, no_claude_md, created, driver {python, machine},
                                  session? (Claude Code's, or an OpenCode driver's with session_kind: opencode, #1309), claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,

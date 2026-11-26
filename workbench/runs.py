@@ -197,6 +197,18 @@ def is_code(stage: dict) -> bool:
     return stage.get("kind") == "code" or (bool(stage.get("card")) and _card_tools(stage) == "code")
 
 
+def settled(flow: dict) -> dict:
+    """``flow`` with each code card's stage marked `kind: code`, as run.json keeps it: is_code read
+    the card on every pass, so a card copied and edited past loading (a typo'd key, a body over
+    cards.BODY_MAX) mid-run made a code item at review read as a report, and the driver's _take
+    or wb run close discarded it, branch and all (#1470, 2026-11-26)."""
+    flow = json.loads(json.dumps(flow))
+    for s in stages(flow):
+        if s.get("card") and s.get("kind") is None and is_code(s):
+            s["kind"] = "code"
+    return flow
+
+
 def _card_tools(stage: dict) -> str | None:
     try:
         return cards.load(stage["card"]).tools
@@ -1277,6 +1289,8 @@ def _take(run: Run, stage: dict, it: Item) -> None:
     """A report item's end, once its task waits on Claude: its object kept (filtered by `keep`,
     or a refix sent), the task accepted; a failed one discarded, its result null."""
     task = store.Task(it.task)
+    if not task.spec.get("report"):  # a code task is Claude's, never discarded as a report (#1470)
+        return
     st = task.status
     phase = st.get("phase")
     from . import runner
@@ -2000,7 +2014,9 @@ def cmd_start(a) -> None:
     d.mkdir(parents=True)
     for sub in ("inbox", "outputs", "specs"):
         (d / sub).mkdir()
-    spec = {"name": a.name, "flow": flow, "flow_name": flow["name"], "flow_sha": flow_sha(flow),
+    sha = flow_sha(flow)
+    flow = settled(flow)
+    spec = {"name": a.name, "flow": flow, "flow_name": flow["name"], "flow_sha": sha,
             "params": params, **({"exists": exists} if exists else {}),
             "context": ctx[:CUTS["context"]], "repo": str(repo), "base": base,
             "base_ref": a.base, "cwd": os.getcwd(), "budget_usd": usd_, "budget_min": mins,
@@ -2268,9 +2284,11 @@ def cmd_feed(a) -> None:
 
 def cmd_close(a) -> None:
     run = need(a.name)
+    # code is any item not started as a report, from its own task (#1470): never the card as it
+    # reads now, which an edit may have made unloadable
     open_code = [n for n in run_tasks(run) if store.Task(n).exists
                  and store.Task(n).status.get("phase") not in store.CLOSED
-                 and is_code(stage_by(run.flow, store.Task(n).spec.get("stage") or "") or {})]
+                 and not store.Task(n).spec.get("report")]
     if open_code:
         _die(f"run {run.name} has code waiting on you: {', '.join(open_code)} (wb accept or wb discard each)")
     if run.status.get("phase") in OPEN:
