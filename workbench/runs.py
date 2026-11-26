@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import cards, gitops, meter, models, routes, spend, store
+from . import ask_mcp, cards, gitops, meter, models, routes, spend, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED = PKG_ROOT / "agent" / "flows"
@@ -47,6 +47,8 @@ STAGE_KEYS = ("id", "card", "kind", "role", "items", "from", "split", "keep", "f
               "attempts", "schema", "tools", "skills", "ask", "setup", "test", "refix", "on_failure",
               "max_items", "claude", "final", "prompt", "compare", "escalate")
 PARAM_TYPES = ("string", "int", "list", "json", "file", "runs")
+RUN_REFUSED = ("No one answers in a run (wb run): Claude reads your result at its end, and nothing outside "
+               "your task's rules can be granted. Do the task without it, and say so in your result.")
 ESCALATE_MAX = 3       # a code stage's `escalate` roles, at most
 MAX_ITEMS = 200        # a stage's items, at most (`max_items`): the rest not_run, named (no silent caps)
 ATTEMPTS_MAX = 5
@@ -1272,6 +1274,12 @@ def tick(run: Run) -> bool:
                 continue
             if it.state == "running" and t.status.get("phase") in cli.LIVE:
                 cli.reap(t, quiet=True)
+            if it.state == "running" and t.status.get("phase") == "asking" and (qid := t.status.get("asking")) \
+                    and ask_mcp.is_open(t, qid):
+                # nobody is told of an item's ask in a run (its notices are the driver's): a finder
+                # asking for a path outside its lane held the GPU its 20-minute ask_timeout while
+                # the other finder queued (the real GPU audit of #1278, 2026-11-26); as the bench does
+                ask_mcp.answer_once(t, qid, RUN_REFUSED)
             if t.status.get("phase") not in cli.LIVE and _held(run, it):
                 held.add(it.task)
             elif not is_code(s) and it.state == "running" and t.status.get("phase") not in cli.LIVE:
