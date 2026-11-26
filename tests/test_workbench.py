@@ -40839,6 +40839,7 @@ class Routes(Base):
         self.assertIn("deepseek/deepseek-flash#high (API, DeepSeek)", asked["change"])
         self.assertEqual(self.route("driver", "deepseek/deepseek-flash#high")[0], 3)
         self.assertEqual(self.doc()["driver"], "ollama/qwen3.8-27b")  # refused: nothing written
+        self.ok = store.home() / "route-ok.ses_x.json"   # the plugin's yes is the session's own (#1363)
         self.approve(asked["approval"])
         self.assertEqual(self.route("driver", "deepseek/deepseek-flash#high")[0], 0)
         self.assertEqual(self.doc()["driver"], "deepseek/deepseek-flash#high")
