@@ -1516,13 +1516,32 @@ class RunsApi(Base):
     def test_a_run_at_the_day_cap_starts_nothing_again_until_the_day_changes(self):
         # #1543, 2026-11-26: each pass ran a refused wb start, journalled item and retry and wrote
         # a spec, and the journal's write woke the driver at once (7 starts a second all night);
-        # at an item's checkpoint the cap never paused the run, which started paid items past midnight
+        # at an item's checkpoint the cap never paused the run, which started paid items past midnight.
+        # And the band (#1543's second review, 2026-11-26): a day under the cap by less than the
+        # item's spec costs at the input price passed meter.refusal's FIRST_TOKENS while wb start,
+        # which counts the spec (runner.first_tokens), refused it: the spin again, until midnight
         from workbench.watch import Watcher
-        self.spent(5.03)                                                 # today at the $5 cap
+        m = models.lookup(SPEND_FLASH)
+        band, _ = self.start("band", "--budget-usd", "1", "--overnight")
+        spec = runs._spec_of(band, runs.stages(band.flow)[0], runs.state(band)["find"][0])
+        small, big = meter.request_floor(m), meter.request_floor(m, runner.first_tokens(prompt=spec))
+        self.assertLess(small, big)
+        under = 5 - (small + big) / 2
+        self.spent(under)                                                # in the band: only wb start refuses
+        store.tasks_dir().mkdir(parents=True, exist_ok=True)
+        with Watcher(band.dir, store.tasks_dir()) as w:
+            runs.tick(band)                                              # the one refused start
+            w.wait(0.05)
+            for _ in range(5):
+                self.assertTrue(runs.tick(band))
+                self.assertEqual(w.wait(0.2), [])                        # nothing written: the full wait
+        self.assertEqual([r["kind"] for r in band.journal() if r.get("stage") == "find"], ["item", "retry"])
+        self.assertEqual(len(list((band.dir / "specs").glob("find-*.md"))), 1)
+        self.assertEqual(band.status["phase"], "running")
+        self.spent(5.03 - under)                                         # today at the $5 cap
         night, _ = self.start("capn", "--budget-usd", "1", "--overnight")
         held, _ = self.start("capk", "--budget-usd", "1")
         held.set_status(phase="checkpoint", cause="item", why="x")
-        store.tasks_dir().mkdir(parents=True, exist_ok=True)
         for run in (night, held):
             with Watcher(run.dir, store.tasks_dir()) as w:
                 runs.tick(run)                                           # the one refused start

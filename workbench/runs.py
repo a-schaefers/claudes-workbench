@@ -1330,8 +1330,9 @@ def _base_of(run: Run, stage: dict, it: Item) -> str:
         return base
 
 
-def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
-    """Start item ``it`` as task <run>-<stage>-<n>: ("running"|"not_run"|"null"|"paused", why)."""
+def _start(run: Run, stage: dict, it: Item, n: int, m=None) -> tuple[str, str]:
+    """Start item ``it`` as task <run>-<stage>-<n>: ("running"|"not_run"|"null"|"paused", why).
+    ``m``: the item's model now (stage_model), named in a day cap's retry row for _cap_held."""
     spec = run.spec
     name = run.task_name(stage["id"], n)
     specs = run.dir / "specs"
@@ -1385,8 +1386,9 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     # the day cap's own refusal, the one that clears at midnight (meter.RESETS, anywhere in what
     # wb start said): no cap, no price or an unreadable routes.json say "day cap" too, and never clear
     if r.returncode == 3 and meter.RESETS in (r.stderr or "") + (r.stdout or ""):
-        # its day and cap, so the next pass doesn't run wb start again while they hold (_cap_held)
-        run.log(kind="retry", stage=stage["id"], key=it.key, day=meter.day(), cap=meter.cap(), why=why)
+        # its day, cap and model, so the next pass doesn't run wb start again while they hold (_cap_held)
+        run.log(kind="retry", stage=stage["id"], key=it.key, day=meter.day(), cap=meter.cap(),
+                model=getattr(m, "id", None), why=why)
         return "paused", why
     if r.returncode == 3:
         return "not_run", why
@@ -1591,12 +1593,13 @@ def _held(run: Run, it: Item) -> bool:
 
 def _cap_held(run: Run, stage: dict, it: Item, m) -> str | None:
     """The day cap's refusal of ``it``'s last start while it still holds (that day, that cap,
-    and the cap still refusing ``m``, the item's model now: stage_model), fresh, else None. Each
-    pass ran a refused wb start, journalled item and retry and wrote a spec, and the journal's
-    write woke the driver at once: about 7 starts a second until midnight at the cap, under
-    keep-awake (#1543, 2026-11-26). A cap the user raised tries again, and so does a role the
-    pause's own advice moved to the GPU or a free model: held on the journal row alone, `wb run
-    resume` paused again at once with the old line until midnight (#1543's review, 2026-11-26)."""
+    and ``m``, the item's model now: stage_model, the one refused, or one the cap still
+    refuses), else None. Each pass ran a refused wb start, journalled item and retry and wrote a
+    spec, and the journal's write woke the driver at once: about 7 starts a second until
+    midnight at the cap, under keep-awake (#1543, 2026-11-26). A cap the user raised tries
+    again, and so does a role the pause's own advice moved to the GPU or a free model: held on
+    the journal row alone, `wb run resume` paused again at once with the old line until
+    midnight (#1543's review, 2026-11-26)."""
     if m is None:
         return None  # the GPU's: no day cap
     rows = [r for r in run.journal() if r.get("stage") == stage["id"] and r.get("key") == it.key
@@ -1604,7 +1607,17 @@ def _cap_held(run: Run, stage: dict, it: Item, m) -> str | None:
     last = rows[-1] if rows else {}
     if last.get("kind") != "retry" or last.get("day") != meter.day() or last.get("cap") != meter.cap():
         return None
-    why = meter.refusal(m, item_role(stage, it), advice=False)
+    if last.get("model") == m.id:
+        # the model wb start refused, the same day and cap: spend only grows, so it still
+        # refuses. Asked again with meter.refusal's FIRST_TOKENS, a day within the item's spec
+        # of the cap (about spec bytes / 4 at the input price, $0.015 on a $3/M model) passed
+        # here and wb start, which counts the spec (runner.first_tokens), refused it each pass:
+        # the spin again (#1543's second review, 2026-11-26)
+        return last.get("why") or f"the day cap ({meter.RESETS})"
+    from . import runner
+    # another model: asked as wb start asks it, round 1's first request with the spec in it
+    why = meter.refusal(m, item_role(stage, it), advice=False,
+                        tokens=runner.first_tokens(prompt=_spec_of(run, stage, it)))
     return why if why and meter.RESETS in why else None  # any other refusal is wb start's to say
 
 
@@ -1715,7 +1728,7 @@ def tick(run: Run) -> bool:
                                                          and r.get("key") == it.key for r in run.journal()):
                     prev = escalation_key(it.key, k - 1) if k > 1 else re.sub(r"#e\d+\Z", "", it.key)
                     run.log(kind="escalated", stage=s["id"], key=it.key, after=prev, role=item_role(s, it))
-                got, why = ("paused", capped) if (capped := _cap_held(run, s, it, m)) else _start(run, s, it, n)
+                got, why = ("paused", capped) if (capped := _cap_held(run, s, it, m)) else _start(run, s, it, n, m)
                 if got in ("not_run", "null"):
                     run.log(kind=got, stage=s["id"], key=it.key, why=why)
                     it.state = got

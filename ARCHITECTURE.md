@@ -9926,10 +9926,11 @@ a chooser's stays at the base, each attempt only in its diff. Each start is a su
 user's: an exit 3 that is the day cap's own (`meter.RESETS`, "it resets at local midnight", anywhere in what wb start said) pauses the run (at an item's
 checkpoint too, `runs._going`, its `cause` kept: held only there, it started paid items past midnight with no `wb
 run resume`), or under `--overnight` is tried again on the first pass past midnight, or once the cap is raised
-(journal `retry` with its `day` and `cap`: while both hold and the cap still refuses the item's model now,
-`runs._cap_held` starts nothing and writes nothing, where each pass's refused start and journal row woke the
-driver at once, #1543; a role the pause's advice moved to the GPU or a free model starts on the next pass after
-`wb run resume`); any other exit 3 (no cap, no price, an unreadable routes.json, which say "day
+(journal `retry` with its `day`, `cap` and `model`: while all three hold, `runs._cap_held` starts nothing and
+writes nothing, on the row alone, where each pass's refused start and journal row woke the driver at once, #1543,
+and asked again with `meter.FIRST_TOKENS` a day within the item's spec of the cap spun so; another model is asked
+as wb start asks it, `meter.refusal` with `runner.first_tokens` of the spec, so a role the pause's advice moved
+to the GPU or a free model starts on the next pass after `wb run resume`); any other exit 3 (no cap, no price, an unreadable routes.json, which say "day
 cap" too and never clear) is `not_run`; a start that timed out (124) once its task exists is the item's,
 running (a runner that never came is reaped, a stop from outside); else `null`. The journal row comes first, so a
 crash adopts the item.
@@ -10153,7 +10154,7 @@ $WB_HOME (~/.local/state/workbench)
                                  session? (Claude Code's, or an OpenCode driver's with session_kind: opencode, #1309), claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,
                                  why, cause? (item: a checkpoint an item's null raised, runs._going), pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
                                  budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|escalate|escalated|fed|amend|notice|resumed|reaped,
-                                 stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), ok?, day?, cap? (retry: runs._cap_held)}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
+                                 stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), ok?, day?, cap?, model? (retry: runs._cap_held)}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
                                  {key, input, result, task}; specs/<stage>-<n>.md (each item's spec); schemas/<stage>-<n>.json (a batch's schema, runs.batch_schema); notify.jsonl (its items' notices, the driver's);
                                  result.json (runs.report_of at the end); acked (its notices taken); driver.log
   runs/.archive/<run>/           a run closed ARCHIVE_DAYS, moved by gc (runs.archive)
@@ -10908,7 +10909,7 @@ budget's pause, a `claude` checkpoint's feed, a dead driver's stop and resume, a
 its result, `wb run stop`'s items stopped and resumed, `attempts` and a barrier's `batch`, `max_items` and `amend
 --skip`, run and task names apart; `tearDown` stops the drivers while `WB_HOME` is the test's), `RunsApi` (the fake's
 catalog, the passes run in the test: the no-cap refusal, the dollar budget with `request_floor`, the day cap's
-pause and `--overnight`'s retry, once a day, through the driver's own wait, #1543, a resume onto the GPU or a free model, any other exit 3 `not_run`, the provider's slots, a user's waiting task first,
+pause and `--overnight`'s retry, once a day, through the driver's own wait, #1543, a day under the cap by less than the spec, a resume onto the GPU or a free model, any other exit 3 `not_run`, the provider's slots, a user's waiting task first,
 `IN_FLIGHT`), `Wiring` (routing only to a live driver, the `noticed` mark, a reboot's batches apart, wakes charged by
 the journal, `wb top --json`'s `runs`, `wb run feed` on a closed run, `wb flow import`; a live driver is a sleeping
 process with its command line));
