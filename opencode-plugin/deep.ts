@@ -53,6 +53,16 @@ export class Deep {
   private readonly notes = new Map<string, { message: string; texts: string[] }>()
   constructor(private readonly host: DeepHost, private readonly run: SessionRun) {}
 
+  private async isChild(sessionID: string): Promise<boolean> {
+    try {
+      const got = (await this.host.session?.get?.({ sessionID })) as { data?: unknown } | undefined
+      const info = (got && typeof got === 'object' && 'data' in got ? got.data : got) as { parentID?: unknown } | undefined
+      return !!info?.parentID
+    } catch {
+      return false
+    }
+  }
+
   private async where(sessionID: string): Promise<string> {
     return (await whereOf(this.host, sessionID)).dir
   }
@@ -63,6 +73,10 @@ export class Deep {
     this.notes.delete(e.sessionID) // a new prompt: the last one's notes are done
     if (words === null) return
     const kw = keywords(words)
+    if (!kw.deepcode && kw.deepmode === null) return
+    // a subagent's prompt comes unmarked too (core/src/tool/plugin/subagent.ts): it is the driver's
+    // words, never the user's yes, so a `deepmode off` line in it, or a `deepcode`, is nobody's (#1325)
+    if (await this.isChild(e.sessionID)) return
     const texts: string[] = []
     if (kw.deepmode !== null) {
       const on = kw.deepmode

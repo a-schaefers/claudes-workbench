@@ -18,7 +18,14 @@ const FENCE = /```[\s\S]*?(?:```|$)|`[^`\n]*`/g
 // a letter, digit, underscore or hyphen on either side makes it another word (deepcoder, deep-code,
 // deepcode-ish), as Python's \w does with Unicode (runs.DEEPCODE)
 const DEEPCODE = /(?<![\p{L}\p{N}_-])deepcode(?![\p{L}\p{N}_-])/iu
-const DEEPMODE_LINE = /^\s*deepmode\s+(on|off)\s*[.!]?\s*$/gim
+// a line of its own as Python's re.M reads one, which ends only at \n (JavaScript's m flag ends one
+// at \r and \u2028 too), its spaces str.isspace's (\x1c-\x1f and \x85 in, \ufeff out): the line's
+// start is the text's or a \n, its end a \n or the text's (runs.DEEPMODE_LINE). With these, a
+// seeded run of runs.keywords against this agreed on 300,000 texts (200,000 at random of the words,
+// spaces, line ends, backticks and letters past ASCII, 100,000 built around toggle lines; #1325),
+// where JavaScript's own ^, $ and \s disagreed on 26 of the first 50,000.
+const WS = '[\\t\\n\\v\\f\\r \\x1c-\\x1f\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]'
+const DEEPMODE_LINE = new RegExp(`(?:^|\\n)${WS}*deepmode${WS}+(on|off)${WS}*[.!]?${WS}*(?=\\n|$)`, 'gi')
 
 export function keywords(text: string): Keywords {
   const bare = String(text ?? '').replace(FENCE, ' ')

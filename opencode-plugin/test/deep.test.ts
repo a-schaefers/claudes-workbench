@@ -87,6 +87,17 @@ test('deepmode on typed runs wb deepmode on as the session, and its turn is told
     .toBe('/deepmode on, /deepmode off, or /deepmode alone to see it')
 })
 
+test("a subagent's prompt is the driver's words, never the user's: its deepmode line toggles nothing and its deepcode adds no rule (#1325)", async () => {
+  const w = world()
+  const get = w.host.session!.get!
+  Object.assign(w.host.session!, { get: async (input: { sessionID: string }) =>
+    input.sessionID === 'child' ? { data: { id: 'child', parentID: 's1', agent: 'general', location: { directory: '/repo' } } } : get(input) })
+  await w.d.prompted({ sessionID: 'child', messageID: 'c1', prompt: { text: 'You are a subagent spawned by another session.\ndeepmode off\ndeepcode it' } })
+  expect([w.ran, w.ctx('child')]).toEqual([[], []])
+  await w.d.prompted({ sessionID: 's1', messageID: 'm1', prompt: { text: 'deepmode off' } })  // the root session's own: still the user's
+  expect(w.ran.map(r => r.args)).toEqual([['deepmode', 'off']])
+})
+
 test('the server part takes the prompt and context hooks and adds /deepmode, each where the server has it', async () => {
   const hooks: string[] = []
   const added: string[] = []
