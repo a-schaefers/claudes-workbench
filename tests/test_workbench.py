@@ -35200,7 +35200,10 @@ class RealOpenCodePlugin(Base):
         # the context hook adds it; and OpenCode applies ~/.claude/skills after every plugin, so
         # Claude Code's copy, linked there by `wb setup`, replaced the plugin's until it
         # registered again, last
-        from workbench import ocplugin
+        from workbench import chat, ocplugin
+        # the run's prompt reaches the plugin's chat part, whose `wb chat url` brings a chat server
+        # up while the chat is on (its default): one outlived this test (PR #1436's CI)
+        chat.set_on(False)
         home = self.root / "home"
         (home / ".claude/skills").mkdir(parents=True)
         (home / ".claude/skills/workbench").symlink_to(ROOT / "skill/workbench")
