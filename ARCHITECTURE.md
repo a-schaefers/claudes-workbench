@@ -8432,7 +8432,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     - **The rules are session instruction entries** (`session.instructions.entry` `list`, `put`,
       `remove`: OpenCode's experimental API, `core/src/session/instruction-entry.ts`), one per
       block, keyed by the mod's block names (`KEYS`: `workbench-mode`, `claude-coding`,
-      `user-notes`, `dynamic-workflows`, `workbench-routes`; `TASKS_KEY` `workbench`; `OURS`), which
+      `user-notes`, `dynamic-workflows`, `web-chat`, `workbench-wake`, `workbench-routes`; `TASKS_KEY`
+      `workbench`; `OURS`), which
       SKILL.md names. OpenCode sends each as `<context key="…">` with its instructions, again after
       a compaction (its summary leaves instructions out: the next request gets their current
       values), and tells the model a change or a removal itself at the next step ("The context under
@@ -8442,7 +8443,12 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       answer, `blocksOf`): `mode` while its agent is `workbench` (Workbench mode is the agent),
       `notes` then too, `coding` (not `decide`), `workflows` (on) and `routes` (routes.json not the plain
       default, GPU-only changes too, as the mod's `readRoutes`: `wb route`'s lines, read again when
-      routes.json changes, `routesPath`, `routesSaid`)
+      routes.json changes, `routesPath`, `routesSaid`), `away` (`web-chat`, AWAY_NOTE in OpenCode's
+      words: tell the user with the `workbench_chat_reply` tool) while `wb chat away` as the session
+      says `away` (wb's `chat.away`: the web chat used last, within six hours or while the session
+      has a task open; asked only when chat/away.json has a time, `Upkeep.away`), and `wakeOff`
+      (`workbench-wake`, WAKE_OFF_NOTE: no `[workbench]` message will come, a toast will) while the
+      config entry's options `wake` is `"off"`, as notices.ts reads it,
       while in the mode or with a task of its own open; plus `workbench`, `wb status` as the session
       in its directory, while it has open tasks (read again when their names or phases change).
       `refresh` reads those facts (`openTasks`: `tasks/*/status.json` active or waiting, `task.json`
@@ -8451,8 +8457,11 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       names a session switched to the Workbench agent before any hook has, or
       the `context` hook seeing a new one) and each idle look; `sync` lists the session's entries
       once, then puts each block whose text differs and removes each of `OURS` it shouldn't have
-      (another plugin's keys are never touched), one refresh at a time per session. `away` and
-      `wakeOff` are never wanted (the chat tells the driver itself; the notices have no wake setting).
+      (another plugin's keys are never touched), one refresh at a time per session. Unlike the
+      mod's once-per-conversation `web-chat` block, the entry follows away: a prompt the user typed
+      (chat.ts's `typedByUser`) is them back, so that prompt's refresh skips the away check
+      (`refresh(…, back)`: chat.ts's `wb chat back` for it runs beside this part's `prompt` hook, not
+      before) and the entry goes before that turn ("… no longer applies").
       A server without the entries API gets the same blocks appended to the session's own
       requests' system prompt by the `context` hook, as `<context key="…">` text (the fallback).
     - **What a compaction keeps**: the `compaction` hook adds `KEEP_ON_COMPACT` (the mod's words,
@@ -8634,7 +8643,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   the real kernel: a Workbench session's entries are `tellPlan`'s blocks under the mod's names,
   each put once and `wb status` read once while nothing changes, a stale one of ours replaced and
   another plugin's untouched, none sent by the requests themselves; a switch away drops the mode's,
-  nothing open the rest; no roles block for the plain default, one for a GPU-only change; without the entries API the blocks
+  nothing open the rest; no roles block for the plain default, one for a GPU-only change; `web-chat` while `wb chat away`
+  says so (asked as the session, only with a time in chat/away.json, never for a session out of the mode with nothing
+  open) and removed once back, before the turn of a prompt the user typed; `workbench-wake` with the `wake` option off, in the mode or with a task open; without the entries API the blocks
   in the session's own requests' system prompt; a task closing compacts at half of OpenCode's own
   point, not below it, once; `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
   OpenCode doesn't list; KEEP_ON_COMPACT once, only for a session that delegated with a task open or in the boundary compaction after the last one closed;
@@ -10489,10 +10500,10 @@ doc needs its own `!/` line).
   agent's id** (`agent.ts` `AGENT`, `workbench`) → the slash command or pane that switches to it
   (#1312), and `upkeep.ts` (a session on it is in the mode) and `commands.ts` (a quit switches from
   it to `AFTER`, `build`). **The mod's context block names** (`prompt.context`'s `workbench-mode`,
-  `claude-coding`, `user-notes`, `dynamic-workflows`, `workbench-routes`, `workbench`) → `upkeep.ts`'s
+  `claude-coding`, `user-notes`, `dynamic-workflows`, `web-chat`, `workbench-wake`, `workbench-routes`, `workbench`) → `upkeep.ts`'s
   `KEYS` and `TASKS_KEY` (the entries' keys) and SKILL.md, which names them; **the mod's
   `KEEP_ON_COMPACT`** → `upkeep.ts`'s, word for word; **its `SCOUT_NOTE`, `QUIT_NOTE`,
-  `DONE_NOTE`, `CODING_RULES`, `WORKFLOWS_RULE`, `MODE_NOTE`, `NOTES_NOTE`** → `commands.ts`'s and
+  `DONE_NOTE`, `CODING_RULES`, `WORKFLOWS_RULE`, `MODE_NOTE`, `NOTES_NOTE`, `AWAY_NOTE`, `WAKE_OFF_NOTE`** → `commands.ts`'s and
   `upkeep.ts`'s, the same meaning in OpenCode's words (#1315); **the `wb` commands the quit commands
   run** (`stop --all --park-waiting`, `takeover --all --user`, `update`) → `commands.ts` too.
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught (`schema.py`, the ask server's import since #1278).

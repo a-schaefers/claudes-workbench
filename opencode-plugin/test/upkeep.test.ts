@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import * as core from '../../mod/hooks/core.ts'
-import { autoCeiling, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, routesSaid, Upkeep, upkeep,
-  WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
+import { autoCeiling, AWAY_NOTE, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, routesSaid, Upkeep,
+  upkeep, WAKE_OFF_NOTE, WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
 
 // The driver's conversation kept (#1315), against an in-memory WB_HOME, a fake wb and a fake
 // session API: `BUN_BE_BUN=1 opencode test opencode-plugin/test/upkeep.test.ts`.
@@ -138,6 +138,81 @@ test("without OpenCode's entries API the blocks go into the session's own reques
   const other: { type: 'text'; text: string }[] = []
   await u.context({ sessionID: 's2', agent: 'build', system: other })
   expect(other).toEqual([])
+})
+
+test("the web-chat block is the session's while wb says the user is away, and goes when they are back", async () => {
+  const w = world({}, { 'chat away': 'away' })
+  const { host, calls } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  u.setAgent(u.sess('s1'), 'workbench')
+  await u.refresh('s1')
+  // no time in chat/away.json: never away, and no wb run to learn it
+  expect(w.ran.filter(r => r.args[0] === 'chat')).toEqual([])
+  expect(u.sess('s1').put!.has('web-chat')).toBe(false)
+  w.files[`${HOME}/chat/away.json`] = JSON.stringify({ at: 999, by: 's1' })
+  calls.length = 0
+  await u.refresh('s1')
+  expect(calls).toEqual([`put web-chat: ${AWAY_NOTE}`]) // OpenCode says the new context at the next step
+  expect(AWAY_NOTE.includes('workbench_chat_reply')).toBe(true) // the tool's name as the model sees it
+  expect(w.ran.filter(r => r.args[0] === 'chat')).toEqual([{ args: ['chat', 'away'], session: 's1' }]) // wb decides, as the session
+  // the user typed in the terminal (chat.ts's `wb chat back`): the entry goes ("… no longer applies")
+  w.files[`${HOME}/chat/away.json`] = JSON.stringify({ at: 0 })
+  calls.length = 0
+  await u.refresh('s1')
+  expect(calls).toEqual(['remove web-chat'])
+  // wb says here (the six hours past, the chat off): no block either
+  w.files[`${HOME}/chat/away.json`] = JSON.stringify({ at: 999 })
+  const here = world({ ...w.files }, { 'chat away': 'here' })
+  const v = new Upkeep(core, entriesHost().host, here.io, HOME)
+  v.setAgent(v.sess('s1'), 'workbench')
+  await v.refresh('s1')
+  expect(v.sess('s1').put!.has('web-chat')).toBe(false)
+  // a session out of the mode with nothing open isn't Workbench's to tell: no block, no wb run
+  const other = world({ [`${HOME}/chat/away.json`]: JSON.stringify({ at: 999 }) }, { 'chat away': 'away' })
+  const o = new Upkeep(core, entriesHost().host, other.io, HOME)
+  o.setAgent(o.sess('s3'), 'build')
+  await o.refresh('s3')
+  expect([o.sess('s3').put!.size, other.ran.length]).toEqual([0, 0])
+})
+
+test('a prompt the user typed is them back at the terminal: that turn gets no web-chat block, a web message\'s does', async () => {
+  const w = world({ [`${HOME}/chat/away.json`]: JSON.stringify({ at: 999 }) }, { 'chat away': 'away' })
+  const { host, calls } = entriesHost()
+  const hooks = new Map<string, (e: unknown) => unknown>()
+  ;(host.session as { hook: unknown }).hook = async (name: string, cb: (e: unknown) => unknown) => {
+    hooks.set(name, cb)
+    return { dispose: async () => {} }
+  }
+  ;(host.session as { get: unknown }).get = async () => ({ data: { agent: 'workbench', location: { directory: '/r' } } })
+  ;(host as { options: unknown }).options = { env: { WB_HOME: HOME } }
+  const stop = await upkeep(host, core, w.io)
+  // chat.ts's own delivery (its metadata): the user is still away, and wb says so
+  await hooks.get('prompt')!({ sessionID: 's1', prompt: { text: '[web chat] hi' }, metadata: { source: 'workbench.chat' } })
+  expect(calls.includes(`put web-chat: ${AWAY_NOTE}`)).toBe(true)
+  // typed in the terminal: away.json may still have its time (chat.ts's `wb chat back` runs beside
+  // this hook, not before it), and the block goes before the turn all the same
+  calls.length = 0
+  await hooks.get('prompt')!({ sessionID: 's1', prompt: { text: 'carry on' } })
+  expect(calls).toEqual(['remove web-chat'])
+  await stop!()
+})
+
+test("the workbench-wake block says wakes are off while the plugin's wake option is off, in the mode or with a task open", async () => {
+  const w = world({}, { status: 't1  running' })
+  const { host, calls } = entriesHost()
+  ;(host as { options: unknown }).options = { wake: 'off' }
+  const u = new Upkeep(core, host, w.io, HOME)
+  u.setAgent(u.sess('s1'), 'build')
+  await u.refresh('s1')
+  expect(calls).toEqual([]) // out of the mode with nothing open: nothing to say
+  task(w.files, 't1', RUNNING)
+  await u.refresh('s1')
+  expect(calls).toEqual([`put workbench-wake: ${WAKE_OFF_NOTE}`, 'put workbench: Tasks delegated to agents with wb (your Workbench instructions) are open:'])
+  const on = world({}, {})
+  const v = new Upkeep(core, entriesHost().host, on.io, HOME)
+  v.setAgent(v.sess('s1'), 'workbench')
+  await v.refresh('s1')
+  expect(v.sess('s1').put!.has('workbench-wake')).toBe(false) // wakes on (no option): no block
 })
 
 // a session in the mode, its task t1 open at one look and closed at the next, the last step's
