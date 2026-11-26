@@ -4886,6 +4886,12 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
         return OLD_STORE
     if st["session"] == st.get("compact_failed_session"):  # it can't go on, nor be kept (#969)
         return COMPACTION_FAILED
+    # A report's repair round (SCHEMA_FIX) asks the session to resend the object it just sent:
+    # its newest message, inside what a compaction keeps verbatim. A fresh session after a
+    # compaction had neither the object nor the reading behind it, so it redid the report or made
+    # up a valid one (#1478, 2026-11-26)
+    if st.get("round_for") == "schema_fix":
+        return None
     if st.get("context") == "keep":
         return None
     if st.get("context") == "full":  # handed over mid-round; after OpenCode compacted it (#774)

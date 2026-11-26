@@ -1612,7 +1612,9 @@ Claude read the diff.
   before v1.91.2, which the agent's OpenCode no longer reaches, #1010) → fresh, `OLD_STORE` ("its
   session is in OpenCode's shared store, which agents no longer reach (v1.91.2)"), even under
   `keep` and on round 1; the `compact_failed_session` → fresh, `COMPACTION_FAILED`, even under `keep`;
-  `keep` → continue; `context: full` → fresh (`COMPACTED`/`COMPACTION_FAILED` per
+  a report's repair round (status `round_for: schema_fix`) → continue, compacted or full: the object
+  it resends is the session's newest message, and a fresh session had neither it nor its reading
+  (#1478); `keep` → continue; `context: full` → fresh (`COMPACTED`/`COMPACTION_FAILED` per
   `full_compacted`/`full_compact_failed`); the export lists a completed compaction (a message `{type: "compaction", status: "completed", summary}`) → fresh; the
   last message with tokens (`context_state`, all-zero ones skipped, #481) at `fresh_at` or more →
   fresh, unless `no_room` (#781: `session_floor` unset or under `HANDOVER_ROOM` below the point, as
@@ -9576,7 +9578,7 @@ OpenCode hands a tool's argument errors back to the model), else the last object
 2,500-character cut lost it in 13). `runner.report_end` checks it again outside the lane: valid, it goes to
 `tasks/<task>/result.json` and the review notice carries it (up to `RESULT_SHOWN` 24,000 characters) with its
 source; else one repair round (`runner.SCHEMA_FIX`, a new opening: `rejected: <errors>. Resend the whole
-object: …`), then `failed`. `wb accept` takes no `-m`, commits nothing, deletes the branch while still at the
+object: …`) in the same session, even one OpenCode compacted (`fresh_reason`, #1478), then `failed`. `wb accept` takes no `-m`, commits nothing, deletes the branch while still at the
 base, and records `outcome: reported`, `report: true` (`_accept_report`); `store.results()` keeps such rows
 from the router, the slices and tuning.
 
