@@ -6888,7 +6888,9 @@ client; the server needs no browser.
   cwd, pid, start, machine, busy}` (`chat.listener_driver` names it OpenCode by its `tool`, with the
   session's model from its server's beat, `store.beat_of`), `pid` the server's, `start` as wb reads it; it counts while that process runs
   (pid and start) and, once the server beats, while its fresh beat (`store.beat_of`) lists the
-  session whenever the beat names its `store` (`chat._server_listens`); `{}` once dropped
+  session whenever the beat names its `store`, or that beat's listing began (`ts`) before the claim was
+  written (listener.json's mtime: a new session's first prompt claims up to 30 s before a beat lists it,
+  #1319's live check) (`chat._server_listens`); `{}` once dropped
   (`chat.drop`).
 - `wb chat pending` lists every unreceipted message (#265). A notice open past `ASK_STALE` (an
   hour) no longer counts in `waiting_on_user` (a session that died with its dialog up). A user message unread past `MESSAGE_EXPIRE` (6 h, the one threshold) is `expired: true`; claim
@@ -6946,7 +6948,8 @@ address (#534).
   (*Other agents*), else 401 "bad or missing token: open the link from `wb chat url`".
 - `GET /api/health` → `{api, listening}`; `GET /api/wait` (*Other agents*).
 - `GET /api/latest` (`chat.latest`): for a push: Claude's last message or an open notice (from
-  the last `LATEST_BYTES` 1 MiB; a settled notice skipped), `push`: the snapshot's shape, which
+  the last `LATEST_BYTES` 1 MiB; a settled notice skipped), `listener` (`chat.listener_view`: its
+  `driver` titles a push whose row names none, #1319), `push`: the snapshot's shape, which
   `sw.ts` reads.
 - `GET /api/state`: `{api, messages (the last 200 from `THREAD_BYTES` 4 MiB, user rows with
   `received`; a settled notice left out), push ({key or null, `chat._push_key_or_none`, #924; test}), listener,
@@ -7032,11 +7035,17 @@ reader (WebKit keeps the socket); back on screen after `AWAY_MS` 3 s, or from th
 `STALE_MS` 20 s, or on the worker's `{kind: "push"}`, it dials at once (2026-11-20); a new `build`
 reloads (`reloadOnce`, once a minute). While the stream fails past its first two tries (the banner's `Can't reach
 the computer`) or the page is offline, the header says `computer unreachable · messages wait` with a grey dot
-(`reachable`, set again by the next state), never the last listener's green `listening` (#1415). The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
+(`reachable`, set again by the next state), never the last listener's green `listening` (#1415). The page names
+the driver (#1319, `driverName`, `DRIVER_NAMES` in `app.ts`: `Claude` or `OpenCode`): a reply's meta by its row's
+`driver` (none: `Claude`), a receipt (`Read by`, `Queued for`) by its `by` (`readBy`: OpenCode's `ses_…` session
+ids, else Claude Code's), and the header (`OpenCode · listening in …`), `Not passed to`, `Waiting for a Claude
+session`/`an OpenCode session` and `… is on it` by the listener's `driver` (an
+OpenCode claim's `tool`), with none listening by the newest reply or waiting line that names one, else `Claude`;
+`sw.ts` titles a push by the row's `driver`, else `/api/latest`'s `listener`, else `Claude`. The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
 releases it; a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
 after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). A screen reader
 hears the thread through `#say` (`role=log`, `.sr-only`), outside it: each new message from Claude and each waiting line once,
-whole (`say`, after the reveal), and "Claude is on it" once; the thread was the live region, and every update read
+whole (`say`, after the reveal), and "Claude is on it" (the driver's name) once; the thread was the live region, and every update read
 each row's time and `copy` out again, a reply in its reveal's fragments (#1408). A row's `.meta` is made anew only
 when its words change (`dataset.said`), so its buttons keep the focus (#1409), or once the copy a pressed
 *send again* sent (its `data-cid`) has left the outbox, landed or deleted, so the button is pressable again. The message box, focused, has a
@@ -10856,7 +10865,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   listener, #1319: it must say `driver: "opencode"`, and `session` is the listening session's `OPENCODE_SESSION_ID`,
   not a server's, as a tool run in the server has none) → `chat.listener_driver`, `chat._listens_across`;
   **the driver's shape** (`{tool, model?}`, `chat.DRIVER_TOOLS`) → `chat.writer_driver`, `/api/health`,
-  `ask_workbench.who` (`DRIVERS`), the MCP server, docs/chat-api.md's *The driver*, docs/chat-api.yaml's `Driver`.
+  `ask_workbench.who` (`DRIVERS`), the MCP server, docs/chat-api.md's *The driver*, docs/chat-api.yaml's `Driver`,
+  and the web app's names for it (`app.ts`'s `DRIVER_NAMES` and `readBy`, `sw.ts`'s `NAMES`, `src/types.d.ts`'s `Driver`).
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.ts`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.

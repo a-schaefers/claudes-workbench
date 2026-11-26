@@ -1058,13 +1058,14 @@ NEWS = ("claude", "notice")
 def latest() -> dict:
     """What a push shows, for the service worker (GET /api/latest): Claude's last message, or a
     notice still open, in the snapshot's shape. It fetched the whole /api/state, up to a
-    megabyte, within the time iOS gives a push handler (#755)."""
+    megabyte, within the time iOS gives a push handler (#755). With the `listener` (its
+    `driver`), which names a push whose row says no driver (#1319)."""
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
     # a notice whose dialog settled in the terminal is no news (#959)
     answered = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
                 if r.get("how") == "answered"}
     last = next((r for r in reversed(rows) if r.get("from") in NEWS and _for_user(r) and r.get("id") not in answered), None)
-    return {"now": store.now(), "messages": [last] if last else [],
+    return {"now": store.now(), "messages": [last] if last else [], "listener": listener_view(listener()),
             "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
 
@@ -1656,7 +1657,11 @@ def listener() -> dict | None:
     if isinstance(st.get("machine"), str) and st["machine"] and st["machine"] != store.machine():
         return st
     if st.get("tool") == "opencode":
-        return st if _server_listens(st) else None
+        try:
+            at = (chat_dir() / "listener.json").stat().st_mtime
+        except OSError:
+            at = 0.0
+        return st if _server_listens(st, at) else None
     if st.get("pid"):
         return st if _alive(st["pid"], st.get("start")) else None
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
@@ -1669,15 +1674,23 @@ def listener() -> dict | None:
 # "opencode", pid, start, machine, cwd, busy}`, `pid` the server's, `start` as wb reads it. It
 # listens while that process runs (pid and start: a recycled pid is gone, #532) and, once the
 # server beats (store.beat_of), while the beat lists its session when it lists the whole store: a
-# session deleted in that server never listens. First live claim wins, either driver's, as two
-# Claude Code sessions' do: `hold` refuses while another's claim stands, and the Claude Code mod
-# stands by while this one's does (its `claimStands` reads the same pid and start).
-def _server_listens(st: dict) -> bool:
+# session deleted in that server never listens. A beat whose listing began (`ts`) before the claim
+# was written (``at``, listener.json's mtime) can't say: the user's first prompt in a new session
+# claims it up to 30 s before a beat lists it, and the page said "no session listening" while the
+# session took the message (#1319's live check, 2026-11-26). First live claim wins, either
+# driver's, as two Claude Code sessions' do: `hold` refuses while another's claim stands, and the
+# Claude Code mod stands by while this one's does (its `claimStands` reads the same pid and start).
+def _server_listens(st: dict, at: float = 0.0) -> bool:
     pid = st.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or not _alive(pid, st.get("start")):
         return False
     beat = store.beat_of(pid)
-    return not (beat and beat.get("store") and st.get("session") not in beat["sessions"])
+    if not (beat and beat.get("store") and st.get("session") not in beat["sessions"]):
+        return True
+    try:
+        return float(beat.get("ts") or 0) < at
+    except (TypeError, ValueError):
+        return False
 
 
 def hold(session: str, pid: int, busy: bool = False, cwd: str | None = None) -> tuple[bool, dict | None]:
