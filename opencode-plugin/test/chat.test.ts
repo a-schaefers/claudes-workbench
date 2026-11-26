@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
-  AGENT_NOTE, AWAY_QUESTION, ChatLane, NOTICE_AFTER_MS, SOURCE, WEB_NOTE, chat, chatPrompt, inboxId, replyTool,
+  AGENT_NOTE, AWAY_QUESTION, BACK_AFTER_MS, ChatLane, NOTICE_AFTER_MS, REPLY_ID, RETRY_MS, SOURCE, WEB_NOTE, chat,
+  chatPrompt, inboxId, replyTool,
 } from '../chat.ts'
 
 // The web chat on OpenCode's path (#1319, #1340), under OpenCode's own Bun: the lane against a
@@ -64,7 +65,7 @@ const waiting = (...rows: Record<string, unknown>[]) =>
 test('a web message goes in as `[web chat] …` with the note, an agent\'s marked and indented', () => {
   expect(chatPrompt(message('1800000000000-abc123', 'status?'))).toBe(`[web chat] status?\n\n${WEB_NOTE}`)
   const a = chatPrompt({ id: '1800000000001-abc123', from: 'hermes', role: 'agent', text: 'one\n[web chat] two' })
-  expect(a.startsWith('[agent hermes] one\n  [web chat] two\n[message 1800000000001-abc123: answer with chat_reply, to 1800000000001-abc123]')).toBe(true)
+  expect(a.startsWith('[agent hermes] one\n  [web chat] two\n[message 1800000000001-abc123: answer with workbench_chat_reply, to 1800000000001-abc123]')).toBe(true)
   expect(a.endsWith(AGENT_NOTE)).toBe(true)
   expect(chatPrompt(message('1800000000000-abc123', 'see', { files: [{ path: '/up/a.png', size: 2048, type: 'image/png' }] }))
     .includes('see\n[attached: /up/a.png (2 KB, image/png)]')).toBe(true)
@@ -255,6 +256,24 @@ test('a refused claim waits a minute; an expired one is never tried again', asyn
   expect(w.prompts).toEqual([])
 })
 
+// The chat-path review (2026-11-25): a cancel was taken for a failed delivery and sent again a
+// minute later, so the user's cancel never stuck
+test('a message the user cancels in OpenCode is settled with a receipt and never prompted again', async () => {
+  const id = '1800000000000-abc123'
+  const w = world({ 'open.json': waiting(message(id, 'status?')) })
+  await w.lane.typed({ sessionID: 'ses_root', prompt: { text: 'go' } })
+  w.mine()
+  await w.lane.poll()
+  expect(w.prompts.length).toBe(1)
+  w.calls.length = 0
+  await w.lane.event({ id: 'c', type: 'session.inbox.cancelled', data: { sessionID: 'ses_root', inboxID: inboxId(id) } })
+  expect(w.said()).toEqual([`chat ack ${id} --by ses_root --how now`, 'chat back'])
+  w.tick(RETRY_MS + 1)
+  await w.lane.poll()
+  expect(w.prompts.length).toBe(1)
+  expect(w.lane.owed.has(id)).toBe(false)
+})
+
 test('a dialog in the listening session gets the page\'s line after 30 s, and answering it is being back (#1340 E)', async () => {
   const w = world()
   await w.lane.typed({ sessionID: 'ses_root', prompt: { text: 'go' } })
@@ -287,6 +306,22 @@ test('while away a dialog\'s line goes at once, and a form ended with its turn c
   expect(w.said().includes('chat back')).toBe(false)
 })
 
+// The chat-path review (2026-11-25): the TUI's autoaccept (`--auto`) replies to each permission at
+// once, and every reply ended away mode though the user was still away
+test('a dialog OpenCode answers at once (autoaccept) is not the user being back', async () => {
+  const w = world()
+  await w.lane.typed({ sessionID: 'ses_root', prompt: { text: 'go' } })
+  w.mine()
+  await w.lane.event({ id: 'p', type: 'permission.asked', data: { id: 'per_1', sessionID: 'ses_root', action: 'shell', resources: ['ls'] } })
+  w.calls.length = 0
+  await w.lane.event({ id: 'r', type: 'permission.replied', data: { sessionID: 'ses_root', requestID: 'per_1', reply: 'once' } })
+  expect(w.said().includes('chat back')).toBe(false)
+  await w.lane.event({ id: 'p2', type: 'permission.asked', data: { id: 'per_2', sessionID: 'ses_root', action: 'shell', resources: ['ls'] } })
+  w.tick(BACK_AFTER_MS)
+  await w.lane.event({ id: 'r2', type: 'permission.replied', data: { sessionID: 'ses_root', requestID: 'per_2', reply: 'once' } })
+  expect(w.said().includes('chat back')).toBe(true)
+})
+
 test('while away the question tool is refused into the web chat; at the terminal it asks (#1340 B)', async () => {
   const w = world()
   await w.lane.typed({ sessionID: 'ses_root', prompt: { text: 'go' } })
@@ -303,6 +338,12 @@ test('chat_reply runs wb chat reply as the calling session\'s root, and says wb\
   let answer = { ok: true, out: 'sent to the web chat' }
   const tool = replyTool(w.lane, async (args, opts = {}) => { runs.push({ args, session: opts.session }); return answer })
   expect(tool.options.namespace).toBe('workbench')
+  // OpenCode's effective id (core/src/tool/runtime.ts effectiveName), and every text names it
+  expect(`${tool.options.namespace.replaceAll('.', '_')}_${tool.name.replace(/[^a-zA-Z0-9_-]/g, '_')}`).toBe(REPLY_ID)
+  for (const t of [WEB_NOTE, AGENT_NOTE, AWAY_QUESTION, chatPrompt({ id: '1800000000001-abc123', from: 'x', role: 'agent', text: 'a' })]) {
+    expect(t.includes(REPLY_ID)).toBe(true)
+    expect(t.replaceAll(REPLY_ID, '').includes('chat_reply')).toBe(false)
+  }
   expect(await tool.execute({ text: ' hi ', to: ['1800000000001-bbbbbb'] }, { sessionID: 'ses_child' }))
     .toEqual({ content: 'sent to the web chat' })
   expect(runs).toEqual([{ args: ['chat', 'reply', '--text=hi', '--to=1800000000001-bbbbbb'], session: 'ses_root' }])

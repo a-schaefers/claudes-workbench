@@ -11,5 +11,11 @@
     "./tui": "./tui.ts",
     "./rpc": "./rpc.ts"
   },
-  "files": ["server.ts", "tui.ts", "rpc.ts", "wb.ts", "chat.ts"]
+  "files": [
+    "server.ts",
+    "tui.ts",
+    "rpc.ts",
+    "wb.ts",
+    "chat.ts"
+  ]
 }

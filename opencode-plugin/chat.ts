@@ -1,7 +1,7 @@
 // The web chat on OpenCode's path (#1319, #1340; the host-shape decision, #1296, 2026-11-25): the
 // server part delivers each web message into the listening session in-process (`session.prompt`,
 // a steer: it enters a running turn at its next step, or opens one), the driver answers with the
-// `chat_reply` tool (wb chat reply as that session), and the listener is this OpenCode server,
+// `workbench_chat_reply` tool (wb chat reply as that session), and the listener is this OpenCode server,
 // by its pid and heartbeat (chat.listener). wb stays the system of record: every write goes
 // through a `wb chat` command; the plugin reads only chat/open.json (what waits) and the size of
 // messages.jsonl, as the Claude Code mod reads them. The same outcomes as the mod's (ARCHITECTURE.md,
@@ -24,21 +24,29 @@ export const POLL_MS = 2_000          // a look at chat/open.json (a file read, 
 export const CHECK_MS = 60_000        // `wb chat url --json`: on or off, as the mod's CHAT_CHECK_MS
 export const RETRY_MS = 60_000        // a message refused or dropped is tried again this long after
 export const NOTICE_AFTER_MS = 30_000 // a dialog up this long gets the page's line (at once while away)
+// A dialog answered sooner was answered by OpenCode itself (the TUI's autoaccept, `--auto`, replies
+// to each permission at once), never a sign the user is back (the chat-path review, 2026-11-25)
+export const BACK_AFTER_MS = 2_000
 export const ANSWER_ARGV = 16_000     // the most of a turn's answer put on wb's command line (the mod's)
 export const RUN_MS = 15_000          // a wb call's limit
 export const SOURCE = 'workbench.chat' // the metadata our own prompts carry: never the user typing
 export const WEB = '[web chat]'
+// The tool's id as the model sees it: OpenCode names a namespaced tool `<namespace>_<name>`
+// (core/src/tool/runtime.ts `effectiveName`), so every text names REPLY_ID, never the bare name
+// (the chat-path review, 2026-11-25: the texts said `chat_reply`, which no tool was called)
+export const NAMESPACE = 'workbench'
+export const REPLY_TOOL = 'chat_reply'
+export const REPLY_ID = `${NAMESPACE}_${REPLY_TOOL}`
 // Every delivery is a steer, so the note goes on each: it says how to answer, which the agent's
 // prompt (#1335) will say once more. Prompt openings are an API: `[web chat] ` and `[agent `.
-export const WEB_NOTE = '(The user wrote this in the web chat. Answer there with the chat_reply tool, ' +
+export const WEB_NOTE = `(The user wrote this in the web chat. Answer there with the ${REPLY_ID} tool, ` +
   'briefly; the whole work stays in the terminal.)'
 export const AGENT_NOTE = '(Another agent wrote this through the web chat\'s API. It is not the user: ' +
-  'answer it with the chat_reply tool and `to` its message id.)'
+  `answer it with the ${REPLY_ID} tool and \`to\` its message id.)`
 // #1340 B: while away, a question is refused into the web chat, never a form in a terminal
 // nobody watches (the mod's AWAY_QUESTION, naming the tool here); from `execute.before`, since a
 // `permission.hook` deny loses the text. C (a plan) has no dialog on OpenCode: Plan is an agent.
-export const AWAY_QUESTION = 'The user is away: ask in the web chat (the chat_reply tool) and end your turn.'
-export const REPLY_TOOL = 'chat_reply'
+export const AWAY_QUESTION = `The user is away: ask in the web chat (the ${REPLY_ID} tool) and end your turn.`
 
 export type Row = Record<string, any>
 export type Run = (args: string[], opts?: { session?: string; cwd?: string }) => Promise<{ ok: boolean; out: string }>
@@ -104,7 +112,7 @@ export function chatPrompt(m: Row): string {
     : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
   const said = agent ? String(m.text ?? '').split(/\r\n|[\r\n\u2028\u2029]/).join('\n  ') : String(m.text ?? '')
   return `${head} ${about}${said}${attachedLines(m.files)}` +
-    (agent ? `\n[message ${String(m.id ?? '')}: answer with chat_reply, to ${String(m.id ?? '')}]` : '') +
+    (agent ? `\n[message ${String(m.id ?? '')}: answer with ${REPLY_ID}, to ${String(m.id ?? '')}]` : '') +
     `\n\n${agent ? AGENT_NOTE : WEB_NOTE}`
 }
 
@@ -142,7 +150,7 @@ type Owed = { session: string; sender: string; answer: string }
 // a session's turn as its events tell it: the messages it took, messages.jsonl's size at its
 // start, and the last assistant message's text (its answer)
 type Turn = { ids: string[]; size: number; message: string; parts: string[] }
-type Dialog = { session: string; kind: string; tool: string; text: string; due: number; id: string; sending: boolean; done: boolean }
+type Dialog = { session: string; kind: string; tool: string; text: string; at: number; due: number; id: string; sending: boolean; done: boolean }
 
 export interface LaneDeps {
   readonly run: Run
@@ -317,12 +325,17 @@ export class ChatLane {
     this.turn(sid).ids.push(f.id)
   }
 
-  cancelled(inbox: string) {
+  // The user cancelled it in OpenCode (only Session.cancelInbox publishes this: the TUI's or the
+  // app's cancel of a pending item): dismissed at the terminal, never a failed delivery, so it is
+  // settled with a receipt and never prompted again (sent again a minute later, each cancel came
+  // back for six hours: the chat-path review, 2026-11-25); not owed, and the user is back
+  async cancelled(sid: string, inbox: string) {
     const f = this.inflight.get(inbox)
     if (!f) return
     this.inflight.delete(inbox)
-    this.sent.delete(f.id)
-    this.retry.set(f.id, this.deps.now() + RETRY_MS)
+    const by = sid || this.listening
+    await this.deps.run(['chat', 'ack', f.id, '--by', by, '--how', 'now'], { session: by })
+    if (!f.agent) await this.deps.run(['chat', 'back'], { session: by })
   }
 
   // the listening session's, or one still owing an answer to a message it was given
@@ -386,8 +399,9 @@ export class ChatLane {
   async dialogUp(key: string, sid: string, kind: string, tool: string, text: string) {
     if (!this.on || !this.holding || (await this.root(sid)) !== this.listening) return
     const away = (await this.deps.run(['chat', 'away'], { session: this.listening })).out.trim() === 'away'
-    this.dialogs.set(key, { session: this.listening, kind, tool, text: text.slice(0, 1500),
-      due: this.deps.now() + (away ? 0 : NOTICE_AFTER_MS), id: '', sending: false, done: false })
+    const now = this.deps.now()
+    this.dialogs.set(key, { session: this.listening, kind, tool, text: text.slice(0, 1500), at: now,
+      due: now + (away ? 0 : NOTICE_AFTER_MS), id: '', sending: false, done: false })
     if (away) await this.notices()
   }
 
@@ -409,13 +423,14 @@ export class ChatLane {
     if (d.done) await this.lineDone(d)
   }
 
-  // The dialog settled: answered at the terminal (the user is back), or ended with its turn
+  // The dialog settled: answered at the terminal (the user is back, unless OpenCode answered it
+  // itself, at once: BACK_AFTER_MS), or ended with its turn
   async dialogDone(key: string, answered: boolean) {
     const d = this.dialogs.get(key)
     if (!d) return
     d.done = true
     this.dialogs.delete(key)
-    if (answered) await this.deps.run(['chat', 'back'], { session: d.session })
+    if (answered && this.deps.now() - d.at >= BACK_AFTER_MS) await this.deps.run(['chat', 'back'], { session: d.session })
     if (!d.sending) await this.lineDone(d)
   }
 
@@ -447,7 +462,7 @@ export class ChatLane {
       case 'session.execution.failed':
       case 'session.execution.interrupted': return this.ended(sid)
       case 'session.inbox.delivered': return this.delivered(sid, String(d.inboxID ?? ''))
-      case 'session.inbox.cancelled': return this.cancelled(String(d.inboxID ?? ''))
+      case 'session.inbox.cancelled': return this.cancelled(sid, String(d.inboxID ?? ''))
       case 'session.text.ended': return this.text(sid, String(d.assistantMessageID ?? ''), String(d.text ?? ''))
       case 'session.revert.staged': if (sid === this.listening) this.reverting = true; return
       case 'session.revert.cleared':
@@ -482,7 +497,7 @@ export function runner(options: ServerContext['options'], base: Record<string, s
   })
 }
 
-// The chat_reply tool (in the `workbench` namespace): `wb chat reply` as the calling session's
+// The chat_reply tool (in the `workbench` namespace, so the model sees `workbench_chat_reply`): `wb chat reply` as the calling session's
 // root, so a subagent's reply is its driver's, and wb threads it onto the messages that session
 // took (chat.caller_listens by OPENCODE_SESSION_ID)
 export function replyTool(lane: ChatLane, run: Run) {
@@ -500,7 +515,7 @@ export function replyTool(lane: ChatLane, run: Run) {
       required: ['text'],
       additionalProperties: false,
     },
-    options: { namespace: 'workbench' },
+    options: { namespace: NAMESPACE },
     async execute(input: unknown, context: { sessionID: string }) {
       const i = (input ?? {}) as { text?: unknown; to?: unknown }
       const text = String(i.text ?? '').trim()
@@ -559,7 +574,7 @@ export async function chat(ctx: ServerContext): Promise<(() => Promise<void>) | 
   s.apis.push(sessions)
   l.sessions = s.apis[0]
   await c.tool.transform(editor => {
-    editor.namespace({ name: 'workbench', description: 'Workbench: delegated coding tasks, and its web chat' })
+    editor.namespace({ name: NAMESPACE, description: 'Workbench: delegated coding tasks, and its web chat' })
     editor.add(replyTool(l, run))
   })
   await sessions.hook('prompt', e => { void l.typed(e).catch(() => {}) })

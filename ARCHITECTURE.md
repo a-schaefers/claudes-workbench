@@ -6491,8 +6491,8 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   plan in the web chat and end your turn; approval is at the terminal.` (`AWAY_PLAN`); at the
   terminal both are ordinary dialogs. On the OpenCode path (#1319) the plugin refuses OpenCode's
   `question` tool from `execute.before` (a `permission.hook` deny loses the text) with ``The user is
-  away: ask in the web chat (the chat_reply tool) and end your turn.`` (`chat.ts` `AWAY_QUESTION`,
-  naming its tool); a plan has no dialog there (Plan is an agent). The mod's side: *The web chat
+  away: ask in the web chat (the workbench_chat_reply tool) and end your turn.`` (`chat.ts`
+  `AWAY_QUESTION`, naming its tool by `REPLY_ID`); a plan has no dialog there (Plan is an agent). The mod's side: *The web chat
   listener*, under *The mod*; the plugin's: *The web chat on OpenCode*.
 
 **Other agents** (#1042). The API is documented for other clients in `docs/chat-api.md` (every
@@ -7823,8 +7823,9 @@ session `dir` is the other source, once the plugin writes beats, #1316: #1309's 
   as it is by OpenCode's Bun, a package's in `node_modules` too.
   - `server.ts`: `{id: "workbench", setup}` (OpenCode's check is that shape alone,
     `core/src/plugin/module.ts` `Module`). Setup registers the RPC's `status` handler and sets up
-    the web chat (`chat.ts`'s `chat(ctx)`, whose cleanup it returns); under `WB_TASK` it returns
-    at once (#1363). It exports `ID` and `status(options, env)`.
+    the web chat (`chat.ts`'s `chat(ctx)`); each part's cleanup joins `stops`, and setup returns
+    one cleanup that runs them all, newest first, at its end, so a part registered later is never
+    after a `return`; under `WB_TASK` it returns at once (#1363). It exports `ID` and `status(options, env)`.
   - `rpc.ts`: the contract `Workbench` (`id: "workbench"`), JSON Schema, no validator package:
     `status` → `{wb, found, from: options|package|PATH|none, home}`. Called over HTTP as `POST
     /api/rpc/workbench/status` with `{"input": {}}` (`protocol/src/groups/rpc.ts`), by the TUI
@@ -8007,7 +8008,7 @@ session `dir` is the other source, once the plugin writes beats, #1316: #1309's 
 ### The web chat on OpenCode
 
 `opencode-plugin/chat.ts` (#1319, #1340; the host-shape decision: in-process turns and a
-`chat_reply` tool, the listener the server and its heartbeat). The same outcomes as the Claude
+`chat_reply` tool, `workbench_chat_reply` to the model, the listener the server and its heartbeat). The same outcomes as the Claude
 Code mod's *The web chat listener*, OpenCode-native, with #1340's simplifications; wb stays the
 system of record: every write is a `wb chat` command (`runner`: the options' wb and `WB_*` paths,
 `OPENCODE_SESSION_ID` the session it acts for, `CLAUDECODE`, `CLAUDE_PID`,
@@ -8038,11 +8039,16 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   typed then would (another shape sorted wrong on a revert, #1340) and a retry gets the first
   admission back; a conflict (that id in another session) is delivered there. The text is the
   mod's `chatPrompt` (`[web chat] <words>`, an agent's `[agent <name>] …` with its lines indented
-  and `[message <id>: answer with chat_reply, to <id>]`, `about`, attachments), then `WEB_NOTE` or
-  `AGENT_NOTE` (answer with the `chat_reply` tool). Nothing while a revert is staged in the
+  and `[message <id>: answer with workbench_chat_reply, to <id>]`, `about`, attachments), then
+  `WEB_NOTE` or `AGENT_NOTE` (answer with the `workbench_chat_reply` tool: every text names
+  `REPLY_ID`). Nothing while a revert is staged in the
   session (a prompt commits it: `session.revert.staged` until `cleared`/`committed`). On
   `session.inbox.delivered`: `wb chat ack <id> --by <session> --how now` (an agent's into a running
-  turn `into`, #1175) and, for the user's, `--away`; `cancelled` tries it again a minute later.
+  turn `into`, #1175) and, for the user's, `--away`. On `session.inbox.cancelled` (only
+  `Session.cancelInbox` publishes it: the user cancelled the pending item in the TUI or the app)
+  the message is dismissed, never sent again: `wb chat ack <id> --by <session> --how now`, not
+  owed, and for the user's `wb chat back` (a retry under the same inbox id came back after every
+  cancel for six hours: the chat-path review, 2026-11-25).
 - **The turn's answer** (#1340 F). Each delivered message is owed a reply by the session it went
   to (`turns`, by session: the listener may move since); the turn's answer is the
   last assistant message's text (`session.text.ended`, its parts joined). At the session's
@@ -8053,7 +8059,9 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   leaves it owed for the next. Then `wb chat ended <ids> --by <session>` (the messages that turn
   took, or none when `messages.jsonl` grew), after the post (#1352). A typed prompt settles what
   the user is owed, never an agent's.
-- **`chat_reply`** (the tool, namespace `workbench`, `{text, to?}`): `wb chat reply --text … --to …`
+- **`chat_reply`** (the tool, namespace `workbench` (`NAMESPACE`), so OpenCode's id for it, the one
+  the model sees, is `workbench_chat_reply`, `REPLY_ID`: `effectiveName` in core/src/tool/runtime.ts;
+  `{text, to?}`): `wb chat reply --text … --to …`
   as the calling session's root (a subagent's reply is its driver's), so `chat.caller_listens`
   (by `OPENCODE_SESSION_ID`, the listener's `session`) threads it onto the messages that session
   took; wb's refusal is the tool's error.
@@ -8062,7 +8070,9 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   it get `wb chat notice --tool --kind --text` after `NOTICE_AFTER_MS` 30 s, at once while away
   (`wb chat away`), one open at a time, in OpenCode's words (`OpenCode is waiting for you in the
   terminal.`); `permission.replied` and `form.replied` are the user back (`wb chat back`) and clear
-  it (`wb chat notice --done`), as does `form.cancelled` or the turn's end, without `back`. No
+  it (`wb chat notice --done`), as does `form.cancelled` or the turn's end, without `back`. A
+  dialog answered within `BACK_AFTER_MS` 2 s of asking was answered by OpenCode itself (the TUI's
+  autoaccept, `--auto`), so it clears without `back`. No
   dialog is answered from the phone (#1340: the relay through `permission.list`/`reply` is struck).
 - **A question while away** (#1340 B): `execute.before` refuses the `question` tool in the listening
   session's tree with `AWAY_QUESTION` while `wb chat away` says `away`.
@@ -9759,7 +9769,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
 - **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`) → `e2e_chat.mjs`, the WebChat tests, reference/driving.md
   and SKILL.md's *the web chat*, `chat.WAITING_FOR` beside it (OpenCode's, `DRIVER_NAMES`); **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
-  once #1296's core exists (`texts.ts`), `chat.ts`'s `AWAY_QUESTION` (#1319's `execute.before`, naming `chat_reply`), reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
+  once #1296's core exists (`texts.ts`), `chat.ts`'s `AWAY_QUESTION` (#1319's `execute.before`, naming `REPLY_ID`, `workbench_chat_reply`), reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
 - **A message's `about`** (`{task, n, step, round}`, `{audio, n, name, path}`) → `listen`'s prefix, `aboutTag`,
   `aboutBody`, `/api/send`'s check.
 - **`$` in `register.tsx`** → only through top-level functions, or `claude plugin validate mod` fails.

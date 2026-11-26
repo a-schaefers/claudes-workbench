@@ -25,7 +25,12 @@ const plugin: ServerPlugin = {
   async setup(ctx) {
     if (process.env.WB_TASK) return
     await ctx.rpc.register(Workbench, { status: async () => status(ctx.options) })
-    return await chat(ctx) // the web chat: in-process turns and chat_reply (#1319)
+    // each part's cleanup joins `stops`, and setup returns them together at its end: a part added
+    // after another's `return` never ran (the chat-path review, 2026-11-25)
+    const stops: (() => Promise<void>)[] = []
+    const stopChat = await chat(ctx) // the web chat: in-process turns and chat_reply (#1319)
+    if (stopChat) stops.push(stopChat)
+    return async () => { for (const stop of stops.reverse()) await stop().catch(() => {}) }
   },
 }
 
