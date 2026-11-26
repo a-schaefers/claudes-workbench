@@ -95,6 +95,8 @@ dialog: tell them there what it would send; it waits until they are back at the 
    `Workbench-Driver:` trailer, and prints the suites to run, the template's sections still
    unfilled, `no Scope trailer: decide first` when it has none, the one `wb patch send` line and
    gh's state.
+   Its tests can take minutes (the mod's, the kernel's): run it in the background or with a
+   10-minute timeout, never Bash's 2-minute default.
 3. In that worktree, the suites it printed (each directory's: the mod's, the OpenCode plugin's,
    the kernel's), on Python 3.11 too, each skip named (a skip is not a pass). Fill every section
    of the body file honestly (what you ran, what you didn't), keeping wb's lines. Keep it outside

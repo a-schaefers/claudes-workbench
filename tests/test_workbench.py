@@ -27222,6 +27222,13 @@ class LocalPatches(Base):
             self.assertEqual(self.check(plugin), "a plugin fix's tests didn't all run here (neither opencode nor bun "
                                                  "is on PATH for the OpenCode plugin's tests), so wb patch check "
                                                  "can't tell: run them where they can (a skip is not a pass)\n")
+            # the #1329 review (2026-11-25): kernel.py props refuses with neither (exit 1), which
+            # read as upstream failing the patch
+            self.calls.unlink(missing_ok=True)
+            self.assertEqual(self.check(kernel), "a kernel prop's tests didn't all run here (neither bun nor opencode "
+                                                 "is on PATH for the kernel's props), so wb patch check can't tell: "
+                                                 "run them where they can (a skip is not a pass)\n")
+            self.assertFalse(self.calls.exists())
         self.assertEqual(self.check(stray), "a web fix's tests didn't all run here (no runner for web/x.test.ts "
                                             "(only mod/, opencode-plugin/ and kernel/ have one)), so wb patch "
                                             "check can't tell: run them where they can (a skip is not a pass)\n")
@@ -27281,6 +27288,19 @@ class LocalPatches(Base):
         clash = self.commit(self.copy, "calc.py", "def add(a, b):\n    return b + a\n", "commuted\n\nScope: me")
         self.assertIn("Tests run by wb: not run (the patch conflicted on upstream: run its tests once it's "
                       "resolved)\n", self.wb("patch", "upstream", clash, "--name", "clash"))
+
+    def test_patch_upstream_records_the_prepared_patch_and_its_body_before_its_tests_run(self):
+        # the #1329 review (2026-11-25): the tests can take minutes, and a run killed in them
+        # (Claude's Bash stops at 2) left pr/<slug>, which a rerun refuses, with no prepared row
+        # for wb update to drop the local patch by and no body file to send
+        fix = self.on_github()
+        with mock.patch.object(patches, "evidence", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            cli.main(["patch", "upstream", fix, "--name", "add"])
+        noted = store.read_json(store.home() / "patches.json")
+        self.assertEqual(list(noted["prepared"]), ["add"])
+        self.assertEqual(patches.body_path("add").read_text(), self.TEMPLATE)
+        self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "add"))
 
     def test_patch_upstream_stamps_the_pr_commit_with_its_driver_and_keeps_what_wb_update_matches(self):
         # #1329 (#1321's finding 21): upstream couldn't tell which driver prepared a patch

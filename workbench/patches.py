@@ -656,7 +656,11 @@ def _own_runs(wt, tests, added) -> tuple[list[tuple[str, list[str], dict, int | 
         else:
             why.append("neither opencode nor bun is on PATH for the OpenCode plugin's tests")
     if any(p.startswith("kernel/") for p in other):
-        runs.append(("python3 scripts/kernel.py props", [sys.executable, "scripts/kernel.py", "props"], {}, None))
+        # kernel.py props refuses with neither (exit 1): that read as upstream failing the patch
+        if shutil.which("bun") or shutil.which("opencode"):
+            runs.append(("python3 scripts/kernel.py props", [sys.executable, "scripts/kernel.py", "props"], {}, None))
+        else:
+            why.append("neither bun nor opencode is on PATH for the kernel's props")
     stray = [p for p in other if not p.startswith(("mod/", "opencode-plugin/", "kernel/"))]
     if stray:
         why.append(f"no runner for {', '.join(stray)} (only mod/, opencode-plugin/ and kernel/ have one)")
@@ -1180,6 +1184,20 @@ def upstream(root, kind, commit, slug) -> None:
     repo = _owner_repo(url)  # gh takes owner/repo, never a URL (gh repo fork <url> was printed)
     scope = _out(root, "log", "-1", "--format=%(trailers:key=Scope,valueonly,separator=%x2C)", sha).lower()
     tag = " (Scope: me)" if scope == "me" else ""  # a fact; the dialog says it at the send (#1322)
+    # what a rerun can't redo, recorded before the tests run: they can take minutes, and a run
+    # killed there (Claude's Bash stops at 2) left pr/<slug>, which a rerun refuses, with no
+    # prepared row for wb update and no body file (the #1329 review, 2026-11-25)
+    note_install(root)
+    with _noting() as noted:  # the local commit wb update later drops when its pull request merges
+        _table(noted, "prepared")[slug] = _ident(root, sha)
+    # the body outside the worktree: a file left in it is an uncommitted change send refuses
+    body, template = body_path(slug), wt / ".github/pull_request_template.md"
+    had = body.exists()
+    if repo and not had and template.is_file():
+        try:
+            shutil.copyfile(template, body)
+        except OSError as e:
+            raise PatchError(f"{body}: {e.strerror or e}") from None
     if picked.returncode:
         print(f"{pr} from {remote}'s {up[:7]} in {wt}: {what}{tag} conflicts there. Resolve it in that "
               "worktree, then git cherry-pick --continue, and go on below")
@@ -1195,9 +1213,6 @@ def upstream(root, kind, commit, slug) -> None:
     if not has_test(root, sha):
         print(NO_TEST_SEND)
     print("\n".join(proof))
-    note_install(root)
-    with _noting() as noted:  # the local commit wb update later drops when its pull request merges
-        _table(noted, "prepared")[slug] = _ident(root, sha)
     # each directory's own suite (#1328): the kernel's check when the patch touches kernel/ (#1356:
     # the suite holds the committed bundle offline, but only kernel.py check rebuilds it and runs
     # its props), the mod's, and the OpenCode plugin's (it imports the mod's shared core)
@@ -1208,11 +1223,6 @@ def upstream(root, kind, commit, slug) -> None:
         print(f"{remote} ({_shown_url(url)}) isn't on GitHub, and wb patch send sends only there: send it "
               "the way that project takes changes")
     else:
-        # the body outside the worktree: a file left in it is an uncommitted change send refuses
-        body, template = body_path(slug), wt / ".github/pull_request_template.md"
-        had = body.exists()
-        if not had and template.is_file():
-            shutil.copyfile(template, body)
         try:  # the evidence in the body, under its Tests run (#1329): the driver fills in the rest
             text = body.read_text(encoding="utf-8", errors="replace") if body.exists() else ""
             body.write_text(with_evidence(text, proof), encoding="utf-8")
