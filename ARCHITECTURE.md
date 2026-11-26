@@ -8695,20 +8695,25 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     /api/rpc/workbench/status` with `{"input": {}}` (`protocol/src/groups/rpc.ts`), by the TUI
     part as `ctx.client.rpc(Workbench).status({})`.
   - `tui.ts`: `{id: "workbench", setup}`. OpenCode's TUI loads it only for a server plugin that is
-    active (`tui/src/plugin/context.tsx`, `serverTuiPlugins`). It asks `status` and, when no wb
-    was found, shows one warning toast titled `Workbench` (`wb isn't at <path>, which the
+    active (`tui/src/plugin/context.tsx`, `serverTuiPlugins`). It asks `status` (`askStatus`: again
+    every `STATUS_MS` 0.5 s, `STATUS_TRIES` 30 times, as on a cold service the first call fails
+    `rpc.unavailable`, the location for `$HOME` booting on it and loading its plugins only after
+    answering: once the whole TUI went without its panel, footer and palette entry, #1488, the
+    owner's own machine, 2026-11-26) after setup has returned, never awaited in it (the TUI
+    activates its plugins one after another, and `ui.panel.open` works only once setup returned),
+    and, when no wb was found, shows one warning toast titled `Workbench` (`wb isn't at <path>, which the
     plugin's options name: run bin/wb setup --opencode in your Workbench clone`, or `this install
     of the plugin brings no wb, and OpenCode's PATH has none: opencode plugin add
     'github:a-schaefers/workbench#main' brings it, or bin/wb setup --opencode in a clone`, its
     `GET_WB`, `ocplugin.GET_WB` word for word); nothing when all is well (a healthy install is
     seen in the TUI's `/plugins`, or `opencode plugin list`), nothing when the server part
-    doesn't answer. A no-op under `WB_TASK`. First it starts the consent forms' part (`consentTui(ctx)`),
+    never answers (an older server, with no Workbench RPC). A no-op under `WB_TASK`. First it starts the consent forms' part (`consentTui(ctx)`),
     subscribes to the notices' toasts (`noticesTui`, *Notices on OpenCode*) and starts the child
-    sessions' import (`childrenTui`, below); then it imports `pane.tsx` (in setup, never at load:
-    OpenTUI and Solid are only the TUI's) and returns `mountPane`'s removal (the panel through
-    `mountSplash`, the sidebar section, the footer item, the palette entry) with the consent forms', the notices'
-    and the import's as its cleanup; a TUI that can't load the views sets up without them (those two cleanups
-    alone), said nowhere.
+    sessions' import (`childrenTui`, below) and returns their cleanup, with `mountPane`'s removal
+    once it has mounted; once `status` answers it imports `pane.tsx` (never at load: OpenTUI and
+    Solid are only the TUI's) and mounts it (the panel through `mountSplash`, the sidebar section,
+    the footer item, the palette entry); a TUI that can't load the views goes without them, said
+    nowhere. The cleanup's `ready`: that step's promise, for the tests.
   - `spans.ts` (#1333, slice 4c of #1296; pure, no OpenTUI or Solid, so Bun tests it bare): the
     cells the mod's `splash.ts` and `apprentice.ts` compute for Claude Code's Raster as rows of
     spans, one span a run of one fg and bg (`spans(cells, cols)`, `cellsOf` back, `words` for a

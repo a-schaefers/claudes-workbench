@@ -151,6 +151,7 @@ test('a TUI that can\'t load the OpenTUI views still sets the plugin up, with no
     }
     const stop = await tui.setup(ctx as never)  // the notices' cleanup alone (#1313)
     expect(typeof stop).toBe('function')
+    await (stop as unknown as { ready: Promise<void> }).ready  // the status asked, the views tried (#1488)
     ;(stop as () => void)()
   } finally {
     if (was !== undefined) process.env.WB_TASK = was
