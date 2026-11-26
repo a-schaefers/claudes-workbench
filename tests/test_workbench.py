@@ -22943,6 +22943,35 @@ class ScheduledRuns(Base):
         self.assertIn("skipped: significant role", run_wb("schedule", "list"))
         self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
 
+    def test_a_role_whose_key_is_only_exported_in_the_shell_is_noted_at_add_and_a_fire_without_it_is_skipped(self):
+        # #1495: wb writes no key into a unit, so a fire's every API start exited 3 (a backlog's
+        # headless Claude spending its turns on them), and a read there turned hosted.json's env
+        # row into "no key" for the web app's Settings and the terminal alike
+        from workbench import models, schedule
+        catalog = Path(self.tmp.name) / "catalog.json"
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", {"type": "env", "name": "XENV_API_KEY"})]}))
+        os.environ.update(WB_FAKE_CATALOG=str(catalog), WB_FAKE_API="xenv=env", XENV_API_KEY="xenv-not-a-real-key")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"significant": {
+            "via": "api", "api": "xenv/grok-9"}}}))
+        self.assertEqual(models.hosted(fresh=True)["xenv/grok-9"].key, "env:XENV_API_KEY")
+        out = self.add()
+        self.assertIn("note: the significant role's key is $XENV_API_KEY in your shell, which a fire gets "
+                      "only if your user manager has it (wb writes no key into a unit): `opencode auth "
+                      "login xenv` stores it, else such a fire is skipped", out)
+        self.assertIsNone(schedule.spend_skip())                     # where it is set, the fire runs
+        os.environ.pop("XENV_API_KEY")                                # the timer's (or the service's) environment
+        models.hosted(fresh=True)                                     # a read there keeps the terminal's row
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "env:XENV_API_KEY")
+        self.assertIn("$XENV_API_KEY isn't set where wb start ran",
+                      models.status(models.lookup("xenv/grok-9", cached=True))["why"])   # not "no key"
+        self.assertIn("$XENV_API_KEY isn't set", cli._route_pane()["providers"]["xenv"]["why"])  # Settings' row
+        self.assertEqual(schedule.spend_skip(), "significant role: its key is $XENV_API_KEY, which this fire's "
+                         "environment lacks (wb writes no key into a unit): store it with `opencode auth login xenv`")
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
     def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
         # the review of #1204: every fire on a date was batch night-<date>, so a second one took
         # the first's tasks (its row counted them again, its Claude was handed them to review),

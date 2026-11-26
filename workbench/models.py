@@ -1516,7 +1516,22 @@ def _build_hosted() -> dict:
                 continue
             provider(pid, url, prov.get("npm"), name=OLLAMA_CLOUD, key="ollama")
             found[mid] = {**spec, "name": str(spec.get("id") or name), "free": False, "cloud": True}
+    # a key from $VAR that this environment lacks: `auth list` lists no variable its reader's
+    # environment lacks, so this read says nothing of it. The web app's service (or a timer's
+    # fire) read "no key" over the terminal's env row, and Settings, the role change and the
+    # terminal's own reads said so until a fresh read there (#1495, 2026-11-26): the row stays
+    old = _read_hosted()
+    for pid, row in (old.get("providers") or {}).items():
+        if pid in gpu or not loads(pid) or not _env_unseen(row.get("key")) or (provs.get(pid) or {}).get("key"):
+            continue
+        provs[pid] = {**row, **(provs.get(pid) or {}), "key": row["key"]}
     return doc
+
+
+def _env_unseen(key) -> bool:
+    """A key source "env:<VAR>" whose variable this process's environment lacks (#1495)."""
+    key = str(key or "")
+    return key.startswith("env:") and not os.environ.get(key[4:], "").strip()
 
 
 def _read_hosted() -> dict:
@@ -1974,7 +1989,9 @@ def _fresh_key(m: Model) -> tuple[str, str]:
     name = (hit[1].get(m.provider) or {}).get("name") or provider_name(m)
     doc = _read_hosted()
     row = (doc.get("providers") or {}).get(m.provider)
-    if row is not None and key != row.get("key"):  # the provider's source: never a model's "none"
+    # the provider's source: never a model's "none", nor "" over a variable this environment
+    # lacks, which `auth list` can't see (#1495)
+    if row is not None and key != row.get("key") and not (not key and _env_unseen(row.get("key"))):
         doc = json.loads(json.dumps(doc))
         doc["providers"][m.provider].update(key=key, name=name)
         try:

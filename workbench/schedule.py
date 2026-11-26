@@ -457,8 +457,30 @@ def add(name: str, file: str | None, repo: str, at: str, turns: int | None = Non
                    "a fire fails until they are")
     if note := linger_note():
         out.append(f"note: {note}")
+    out += [f"note: {n}" for n in _env_key_notes()]
     if note := wsl_idle_note():
         out.append(f"note: {note}")
+    return out
+
+
+def _env_key_notes() -> list[str]:
+    """env_key_note for each role on API (#1495); none when routes.json can't be read (a fire
+    skips then, said in its row)."""
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        return []
+    out = []
+    for role in routes.ROLES:
+        mid = doc["roles"][role].get("api")
+        if routes.effective_via(doc, role) != "api" or not mid:
+            continue
+        try:
+            m = models.lookup(mid, cached=True)
+        except Exception:
+            m = None
+        if m is not None and (note := env_key_note(role, m)):
+            out.append(note)
     return out
 
 
@@ -544,9 +566,34 @@ def _fire_env(name: str) -> dict:
     return env
 
 
+def env_key_note(role: str, m) -> str | None:
+    """A role whose model's key is only $VAR in the shell (#1495): wb writes no key into a unit, so
+    a fire sees it only where the user manager has it. wb schedule add's note."""
+    from . import keyhole
+    if not str(m.key).startswith("env:"):
+        return None
+    return (f"the {role} role's key is ${m.key[4:]} in your shell, which a fire gets only if your user "
+            f"manager has it (wb writes no key into a unit): `{keyhole.login(m.provider)}` stores it, "
+            f"else such a fire is skipped")
+
+
+def _env_key_skip(role: str, m) -> str | None:
+    """Why a fire can't start ``m`` for want of its exported key here, else None: each of its wb
+    starts exited 3, a flow's items not_run and a backlog's headless Claude spent its turns on
+    them (#1495, 2026-11-26)."""
+    from . import keyhole
+    if m is None or not str(m.key).startswith("env:") or not (why := models.env_why(m.provider, m.key[4:])):
+        return None
+    if models._env_unseen(m.key):
+        return (f"{role} role: its key is ${m.key[4:]}, which this fire's environment lacks (wb writes "
+                f"no key into a unit): store it with `{keyhole.login(m.provider)}`")
+    return f"{role} role: {why}"
+
+
 def spend_skip() -> str | None:
     """Why tonight's fire is skipped for money: an API role (routes.effective_via) that meter.refusal
-    refuses: no day cap at all (meter.no_cap), today's spend at it, or no price. None when every
+    refuses: no day cap at all (meter.no_cap), today's spend at it, or no price; or whose key is
+    an exported variable this fire's environment lacks (_env_key_skip, #1495). None when every
     role is on the GPU, or each API role has room. routes.json unreadable is a skip too."""
     try:
         doc = routes.read()
@@ -568,7 +615,7 @@ def spend_skip() -> str | None:
             why = f"{role} role: API spend today is {meter.usd(t)} of the {meter.usd(cap)} day cap"
         else:
             why = None
-        if why:
+        if why := why or _env_key_skip(role, m):
             return why
     return None
 
@@ -651,7 +698,7 @@ def _tasks_of(batch: str) -> tuple[list[dict], float | None]:
 
 def fire(name: str) -> int:
     """`wb schedule fire`, the unit's command: one headless Claude run on the backlog, one runs.jsonl
-    row. Skips (a row saying why) while the last fire lives, or for money (spend_skip)."""
+    row. Skips (a row saying why) while the last fire lives, or for money or a key (spend_skip)."""
     s = read(name)
     if s is None:
         print(f"wb schedule fire: no schedule {name!r}", file=sys.stderr)
