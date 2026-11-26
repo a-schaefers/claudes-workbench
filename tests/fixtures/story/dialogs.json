@@ -1,0 +1,17 @@
+{
+  "//": "mod/hooks/waiting.ts's waitingFact, the one module both hosts import, under OpenCode's Bun (opencode-plugin/test/chat.test.ts; mod/hooks/waiting.test.ts has these inline, as a hooks test reads no file) and chat.driver_state's reading of the fact (tests/test_chat_driver.py), #1355: the oldest dialog up 2 s or more, `since` in seconds",
+  "cases": [
+    {"why": "none up", "now": 10000, "dialogs": [], "out": null},
+    {"why": "answered within 2 s (an auto-accept): never shown", "now": 11999, "dialogs": [{"kind": "permission", "tool": "Bash", "at": 10000}], "out": null},
+    {"why": "up 2 s: the fact", "now": 12000, "dialogs": [{"kind": "permission", "tool": "Bash", "at": 10000, "text": "rm -rf runs/*"}],
+     "out": {"kind": "permission", "tool": "Bash", "since": 10, "what": "rm -rf runs/*"}},
+    {"why": "the oldest is named, whatever the order", "now": 20000, "dialogs": [{"kind": "plan", "tool": "ExitPlanMode", "at": 15000}, {"kind": "question", "tool": "AskUserQuestion", "at": 12000}, {"kind": "permission", "tool": "Bash", "at": 17000}],
+     "out": {"kind": "question", "tool": "AskUserQuestion", "since": 12}},
+    {"why": "a settled one is no wait", "now": 20000, "dialogs": [{"kind": "permission", "tool": "Bash", "at": 1000, "done": true}, {"kind": "elicitation", "tool": "mcp:github", "at": 15000, "text": "Pick a repo"}],
+     "out": {"kind": "elicitation", "tool": "mcp:github", "since": 15, "what": "Pick a repo"}},
+    {"why": "a consent dialog (the host's own) waits too", "now": 9000, "dialogs": [{"kind": "consent", "tool": "workbench", "at": 5000}],
+     "out": {"kind": "consent", "tool": "workbench", "since": 5}},
+    {"why": "a kind wb doesn't name reads as a permission", "now": 9000, "dialogs": [{"kind": "form", "tool": "x", "at": 5000}],
+     "out": {"kind": "permission", "tool": "x", "since": 5}}
+  ]
+}

@@ -114,6 +114,15 @@ Final, from #1356's production plan (#1354), with the owner's ruling on the gate
     `offered_at` spends the period's offer for both.
   - **Ask stays in each host.** #1350 to #1352 removed most of the web chat's asks. What is left
     (`answersTo`, `sameCall`) matches each host's own delivery, which is code for one host.
+  - **The driver's wait stays out** (#1355, 2026-11-26): `mod/hooks/waiting.ts`'s `waitingFact`
+    picks the oldest of each host's own dialog records up 2 s or more, one fact out, no state
+    machine and no closed outcome to classify; both hosts import that one module, as they do the
+    keywords, and `tests/fixtures/story/dialogs.json` holds them to it. wb turns the fact into the
+    state line (`chat.driver_state`).
+  - **No words, ever** (#1355, amending #1356's draft, which had the wording of shared texts here):
+    a decision returns a key and facts, and the sentence is wb's (`workbench/story.py`), so a
+    wording patch needs no PureScript toolchain or `kernel.js` budget. `tests/test_story.py` fails on
+    a string of four or more words in hand-written `kernel/src`.
   - **Wire stays out.** The chat API's shapes are types, not decisions. They go in #1323's one
     shared types module, which the web app, the mod and the plugin import.
 

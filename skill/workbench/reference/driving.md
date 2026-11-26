@@ -96,9 +96,10 @@ once they use the chat (open it or write there) after they last used the termina
 prompt they answer there, means they are back. Your prompts (a permission, an AskUserQuestion
 question, a plan, an MCP server's form) are answered only in the terminal, never in the chat: the
 terminal is where work gets done, the chat is for a message in a pinch. While one waits, the chat
-shows one line, "Claude is waiting for you in the terminal" (a permission's adds "Run it with
-permissions granted to work from the chat"), at once while they're away, after half a minute
-while they're at the terminal; it clears when the prompt is answered. So while they're away,
+shows one line, "Claude is waiting for you in the terminal" and what it is, at the top, within
+seconds (a permission's adds the way to run you with permissions granted, to copy); their phone
+is notified at once while they're away, after half a minute while they're at the terminal; it
+clears when the prompt is answered. So while they're away,
 before a call that would prompt, tell them in the chat what you need and why: most work still goes
 on from the chat when they run you with permissions granted (their own permission mode and rules,
 the one policy). While they're away, AskUserQuestion and ExitPlanMode are refused (the mod does it):

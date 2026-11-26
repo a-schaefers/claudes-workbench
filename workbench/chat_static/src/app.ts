@@ -36,7 +36,6 @@
   // as a hint until dismissed on this device. load and save catch a storage that throws: there the
   // hint shows on each open, and a dismissal holds until the page is left
   let hintGone = load(K.hint, false) === true
-  $('hint-text').replaceChildren(...$('intro').querySelector('p')!.cloneNode(true).childNodes)
   function drawHint() { $('hint').hidden = hintGone || !$('intro').hidden || !!document.querySelector('.keyless') }
   $('hint-x').onclick = () => { hintGone = true; save(K.hint, true); drawHint() }
 
@@ -245,7 +244,8 @@
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     const pending = outbox.filter(o => !onServer.has(o.cid))
       .map(o => ({ id: 'local-' + o.cid, cid: o.cid, from: 'user', text: o.text, ts: o.ts, local: true, error: o.error, about: o.about, files: o.files }))
-    return [...state.messages].sort((x, y) => x.ts - y.ts).concat(pending)
+    // a notice (a dialog waiting in the terminal) is no row: the strip at the top says it (#1355)
+    return state.messages.filter(m => m.from !== 'notice').sort((x, y) => x.ts - y.ts).concat(pending)
   }
 
   // A reply Claude wrote to agents alone (`to` without "user", #1042) is no news for the user, as
@@ -327,10 +327,13 @@
       const b = document.createElement('button'); b.textContent = 'send again'
       b.onclick = () => { b.disabled = true; b.dataset.cid = newId(); resend(m, b.dataset.cid) }
       meta.append(b)
-    } else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : `Waiting for ${aSession(who)} · `)
-      + clock(m.ts)))
+    } else meta.append(span('tick', '✓'), span('', delivered(who) + clock(m.ts)))
     return meta
   }
+  // an unread message's line: delivered, behind a prompt in the terminal (the driver can't read it
+  // until that is answered, #1355), or waiting for a session
+  const delivered = (who: string) => !state.listener ? `Waiting for ${aSession(who)} · `
+    : state.driver && state.driver.state === 'waiting' ? storyText('receipt.blocked', driverKind()) + ' · ' : 'Delivered · '
 
   // another agent's message (#1042): its name, then the driver's receipt; never the user's to send again
   function agentMeta(meta: HTMLElement, m: Msg) {
@@ -338,7 +341,7 @@
     meta.append(span('agent-name', m.from), span('', ' · ' + (m.received
       ? (m.received.how === 'queued' ? `Queued for ${readBy(m)} · ` : `Read by ${readBy(m)} · `) + clock(m.received.ts)
       : m.expired ? `Not passed to ${who} · ` + clock(m.ts)
-      : (state.listener ? 'Delivered · ' : `Waiting for ${aSession(who)} · `) + clock(m.ts))))
+      : delivered(who) + clock(m.ts))))
     return meta
   }
 
@@ -605,23 +608,7 @@
   $('about-x').onclick = () => setAbout(null)
   setAbout(about)
 
-  // Claude waiting on a dialog in the terminal (#959, #1350): one line, with what a permission
-  // would run, and no buttons, since only the terminal answers it (#1340's decision)
-  function makeNotice(m: Msg) {
-    const row = document.createElement('div')
-    const b = document.createElement('div'); b.className = 'bubble'
-    b.append(span('notice-text', m.text))
-    if (m.what) { const c = document.createElement('code'); c.className = 'notice-what'; c.textContent = m.what; b.append(c) }
-    if (!seen.has(m.id) && !firstVisit) say(m.text + (m.what ? ' ' + m.what : ''))
-    if (document.hidden && !seen.has(m.id) && !firstVisit) { unread++; document.title = `(${unread}) Workbench` }
-    seen.add(m.id); save(K.seen, [...seen].slice(-500))
-    row.append(b, document.createElement('div'))
-    ;(row.lastChild as HTMLElement).className = 'meta'
-    return row
-  }
-
   function makeRow(m: Msg) {
-    if (m.from === 'notice') return makeNotice(m)
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
     if (m.about) row.append(span('about-tag', aboutTag(m.about)))
@@ -665,11 +652,63 @@
   function drawPresence() {
     const l = state.listener
     const where = l ? l.cwd.replace(/^\/home\/[^/]+/, '~') : ''
-    presence.className = 'presence ' + (live && !reachable ? 'down' : !l ? 'away' : l.busy ? 'working' : 'listening')
+    const waits = !!l && !!state.driver && state.driver.state === 'waiting'
+    presence.className = 'presence ' + (live && !reachable ? 'down' : !l ? 'away' : waits ? 'waiting' : l.busy ? 'working' : 'listening')
     presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !reachable ? 'computer unreachable · messages wait'
       : !l ? 'no session listening · messages wait' :
       // whom you talk to here (#103: a notification opened on "Claude"), the driver's name (#1319)
-      driverName() + ' · ' + (l.busy ? 'working in ' : 'listening in ') + where
+      driverName() + ' · ' + (waits ? 'waiting for you in the terminal' : (l.busy ? 'working in ' : 'listening in ') + where)
+    drawState()
+  }
+
+  // The state line (#1355): the driver's state at the top of the chat, the server's (chat.driver_state,
+  // in the story's words), while it asks something of the user: waiting on a prompt in the
+  // terminal (what it is, what to do, and for a permission the way to run with permissions granted,
+  // which Copy copies), or no session listening (how to start one). Only the terminal answers a
+  // prompt (#1350): Copy is its one button. It took the waiting line's place in the thread.
+  const stateLine = $('driver-state')
+  function drawState() {
+    const d = state.driver
+    const show = !!token && live && reachable && !!d && (d.state === 'waiting' || d.state === 'none')
+    stateLine.hidden = !show
+    if (!show || !d) { stateLine.dataset.key = ''; return }
+    const key = JSON.stringify([d.state, d.line, d.next, d.waiting && d.waiting.what, d.grant && d.grant.line])
+    if (stateLine.dataset.key === key) return
+    stateLine.dataset.key = key
+    stateLine.className = 'dstate ' + d.state
+    const parts: HTMLElement[] = []
+    if (d.state === 'waiting') parts.push(span('dstate-line', d.line))
+    if (d.waiting && d.waiting.what) { const c = document.createElement('code'); c.className = 'dstate-what'; c.textContent = d.waiting.what; parts.push(c) }
+    parts.push(span('dstate-next', d.next))
+    if (d.grant) {
+      const g = document.createElement('span'); g.className = 'dstate-grant'
+      storyInto(g, d.grant.line)
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'plain dstate-copy'; b.textContent = 'Copy'
+      b.setAttribute('aria-label', 'Copy ' + d.grant.command)
+      const cmd = d.grant.command
+      b.onclick = async () => { b.textContent = await copyText(cmd) ? 'Copied' : 'Copy failed'; setTimeout(() => { b.textContent = 'Copy' }, 1500) }
+      parts.push(g, b)
+    }
+    stateLine.replaceChildren(...parts)
+    if (d.state === 'waiting' && !firstVisit) say(d.line + (d.waiting && d.waiting.what ? ' ' + d.waiting.what : ''))
+  }
+
+  // The story's sentences on the page (#1355, story.ts, generated from workbench/story.py): each
+  // element with `data-story="<key>"` says that sentence for the driver listening (else the last
+  // that wrote, else any driver), its `code` spans as code
+  const driverKind = () => (state.driver && state.driver.driver) || 'any'
+  function storyInto(el: HTMLElement, text: string) {
+    el.replaceChildren(...text.split('`').map((part, i) => {
+      if (i % 2 === 0) return document.createTextNode(part)
+      const c = document.createElement('code'); c.textContent = part; return c
+    }))
+  }
+  let storyFor = ''
+  function drawStory() {
+    const kind = driverKind()
+    if (kind === storyFor) return
+    storyFor = kind
+    for (const el of document.querySelectorAll<HTMLElement>('[data-story]')) storyInto(el, storyText(el.dataset.story!, kind))
   }
 
   // ---- the connection ----
@@ -692,8 +731,9 @@
     if (s.build) build = s.build
     live = true; reachable = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
-    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], dictate: !!s.dictate }
-    drawTasks(); drawMic()
+    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], dictate: !!s.dictate,
+      driver: s.driver || null, settings: s.settings || null }
+    drawTasks(); drawMic(); drawStory()
     drawShown()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()

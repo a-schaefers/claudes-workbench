@@ -7478,7 +7478,8 @@ def cmd_chat(a):
             print(json.dumps(lst) if lst else "none")
             return
         try:
-            ok, claim = chat.hold(a.id, a.pid or 0, a.busy)
+            waiting = json.loads(a.waiting) if a.waiting else None
+            ok, claim = chat.hold(a.id, a.pid or 0, a.busy, waiting=waiting)
         except ValueError as e:
             die(f"wb chat listener: {e}")
         if not ok:
@@ -9751,6 +9752,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--pid", type=int, help=argparse.SUPPRESS)       # listener: the server's pid
     s.add_argument("--busy", action="store_true", help=argparse.SUPPRESS)  # listener: in a turn
     s.add_argument("--drop", action="store_true", help=argparse.SUPPRESS)  # listener: stop listening
+    s.add_argument("--waiting", help=argparse.SUPPRESS)  # listener: the dialog up in its terminal, JSON (#1355)
     s.add_argument("--away", action="store_true", help=argparse.SUPPRESS)  # ack: the user is away now
     s.add_argument("--if-owed", action="store_true", help=argparse.SUPPRESS)  # reply: owed ones only
     s.add_argument("--turn-answer", action="store_true", help="reply: the mod's: a turn's own answer, "

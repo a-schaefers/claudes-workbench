@@ -476,8 +476,14 @@ def _fresh(fresh: bool) -> dict:
 
 
 def rows(fresh: bool = False) -> list[dict]:
-    """Every admin row, in GROUPS' order; kept ROWS_CACHE_S, `fresh` reads again."""
-    return copy.deepcopy(_fresh(fresh)["rows"])
+    """Every admin row, in GROUPS' order; kept ROWS_CACHE_S, `fresh` reads again. A row changed
+    within CHANGED_FOR carries `changed` {ts, by}: its newest change (#1355)."""
+    out = copy.deepcopy(_fresh(fresh)["rows"])
+    last = changed()
+    for r in out:
+        if r.get("key") in last:
+            r["changed"] = last[r["key"]]
+    return out
 
 
 def reads(fresh: bool = False) -> dict:
@@ -600,14 +606,69 @@ def dry_run(key: str, value) -> tuple[int, str, str]:
     return (0 if ok else 3), out, err
 
 
-def record(before: dict, key: str, value, done: dict, by: str) -> dict:
+def _same(a, b) -> bool:
+    """Whether a row's value ``a`` and the value set ``b`` are one (`5` and `5.0`, None and "off")."""
+    na, nb = (None if v is None or (isinstance(v, str) and v.strip().lower() in ("", "off")) else v for v in (a, b))
+    if na is None or nb is None:
+        return na is nb
+    try:
+        return float(na) == float(nb)
+    except (TypeError, ValueError):
+        return str(na) == str(nb)
+
+
+def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
     """Append a change that went through to settings-changes.jsonl (chat.CHANGES): {ts, key,
-    label, from, to, said, help?, by}, ``before`` the row as it was. The mod tells Claude of the
-    web's (#1283); Claude's own (by "claude") it made itself."""
+    label, from, to, said, help?, by}, ``before`` the row as it was, and stamp chat/settings-rev.json
+    with it, which wakes every open page's stream (the page draws who changed what, #1355). The mod
+    tells Claude of the web's (#1283); Claude's own (by "claude") it made itself. None, nothing
+    written, for a choice or a number set to the value it had: no change to tell anyone of."""
+    if before.get("kind") in ("choice", "number") and _same(before.get("value"), value):
+        return None
     entry = {"ts": store.now(), "key": key, "label": before.get("label") or key, "from": before.get("value"),
              "to": value, "said": done["said"], **({"help": done["help"]} if done.get("help") else {}), "by": by}
     store.append_jsonl(chat.changes_path(), entry)
+    store.write_json(chat.chat_dir() / REV, {k: entry[k] for k in ("ts", "key", "label", "to", "by")})
     return entry
+
+
+# Who changed a setting, as the page shows it (#1355, "A Settings change made while Claude is
+# mid-turn, or by Claude itself, shows who changed what and when, and needs no reload"): each
+# row's newest change within CHANGED_FOR (`changed`), the newest CHANGES_SHOWN (`changes`), and
+# chat/settings-rev.json, the newest change's {ts, key, label, to, by}, which the chat's state
+# carries as `settings` so an open page reads its rows again. Last writer wins: no lock.
+REV = "settings-rev.json"  # under chat/ (chat.SETTINGS_REV, which the state reads)
+CHANGED_FOR = 7 * 86400
+CHANGES_SHOWN = 10
+CHANGES_TAIL = 64 << 10
+
+
+def changes(n: int = CHANGES_SHOWN) -> list[dict]:
+    """The newest ``n`` changes, newest first: {ts, key, label, from, to, by}."""
+    out = []
+    for r in reversed(store.read_jsonl_tail(chat.changes_path(), CHANGES_TAIL)):
+        if not isinstance(r, dict) or not isinstance(r.get("ts"), (int, float)) or not isinstance(r.get("key"), str):
+            continue
+        out.append({k: r.get(k) for k in ("ts", "key", "label", "from", "to", "by")})
+        if len(out) >= n:
+            break
+    return out
+
+
+def changed(now: float | None = None) -> dict[str, dict]:
+    """Each key's newest change within CHANGED_FOR: {key: {ts, by}}."""
+    now = store.now() if now is None else now
+    out: dict[str, dict] = {}
+    for r in store.read_jsonl_tail(chat.changes_path(), CHANGES_TAIL):
+        if isinstance(r, dict) and isinstance(r.get("key"), str) and isinstance(r.get("ts"), (int, float)) \
+                and now - r["ts"] <= CHANGED_FOR:
+            out[r["key"]] = {"ts": r["ts"], "by": str(r.get("by") or "")}
+    return out
+
+
+def rev() -> dict | None:
+    """chat/settings-rev.json: the newest change's {ts, key, label, to, by}, or None."""
+    return chat.settings_rev()
 
 
 # The settings offer (#1334, the OpenCode plugin's idle check; kernel/BOUNDARY.md: it stays in

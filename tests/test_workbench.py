@@ -24852,7 +24852,7 @@ class Setup(Base):
             imports.add(target)
         self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts",
                          "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts",
-                         "mod/hooks/keywords.ts"} <= imports)  # deep.ts's keywords (#1278)
+                         "mod/hooks/keywords.ts", "mod/hooks/waiting.ts"} <= imports)  # deep.ts's keywords (#1278), chat.ts's wait (#1355)
         # and every mod file the Git install brings is one the plugin needs, itself or through another
         self.assertEqual({f for f in root if f.startswith("mod/")}, {t for t in imports if t.startswith("mod/")})
 
@@ -24869,7 +24869,7 @@ class Setup(Base):
             self.assertEqual([p for p, _ in ocplugin.shared_files(clone)],
                              ["mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/kernel.js",
                               "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/splash.ts",
-                              "mod/hooks/tasks.ts"])
+                              "mod/hooks/tasks.ts", "mod/hooks/waiting.ts"])
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
             first = Path(self.plugins()[0]["package"])
