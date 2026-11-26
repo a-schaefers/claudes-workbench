@@ -1,0 +1,223 @@
+import { expect, test } from 'bun:test'
+import * as core from '../../mod/hooks/core.ts'
+import { autoCeiling, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, Upkeep, upkeep,
+  WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
+
+// The driver's conversation kept (#1315), against an in-memory WB_HOME, a fake wb and a fake
+// session API: `BUN_BE_BUN=1 opencode test opencode-plugin/test/upkeep.test.ts`.
+
+const HOME = '/state'
+// phases from the kernel's tables, never spelled here (scripts/kernel.py phase_literals): one under
+// way, one waiting on the driver, one closed
+const RUNNING = [...core.ACTIVE].find(p => core.phaseOf({ phase: p, parked: false }).running)!
+const WAITING = [...core.NEEDS].find(p => !core.ACTIVE.has(p) && core.phaseOf({ phase: p, parked: false }).waits)!
+const CLOSED = [...core.CLOSED][0]!
+
+function world(files: Record<string, string>, outs: Record<string, string> = {}, env: Record<string, string> = {}) {
+  const ran: { args: readonly string[]; session?: string; cwd?: string }[] = []
+  const io: Io = {
+    read: (p) => files[p],
+    list: (dir) => [...new Set(Object.keys(files).filter(p => p.startsWith(dir + '/')).map(p => p.slice(dir.length + 1).split('/')[0]!))],
+    run: async (args, opts) => { ran.push({ args, ...opts }); return { ok: true, out: outs[args.join(' ')] ?? '' } },
+    env: { HOME: '/h', ...env },
+    now: () => 1_000_000,
+  }
+  return { io, ran, files }
+}
+
+const task = (files: Record<string, string>, name: string, phase: string, session = 's1') => {
+  files[`${HOME}/tasks/${name}/status.json`] = JSON.stringify({ phase })
+  files[`${HOME}/tasks/${name}/task.json`] = JSON.stringify({ name, session })
+}
+
+function entriesHost(list: { key: string; value: unknown }[] = []) {
+  const calls: string[] = []
+  const compacted: string[] = []
+  const host = {
+    options: {},
+    session: {
+      hook: async () => ({ dispose: async () => {} }),
+      compact: async ({ sessionID }: { sessionID: string }) => { compacted.push(sessionID) },
+      instructions: { entry: {
+        list: async () => ({ data: list }),
+        put: async ({ key, value }: { key: string; value: string }) => { calls.push(`put ${key}: ${value.split('\n')[0]}`) },
+        remove: async ({ key }: { key: string }) => { calls.push(`remove ${key}`) },
+      } },
+    },
+    event: { subscribe: async function* () {} },
+    model: { list: async () => ({ data: [{ providerID: 'p', id: 'm', limit: { context: 100_000, output: 8_000 } }] }) },
+  }
+  return { host: host as unknown as UpkeepHost, calls, compacted }
+}
+
+function rules(files: Record<string, string>) {
+  files[`${HOME}/notes.md`] = 'Always run the tests.\n'
+  files[`${HOME}/coding.json`] = JSON.stringify({ mode: 'only' })
+  files[`${HOME}/workflows.json`] = JSON.stringify({ mode: 'on' })
+  files['/h/.config/workbench/routes.json'] = JSON.stringify({ roles: { significant: { via: 'api', api: 'p/m' } } })
+}
+
+test("a Workbench session's entries are the kernel's blocks under the mod's names, each put once", async () => {
+  const w = world({}, { route: 'significant  API p/m', status: 't1  running' })
+  rules(w.files)
+  task(w.files, 't1', RUNNING)
+  task(w.files, 't2', RUNNING, 's2') // another session's: never this one's
+  const { host, calls } = entriesHost([{ key: 'workbench-routes', value: 'stale' }, { key: 'someone-else', value: 'x' }])
+  const u = new Upkeep(core, host, w.io, HOME)
+  u.setAgent(u.sess('s1'), 'workbench')
+  await u.refresh('s1')
+  // tellPlan's order, the mod's block names (SKILL.md names them); a stale one of ours replaced,
+  // another plugin's left alone
+  expect(calls.map(c => c.slice(0, c.indexOf(':')))).toEqual(['put workbench-mode', 'put claude-coding', 'put user-notes',
+    'put dynamic-workflows', 'put workbench-routes', 'put workbench'])
+  const said = new Map(u.sess('s1').put)
+  expect(said.get('workbench-mode')).toBe(MODE_NOTE)
+  expect(said.get('claude-coding')).toBe(CODING_RULES.only)
+  expect(said.get('user-notes')).toBe("The user's delegation notes (`wb notes`):\nAlways run the tests.")
+  expect(said.get('dynamic-workflows')).toBe(WORKFLOWS_RULE)
+  expect(said.get('workbench-routes')!.split('\n').slice(0, 2)).toEqual(["Roles (the user's, `wb route`):", 'significant  API p/m'])
+  expect(said.get('workbench')!.split('\n').slice(0, 2)).toEqual(['Tasks delegated to agents with wb (your Workbench instructions) are open:', 't1  running'])
+  expect(said.has('someone-else')).toBe(false) // never ours to list, put or remove
+  // wb status ran as the session; nothing again while nothing changed
+  expect(w.ran.filter(r => r.args[0] === 'status')).toEqual([{ args: ['status'], session: 's1', cwd: '' }])
+  calls.length = 0
+  await u.refresh('s1')
+  expect(calls).toEqual([])
+  expect(w.ran.filter(r => r.args[0] === 'status').length).toBe(1) // read again only when its tasks change
+  // with the entries API, the requests carry none of it themselves: OpenCode sends the entries
+  const system: { type: 'text'; text: string }[] = []
+  await u.context({ sessionID: 's1', agent: 'workbench', system })
+  expect(system).toEqual([])
+})
+
+test("switching away from the Workbench agent drops the mode's blocks, and nothing open drops the rest", async () => {
+  const w = world({}, { route: 'significant  API p/m', status: 't1  running' })
+  rules(w.files)
+  task(w.files, 't1', RUNNING)
+  const { host, calls } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  u.setAgent(u.sess('s1'), 'workbench')
+  await u.refresh('s1')
+  calls.length = 0
+  // OpenCode says the removal to the model itself ("… no longer applies"): the mod's midway row
+  await u.event({ type: 'session.agent.selected', data: { sessionID: 's1', agent: 'build' } })
+  expect(calls).toEqual(['remove workbench-mode', 'remove user-notes'])
+  calls.length = 0
+  task(w.files, 't1', CLOSED)
+  await u.refresh('s1')
+  expect(calls.sort()).toEqual(['remove claude-coding', 'remove dynamic-workflows', 'remove workbench', 'remove workbench-routes'])
+})
+
+test('a switch to the Workbench agent puts its blocks before the session makes a request', async () => {
+  const w = world({})
+  const { host, calls } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  await u.event({ type: 'session.agent.selected', data: { sessionID: 's5', agent: 'build' } })
+  expect(calls).toEqual([]) // a session no hook named, on another agent: not this part's
+  await u.event({ type: 'session.agent.selected', data: { sessionID: 's5', agent: 'workbench' } })
+  expect(calls).toEqual([`put workbench-mode: ${MODE_NOTE}`])
+})
+
+test('the blocks follow the kernel: no roles block without an API role, the default coding said by nothing', () => {
+  const want = { notes: '', wakeOff: false, coding: 'decide', routes: '', workflows: 'off' }
+  expect(blocksOf(core, want, true, '', '').map(b => b[0])).toEqual(['workbench-mode'])
+  expect(blocksOf(core, want, false, '', '')).toEqual([])
+  expect(blocksOf(core, { ...want, coding: 'ask' }, false, '', 't1').map(b => b[0])).toEqual(['claude-coding', 'workbench'])
+})
+
+test("without OpenCode's entries API the blocks go into the session's own requests' system prompt", async () => {
+  const w = world({}, { route: 'significant  API p/m' })
+  rules(w.files)
+  const { host } = entriesHost()
+  delete (host.session as { instructions?: unknown }).instructions
+  const u = new Upkeep(core, host, w.io, HOME)
+  const system: { type: 'text'; text: string }[] = []
+  await u.context({ sessionID: 's1', agent: 'workbench', system })
+  expect(system.map(p => p.text.split('\n')[0])).toEqual(['<context key="workbench-mode">', '<context key="claude-coding">',
+    '<context key="user-notes">', '<context key="dynamic-workflows">', '<context key="workbench-routes">'])
+  const other: { type: 'text'; text: string }[] = []
+  await u.context({ sessionID: 's2', agent: 'build', system: other })
+  expect(other).toEqual([])
+})
+
+// a session in the mode, its task t1 open at one look and closed at the next, the last step's
+// prompt `tokens` long, on a 100K window (OpenCode compacts by itself at 84K)
+async function boundary(tokens: number, opts: { env?: Record<string, string>; agent?: string; also?: string; model?: string } = {}) {
+  const w = world({}, {}, opts.env)
+  task(w.files, 't1', RUNNING)
+  if (opts.also) task(w.files, 't9', opts.also)
+  const { host, compacted } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  await u.context({ sessionID: 's1', agent: opts.agent ?? 'workbench', model: { providerID: 'p', id: opts.model ?? 'm' }, system: [] })
+  await u.event({ type: 'session.execution.started', data: { sessionID: 's1' } })
+  await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
+  expect(compacted).toEqual([]) // nothing closed yet
+  task(w.files, 't1', CLOSED)
+  await u.event({ type: 'session.execution.started', data: { sessionID: 's1' } })
+  await u.event({ type: 'session.step.ended', data: { sessionID: 's1', tokens: { input: tokens - 20_000, output: 900, reasoning: 0, cache: { read: 20_000, write: 0 } } } })
+  await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
+  const first = [...compacted]
+  await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } }) // checked once
+  return { first, compacted }
+}
+
+test("a task closing compacts the Workbench session once it is halfway to OpenCode's own compaction", async () => {
+  expect(autoCeiling(100_000)).toBe(84_000)
+  expect(promptTokens({ input: 1, output: 5, cache: { read: 2, write: 3 } })).toBe(6)
+  const past = await boundary(43_000)
+  expect(past.first).toEqual(['s1'])
+  expect(past.compacted).toEqual(['s1'])
+  expect((await boundary(41_000)).compacted).toEqual([])
+})
+
+test('the boundary compaction follows WB_COMPACT_AT, waits for every task waiting on the driver, and is the mode\'s alone', async () => {
+  expect((await boundary(1_000, { env: { WB_COMPACT_AT: '1' } })).first).toEqual(['s1'])
+  expect((await boundary(80_000, { env: { WB_COMPACT_AT: '0' } })).compacted).toEqual([])
+  expect((await boundary(80_000, { also: WAITING })).compacted).toEqual([])
+  expect((await boundary(80_000, { agent: 'build' })).compacted).toEqual([])
+  // a model whose window OpenCode doesn't list: never compacted early, as OpenCode never compacts it
+  expect((await boundary(80_000, { model: 'unlisted' })).compacted).toEqual([])
+})
+
+test('a compaction of a session that delegated, with a task of its own open, is told what to keep, once', async () => {
+  const w = world({})
+  task(w.files, 't1', RUNNING)
+  const { host } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  const system: { type: 'text'; text: string }[] = []
+  u.setAgent(u.sess('s1'), 'build')
+  u.compaction({ sessionID: 's1', system })
+  expect(system).toEqual([]) // a session never in the mode here
+  u.setAgent(u.sess('s1'), 'workbench')
+  u.compaction({ sessionID: 's1', system })
+  u.compaction({ sessionID: 's1', system })
+  expect(system).toEqual([{ type: 'text', text: KEEP_ON_COMPACT }])
+  task(w.files, 't1', CLOSED)
+  const none: { type: 'text'; text: string }[] = []
+  u.compaction({ sessionID: 's1', system: none })
+  expect(none).toEqual([])
+})
+
+test("a session's open tasks are those wb start recorded for it, active or waiting on it, never a bench replay", () => {
+  const w = world({})
+  task(w.files, 'a', RUNNING)
+  task(w.files, 'b', WAITING)
+  task(w.files, 'c', CLOSED)
+  task(w.files, 'd', RUNNING, 's2')
+  w.files[`${HOME}/tasks/e/status.json`] = JSON.stringify({ phase: RUNNING })
+  w.files[`${HOME}/tasks/e/task.json`] = JSON.stringify({ name: 'e', session: 's1', bench: true })
+  expect(openTasks(core, w.io, HOME, 's1').map(t => t.name)).toEqual(['a', 'b'])
+})
+
+test('the setup takes the kernel from the membrane and registers the prompt, context and compaction hooks', async () => {
+  const hooks: string[] = []
+  const stop = await upkeep({
+    options: {},
+    session: { hook: async (name: string) => { hooks.push(name); return { dispose: async () => {} } } },
+    event: { subscribe: async function* () {} },
+  } as unknown as UpkeepHost)
+  expect(hooks).toEqual(['prompt', 'context', 'compaction'])
+  await stop!()
+  // a server without the session hooks or the event stream: nothing
+  expect(await upkeep({ options: {} } as unknown as UpkeepHost)).toBeUndefined()
+})

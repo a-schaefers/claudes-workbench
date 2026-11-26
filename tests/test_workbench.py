@@ -35286,6 +35286,51 @@ class RealOpenCodePlugin(Base):
         self.assertNotIn("run_in_background", sent[0])
         self.assertNotIn("an OpenCode agent writes", sent[1])        # Build's requests never carry it
 
+    def test_a_workbench_sessions_rules_reach_its_model_as_context_entries_and_its_quit_leaves_the_mode(self):
+        # #1315: the mod's context blocks are session instruction entries on OpenCode
+        # (opencode-plugin/upkeep.ts), put by the prompt hook before the turn, so its first request
+        # carries them; /workbench-quit (commands.ts) stops the session's agents as that session,
+        # switches it to Build, and the entries the mode wanted go
+        from workbench import chat, ocplugin
+        chat.set_on(False)  # the prompt reaches the chat part too (see the test above)
+        os.environ["HOME"] = str(self.root / "home")  # no routes.json of the user's
+        state = self.root / "wb-state"
+        state.mkdir()
+        (state / "coding.json").write_text(json.dumps({"mode": "only"}))
+        (state / "notes.md").write_text("- Always run the tests.\n")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = self.root / "requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out)])
+        self.addCleanup(lambda: (server.kill(), server.wait()))
+        self.conf.write_text(json.dumps({
+            "plugins": [{"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(state)}}}],
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 131072, "output": 1024}}}}}}))
+        url = self.serve(WB_HOME="")
+        self.listed(url, ocplugin.PLUGIN_ID)
+        self.ask(url, "run", "--agent", "workbench", "-m", "cap/cap", "--format", "json", "say ok")
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        sent = [json.dumps(r["messages"]) for r in reqs if r.get("tools")]   # not the title request
+        self.assertTrue(sent, reqs)
+        for key in ("workbench-mode", "claude-coding", "user-notes"):
+            self.assertIn(f'context key=\\"{key}\\"', sent[0])
+        self.assertIn("Only when I say", sent[0])
+        self.assertIn("Always run the tests.", sent[0])
+        sid = json.loads(self.ask(url, "api", "GET", "/api/session"))["data"][0]["id"]
+        entries = lambda: sorted(e["key"] for e in json.loads(  # noqa: E731
+            self.ask(url, "api", "GET", f"/api/experimental/session/{sid}/instructions/entries"))["data"])
+        self.assertEqual(entries(), ["claude-coding", "user-notes", "workbench-mode"])
+        self.ask(url, "api", "POST", f"/api/session/{sid}/command", "-d", json.dumps({"name": "workbench-quit", "text": ""}))
+        self.assertEqual(json.loads(self.ask(url, "api", "GET", f"/api/session/{sid}"))["data"].get("agent"), "build")
+        end = time.monotonic() + 30     # the switch's event refreshes them: nothing open, nothing wanted
+        while (left := entries()) and time.monotonic() < end:
+            time.sleep(0.5)
+        self.assertEqual(left, [])
+
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCodeSkillFiles(Base):
