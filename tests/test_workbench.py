@@ -35229,6 +35229,46 @@ class RealOpenCodePlugin(Base):
         time.sleep(3)
         self.assertEqual(len({r["id"] for r in ours()}), 1)
 
+    def test_a_web_settings_change_with_help_gets_one_offer_in_the_session_the_user_typed_in(self):
+        # #1334's live acceptance: once a turn ended here, a `help` row in settings-changes.jsonl
+        # is offered once, in the session the user last typed in, and the mark keeps a second
+        # look from offering it again
+        from workbench import ocplugin
+        home = self.root / "wb-state"
+        self.conf.write_text(json.dumps({"enabled_providers": ["none-such"], "plugins": [{"package": str(ocplugin.DIR),
+                                         "options": {"wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(home)}}}]}))
+        url = self.serve(WB_HOME="")
+        self.listed(url, ocplugin.PLUGIN_ID)
+        sid = json.loads(self.ask(url, "api", "POST", "/api/session", "-d",
+                                  json.dumps({"location": {"directory": str(self.project)}})))["data"]["id"]
+        os.environ["WB_HOME"] = str(home)
+
+        def offers() -> list:
+            got = []
+            for path in (f"/api/session/{sid}/inbox", f"/api/session/{sid}/message"):
+                out = json.loads(self.ask(url, "api", "GET", path) or "{}")
+                rows = out.get("data", out) if isinstance(out, dict) else out
+                for r in (rows if isinstance(rows, list) else rows.get("items", []) if isinstance(rows, dict) else []):
+                    meta = (r.get("metadata") or r.get("payload", {}).get("metadata") or {}) if isinstance(r, dict) else {}
+                    if meta.get("source") == "workbench.notice" and meta.get("kind") == "settings":
+                        got.append(r)
+            return got
+        # the user types here: the prompt hook names the session, and the turn (no provider) ends
+        self.ask(url, "api", "POST", f"/api/session/{sid}/prompt", "-d", json.dumps({"text": "hello"}))
+        ts = store.now()
+        store.append_jsonl(store.home() / "settings-changes.jsonl", {
+            "ts": ts, "by": "web", "key": "probe", "label": "Probe", "from": False, "to": True,
+            "help": "It needs the probe tool installed."})
+        end = time.monotonic() + 90
+        while not offers():
+            self.assertLess(time.monotonic(), end, self.ask(url, "api", "GET", f"/api/session/{sid}"))
+            time.sleep(0.5)
+        self.assertEqual(store.read_json(store.home() / "settings-offered.json", {}).get("ts"), ts)
+        time.sleep(20)  # past the next timer look (SCAN_MS 15 s)
+        got = offers()
+        self.assertEqual(len({r["id"] for r in got}), 1, got)
+        self.assertIn("The user changed Probe from", json.dumps(got[0]))
+
     def test_a_real_opencode_loads_wb_setup_opencodes_copy_and_never_the_clones_live_edits(self):
         # #1321's finding 16: OpenCode watches a configured local plugin and reloads it on every
         # change, so an entry on the clone's opencode-plugin/ ran each save. The entry names a

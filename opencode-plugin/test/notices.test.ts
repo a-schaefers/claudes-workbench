@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  AWAY_TAIL, MIDTURN_NOTE, NoticeLane, SOURCE, WorkbenchNotices, noticeId, notices, routesPath, wakeText,
+  AWAY_TAIL, JOB_MS, MIDTURN_NOTE, NoticeLane, SOURCE, WorkbenchNotices, noticeId, notices, routesPath, wakeText,
 } from '../notices.ts'
 import { QUIET_MS } from '../jobs.ts'
 import { shown } from '../notices-tui.ts'
@@ -21,6 +21,7 @@ type Synth = { sessionID: string; id?: string; text: string; delivery?: string; 
 function world(opts: { wake?: boolean; ack?: number; failSynthetic?: boolean } = {}) {
   const files: Record<string, string> = {}
   const calls: string[] = []
+  const limits: Record<string, number | undefined> = {} // each call's time limit, by its line
   const admitted: Synth[] = []      // what the inbox holds: one per id
   const offered: Synth[] = []       // every call to synthetic, a resend too
   const toasts: { key: string; message: string; sessionID: string; notify: boolean }[] = []
@@ -35,9 +36,10 @@ function world(opts: { wake?: boolean; ack?: number; failSynthetic?: boolean } =
     'optimize start --if-due': { code: 0, out: 'not due' },
   }
   const lane = new NoticeLane({
-    run: async (args, session) => {
+    run: async (args, session, timeoutMs) => {
       const line = args.join(' ')
       calls.push(session ? `${line} @${session}` : line)
+      limits[args[0] === 'ack' ? 'ack' : line] = timeoutMs
       if (args[0] === 'ack' && !args.includes('--if')) return { code: opts.ack ?? 0, out: '' }
       return answers[line] ?? { code: 0, out: '' }
     },
@@ -68,7 +70,7 @@ function world(opts: { wake?: boolean; ack?: number; failSynthetic?: boolean } =
     files[f] = (files[f] ?? '') + JSON.stringify(row) + '\n'
   }
   return {
-    lane, files, calls, admitted, offered, toasts, task, notify,
+    lane, files, calls, limits, admitted, offered, toasts, task, notify,
     tick: (ms: number) => { clock += ms },
     get now() { return clock },
     acks: () => calls.filter(c => c.startsWith('ack ')),
@@ -127,7 +129,8 @@ test('a subagent\'s task wakes its driver, the root session', async () => {
 test('another server\'s or Claude Code\'s task is left alone: no ack, no toast', async () => {
   const w = world()
   w.task('elsewhere', P.review, {}, 'ses_gone')                      // not in this store
-  w.task('claude', P.review, { driver: undefined, session: 'abc' })  // a Claude Code task
+  // a Claude Code task, in a session this store holds: only its driver keeps it out
+  w.task('claude', P.review, { driver: { tool: 'claude' } }, 'ses_two')
   w.notify({ task: 'elsewhere', kind: P.review, ts: w.now / 1000, text: '' })
   w.notify({ task: 'claude', kind: P.review, ts: w.now / 1000 + 1, text: '' })
   await w.lane.scan()
@@ -247,6 +250,19 @@ test('the jobs: the update check after a turn, the model check after a quiet min
   expect(w.toasts.map(t => t.key)).toEqual(['scout'])
 })
 
+test('the jobs\' wb calls get the mod\'s two minutes, as the update check fetches; an ack keeps the short limit', async () => {
+  const w = world()
+  w.task('t1', P.review)
+  w.notify({ task: 't1', kind: P.review, ts: w.now / 1000, text: '' })
+  await w.lane.scan()
+  w.tick(13 * 3600_000)
+  await w.lane.ended('ses_drv')
+  await new Promise(r => setTimeout(() => r(undefined), 5))
+  expect(w.limits['update --check --if-due']).toBe(JOB_MS)
+  expect(w.limits['optimize start --if-due']).toBe(JOB_MS)
+  expect('ack' in w.limits && w.limits.ack === undefined).toBe(true)
+})
+
 test('a settings change with help is offered once, in the session the user typed in', async () => {
   const w = world()
   w.files[`${HOME}/settings-changes.jsonl`] = '{"ts": 1}\n'
@@ -264,7 +280,7 @@ test('a settings change with help is offered once, in the session the user typed
   await w.lane.scan()
   await w.lane.scan()
   expect(w.calls.filter(c => c.startsWith('settings'))).toEqual(['settings offers --if-due --json @ses_two'])
-  expect(w.admitted.map(s => [s.sessionID, s.delivery, s.resume])).toEqual([['ses_two', 'queue', undefined], ['ses_two', 'queue', false]])
+  expect(w.admitted.map(s => [s.sessionID, s.delivery, s.resume])).toEqual([['ses_two', 'queue', undefined], ['ses_two', 'steer', false]])
   expect(w.toasts.map(t => t.message)).toEqual(['probe changed'])
   // another listener's live claim: that host says them
   w.files[`${HOME}/chat/listener.json`] = JSON.stringify({ session: 'cc', pid: 999 })

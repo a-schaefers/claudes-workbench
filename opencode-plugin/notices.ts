@@ -26,7 +26,8 @@ import { Jobs } from './jobs.ts'
 
 export const SCAN_MS = 15_000          // the timer's look: held notices, the rewake net, the jobs
 export const EARS_RETRY_MS = 2_000     // wb events respawned this long after it ends, doubling to a minute
-export const RUN_MS = 15_000           // a wb call's limit
+export const RUN_MS = 15_000           // a wb call's limit (ack, chat away)
+export const JOB_MS = 120_000          // a background job's (jobs.ts): the mod's runWb, as `wb update --check` fetches
 export const NOTIFY_TAIL = 1 << 20     // the mod's: far more than an hour of notices
 export const SOURCE = 'workbench.notice' // our synthetic messages' metadata `source`
 // The kinds a desktop notification goes with too, and their toasts' look. Keyed by the kinds' bare
@@ -150,7 +151,7 @@ export function noticeId(task: string, kind: string, ts: number): string {
 // ---- the lane
 
 export interface Ran { readonly code: number; readonly out: string }
-export type Run = (args: readonly string[], session?: string) => Promise<Ran>
+export type Run = (args: readonly string[], session?: string, timeoutMs?: number) => Promise<Ran>
 
 // plugin/src/promise/session.ts's domain, the parts used here (client types.ts
 // `SessionSyntheticInput`: `id` the inbox id, `delivery` steer or queue, `resume` false: no wake)
@@ -492,7 +493,7 @@ export const WorkbenchNotices = {
 // wb, as the plugin runs it: the options' wb and WB_* paths, never as Claude Code or an agent,
 // as the OpenCode session ``session`` when given (chat.ts's runner, with the exit status)
 export function wbRun(options: Options, base: Record<string, string | undefined> = process.env): Run {
-  return (args, session) => new Promise(done => {
+  return (args, session, timeoutMs = RUN_MS) => new Promise(done => {
     const env: Record<string, string | undefined> = { ...wbEnv(options, base) }
     for (const k of ['CLAUDECODE', 'CLAUDE_PID', 'CLAUDE_CODE_SESSION_ID', 'WB_TASK', 'OPENCODE_SESSION_ID']) delete env[k]
     if (session) env.OPENCODE_SESSION_ID = session
@@ -500,7 +501,7 @@ export function wbRun(options: Options, base: Record<string, string | undefined>
     if (!found.found) return done({ code: 127, out: `wb not found (${found.wb})` })
     let out = ''
     const child = spawn(found.wb, [...args], { env, stdio: ['pipe', 'pipe', 'pipe'] })
-    const timer = setTimeout(() => child.kill('SIGKILL'), RUN_MS)
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
     child.stdout.on('data', b => { out += String(b) })
     child.on('error', e => { clearTimeout(timer); done({ code: 127, out: String(e) }) })
     child.on('close', code => { clearTimeout(timer); done({ code: code ?? 1, out: out.trim() }) })

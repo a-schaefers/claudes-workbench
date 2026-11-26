@@ -8339,7 +8339,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   API, *The web chat on OpenCode*; wb's side in `tests/test_chat_opencode.py`),
   `opencode-plugin/test/notices.test.ts` (the notices' lane and the jobs against an in-memory state
   dir, a fake wb and session API, and the TUI's toasts: *Notices on OpenCode*), `RealOpenCodePlugin`'s
-  `test_a_review_notice_reaches_its_session_once_and_a_resend_under_its_id_adds_nothing`, `Setup`'s
+  `test_a_review_notice_reaches_its_session_once_and_a_resend_under_its_id_adds_nothing` and
+  `test_a_web_settings_change_with_help_gets_one_offer_in_the_session_the_user_typed_in` (#1334's
+  live acceptance: a prompt with no provider, then a `help` row), `Setup`'s
   `test_the_plugins_copy_carries_the_kernels_membrane_and_a_kernel_rebuilt_alone_makes_a_new_one`, and
   `opencode-plugin/test/plugin.test.ts` (`BUN_BE_BUN=1 opencode test opencode-plugin/test`:
   both parts' shape and id, nothing touched under `WB_TASK` (a proxy context that records every
@@ -8464,7 +8466,9 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
 `--if-due`, the idle hook checks them and shows a toast). `Jobs.tick` runs at the end of each of the
 notices' looks once a turn ended here (`sawTurn`) and `wb events` said hello; "quiet" is no task
 anywhere active and none of this server's waiting on its driver within rewake's 12 hours
-(`rewakePlan`'s `recent`: the mod's `quietForJobs`).
+(`rewakePlan`'s `recent`: the mod's `quietForJobs`). Each job's wb call has `JOB_MS` (two minutes,
+the mod's `runWb`), not the lane's `RUN_MS` 15 s: `wb update --check` fetches, and its `checked_at`
+is written before the fetch, so a killed check lost the week's (the 2026-11-26 review).
 - `wb update --check --if-due`, once a load: `update available …` and the marketplace clone's
   local changes (`LOCAL_CHANGES`, patches.CHECK_LINE's opening) toasted as wb says them.
 - `wb optimize start --if-due`, once a load, quiet: `measuring …` toasted.
@@ -8477,8 +8481,9 @@ anywhere active and none of this server's waiting on its driver within rewake's 
   (Claude Code's mod or another server says them) and not before a session is there (the rows wait):
   each offer toasted and, wakes on, a queued synthetic turn (`[workbench] The user changed …\n<help>\n
   Offer to help with it, and install or change nothing without their yes.`, its id `noticeId(
-  "settings:<key>", "offer", ts)`); the other rows one synthetic with `resume: false`, which the
-  next turn reads without one of its own.
+  "settings:<key>", "offer", ts)`); the other rows one synthetic steer with `resume: false`:
+  OpenCode publishes pending steers with the next turn's own (the user's prompt), so that turn reads
+  it, with no turn of its own (a queued one is promoted alone after it, 2.4.1's inbox `promote`).
 
 ### The web chat on OpenCode
 

@@ -16,11 +16,11 @@
 //   grew, into the session the web chat listens to here, else the one the user last typed in, and
 //   never while another listener's claim stands (that host says them); a change with help is a
 //   queued turn that offers to set it up, and toasted; the rest a note the next turn reads
-//   (`resume: false`: no turn of its own). Wakes off, the offers are toasted only.
+//   (a steer with `resume: false`: published with the user's next prompt, no turn of its own). Wakes off, the offers are toasted only.
 // "Quiet": no task anywhere active, and none of this server's waiting on its driver lately
 // (rewakePlan's `recent`): the mod's quietForJobs.
 import { ACTIVE, rewakePlan } from '../mod/hooks/core.ts'
-import { noticeId, type NoticeLane, type Row } from './notices.ts' // a cycle: used only at call time
+import { JOB_MS, noticeId, type NoticeLane, type Row } from './notices.ts' // a cycle: used only at call time
 
 export const QUIET_MS = 60_000
 export const LOCAL_CHANGES = 'local changes in the marketplace clone' // patches.CHECK_LINE's opening (the mod's)
@@ -50,7 +50,7 @@ export class Jobs {
     const quiet = this.quiet(now, list)
     if (!this.updateAsked) {
       this.updateAsked = true
-      void l.deps.run(['update', '--check', '--if-due']).then(r => {
+      void l.deps.run(['update', '--check', '--if-due'], undefined, JOB_MS).then(r => {
         if (r.code === 0 && (r.out.startsWith('update available') || r.out.includes(LOCAL_CHANGES))) {
           l.toast('update', r.out, '', false)
         }
@@ -58,13 +58,13 @@ export class Jobs {
     }
     if (!this.optimizeAsked && quiet) {
       this.optimizeAsked = true
-      void l.deps.run(['optimize', 'start', '--if-due']).then(r => {
+      void l.deps.run(['optimize', 'start', '--if-due'], undefined, JOB_MS).then(r => {
         if (r.code === 0 && r.out.startsWith('measuring')) l.toast('optimize', r.out, '', false)
       }, () => {})
     }
     if (!this.scoutAsked && quiet && idle && l.deps.wake && l.delegated.size && now - l.turnEndedAt >= QUIET_MS) {
       this.scoutAsked = true
-      const r = await l.deps.run(['scout', '--if-due'])
+      const r = await l.deps.run(['scout', '--if-due'], undefined, JOB_MS)
       if (r.code === 0 && r.out) l.toast('scout', r.out, '', false)
     }
     await this.offers()
@@ -89,7 +89,7 @@ export class Jobs {
     if (size < 0 || size === this.changesSize) return
     const sid = this.target()
     if (!sid) return // read again once a session here can take them
-    const r = await l.deps.run(['settings', 'offers', '--if-due', '--json'], sid)
+    const r = await l.deps.run(['settings', 'offers', '--if-due', '--json'], sid, JOB_MS)
     if (r.code !== 0) return
     this.changesSize = size
     let got: { offers?: Row[]; notes?: Row[] } = {}
@@ -102,8 +102,11 @@ export class Jobs {
     }
     const notes = (got.notes ?? []).map(n => String(n.text ?? '')).filter(Boolean)
     if (notes.length) {
+      // a steer that doesn't resume: OpenCode publishes pending steers together with the next
+      // turn's own (the user's prompt), so the note is read in that turn; a queued one would be
+      // promoted alone after it, a turn of its own (2.4.1's inbox.ts promote, the 2026-11-26 review)
       const last = (got.notes ?? []).at(-1) ?? {}
-      await l.send(sid, offerId({ key: 'notes', ts: last.ts }), `[workbench] ${notes.join('\n')}`, 'queue',
+      await l.send(sid, offerId({ key: 'notes', ts: last.ts }), `[workbench] ${notes.join('\n')}`, 'steer',
         { kind: 'settings', ts: last.ts, title: 'settings changed on the web app' }, false)
     }
   }
