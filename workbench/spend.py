@@ -21,8 +21,28 @@ from . import context, store
 WAKE_OPENING = "[workbench] Task"
 # ...at a prompt's start only, after the line Claude Code puts before a plugin's message: matched
 # anywhere, a summary quoting one charged later calls to it (#557)
-WAKE = re.compile(r"\s*(?:The [\w .-]{1,60} plugin sent a message:\s*)?"
-                  + re.escape(WAKE_OPENING) + r" `([a-z0-9][a-z0-9-]{0,47})`")
+_PLUGIN_LINE = r"\s*(?:The [\w .-]{1,60} plugin sent a message:\s*)?"
+WAKE = re.compile(_PLUGIN_LINE + re.escape(WAKE_OPENING) + r" `([a-z0-9][a-z0-9-]{0,47})`")
+# A run's wake (#1278, runs.Run.notify's opening), charged to the run's tasks (its journal)
+RUN_WAKE_OPENING = "[workbench] Run"
+RUN_WAKE = re.compile(_PLUGIN_LINE + re.escape(RUN_WAKE_OPENING) + r" `([a-z0-9][a-z0-9-]{0,47})`")
+
+
+def _woken(text: str, names: set[str], runs_seen: dict | None = None) -> set[str]:
+    """The tasks a prompt's wake names: its task, or a run's every task as its journal has them
+    (runs.tasks_of; ``runs_seen`` keeps one read per run). By the `<run>-` prefix, a user's own
+    `aud-x` was charged for run `aud`'s wakes (the review of #1278, 2026-11-25)."""
+    if m := WAKE.match(text):
+        return {m.group(1)} & names
+    if m := RUN_WAKE.match(text):
+        from . import runs  # only here: runs imports more of the package than spend needs
+        seen = {} if runs_seen is None else runs_seen
+        if m.group(1) not in seen:
+            seen[m.group(1)] = runs.tasks_of(m.group(1))
+        return seen[m.group(1)] & names
+    return set()
+
+
 KINDS = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
 # Input-equivalent weights: the API's multipliers on the base input price (claude-api skill,
 # pricing, cached 2026-10-06): output 5x on every current model, a cache write 1.25x (5 minutes)
@@ -170,9 +190,10 @@ def _events(rows: list[dict], names: set[str]) -> list:
     """A transcript's turns and calls in order: a set (a prompt, and the task its wake names) or
     a call's dict (what it does, `_named`, its time and usage), one per API call."""
     events, by_id = [], {}  # an assistant message is a row per content block, each with its usage
+    runs_seen: dict = {}
     for row in rows:
         if (text := _prompt(row)) is not None:
-            events.append({m.group(1)} & names if (m := WAKE.match(text)) else set())
+            events.append(_woken(text, names, runs_seen))
         elif row.get("type") == "assistant":
             does = _named(row, names)
             mid = (row.get("message") or {}).get("id") or ("row", len(events))  # not deduplicated
