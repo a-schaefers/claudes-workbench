@@ -502,6 +502,21 @@ class DocsForTheWebApp(unittest.TestCase):
             self.assertIn(method, allow)
             self.assertIn(f"{path}<id>`" if path.endswith("/") else f"{path}`", allow, (method, path))
 
+    def test_the_agents_skill_and_the_api_reference_say_the_driver_never_claude_alone(self):
+        # #1366: another agent hands work to whichever driver listens, Claude Code or OpenCode,
+        # and the skill and docs/chat-api.md said "Claude" for it: Claude is named only as Claude
+        # Code (one driver) or Claude's Workbench, and the old path is only a pointer
+        skill = ROOT / "skill/agents/ask-workbench"
+        for path in [skill / "SKILL.md", *sorted((skill / "scripts").glob("*.py")),
+                     ROOT / "docs/chat-api.md", ROOT / "docs/chat-api.yaml"]:
+            text = " ".join(path.read_text().split()).replace("automated use of Claude", "")
+            alone = [text[max(0, m.start() - 40):m.end() + 20]
+                     for m in re.finditer(r"\bClaude\b(?! Code|'s Workbench)", text)]
+            self.assertEqual(alone, [], path.relative_to(ROOT))
+        self.assertIn("name: ask-workbench", (skill / "SKILL.md").read_text())
+        old = (ROOT / "skill/agents/claude-workbench/SKILL.md").read_text()
+        self.assertIn("Moved to the ask-workbench skill", old)
+
 
 class ContactInOnePlace(unittest.TestCase):
     """#1291: `patches.UPSTREAM_CONTACT` is the one place the contact lives; every doc that also

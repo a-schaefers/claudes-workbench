@@ -7339,8 +7339,8 @@ def chat_token(what: str | None, name: str | None) -> None:
         except ValueError as e:
             die(f"wb chat token add: {e}")
         print(secret)
-        print(f"--  {name}'s token, shown this once: give it to that agent as CLAUDE_WB_TOKEN, with "
-              f"CLAUDE_WB_URL the chat's address (docs/chat-api.md); wb chat token revoke {name} ends it",
+        print(f"--  {name}'s token, shown this once: give it to that agent as WORKBENCH_TOKEN, with "
+              f"WORKBENCH_URL the chat's address (docs/chat-api.md); wb chat token revoke {name} ends it",
               file=sys.stderr)
     elif what == "list" and not name:
         agents = chat.agent_tokens()
