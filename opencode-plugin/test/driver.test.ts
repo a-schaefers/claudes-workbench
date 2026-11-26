@@ -152,6 +152,38 @@ test('the driver is recorded from primary requests only, and a /models pick move
   await stop()
 })
 
+test('two locations\' setups in one server write one beat that carries both sessions\' driver (#1502)', async () => {
+  // OpenCode sets the plugin up once per location and runs a session's model.request hook only in
+  // its own: a Map and a timer per setup wrote the one beat file with one location's `used`, so
+  // the other repository's local driver read as idle and free_gpu unloaded it (2026-11-26)
+  const hooks: ((input: never) => void)[] = []
+  const sessions = { data: [{ id: 'sA', location: { directory: '/repo1' } }, { id: 'sB', location: { directory: '/repoB' } }] }
+  const host = (): DriverHost => ({
+    options: {}, app: { channel: 'latest' },
+    rpc: { register: async () => ({ dispose: async () => {} }) },
+    session: {
+      list: async () => sessions as never,
+      hook: async (_name, cb) => { hooks.push(cb as never); return { dispose: async () => {} } },
+    },
+  })
+  const wb = fakeWb()
+  const stopA = await startDriver(host(), wb.run, 4242)
+  const stopB = await startDriver(host(), wb.run, 4242)
+  hooks[0]!({ sessionID: 'sA', kind: 'primary', model: { providerID: 'ollama', id: 'a' } } as never)
+  hooks[1]!({ sessionID: 'sB', kind: 'primary', model: { providerID: 'ollama', id: 'b' } } as never)
+  await new Promise<void>((r) => setTimeout(() => r(), 1_300))
+  const beats = wb.calls.filter(c => c.args.join(' ') === 'driver beat')
+  expect(beats.length).toBe(1)  // one beat a process, never one per location
+  const sent = JSON.parse(beats[0]!.input!).sessions
+  expect([sent.sA.model, sent.sB.model]).toEqual(['ollama/a', 'ollama/b'])
+  expect(typeof sent.sA.used === 'number' && typeof sent.sB.used === 'number').toBe(true)
+  // the first location's cleanup leaves the other's beat going; the last one's stops it
+  await stopA()
+  expect((globalThis as Record<string, unknown>).__workbenchDriver === undefined).toBe(false)
+  await stopB()
+  expect((globalThis as Record<string, unknown>).__workbenchDriver).toBeUndefined()
+})
+
 test('the pin applies routes.json\'s driver unless it is session or already the session\'s', async () => {
   const picks: object[] = []
   const host: DriverHost = {

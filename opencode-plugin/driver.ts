@@ -1,12 +1,13 @@
 // The driver, the model with the final say (#1316, #1317): whatever the session runs on, picked
 // in OpenCode's own /models or set by the `workbench` agent's `model`. wb doesn't own the choice;
-// this records it. The server part's heartbeat: every BEAT_MS it lists every session in its store
-// (`session.list`, unfiltered, every page) and hands them to `wb driver beat`, which writes
-// $WB_HOME/drivers/opencode-<machine_tag>-<pid>.json (workbench/driver.py `write_beat`, read by
-// store.heartbeats: ARCHITECTURE.md, *The heartbeat*). Each session's row is its own selection,
-// overlaid by the model its last primary request went to (the `model.request` hook: a shell has
-// no model variable, and the agent's own `model` never shows in the session's selection) and when
-// (`used`), which says who owns a task and which models a local driver holds on the GPU.
+// this records it. The server part's heartbeat, one per process (`driverLane`, #1502): every BEAT_MS
+// it lists every session in its store (`session.list`, unfiltered, every page) and hands them to
+// `wb driver beat`, which writes $WB_HOME/drivers/opencode-<machine_tag>-<pid>.json
+// (workbench/driver.py `write_beat`, read by store.heartbeats: ARCHITECTURE.md, *The heartbeat*).
+// Each session's row is its own selection, overlaid by the model its last primary request went to
+// (the `model.request` hook: a shell has no model variable, and the agent's own `model` never
+// shows in the session's selection) and when (`used`), which says who owns a task and which
+// models a local driver holds on the GPU.
 //
 // The pane's driver row and /workbench's pin come through the `workbench-driver` RPC (`driver`:
 // `wb driver --session … --json`, `--model` for the TUI's selection, `--once` for the notes said
@@ -242,11 +243,34 @@ export async function applyPin(host: DriverHost, sessionID: string, run: Run, us
   return { applied: true, model: pin }
 }
 
-// The server part's driver piece: the hook, the selection events, the beat and the RPC. Returns
-// its cleanup. Each piece is skipped when this server lacks it.
+// One driver piece per server process (#1502, 2026-11-26): OpenCode sets the plugin up once per
+// location, and a session's `model.request` hook runs only in its own location's instance, so a
+// `used` Map and a beat timer per setup wrote the one beat file (`beat_path(pid)`, replaced
+// whole) with only that location's sessions' `used`, one after the other, and a local driver's
+// model in another repository read as idle: `free_gpu` unloaded it round after round. Every
+// instance feeds the one Map (globalThis, as chat.ts `lane()` and notices.ts `lanes()`); the
+// first to start beats, listing through any instance still set up, and the last cleanup stops it.
+type Shared = { used: Map<string, Used>; users: number; hosts: DriverHost[]; run: Run; pid: number
+  timer?: ReturnType<typeof setTimeout>; beating: boolean; stopped: boolean }
+const KEY = '__workbenchDriver'
+
+// ``used``: the Map the piece starts with when it is the process's first (a test's, to read)
+export function driverLane(run: Run, pid: number, used: Map<string, Used>): Shared {
+  const g = globalThis as Record<string, unknown>
+  let s = g[KEY] as Shared | undefined
+  if (!s) g[KEY] = s = { used, users: 0, hosts: [], run, pid, beating: false, stopped: false }
+  s.users++
+  return s
+}
+
+// The server part's driver piece: the hook, the selection events and the RPC per instance, the
+// beat once per process. Returns its cleanup. Each piece is skipped when this server lacks it.
 export async function startDriver(host: DriverHost, run: Run = wbRunner(host.options),
                                   pid: number = process.pid,
-                                  used: Map<string, Used> = new Map()): Promise<() => Promise<void>> {
+                                  first: Map<string, Used> = new Map()): Promise<() => Promise<void>> {
+  const s = driverLane(run, pid, first)
+  const used = s.used
+  s.hosts.push(host)
   const regs: Registration[] = []
   const stop = new AbortController()
   // a hook or stream this server refuses costs only its piece: never the plugin's setup
@@ -291,22 +315,29 @@ export async function startDriver(host: DriverHost, run: Run = wbRunner(host.opt
     },
     pin: async (input) => applyPin(host, sessionOf(input), run, used),
   }))
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let stopped = false
+  // the one beat: every session in the store (`session.list` is unfiltered), each instance's `used`
   const beat = async () => {
-    if (stopped) return
+    const lister = s.hosts.find(h => h.session?.list)
+    if (s.stopped || !lister) { s.beating = false; return }
     try {
-      await beatOnce(host, run, used, pid)
+      await beatOnce(lister, s.run, used, s.pid)
     } finally {
-      if (!stopped) timer = setTimeout(beat, BEAT_MS)
+      if (!s.stopped) s.timer = setTimeout(beat, BEAT_MS)
     }
   }
-  if (host.session?.list) timer = setTimeout(beat, FIRST_BEAT_MS)
+  if (host.session?.list && !s.beating) {
+    s.beating = true
+    s.timer = setTimeout(beat, FIRST_BEAT_MS)
+  }
   return async () => {
-    stopped = true
-    if (timer) clearTimeout(timer)
     stop.abort()
     for (const r of regs) await r.dispose().catch(() => {})
+    const i = s.hosts.indexOf(host)
+    if (i >= 0) s.hosts.splice(i, 1)
+    if (--s.users > 0) return
+    s.stopped = true
+    if (s.timer) clearTimeout(s.timer)
+    if ((globalThis as Record<string, unknown>)[KEY] === s) delete (globalThis as Record<string, unknown>)[KEY]
   }
 }
 

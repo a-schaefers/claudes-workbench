@@ -3857,10 +3857,14 @@ Under Claude Code the driver is Claude Code, fixed (`driver.CLAUDE_CODE`, "Claud
 and nothing here changes that path.
 
 - **Recorded.** The plugin's server part (`opencode-plugin/driver.ts`, `startDriver`) keeps, per
-  session, the model of its last `primary` request (OpenCode's `model.request` hook; a `title`,
+  session, in one Map per server process (`driverLane`, on `globalThis` as the chat's lane: OpenCode
+  sets the plugin up once per location and runs a session's hook only in its own, and a Map and a
+  beat per setup each wrote the one beat file with one location's `used`, so another repository's
+  local driver read as idle, #1502), the model of its last `primary` request (OpenCode's `model.request` hook; a `title`,
   `compaction` or `generate` request may use a small model and is never the driver) and of a
   `session.model.selected` event (a `/models` pick, before its first request). Every `BEAT_MS` 30
-  s (the first after `FIRST_BEAT_MS` 1 s) it lists its store's sessions (`session.list`, every page:
+  s (the first after `FIRST_BEAT_MS` 1 s; one beat a process, started by the first setup with
+  `session.list` and stopped by the last cleanup) it lists its store's sessions (`session.list`, every page:
   `listAll`), each with that model or, before any request, its selection, its directory and
   `used` (the last primary request, epoch seconds), and pipes the listing to `wb driver beat`
   (`driver.write_beat`): wb checks it (the `pid` must be a process the call runs under,
@@ -8551,8 +8555,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     `model.request` hook, the `session.model.selected` subscription, the RPC contract
     `WorkbenchDriver` (`id: "workbench-driver"`: `driver` `{sessionID, model?, once?}` → `wb driver
     --session <id> --json [--model <ref>] [--once]`'s object, `model` only when `parseRef` reads it;
-    `pin` `{sessionID}` → `{applied, model?, why?}`) and
-    the beat timer, and returns the cleanup; `beatOnce`, `beatOf`, `listAll`, `storePath`,
+    `pin` `{sessionID}` → `{applied, model?, why?}`) per setup, and the beat timer and `used` once
+    per process (`driverLane(run, pid, used)`: `used` is the Map only the first setup's), and
+    returns the cleanup; `beatOnce`, `beatOf`, `listAll`, `storePath`,
     `parseRef` (OpenCode's `Model.Ref.parse`, as `routes.driver_ref`), `variantOf`, `applyPin`; `wbRunner` runs
     wb (`findWb`, `wbEnv`) with stdin, killed after `WB_TIMEOUT_MS` 30 s.
   - `consent.ts` (#1314): what Claude Code's mod gates, gated in OpenCode, for every model the
