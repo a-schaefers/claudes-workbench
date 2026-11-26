@@ -196,6 +196,20 @@ class ReportTasks(Base):
         self.assertNotIn("fresh", [e["kind"] for e in store.read_jsonl(task.dir / "events.jsonl")[0]])
         self.assertEqual(json.loads((task.dir / runner.RESULT).read_text()), VERDICT)
 
+    def test_a_report_that_reads_past_the_explore_limit_reaches_review_not_stuck(self):
+        # #1489: a report can't edit, so the explore guard nudged it to "make the first edit" at 40
+        # calls on the GPU and stopped it at 80
+        self.report("t-rr", "--schema", "verdict",
+                    env={"FAKE_RESULT": json.dumps(VERDICT), "FAKE_REPORT_READS": "85"})
+        st = wait_phase("t-rr", ("review", "failed", "stuck"))
+        task = store.Task("t-rr")
+        self.assertEqual((st["phase"], st["round"]), ("review", 1), st.get("last"))
+        self.assertEqual(json.loads((task.dir / runner.RESULT).read_text()), VERDICT)
+        events = store.read_jsonl(task.dir / "events.jsonl")[0]
+        self.assertEqual([e for e in events if e["kind"] == "steer"], [])
+        self.assertTrue(runner.REPORT_NUDGE.startswith(runner.NUDGE.split(" Stop planning")[0]))
+        self.assertNotIn("edit", runner.REPORT_NUDGE)
+
     def test_submit_result_is_checked_by_the_server_and_the_runner_reads_it(self):
         log = Path(self.tmp.name) / "submit.log"
         self.report("t-sub", "--schema", "verdict", env={"FAKE_RESULT": json.dumps(VERDICT), "FAKE_SUBMIT": "1",

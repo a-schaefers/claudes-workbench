@@ -93,7 +93,8 @@
          message says only that it was sent;
          FAKE_SUBMIT_LOG gets the server's reply text. FAKE_REPORT_WRITE: it writes
          notes.txt in the worktree first (what the lane refuses a report task). FAKE_REPORT_PAD:
-         that many characters of prose before the object (past the report's cut, #1186)
+         that many characters of prose before the object (past the report's cut, #1186).
+         FAKE_REPORT_READS: that many more reads, each of another file, first (#1489)
 A `run` message must follow `--` when it starts with '-', or the fake prints its usage and exits
 1, as OpenCode does. FAKE_LATE: seconds before the first event (a model reading its prompt).
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
@@ -871,6 +872,8 @@ if scenario == "report":  # #1278: a read, then prose and one object
 
     prompt = args[-1] if args else ""
     tool("read", {"filePath": os.path.abspath("README.md")})
+    for i in range(int(os.environ.get("FAKE_REPORT_READS") or 0)):  # #1489: a long read-only sweep
+        tool("read", {"filePath": os.path.abspath(f"src/part{i}.py")})
     if os.environ.get("FAKE_REPORT_WRITE"):
         with open("notes.txt", "w") as fh:
             fh.write("a report task writing its worktree\n")

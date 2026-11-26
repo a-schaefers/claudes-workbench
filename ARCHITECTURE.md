@@ -457,7 +457,7 @@ image at `meter.IMAGE_TOKENS` (16,384, a provider's worst after its own downscal
 |---|---|---|
 | the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, as below: #1250) | `events.StuckDetector` |
 | failing tool calls in a row | 6; the same (#1250) | |
-| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148): the first trip in a session is nudged (`runner.EXPLORE_NUDGE`), a second in it stops ("…, even after a nudge"; #1134), as does a fresh session's when no file changed since the nudge | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188, the round a nudge or a note starts in it, #1207, and the round `wb resume` starts after it, #1228) | |
+| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148): the first trip in a session is nudged (`runner.EXPLORE_NUDGE`), a second in it stops ("…, even after a nudge"; #1134), as does a fresh session's when no file changed since the nudge | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; a report task's none (it can't edit, #1489); in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188, the round a nudge or a note starts in it, #1207, and the round `wb resume` starts after it, #1228) | |
 | no output (not while waiting on Claude; a background job or a command in the foreground gets the test timeout if longer) | 15 min; the self-review's finish instead, as every guard here (#1261) | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
@@ -1169,7 +1169,8 @@ spec or review, outside the runner and so outside the lane and the keyhole.
 A report task's round (#1278, *Deep workflows*): `runner.clear_result` before it, then `report_end` in place
 of the tests: the object checked (`result_of`: `ask/result.json`, else `final.md`'s last), kept as
 `result.json` or one repair round (`SCHEMA_FIX`) through `_go_on`, then `failed`; a changed worktree is
-`REPORT_CHANGED`. No auto-fix, self-review or `review_diff`.
+`REPORT_CHANGED`. No auto-fix, self-review or `review_diff`. No explore guard either (`no_edit` infinite:
+a report can't edit, #1489), and its think nudge is `REPORT_NUDGE` ("… finish now: send your result …").
 
 `workbench/runner.py`, started as `python -X utf8 -m workbench.runner <task>` by `cli.spawn_runner`
 (cwd and `PYTHONPATH` the repo root, the caller's in `WB_USER_PYTHONPATH`, its own session, output
@@ -1957,7 +1958,7 @@ by prefix; rewording one silently changes those:
 | `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`, `compact`, `compactfail`) |
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript`, the fake OpenCode (`FAKE_SELF_STALL`: `Claude, your reviewer`) |
-| `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's), the fake OpenCode (`FAKE_SELF_STALL`) |
+| `NUDGE` (`without a tool call. Stop planning`), `REPORT_NUDGE` (the same opening, a report task's, #1489) | the think nudge | `transcript` (labelled the workbench's, not Claude's), the fake OpenCode (`FAKE_SELF_STALL`) |
 | `EXPLORE_NUDGE` (`without changing a file: make the first edit`) | the explore nudge (#1134) | `transcript` (labelled the workbench's, not Claude's) |
 | `RERUN` (`The round was cut off by the model's provider`) | `run_round`, a round run again (`_run_again`, #1235) | `transcript` (labelled the workbench's) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
@@ -9578,7 +9579,10 @@ OpenCode hands a tool's argument errors back to the model), else the last object
 2,500-character cut lost it in 13). `runner.report_end` checks it again outside the lane: valid, it goes to
 `tasks/<task>/result.json` and the review notice carries it (up to `RESULT_SHOWN` 24,000 characters) with its
 source; else one repair round (`runner.SCHEMA_FIX`, a new opening: `rejected: <errors>. Resend the whole
-object: …`) in the same session, even one OpenCode compacted (`fresh_reason`, #1478), then `failed`. `wb accept` takes no `-m`, commits nothing, deletes the branch while still at the
+object: …`) in the same session, even one OpenCode compacted (`fresh_reason`, #1478), then `failed`. A report
+has no explore guard (the calls-without-an-edit count, which only its reading would fill: #1489); the repeat
+and error guards, the wall, silence and think limits hold, the think nudge `runner.REPORT_NUDGE` (finish and
+send the result, never "make the next edit"). `wb accept` takes no `-m`, commits nothing, deletes the branch while still at the
 base, and records `outcome: reported`, `report: true` (`_accept_report`); `store.results()` keeps such rows
 from the router, the slices and tuning.
 
