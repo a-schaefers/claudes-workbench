@@ -43,7 +43,7 @@ test('under WB_TASK neither part does anything at all (#1363)', async () => {
   }
 })
 
-test('the server part registers the status method, the Workbench agent and its skills (#1335), the driver\'s (#1316) and the panel\'s (#1312)', async () => {
+test('the server part registers the status method, the Workbench agent and its skills (#1335), the driver\'s (#1316), the upkeep\'s hooks and the commands (#1315), and the panel\'s (#1312)', async () => {
   const was = process.env.WB_TASK
   delete process.env.WB_TASK
   const registered: string[] = []
@@ -60,13 +60,15 @@ test('the server part registers the status method, the Workbench agent and its s
       agent: { transform: transform('agent.transform') },
       session: { hook: transform('session.hook') },
       event: { subscribe: async function* () {} },
+      command: { transform: transform('command.transform') },
     } as never)
   } finally {
     if (was !== undefined) process.env.WB_TASK = was
   }
   expect(registered).toEqual(['workbench', 'status', 'status', 'skill.transform', 'agent.transform', 'session.hook',
     'session.hook', 'workbench-driver', 'driver', 'pin', 'driver', 'pin',  // the driver's model.request hook
-    'workbench-pane', 'tasks', 'live', 'diff', 'link', 'tasks', 'live', 'diff', 'link'])
+    'session.hook', 'session.hook', 'session.hook', 'command.transform',  // the upkeep's three hooks, the commands (#1315)
+    'workbench-pane', 'tasks', 'live', 'diff', 'link', 'tasks', 'live', 'diff', 'link', 'command.transform'])  // the panel's, /workbench (#1312)
   // one cleanup for every part's stop (the agent's event stream and the driver's beat among them)
   expect(typeof stop).toBe('function')
   await (stop as () => Promise<void>)()

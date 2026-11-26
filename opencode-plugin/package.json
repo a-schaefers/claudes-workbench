@@ -20,8 +20,13 @@
     "driver.ts",
     "skill.ts",
     "agent.ts",
+    "notices.ts",
+    "notices-tui.ts",
+    "jobs.ts",
     "spans.ts",
     "splash.tsx",
+    "upkeep.ts",
+    "commands.ts",
     "pane.ts",
     "pane-view.ts",
     "pane.tsx"

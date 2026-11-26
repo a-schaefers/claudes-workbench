@@ -149,7 +149,9 @@ test('a TUI that can\'t load the OpenTUI views still sets the plugin up, with no
       client: { rpc: () => ({ status: async () => ({ wb: '/w/bin/wb', found: true, from: 'options', home: '/state' }) }) },
       ui: { toast: { show: (o: unknown) => said.push(o) } },
     }
-    expect(await tui.setup(ctx as never)).toBeUndefined()
+    const stop = await tui.setup(ctx as never)  // the notices' cleanup alone (#1313)
+    expect(typeof stop).toBe('function')
+    ;(stop as () => void)()
   } finally {
     if (was !== undefined) process.env.WB_TASK = was
   }

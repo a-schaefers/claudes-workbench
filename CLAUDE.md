@@ -189,7 +189,7 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 `WB_OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`, `WB_SOURCE` (`wb patch init`'s clone, else
 `~/.local/share/workbench/source`), `WB_ROUTES` (the roles; `wb start`'s local-only check reads it), `WB_AGENTS_MD`
 (the user's file for agents; the tests' own), `WB_FLOWS`, `WB_ROLES` (the user's flows and role cards) (relative or `~` allowed: a new
-one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; `WB_ACTOR` (the chat server's wb
+one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT` (the OpenCode plugin's too); `WB_ACTOR` (the chat server's wb
 children only: `web` stamps a role change `by: "web"`); the agent's `WB_TASK` (ranked first: a call with it
 is the agent's, `store.caller_kind`, #1310), `WB_RUN`,
 `WB_USER_PYTHONPATH`; a scheduled fire's `WB_SCHEDULE` (its Claude's `wb accept --merge` refused); `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's

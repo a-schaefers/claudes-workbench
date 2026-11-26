@@ -8,6 +8,7 @@ import type { TuiContext, TuiPlugin } from './host.d.ts'
 import type { SplashHost } from './splash.tsx'
 import type { PaneHost } from './pane.tsx'
 import { Workbench, type Status } from './rpc.ts'
+import { noticesTui } from './notices-tui.ts'
 
 // where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
 // install of the whole repository does (#1311's review, 2026-11-25)
@@ -17,11 +18,12 @@ const plugin: TuiPlugin = {
   id: 'workbench',
   async setup(ctx) {
     if (process.env.WB_TASK) return
+    const stopNotices = noticesTui(ctx) // the notices' toasts and desktop notifications (#1313)
     let st: Status
     try {
       st = (await ctx.client.rpc(Workbench).status({})) as Status
     } catch {
-      return // the server part isn't there (a server older than this TUI): nothing to say yet
+      return stopNotices // the server part isn't there (a server older than this TUI): nothing to say yet
     }
     if (!st.found) {
       ctx.ui.toast.show({
@@ -40,9 +42,10 @@ const plugin: TuiPlugin = {
     // host.d.ts leaves out
     try {
       const { mountPane } = await import('./pane.tsx')
-      return mountPane(ctx as TuiContext & SplashHost & PaneHost, st.home)
+      const stopPane = mountPane(ctx as TuiContext & SplashHost & PaneHost, st.home)
+      return () => { stopPane(); stopNotices() }
     } catch {
-      return // a TUI that can't load a plugin's OpenTUI views: the rest works without them
+      return stopNotices // a TUI that can't load a plugin's OpenTUI views: the rest works without them
     }
   },
 }

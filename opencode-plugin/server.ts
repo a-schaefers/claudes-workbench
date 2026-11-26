@@ -13,6 +13,9 @@ import { chat } from './chat.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
 import { registerAgent } from './agent.ts'
 import { startDriver, type DriverHost } from './driver.ts'
+import { notices } from './notices.ts'
+import { upkeep, type UpkeepHost } from './upkeep.ts'
+import { registerCommands, type CommandHost } from './commands.ts'
 import { startPane, type PaneHost } from './pane.ts'
 
 export const ID = 'workbench'
@@ -36,6 +39,13 @@ const plugin: ServerPlugin = {
     const agent = await registerAgent(ctx).catch(() => undefined) // no skill/ to read: no agent, the rest stands
     if (agent) stops.push(async () => agent.stop())
     stops.push(await startDriver(ctx as ServerContext & DriverHost))  // the driver's heartbeat and RPC (#1316)
+    const stopNotices = await notices(ctx) // the notices and the background jobs (#1313, #1334)
+    if (stopNotices) stops.push(stopNotices)
+    // the conversation's rules, what a compaction keeps, the boundary compaction; the commands (#1315)
+    const stopUpkeep = await upkeep(ctx as unknown as UpkeepHost).catch(() => undefined)
+    if (stopUpkeep) stops.push(stopUpkeep)
+    const stopCommands = await registerCommands(ctx as unknown as CommandHost).catch(() => undefined)
+    if (stopCommands) stops.push(stopCommands)
     stops.push(await startPane(ctx as ServerContext & PaneHost))  // the panel's data and /workbench (#1312)
     return async () => { for (const stop of stops.reverse()) await stop().catch(() => {}) }
   },
