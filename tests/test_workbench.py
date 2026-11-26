@@ -22972,6 +22972,31 @@ class ScheduledRuns(Base):
             run_wb("schedule", "rm", "night")
             self.assertFalse((home / "Library/LaunchAgents/workbench.schedule.night.plist").exists())
 
+    def test_on_macos_a_repo_in_documents_is_noted_at_add_and_in_doctor_until_a_fire_runs(self):
+        # #1539, 2026-11-26: macOS privacy keeps a launchd job out of ~/Documents (GitHub Desktop's
+        # clone folder), so the schedule never fired, and wb said nothing at add, in doctor or list
+        from workbench import schedule
+        home = Path(self.tmp.name) / "home"
+        (home / "Documents").mkdir(parents=True)
+        self.repo = self.repo.rename(home / "Documents" / "proj")
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                mock.patch.object(Path, "home", return_value=home):
+            out = self.add()
+            note = (f"note: {os.path.realpath(self.repo)} is in ~/Documents: macOS privacy keeps the timer's "
+                    f"fire out, so it never runs (wb schedule run from Terminal still does): give "
+                    f"{os.path.realpath(sys.executable)} Full Disk Access (System Settings, Privacy & "
+                    f"Security), or move it out of ~/Documents")
+            self.assertIn(note, out)
+            self.assertIn("scheduled night", out)                      # a note, never a refusal
+            ((ok, said),) = schedule.doctor_lines()
+            self.assertFalse(ok)
+            self.assertIn("is in ~/Documents: macOS privacy keeps the timer's fire out", said)
+            self.assertEqual(self.fire(), 0)                            # it got in: granted
+            ((ok, said),) = schedule.doctor_lines()
+            self.assertTrue(ok, said)
+        with mock.patch.object(Path, "home", return_value=home):       # never off macOS
+            self.assertIsNone(schedule.protected(self.repo))
+
     def test_a_fire_runs_claude_headless_on_the_backlog_and_records_the_run(self):
         from workbench import schedule
         self.add()
