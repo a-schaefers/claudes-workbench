@@ -175,9 +175,36 @@ class Reach(Base):
 
     def test_chat_on_and_doctor_point_at_the_phones_way_in_only_while_it_opens_here_alone(self):
         from workbench import cli
-        self.assertEqual(cli.reach_hint(), story.text("link.reach"))
+        with self.with_tailscale():
+            self.assertEqual(cli.reach_hint(), story.text("link.reach"))
+        with self.without_tailscale():                       # nothing here to reach the tailnet with (#1524)
+            self.assertEqual(cli.reach_hint(), "")
         self.conf.write_text(json.dumps({"bind": ["127.0.0.1", "tailscale"]}))
-        self.assertEqual(cli.reach_hint(), "")
+        with self.with_tailscale():
+            self.assertEqual(cli.reach_hint(), "")
+
+    def test_on_wsl2_with_tailscale_on_windows_tailnet_names_windows_serve_and_never_says_install_1524(self):
+        # #1524 (2026-11-26): with Tailscale for Windows and none in the distro (#920's setup),
+        # `reach tailnet` said "install Tailscale", Windows' serve went unseen, and `wb chat on`
+        # advised the refused command
+        from workbench import cli, hardware
+        win = Path(self.tmp.name) / "win-bin"
+        win.mkdir()
+        (win / "tailscale.exe").write_text((self.bin / "tailscale").read_text())
+        (win / "tailscale.exe").chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": str(win), "FAKE_TS_SERVE": "1400"}), \
+                mock.patch.object(hardware, "system", return_value="wsl"):
+            said = self.refused("chat", "reach", "tailnet", "--port", "1400")
+            self.assertNotIn("install Tailscale", said)
+            self.assertIn("Tailscale runs on Windows here", said)
+            self.assertIn("`tailscale.exe serve --bg 1400`", said)                # the route that works there
+            self.assertFalse(self.conf.exists())
+            self.assertEqual(self.changes(), [])
+            self.assertIs(chat.https_served(1400), True)                           # Windows' serve, seen
+            self.assertEqual(run_wb("chat", "reach", "--port", "1400"),
+                             f"web app reach: local, but tailnet https via tailscale serve (https://{NAME}/)\n")
+            self.assertEqual(cli.still_served(1400)[1], "tailscale.exe serve --https=443 off")
+            self.assertEqual(cli.reach_hint(), "")                                 # never advised where refused
 
 
 if __name__ == "__main__":

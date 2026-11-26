@@ -279,6 +279,18 @@ def _inbound(r: dict) -> bool:
     return r.get("from") == "user" or r.get("role") == "agent"
 
 
+def tailscale_cli(windows: bool = False) -> str | None:
+    """The tailscale CLI to ask: on PATH, else macOS' app bundle (`TAILSCALE_APP`); ``windows``:
+    under WSL with neither, Windows' tailscale.exe (tailscale()'s). None for none."""
+    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
+                                        and os.path.isfile(TAILSCALE_APP) else None)
+    if not cli and windows:
+        from . import hardware
+        cli = (hardware.windows_program("tailscale.exe", TAILSCALE_WINDOWS)
+               if hardware.system() == "wsl" else None)
+    return cli or None
+
+
 def listenable(ip: str) -> bool:
     """Whether a server here can listen on ``ip``: an address one of this machine's interfaces
     carries. Tailscale's userspace networking (Docker or LXC, no /dev/net/tun) reports a tailnet
@@ -304,12 +316,7 @@ def tailscale(windows: bool = False) -> dict:
     install under the automount root: wb-chat.service runs with the user manager's PATH, which
     has none of Windows', as has appendWindowsPath=false (the review of #920). Not for the
     address: in WSL's NAT networking, Windows' tailnet IP isn't on WSL's interfaces."""
-    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
-                                        and os.path.isfile(TAILSCALE_APP) else None)
-    if not cli and windows:
-        from . import hardware
-        cli = (hardware.windows_program("tailscale.exe", TAILSCALE_WINDOWS)
-               if hardware.system() == "wsl" else None)
+    cli = tailscale_cli(windows)
     if not cli:
         return {"missing": True}
     try:
@@ -358,6 +365,12 @@ def set_reach(to: str, port: int = PORT) -> dict:
     # the tailnet address plan() binds: this OS's own CLI, never Windows' under WSL (its address
     # isn't on WSL's interfaces, so the bind would be skipped)
     ts = tailscale() if to == "tailnet" else {}
+    if to == "tailnet" and ts.get("missing") and not (win := tailscale(windows=True)).get("missing"):
+        # WSL2 with Tailscale on Windows (#920's setup) was told to install Tailscale again and never
+        # shown the route that works there: Windows' serve, over its localhost forwarding (#1524, 2026-11-26)
+        raise ValueError(f"Tailscale runs on Windows here{'' if win else ' (not up: sign in to it)'}, and its "
+                         f"tailnet address isn't on WSL's interfaces: leave reach local and run `tailscale.exe "
+                         f"serve --bg {port}` (Windows'), which serves the web app to your tailnet over https")
     if to == "tailnet" and not ts.get("ip"):
         raise ValueError("no tailscale command here: install Tailscale (tailscale.com/download), sign in, then "
                          "this again" if ts.get("missing") else
@@ -387,9 +400,10 @@ def https_served(port: int) -> bool | None:
 def served_site(port: int) -> str | None:
     """The `tailscale serve` site ("<name>:<https port>") proxying to the chat's ``port`` here, ""
     for none, None when it can't be told. Reach `local` leaves it serving the tailnet, and wb said
-    "this machine only" (#1512, 2026-11-26): its callers name it and the command that stops it."""
-    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin" and os.path.isfile(TAILSCALE_APP)
-                                        else None)
+    "this machine only" (#1512, 2026-11-26): its callers name it and the command that stops it.
+    Under WSL, Windows' CLI too: its serve reaches the chat through Windows' localhost forwarding
+    and was never seen (#1524, 2026-11-26)."""
+    cli = tailscale_cli(windows=True)
     if not cli:
         return None
     try:

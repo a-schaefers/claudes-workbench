@@ -7543,7 +7543,11 @@ def cmd_chat(a):
 
 
 def reach_hint() -> str:
-    """The story's `link.reach` while the web app opens on this machine alone, else ""."""
+    """The story's `link.reach` while the web app opens on this machine alone and `wb chat reach
+    tailnet` can work here (this OS's own tailscale CLI: under WSL with Tailscale on Windows it is
+    refused, and `wb chat on` advised it anyway, #1524), else ""."""
+    if not chat.tailscale_cli():
+        return ""
     try:
         return story.text("link.reach") if chat.reach() == "local" else ""
     except chat.ConfigError:
@@ -7560,8 +7564,9 @@ def still_served(port: int) -> tuple[str, str] | None:
     name, _, https = site.rpartition(":")
     if not name or not https.isdigit():
         name, https = site, "443"
+    exe = "tailscale.exe" if (chat.tailscale_cli(windows=True) or "").lower().endswith(".exe") else "tailscale"
     return (f"https://{name}/" if https == "443" else f"https://{name}:{https}/",
-            f"tailscale serve --https={https} off")
+            f"{exe} serve --https={https} off")
 
 
 def chat_reach(to: str | None, port: int) -> None:
@@ -8879,7 +8884,7 @@ def cmd_doctor(a):
         print(f"--  {said}")
     else:
         line(good, said)
-        if good and shutil.which("tailscale") and (hint := reach_hint()):  # the phone's way in (#1355)
+        if good and (hint := reach_hint()):  # the phone's way in (#1355)
             print(f"--  {hint}")
     for good, said in schedule.doctor_lines():  # wb schedule (#1204)
         line(good, said)
