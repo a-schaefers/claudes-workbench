@@ -7579,7 +7579,7 @@ mode and close the pane (`/workbench` turns it back on).
 setting `userConfig.wake` `on`|`off`, default `on`, changed with `claude plugin configure
 workbench@workbench`, which reloads the module), `hooks/hooks.json` (`{"modules":
 ["./register.tsx"]}`), `hooks/register.tsx` (everything), `hooks/apprentice.ts`, `hooks/splash.ts`
-(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/keywords.ts` (#1278: deepcode and deepmode in what the user typed, the OpenCode plugin's too), `hooks/flows.ts` (#1295: the flows' slash commands, both hosts'), `hooks/waiting.ts` (#1355: the driver's wait for the page's state line, both hosts'; its `waiting.test.ts`), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
+(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/keywords.ts` (#1278: deepcode and deepmode in what the user typed, the OpenCode plugin's too), `hooks/flows.ts` (#1295: the flows' slash commands, both hosts'), `hooks/waiting.ts` (#1355: the driver's wait for the page's state line, both hosts'; its `waiting.test.ts`), `hooks/shell.ts` (#1296: a command line as bash reads it, `simpleCommands` and `runs`, and the consent gate's reading of it, `upstreamAim`, `gatedWhere`, `mcpAimsUpstream`, both hosts'; `register.tsx` re-exports what its tests import), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
 (the atom types), `types/wire.d.ts` (wb's shapes, #1323: *wb's shapes in one module*), `.claude-plugin/icon.png` (the `work` pose), `bin/wb` (#1190: the launcher
 Claude Code puts on its Bash tool's PATH, *Installing*).
 The root's `.claude-plugin/marketplace.json` (source `./mod`) makes the id `workbench@workbench`,
@@ -7961,7 +7961,8 @@ misread; this is the one place every call passes. Outward (the kernel's `gateOf`
 `gh release create|edit|delete|upload|delete-asset`, `gh label create|edit|delete|clone` (past
 `-R`/`--repo`), `gh api` with a method other than GET or HEAD, or with fields, `git push` (past git's own
 options; its `-C` directories, `dirs`), and `wb patch send` (`wb` or a path to it, or Python running `…/wb` or `-m workbench`);
-command words lowercased (macOS finds `GIT` as git). Read as bash reads it (`simpleCommands`, the command word
+command words lowercased (macOS finds `GIT` as git). Read as bash reads it (`simpleCommands`; the reading, from here to
+`upstreamAim`, is `mod/hooks/shell.ts`, which the OpenCode plugin's `upstream.ts` reads lines with too, #1296; the command word
 `gateOf`'s `at` as in `delegates`, past `sudo`, `doas`, `xargs` and the other wrappers): echo and heredoc text isn't a command, `$(…)`
 and backticks are, and a shell's `-c '…'` (`STDIN_SHELL`: `bash`, `sh`, `zsh`, `dash`, `ksh`, `ash`, `fish`) and
 `eval` are read inside; a line naming none of `gh`, `git`, `wb`,
@@ -8314,6 +8315,7 @@ drivers on one machine: *Both drivers on one machine*.
 | Wakes: a `[workbench] Task …` prompt, exactly once (`wb events`, `wb ack`) | `session.synthetic` from the server part's one `wb events`, the same text and ack; an agent's question steers into a running turn | `notices.ts`, *Notices on OpenCode* |
 | The context blocks, `KEEP_ON_COMPACT`, compaction at a task boundary | session instruction entries (the `context` hook as fallback), the `compaction` hook | `upkeep.ts` |
 | The consent dialog: an API role, an API `--model` start, a role's Settings row, `wb patch send` | a session form asked by the gated tool (`workbench_route`, `workbench_start`, `workbench_settings_set`, `workbench_patch_send`); the shell path to them denied on the permission hook; no TUI, no form: refused | `consent.ts`, `gates.ts` |
+| The consent dialog on every other send upstream: a gh write, a `git push`, a GitHub MCP tool's write | the same form, asked from `execute.before` over the line as the mod reads it (`mod/hooks/shell.ts`, one copy for both); no TUI, no form: refused | `upstream.ts` |
 | The coding gate (`wb coding`), routes.json and approval-file edits refused, `local_only` | the same rules on the permission hook and `execute.before` | `consent.ts` |
 | Whose task: `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, `claude-sessions/` | `OPENCODE_SESSION_ID` and the server's heartbeat (`drivers/`), task.json `driver` | *The OpenCode driver: whose task it is* |
 | The driver's own edits in `claude-calls/` | `execute.after` writes the same rows | `calls.ts` |
@@ -8336,11 +8338,11 @@ drivers on one machine: *Both drivers on one machine*.
   live on 2.4.1 (2026-11-26): `tty` under `!` says `not a tty`, in the pane `/dev/pts/<n>`, and
   neither sets `OPENCODE_SESSION_ID` (a wb typed in either is the user's, `store.caller_kind`'s
   `terminal`; only the driver's own shell tool sets it).
-- **Sends upstream**: the mod's dialog holds every outward command (a gh write, a `git push`, a
-  GitHub MCP tool's write) as well as `wb patch send`; of those, the plugin's forms ask for
-  `workbench_patch_send` alone (the kernel's `send` gate; its `outward` one has no OpenCode
-  counterpart), so the rendered procedure has the driver ask in words before an issue or a comment,
-  and away on the web chat the form waits for the user rather than refusing.
+- **Sends upstream**: the mod's dialog and the plugin's form hold the same sends (a gh write, a
+  `git push`, a GitHub MCP tool's write, `wb patch send`), read and aimed by one copy
+  (`mod/hooks/shell.ts`, #1296's row 14); on OpenCode `wb patch send` itself goes only through
+  `workbench_patch_send` (the shell's is refused with that tool), whose form shows its title and
+  body, and away on the web chat the form waits for the user, as the mod's dialog does.
 - **A patch to the plugin**: OpenCode's Git install can't keep one (`wb patch` refuses there and
   names the clone to make); with a clone's wb, the plugin's own code stays the Git install's while
   OpenCode's `plugins` entry names it, so a patch under `opencode-plugin/` needs that entry swapped
@@ -8388,7 +8390,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   `mod/hooks/core.ts` and the `kernel.js` it imports (which `upkeep.ts`, the notices and the panel
   import, #1315, #1313, #1312; not `kernel.d.ts`, types only), `mod/hooks/tasks.ts` and
   `mod/hooks/modeline.ts` (the panel's: one Tasks view for both hosts, #1312), `mod/hooks/keywords.ts` (`deep.ts`'s,
-  #1278), `mod/hooks/waiting.ts` (`chat.ts`'s, #1355), `mod/hooks/flows.ts` (`flows.ts`'s, #1295) and `LICENSE` (the plugin and
+  #1278), `mod/hooks/waiting.ts` (`chat.ts`'s, #1355), `mod/hooks/flows.ts` (`flows.ts`'s, #1295), `mod/hooks/shell.ts` (`upstream.ts`'s, #1296) and `LICENSE` (the plugin and
   the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
   executable); no `type` field, so nothing else in the repository changes how it loads. Each
   `mod/` entry is a file the plugin imports, itself or through another mod file, and each file a
@@ -8399,7 +8401,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   classify commands with, `consent.ts`'s dynamic import of the mod's core, #1314).
   `opencode-plugin/package.json` (`type: module`, `files` the parts and their modules:
   `server.ts`, `tui.ts`, `rpc.ts`, `wb.ts`, `chat.ts`, `driver.ts`, `skill.ts`, `agent.ts`, `notices.ts`,
-  `notices-tui.ts`, `jobs.ts`, `spans.ts`, `splash.tsx`, `upkeep.ts`, `commands.ts`, `deep.ts`, `flows.ts`, `consent.ts`, `consent-tui.ts`, `tools.ts`, `gates.ts`, `words.ts`, `calls.ts`,
+  `notices-tui.ts`, `jobs.ts`, `spans.ts`, `splash.tsx`, `upkeep.ts`, `commands.ts`, `deep.ts`, `flows.ts`, `consent.ts`, `consent-tui.ts`, `tools.ts`, `gates.ts`, `upstream.ts`, `words.ts`, `calls.ts`,
   `pane.ts`, `pane-view.ts`, `pane.tsx`) is the one a clone's
   entry loads (`wb setup --opencode`'s `opencode-plugin/` directory). Each part is TypeScript, run
   as it is by OpenCode's Bun, a package's in `node_modules` too.
@@ -8490,7 +8492,35 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       `write` (the file in `path`, 2.3.2's and 2.4.1's, or 1.x's `filePath`) or `patch` of commands.json (`$WB_COMMANDS`) that drops a repo's `"local_only":
       true` is thrown before it runs (`localOnlyRefusal`, `localOnlyPatchRefusal`: the mod's
       rule); only the user lifts it.
+    - **Sends upstream** (`upstream.ts`'s `Upstream`, a second `execute.before` hook after the
+      gates', imported at setup as the kernel is; #1296's row 14).
     Nothing runs at import; setup returns a cleanup that ends the bus loop and disposes the RPC.
+  - `upstream.ts` (#1296's row 14, 2026-11-26): the mod's consent dialog on the other sends, in
+    the same form. On `execute.before` (once a call, before its permission ask, the whole input;
+    a throw refuses it): a `shell` call's `command`, from its `workdir` (else the session's
+    directory), is read by `mod/hooks/shell.ts`'s `upstreamAim`, the mod's own reading (*The
+    consent gate*: `bash -c`, `eval`, a fed shell, an interpreter's code that runs commands, the
+    kernel's `gateOf` per simple command), not OpenCode's scan, which hands the common `gh issue
+    create --body "$(cat <<'EOF' …)"` over unread, while wb has no refusal of its own behind a gh
+    write or a git push; the permission hook would also run again on a pending ask's
+    re-evaluation and ask twice. Aimed as the mod aims it: a gated directory (`gatedWhere`: the
+    patch clone, patches.json's `source`, else `WB_SOURCE`, else
+    `~/.local/share/workbench/source`; `$WB_HOME/upstream/`; Claude Code's marketplace clone and
+    cache), by real path too; a plugins directory (Claude Code's, and OpenCode's package caches,
+    `packageCaches`: `$XDG_CACHE_HOME/opencode/npm`, `~/.cache/opencode/npm`) whose checkout's
+    origin is upstream; or the upstream's name (patches.json's `upstream`, `a-schaefers/workbench`,
+    the former name) in the line, unless it runs in a developer's own clone of upstream (`git -C
+    <dir> remote get-url origin`, never a gated or plugins directory). A `wb patch send` there is
+    refused with `SEND_VIA_TOOL`. An MCP tool whose namespace (its server's name) holds `github`
+    (`githubTool`; no info: `<server>_<name>`), not `get_`/`list_`/`search_`, whose input names
+    the upstream or a repository of its name (`githubAimsUpstream`), asks the same, unless the
+    session's directory is a developer's clone. The form (`Asker`, `consent.ts`'s): `The driver
+    wants to send this to GitHub (<slug>), publicly: <the command>` (`shownCommand`: the whole
+    line up to 600 characters, else the outward command then the line's start; an MCP call's
+    input up to 4000, `shownInput`), `Send it` / `Don't send`; the yes lets that one call through,
+    nothing remembered; a no or a dismissal is `NOT_SENT`, no TUI in time `NO_FORM_SENT` (fail
+    closed); `--auto` never answers a form. `upstream-env.d.ts`: what its tests use beyond the others'
+    declarations (`symlinkSync`).
   - `gates.ts`, `words.ts`: the pure rules `consent.ts` applies (paths: `places`, `guarded`,
     `taskOfPath`; `shellRefusal`, `lineCommands`; `codingMode`; the local_only rules; the patch text's files and
     lines) and the shell splitter, each tested alone.
@@ -8699,9 +8729,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     --opencode` that make one; the plugin's own code stays that install's while OpenCode's
     `plugins` entry names it, so a patch under `opencode-plugin/` needs that entry swapped for the
     clone's; `wb patch init` only for Claude Code's marketplace install on a machine with both);
-    the form asks for `workbench_patch_send` alone, so an issue, a comment or another send through
-    gh goes on the user's yes in words, and away on the web chat the form waits (nothing refuses
-    it); the GitHub plugin for Claude Code is a GitHub MCP server in OpenCode's `mcp`; the
+    every send upstream asks in a form (`workbench_patch_send`'s, and `upstream.ts`'s for an issue,
+    a comment or another send through gh, git or a GitHub MCP tool, #1296's row 14), and away on the
+    web chat the form waits (nothing refuses it); the GitHub plugin for Claude Code is a GitHub MCP server in OpenCode's `mcp`; the
     marketplace rescue is met only with Claude Code installed too; and each `! <cmd>` (gh's login,
     `setup-git`, the workflow scope, models.md's Ollama install) is typed `PANE_OR_TERMINAL`, in
     OpenCode's terminal pane (ctrl+x t) or a terminal of their own, as OpenCode's `!` runs a
@@ -11048,8 +11078,10 @@ doc needs its own `!/` line).
   `writeApproval` and `gates.ts` `APPROVAL` (the files every agent's edit and write is denied); **its keys** ↔ the plugin's
   `workbench_route`/`workbench_start`/`workbench_settings_set` (the dry run's `approval`) and `workbench_patch_send` (`send-ok`'s).
 - **A gate of the mod's** (`routeRefusal`, `sendRefusal`, `codingRefusal`, `routesFileRefusal`, `writesTo`, `localOnlyRefusal`) ↔
-  the OpenCode plugin's (`gates.ts` `shellRefusal`, `guarded`, `localOnlyRefusal`; `consent.ts` `Gates`): one rule, two hosts,
-  each a test of its own (the mod's, `consent.test.ts`).
+  the OpenCode plugin's (`gates.ts` `shellRefusal`, `guarded`, `localOnlyRefusal`; `consent.ts` `Gates`; `sendRefusal`'s
+  `upstream.ts` `Upstream`, over the same `mod/hooks/shell.ts`): one rule, two hosts, each a test of its own (the mod's,
+  `consent.test.ts`, `upstream.test.ts`). **The gated directories** (`shell.ts` `gatedWhere`) ↔ `patches.source_dir`
+  and Claude Code's plugin layout, read by `register.tsx`'s `gateConf` and `upstream.ts` alike.
 - **A prompt's opening words** → `transcript` labels, `round_asks`, `lessons`, the fake OpenCode, the tests quoting them.
 - **Where a round's own prompt is** (`instructions.md` once `_start_fresh` makes prompt.md the handoff) → `store.round_prompt` (`current_task_prompt`, `round_asks`, `lessons`,
   `bench._step_prompt`).
@@ -11146,9 +11178,10 @@ doc needs its own `!/` line).
   contributing line (never the README: the owner's call), *Sending a patch without GitHub*; the skill names no address ("the address it
   printed"), so a new one never leaves Claude telling a user the old. **What sends** (`wb patch send`'s name, the gh and git commands it
   runs, any new outward command) → `Kernel.Gate` (`gateOf`, `ghWrites`; `python3 scripts/kernel.py build`), its
-  golden `mod/hooks/golden/gate.ts`, the mod's `OUTWARD_TEXT`, the gate's tests in `register.test.tsx`.
+  golden `mod/hooks/golden/gate.ts`, `OUTWARD_TEXT` (`mod/hooks/shell.ts`), the gate's tests in `register.test.tsx` and
+  `opencode-plugin/test/upstream.test.ts`.
   **A program that runs text** (a new shell or interpreter, its code flag) → `RUNS_CODE`, `STDIN_SHELL`, `codeFed`,
-  `spawns`, `WRITES_CODE` in `register.tsx`, together (#1364).
+  `spawns` in `mod/hooks/shell.ts` and `WRITES_CODE` in `register.tsx`, together (#1364).
   **`wb patch send`'s flags** → `Kernel.Gate`'s `sendOf` (it reads `--title`, `--body-file`, `--draft`, `--anyway` as
   written: keep `allow_abbrev=False`). **`send-ok.json`'s keys** (`slug`, `title`, `body_file`, `body`, `draft`,
   `anyway`, `at`) → the mod's `upstreamRefusal` and `patches._approved`, together. **The `Scope`

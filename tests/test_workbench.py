@@ -24868,7 +24868,7 @@ class Setup(Base):
                 mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
             self.assertEqual([p for p, _ in ocplugin.shared_files(clone)],
                              ["mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/flows.ts", "mod/hooks/kernel.js",
-                              "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/splash.ts",
+                              "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/shell.ts", "mod/hooks/splash.ts",
                               "mod/hooks/tasks.ts", "mod/hooks/waiting.ts"])
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
