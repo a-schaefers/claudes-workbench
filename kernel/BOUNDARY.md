@@ -13,7 +13,7 @@ A decision moves in only when all of these hold:
 - it is a state machine or a classifier with closed outcomes;
 - the need is cited (an issue, a drift found);
 - the host already reads its inputs;
-- it is not on the per-tool-call path, but for the gate classifier (*Rulings*).
+- it is not on the per-tool-call path, but for the gate classifier and the coding gate (*Rulings*).
 
 The same commit adds its row to `## Exports`, deletes what `replaces` names, and updates
 ARCHITECTURE.md's *Couplings*.
@@ -51,8 +51,8 @@ Final, from #1356's production plan (#1354), with the owner's ruling on the gate
   gate a shell command meets is a kernel decision, not host glue. One classifier over a parsed
   command, its argv words plus its redirect and `tee` targets, with closed outcomes; Claude Code
   feeds it shellparse's output, OpenCode its own scan of the command line. It is #1364's fix (a
-  command's words, never what its text mentions) and the shell gate #1314 uses. It is the one
-  decision on the per-tool-call path the entry test lets in. Parsing the command line stays in
+  command's words, never what its text mentions) and the shell gate #1314 uses. It is one of the two
+  decisions on the per-tool-call path the entry test lets in (the coding gate, below, is the other). Parsing the command line stays in
   each host, and so do the refusals' words and the dialog. Shipped as `gateOf` (#1325).
 - **The coding gate's rules come in** (#1325, Claude's recommendation, the owner's to overturn):
   `codingGate` and each host's file tools (`editTools`). Finding the task from the path
