@@ -363,7 +363,9 @@ async function run(engine: string, device?: string) {
       document.dispatchEvent(new Event('visibilitychange'))
     }, h)
     await until(() => at() > 0)                                  // opened: in use
-    writeFileSync(join(home, 'state/chat/switch.json'), JSON.stringify({ on: true, v: 2 }))
+    const sw = join(home, 'state/chat/switch.json')
+    const swWas = existsSync(sw) ? readFileSync(sw, 'utf8') : JSON.stringify({ on: true, v: 2 })
+    writeFileSync(sw, JSON.stringify({ on: true, v: 2 }))
     try {
       let was = at()
       await page.evaluate(() => { document._hasFocus = document.hasFocus; document.hasFocus = () => false })
@@ -388,7 +390,9 @@ async function run(engine: string, device?: string) {
       await sleep(1500)
       if (at() !== was) throw new Error('reported again within 30 s')
     } finally {
-      writeFileSync(join(home, 'state/chat/switch.json'), JSON.stringify({ on: false, v: 2 }))
+      // as the checks before left it, on by default (#1281): left off, every listener the checks
+      // after it write listens to nobody, as the chat off says now (#1537, 2026-11-26)
+      writeFileSync(sw, swWas)
       // the document's own hidden again: left at false, the reload's own visibilitychange read
       // as visible and dialled the stream from a page being unloaded (a WebKit page error)
       await page.evaluate(() => { delete (document as any).hidden; if (document._hasFocus) document.hasFocus = document._hasFocus })

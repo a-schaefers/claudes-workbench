@@ -6827,7 +6827,9 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   a fixed string keyed by the token) is ours; anything else is "other" (`chat.blocked_why`, #554).
   `chat.running` is `who_answers == "workbench"`. Off: nobody listens or relays, no link, away ends,
   `listener.json` removed; a running server stays up; `off` stops only the process wb started
-  (`chat.stop_started`, by pid and command line).
+  (`chat.stop_started`, by pid and command line). While off, `chat.listener()` is None whatever
+  claim is on disk, either host's: the mod's poll, its link still cached up, wrote its claim back,
+  and /api/health said Claude listened while /api/wait's messages waited their hour (#1537).
 - **Up by default** (#449, #1281). `chat.ensure(port)` returns `{url, state, why?}`: `off` (the
   switch), `up` (ours answers), `blocked` (something else answers; `why`: `chat.blocked_why`);
   else, for `chat.PORT` (the unit's) when a service keeps it (`chat._unit_keeps_it`: `systemctl

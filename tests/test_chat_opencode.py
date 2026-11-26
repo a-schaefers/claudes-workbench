@@ -115,6 +115,20 @@ class OpenCodeChat(Base):
         self.assertTrue(chat.hold("ses_x", ME)[0])
         self.assertEqual(chat.listener()["session"], "ses_x")
 
+    def test_a_claude_sessions_claim_does_not_listen_while_the_chat_is_switched_off(self):
+        # #1537 (2026-11-26): the Claude Code mod's poll wrote its claim back after `wb chat off`
+        # (its link cached up), and /api/health said Claude listened while /api/wait's messages
+        # waited their hour; #1480 had guarded only OpenCode's hold
+        chat.set_on(False)
+        store.write_json(chat.chat_dir() / "listener.json",
+                         {"session": "claude-key", "cwd": "/c", "pid": ME, "start": models._started(ME), "busy": False})
+        self.assertIsNone(chat.listener())                             # what /api/health and /api/wait read
+        self.assertEqual(chat.driver_state(rows=[])["state"], "off")
+        self.assertIsNone(chat.snapshot()["listener"])
+        chat.set_on(True)
+        self.assertEqual(chat.listener()["session"], "claude-key")
+        self.assertEqual(chat.driver_state(rows=[])["state"], "idle")
+
     def test_the_listening_sessions_reply_threads_onto_its_message_and_another_sessions_goes_to_the_user(self):
         self.claim()
         m = self.user_message()
