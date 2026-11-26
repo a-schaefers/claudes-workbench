@@ -3,7 +3,8 @@
 // off with the server part. The pane, the footer and /workbench come in #1312; the skeleton
 // (#1311, 2026-11-25) asks the server part which wb it runs and says so only when it finds none:
 // every later piece needs it, and a service started without the user's PATH is the likely cause.
-import type { TuiPlugin } from './host.d.ts'
+import type { TuiContext, TuiPlugin } from './host.d.ts'
+import type { SplashHost } from './splash.tsx'
 import { Workbench, type Status } from './rpc.ts'
 import { noticesTui } from './notices-tui.ts'
 
@@ -33,7 +34,16 @@ const plugin: TuiPlugin = {
           : `this install of the plugin brings no wb, and OpenCode's PATH has none: ${GET_WB}`,
       })
     }
-    return stopNotices
+    // the apprentice and the opening animation in Workbench's panel (#1333): imported here, not at
+    // load, as OpenTUI and Solid are only the TUI's; the context has what SplashHost names
+    // (plugin/src/tui/context.ts), which host.d.ts leaves out
+    try {
+      const { mountSplash } = await import('./splash.tsx')
+      const stopSplash = mountSplash(ctx as TuiContext & SplashHost, st.home)
+      return () => { stopSplash(); stopNotices() }
+    } catch {
+      return stopNotices // a TUI that can't load a plugin's OpenTUI views: the rest works without them
+    }
   },
 }
 

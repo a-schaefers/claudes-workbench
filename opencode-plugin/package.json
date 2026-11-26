@@ -22,6 +22,8 @@
     "agent.ts",
     "notices.ts",
     "notices-tui.ts",
-    "jobs.ts"
+    "jobs.ts",
+    "spans.ts",
+    "splash.tsx"
   ]
 }

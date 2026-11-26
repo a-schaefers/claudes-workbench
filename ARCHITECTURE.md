@@ -3911,7 +3911,10 @@ user sees.
   tables and apprentice.ts's `pixels(pose, over)`, nothing at module load, no file read;
   non-apprentice colours go through `atLum` (WCAG luminance 0.105-0.295). It ports forge.py, the
   reference generator, exactly (hash, arithmetic order, half-to-even rounding): the tests hold
-  frames 0-41 at 60x26 and 40x22.
+  frames 0-41 at 60x26 and 40x22. Its words are `plan`'s `lines`, `LINES` (CLAUDE'S WORKBENCH)
+  unless given: the last line cool, any above it warm, the title's rows from their count. The
+  OpenCode plugin plays the same frames with `['WORKBENCH']`, drawn as spans (*The OpenCode
+  plugin*, `spans.ts`), and paints apprentice.ts's `LAMP` colours in its theme's.
   Closed by the user (mark, Esc), the pane is minimized to a strip above the prompt (one
   `▸ Workbench` Button, key `restore`, and `STRIP_HINT`) while workbench mode is on or tasks exist;
   a press or `/workbench` brings it back, a quit clears it, a reload doesn't reopen it.
@@ -8121,13 +8124,19 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   `./server` → `server.ts`, `./tui` → `tui.ts`, `./rpc` → `rpc.ts`, the names OpenCode's
   `Host.resolve` asks for (`plugin/src/host.ts`). The repository's root `package.json` is what
   OpenCode's Git install fetches: its `exports` point into `opencode-plugin/`, its `files` bring
-  `bin/`, `workbench/`, `agent/`, `skill/`, `opencode-plugin/*.ts`, the kernel's membrane
-  (`mod/hooks/core.ts`, `kernel.js`, `kernel.d.ts`: `ocplugin.KERNEL_FILES`, which the notices import)
-  and `LICENSE` (the plugin and the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
-  executable); no `type` field, so nothing else in the repository changes how it loads.
+  `bin/`, `workbench/`, `agent/`, `skill/`, `opencode-plugin/*.ts`, `opencode-plugin/*.tsx`, the
+  kernel's membrane (`mod/hooks/core.ts`, `kernel.js`, `kernel.d.ts`, which the notices import as
+  `../mod/hooks/core.ts`, #1313), the Claude Code mod's `mod/hooks/splash.ts` and
+  `mod/hooks/apprentice.ts` (which `spans.ts` imports as `../mod/hooks/…`: one animation for both
+  hosts, #1333) and `LICENSE` (the plugin and
+  the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
+  executable); no `type` field, so nothing else in the repository changes how it loads. Each
+  `mod/` entry is a file the plugin imports, and each file a plugin module imports from beside it
+  is in `files` (`Setup`'s
+  `test_every_file_the_opencode_plugin_imports_from_beside_it_comes_with_each_install`).
   `opencode-plugin/package.json` (`type: module`, `files` the parts and their modules:
   `server.ts`, `tui.ts`, `rpc.ts`, `wb.ts`, `chat.ts`, `driver.ts`, `skill.ts`, `agent.ts`, `notices.ts`,
-  `notices-tui.ts`, `jobs.ts`) is the one a clone's
+  `notices-tui.ts`, `jobs.ts`, `spans.ts`, `splash.tsx`) is the one a clone's
   entry loads (`wb setup --opencode`'s `opencode-plugin/` directory). Each part is TypeScript, run
   as it is by OpenCode's Bun, a package's in `node_modules` too.
   - `server.ts`: `{id: "workbench", setup}` (OpenCode's check is that shape alone,
@@ -8160,8 +8169,53 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     'github:a-schaefers/workbench#main' brings it, or bin/wb setup --opencode in a clone`, its
     `GET_WB`, `ocplugin.GET_WB` word for word); nothing when all is well (a healthy install is
     seen in the TUI's `/plugins`, or `opencode plugin list`), nothing when the server part
-    doesn't answer. First it subscribes to the notices' toasts (`noticesTui`, *Notices on
-    OpenCode*), whose cleanup its setup returns. A no-op under `WB_TASK`.
+    doesn't answer. A no-op under `WB_TASK`. First it subscribes to the notices' toasts
+    (`noticesTui`, *Notices on OpenCode*); then it imports `splash.tsx` (in setup, never at load:
+    OpenTUI and Solid are only the TUI's) and returns `mountSplash`'s removal and the notices'
+    as its cleanup; a TUI that can't load the views sets up without them (the notices' cleanup
+    alone), said nowhere.
+  - `spans.ts` (#1333, slice 4c of #1296; pure, no OpenTUI or Solid, so Bun tests it bare): the
+    cells the mod's `splash.ts` and `apprentice.ts` compute for Claude Code's Raster as rows of
+    spans, one span a run of one fg and bg (`spans(cells, cols)`, `cellsOf` back, `words` for a
+    Raster's base64 `cells`). A `Paint` is `null` (the terminal's own colour: no colour, the
+    panel's surface shows through), an RGB the art keeps (all in splash.ts's luminance band, read
+    on a dark theme and a light one), or a theme `Token` with the RGB it stands for: the bar the
+    words fall into (a blank cell on `BAR`) is `accent`, and the chest lamp, by its colour
+    (`apprentice.ts` `LAMP`, no colour of the art), the phase's: `accent` (rest, blink, think,
+    work, swing), `success` (tada), `warning` (ask), `error` (slump), `faint` (sleep).
+    `apprentice(pose)`: the apprentice's spans from `cells(pose)`. `TITLE`, `['WORKBENCH']`: the
+    words OpenCode's splash forges (splash.ts `plan`'s `lines`; the owner, 2026-11-24, the pane
+    there "would just only be called workbench"; Claude Code's keeps `LINES`, CLAUDE'S WORKBENCH).
+    `Play`: one play, as the mod drives it: `fit(cols, rows, target)` plans it (`TITLE`), again at
+    a new size from the same frame and ending, and ends it where `splashFont` gives none;
+    `step()` to the next frame, false and `done` after the last; `frame()` the spans; `end()`.
+    `restTarget(rows)`: with no page to say where, the apprentice ends at the bottom left and the
+    words rise away (no modeline row is known, so no bar). `splashOn(read)`: splash.json as the
+    mod's `splashOn` reads it.
+  - `splash.tsx`: the OpenTUI views, `<text>` rows of `<span>`s. `Spans`, `Apprentice({theme,
+    pose})`, `Splash({theme, target, onDone})` (filling its box: `onSizeChange` fits the `Play`, a
+    timer at `SPLASH_MS` steps it, `WAIT` 25 ticks for a first layout; any key, read by
+    `useKeyboard`, which leaves it to whatever has focus, or a click ends it, and so does the
+    panel closing), `SplashThen({host, home, target, children})`: the splash the first time
+    Workbench's panel opens in a TUI (`ctx.storage.memory("splash")`'s `played`, which a plugin
+    reload keeps; `replaySplash(host)` arms it again, for the mode's end as the mod's `splashed`
+    atom) unless `<home>/splash.json` says off, then the page. `mountSplash(host, home, page?,
+    target?)`: one `ui.slot` claim, `append` to `session.panel`, shown for the panel named `PANEL`
+    (`workbench`, the name #1312's `ui.panel.open` uses): the page after the splash, the Tasks
+    page's when #1312 passes it (with its `target`, where its apprentice and modeline are, so the
+    words fall into the modeline's row), else the apprentice resting at the panel's bottom left.
+    Tokens become `ctx.theme`'s colours: `accent` the theme's accent hue at step 400
+    (`theme.hue.accent[400]`, the step of its feedback colours; the primary action's background
+    is `transparent` in OpenCode's own theme, seen live), the rest `text.feedback.<kind>.base` and
+    `text.faint`; an RGB `#rrggbb`. `SplashHost`: what it reads of OpenCode's TUI context
+    (`theme`, `storage.memory`, `ui.slot`; `plugin/src/tui/context.ts`), which `tui.ts` casts its
+    context to, as `host.d.ts` declares only the skeleton's.
+  - `opentui.d.ts`: the modules OpenCode's TUI hands a plugin (`solid-js`, `@opentui/solid` and
+    its `jsx-runtime`'s `JSX`; `tui/src/plugin/runtime-plugin-support.bun.ts`, OpenTUI's
+    `ensureRuntimePluginSupport`, which rewrites a plugin's imports of them to the host's and runs
+    a `.tsx` through Solid's JSX transform), the timers, `atob` and `readFileSync`, only what
+    `splash.tsx` and `spans.ts` use. Bun alone has none of those modules, so only the TUI imports
+    a module that does.
   - `wb.ts`: `findWb(options, env, exec, own)`: the options' `wb` (an absolute path; one that
     isn't there is `found: false`, never swapped for another), else the package's own `OWN`,
     `../bin/wb` from `wb.ts` (the Git install's in OpenCode's package cache, or a clone's: the
@@ -8252,12 +8306,15 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   `opencode-plugin/` as committed at HEAD, never the live directory: OpenCode watches a configured
   local plugin and reloads it on every change (`core/src/config/plugin/source.ts`), so each save
   ran uncommitted, a patch under test with it (#1321's finding 16). `ocplugin.make_copy`: one copy
-  per tree, `~/.local/share/workbench/opencode-plugin/<12 hex of the tree>/opencode-plugin`
-  (`ocplugin.copies_dir`; its tests left out), the kernel's membrane beside it at
-  `<12 hex>/mod/hooks/` (`KERNEL_FILES`, HEAD's: the notices import `../mod/hooks/core.ts`, #1313),
-  with `copy.json` beside it (`commit`, `tree`, `clone`, `ocplugin.copy_info`); the tree
-  (`ocplugin.head_tree`) is `opencode-plugin/`'s, or with the kernel's files at HEAD a sha1 over it
-  and their blobs, so a kernel rebuilt alone makes a new copy too; out of every lane's writable places and readable there (the
+  per tree, `~/.local/share/workbench/opencode-plugin/<12 hex of the tree>/opencode-plugin` (the
+  tree, `ocplugin.head_tree`'s key and `copy.json`'s `tree`: `opencode-plugin/`'s git tree, or with
+  mod files a sha1 of it and their blobs, so a commit changing only `splash.ts`, or a kernel rebuilt
+  alone, makes a new copy)
+  (`ocplugin.copies_dir`; its tests left out), the mod files the root `package.json`'s `files` name
+  under `mod/` beside it at `<12 hex>/mod/hooks/…`, where `spans.ts`'s and the notices' imports look
+  (`ocplugin.shared_files`, read at the copied commit; #1333: a copy of `opencode-plugin/` alone
+  left them unresolved), with `copy.json` beside it (`commit`, `tree`,
+  `clone`, `ocplugin.copy_info`), out of every lane's writable places and readable there (the
   agent's OpenCode imports it to learn its id); off git the live directory, said. Setup says `ok
   OpenCode loads a copy of <clone>/opencode-plugin as committed at <sha>, not the live directory it
   reloads on every change: wb update refreshes it`, and `--  opencode-plugin/ has uncommitted
@@ -8325,7 +8382,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   OpenCode's plugin runs its own …`, neither `BAD` (#1321's finding 26).
 - **Type-checked** by OpenCode's own Bun: `BUN_BE_BUN=1 opencode check -p opencode-plugin`
   (`bun check`, tsc's errors, Bun 1.4.4 in OpenCode 2.3.0, 1.4.5 in 2.4.1), with
-  `opencode-plugin/tsconfig.json` (strict, `noUncheckedIndexedAccess`, `types: []`); the mod's TS
+  `opencode-plugin/tsconfig.json` (strict, `noUncheckedIndexedAccess`, `types: []`, `jsx:
+  preserve` with `jsxImportSource: @opentui/solid`, `*.tsx` included; it checks the mod's
+  `splash.ts` and `apprentice.ts` too, as `spans.ts` imports them); the mod's TS
   is Claude Code's to check (`mod/tsconfig.json` extends the types `claude plugin` generates).
   CI's `opencode-plugin` job runs it after the Bun tests (its own job since #1328, as `mod` is the
   mod's; it was the kernel job's), and `wb patch upstream` names both for a patch that touches
@@ -8348,14 +8407,22 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   access, the list asserted empty: a throw alone was swallowed by `tui.ts`'s own `catch`, so its
   guard could be deleted with the test passing, #1311's review), the RPCs registered (`status`, the driver's), which wb
   (the options', the package's own before PATH's) and which state dir (`~` and relative
-  expanded)), `opencode-plugin/test/skill.test.ts` (#1335: Claude Code's copy of every skill file
+  expanded)), `opencode-plugin/test/splash.test.ts` (#1333: every frame a `Play` gives at 60x26
+  falling into a bar, 40x22 rising and 120x40 decodes to splash.ts's `frameCells` for
+  `plan(…, TITLE)`, all of them, then done; the bar is the accent, its whole row, and in every
+  frame only the lamp (two pixels at most) takes a theme colour beside it; each pose's apprentice
+  is `cells(pose)` with its lamp the phase's token; a resize plans again from the same frame and
+  ending and a small panel ends it for good; the rest target; WORKBENCH alone, cool, against
+  Claude Code's CLAUDE'S WORKBENCH; splash.json; `tui.setup` with a found wb sets up with nothing
+  said when the views can't load, as under bare Bun), `opencode-plugin/test/skill.test.ts` (#1335: Claude Code's copy of every skill file
   is the file byte for byte; every host line matches; OpenCode's copy has no `run_in_background`,
   no `$CLAUDE_CODE_SESSION_ID`, `Claude` only in `Claude Code`, no plan mode, Bash, the mod or a
   `reference/` path; the driver waits with `wb wait`, never for a wake (#1313's to change); every
   named `workbench-<name>` skill exists; the wb line's forms; the skills
   replace the `~/.claude` copy; the agent; the prompt on the Workbench agent's requests alone;
   `keepOurs` registering again once), `Setup -k opencode` (the install and doctor's lines) and
-  `test_doctor_survives_an_opencode_config_that_isnt_an_object_or_cant_be_read`, `Lane`'s
+  `test_doctor_survives_an_opencode_config_that_isnt_an_object_or_cant_be_read`,
+  `test_wb_setup_opencodes_copy_brings_the_mod_files_it_imports_and_a_change_to_one_renews_it`, `Lane`'s
   `test_the_opencode_plugins_copy_is_read_in_the_lane_and_never_written`, `Update`'s
   `test_an_update_moves_opencodes_plugin_to_a_copy_of_the_pulled_commit`, `RealOpenCodePlugin`'s
   `test_a_real_opencode_loads_wb_setup_opencodes_copy_and_never_the_clones_live_edits` and
@@ -8391,7 +8458,12 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   hand on 2.4.1 (2026-11-25): `opencode plugin add` of the repository's Git spec installs it and
   its wb from the package cache, and the TUI's `/plugins` lists it under TUI and Server; #1335's
   (2026-11-25, a scratch HOME and XDG dirs): `run --agent workbench` with a reply calling the
-  `skill` tool on `workbench-spec` gets the part's text back.
+  `skill` tool on `workbench-spec` gets the part's text back. The
+  splash checked by hand on 2.4.1 (2026-11-25, tmux at 150x46, 130x40 mid-play, 100x30 and 70x24,
+  a scratch config and state; a scratch plugin opened the panel, as #1312's `/workbench` will):
+  it forges WORKBENCH in the panel, replans on the resize, a key skips it to the page, splash.json
+  `on: false` shows the page at once, unpainted cells are the panel's raised surface and the lamp
+  the theme's accent.
 - **Live checks #1311 owns**, each run by hand in a real OpenCode by the slice that first builds
   what it checks, and recorded there: setup off in `opencode run` (this slice: the canary in
   `RealOpenCodeRun`); a runner that survives the TUI and the background service ending (#1312,
@@ -10105,6 +10177,13 @@ doc needs its own `!/` line).
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught (`schema.py`, the ask server's import since #1278).
 - **The OpenCode plugin's id** (`'workbench'` in `opencode-plugin/server.ts`'s `ID`, `tui.ts`, `rpc.ts`) → `ocplugin.PLUGIN_ID` and `PLUGIN_OFF` (`"-workbench"`, every task's layer, `context.PLUGIN_OFF`); **its directory and package name** (`opencode-plugin/`, both `package.json`s' `opencode-workbench`) → `ocplugin.DIR`, `PACKAGE`, `SUBDIR`, `GIT_SPEC` and the install line people copy (`ocplugin.ADD`); **its parts' `exports`** → the root `package.json`'s, the same with `./opencode-plugin/` (`Setup`'s package test); **a file the plugin or its wb needs at run time** (a new import from `mod/hooks/`, a top-level directory `workbench/` reads, like `agent/` and `skill/`) → the root `package.json`'s `files`, or OpenCode's Git install lacks it; **where `wb` comes from when none is found** (`ocplugin.GET_WB`) → `tui.ts`'s
 `GET_WB`, word for word, and doctor's lines; **an OpenCode API it uses** → its declaration in `opencode-plugin/host.d.ts` (or `env.d.ts`), with the source file it was read from (#1311).
+- **The splash's frames and the apprentice's cells** (the mod's `splash.ts`, `apprentice.ts`) → the OpenCode plugin's,
+  which draws the same cells as spans (`opencode-plugin/spans.ts`, its `splash.test.ts` decoding every frame back), so
+  a change plays on both hosts; **a colour that means something** (`apprentice.ts`'s `LAMP`, splash.ts's `BAR`) → its
+  `Token` in `spans.ts` (`LAMP_TOKEN`, the bar's blank-cell rule) and `splash.tsx`'s `themed`; **the accent**
+  (`theme.hue.accent[400]`) → the colour #1312's modeline gives its row, the row the words fall into; **a mod file the
+  plugin imports** (`../mod/hooks/…`) → the root `package.json`'s `files`, which OpenCode's Git install fetches and
+  `ocplugin.shared_files` copies beside a clone's copy (#1333).
 - **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ each host's detection (the mod, the OpenCode plugin, the kernel's Keywords, #1325); `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip.
 - **The wb the mod runs** (`findWb` in register.tsx: `WB_BIN`, `wb` on PATH, `~/.local/bin/wb`) → `cli.mod_wb`, what wb
   doctor says the mod runs, and wb setup's PATH note (#1200).
@@ -10380,8 +10459,9 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `SPEND_NEXT`, `AGENTS_NEXT`, `PROVIDER_HEADLINE`, `LOCAL_ONLY_HEADLINE`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`,
   `MIDTURN_NOTE`, `MISSED_NOTE`, `headlineOf`, `nextOf` → opencode-plugin/notices.ts's (said to an OpenCode
   driver); a new notice kind or `cause` changes both. The mod's `scoutIfDue` → `cli.scout_offer_due`
-  (`SCOUT_EVERY_DAYS`, `offered_at`). `wb ack`'s exit 3 → notices.ts's `take`. `ocplugin.KERNEL_FILES`
-  → the root package.json's `files` and the tests' `plugin_repo`; a new file core.ts imports joins all three. **routes.json's
+  (`SCOUT_EVERY_DAYS`, `offered_at`). `wb ack`'s exit 3 → notices.ts's `take`. A new file
+  core.ts imports joins the root package.json's `files`, which `ocplugin.shared_files` and the tests'
+  `plugin_repo` read. **routes.json's
   `by` value `web`** → `readRoutes`' `web`.
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963);
 - **The Tasks view** (#1048): the status keys `round_for`, `typical`, `late_min`, `cards`, `api` and task.json `group` →
