@@ -2570,7 +2570,7 @@ def freed(m: Model, keep=()) -> bool:
     and then said the memory was still being released (#467)."""
     if not releasable(m):
         return False
-    held = {*keep, *keep_loaded()}
+    held = {*keep, *keep_loaded(drivers=False)}  # after free_gpu with no ``of``: a driver's goes too
     if m.id in held or (m.engine == "ollama" and _kept_name(m.name, held)):
         return False
     return not (m.engine == "server" and any(
@@ -2882,14 +2882,20 @@ def _unload(m: Model) -> None:
         pass
 
 
-def keep_loaded() -> set[str]:
+def keep_loaded(drivers: bool = True) -> set[str]:
     """models.json's top-level `keep_loaded`: model ids or Ollama names that wb never unloads or
     stops (an embedding model a project's tests need, the user's autocomplete or Open WebUI
-    model): every round once unloaded every one of them (the 2026-11-19 audit). And the models
-    this machine's live OpenCode drivers run on (store.driver_models, #1317): a local driver on
-    this GPU was evicted at every round, and its next turn reloaded it and evicted the agent's."""
+    model): every round once unloaded every one of them (the 2026-11-19 audit). And, unless
+    ``drivers`` is False, the models this machine's live OpenCode drivers run on
+    (store.driver_models, #1317): a local driver on this GPU was evicted at every round, and its
+    next turn reloaded it and evicted the agent's. A job that takes the GPU to itself (wb image,
+    wb audio, --unload-for-tests, wb optimize: free_gpu with no ``of``) passes False and unloads
+    a driver's model as before, its next turn reloading it: kept, a generation ran beside it and
+    spilled or ran out of memory, as no exclusive lease waits for a driver (the review of #1317,
+    2026-11-25)."""
     v = _overrides().get("keep_loaded") or []
-    return {*({str(x) for x in v} if isinstance(v, list) else set()), *store.driver_models()}
+    user = {str(x) for x in v} if isinstance(v, list) else set()
+    return {*user, *store.driver_models()} if drivers else user
 
 
 def _kept_name(name: str, held: set[str]) -> bool:
@@ -2924,7 +2930,7 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
         return
     seen: dict = {}
     stopped: list[Model] = []
-    held = keep_loaded()
+    held = keep_loaded(drivers=of is not None)  # the GPU to itself: a driver's model goes too (#1317)
     found = discover()
     local = on_this_gpu(found)  # another host's GPU isn't ours to free (unless it's this one: #750)
     lms_scope = local + _shared_servers(found)

@@ -56,17 +56,41 @@ test('a beat holds every session listed, its last primary request over its selec
 
 test('every page of the store is listed, and a failed page names no whole store', async () => {
   const pages: Record<string, object> = {
-    '': { data: [{ id: 'a' }], cursor: { next: 'c1' } },
-    c1: { data: [{ id: 'b' }], cursor: { next: null } },
+    '': { data: [{ id: 'a', time: { updated: 20 } }], cursor: { next: 'c1' } },
+    c1: { data: [{ id: 'b', time: { updated: 10 } }], cursor: { next: null } },
   }
-  const all = await listAll(async (input) => pages[input?.cursor ?? ''] as never)
-  expect(all).toEqual({ rows: [{ id: 'a' }, { id: 'b' }], whole: true })
+  const all = await listAll(async (input) => pages[input?.cursor ?? ''] as never, 100)
+  expect(all).toEqual({ rows: [{ id: 'a', time: { updated: 20 } }, { id: 'b', time: { updated: 10 } }], whole: true })
   const broken = await listAll(async (input) => {
     if (input?.cursor) throw new Error('gone')
     return pages['']! as never
-  })
-  expect(broken).toEqual({ rows: [{ id: 'a' }], whole: false })
+  }, 100)
+  expect(broken).toEqual({ rows: [{ id: 'a', time: { updated: 20 } }], whole: false })
   expect(await listAll(undefined)).toEqual({ rows: [], whole: false })
+})
+
+test('a session updated while the pages are read is listed, and a listing that may miss one is not whole', async () => {
+  // the review of #1316 (2026-11-25): newest-updated first, so `c` updated after page one was read
+  // moved ahead of the cursor; the store was named whole without it, and its task read as gone
+  let reads = 0
+  const moving = async (input?: { cursor?: string }) => {
+    if (input?.cursor) return { data: [{ id: 'b', time: { updated: 10 } }], cursor: { next: null } } as never
+    reads++
+    return (reads === 1
+      ? { data: [{ id: 'a', time: { updated: 20 } }], cursor: { next: 'c1' } }
+      : { data: [{ id: 'c', time: { updated: 150 } }, { id: 'a', time: { updated: 20 } }], cursor: { next: 'c2' } }) as never
+  }
+  const got = await listAll(moving, 100)
+  expect(got.rows.map((r) => r.id)).toEqual(['a', 'b', 'c'])
+  expect(got.whole).toBe(true)
+  // the first page read again is all newer than the listing: what is past it may be missed too
+  const busy = async (input?: { cursor?: string }) => (input?.cursor
+    ? { data: [], cursor: { next: null } }
+    : { data: [{ id: 'x', time: { updated: 150 } }], cursor: { next: 'c1' } }) as never
+  expect((await listAll(busy, 100)).whole).toBe(false)
+  // a row without its time can't show that, so the listing names no store
+  const bare = async () => ({ data: [{ id: 'x' }] }) as never
+  expect(await listAll(bare, 100)).toEqual({ rows: [{ id: 'x' }], whole: false })
 })
 
 test('a beat goes to wb driver beat on stdin, with the store only for a whole listing', async () => {
@@ -74,7 +98,7 @@ test('a beat goes to wb driver beat on stdin, with the store only for a whole li
   const host = (fail: boolean): DriverHost => ({
     options: {}, app: { channel: 'latest' },
     rpc: { register: async () => ({ dispose: async () => {} }) },
-    session: { list: async () => { if (fail) throw new Error('busy'); return { data: [{ id: 's1' }] } } },
+    session: { list: async () => { if (fail) throw new Error('busy'); return { data: [{ id: 's1', time: { updated: 0 } }] } } },
   })
   await beatOnce(host(false), wb.run, new Map(), 4242)
   expect(wb.calls[0]!.args).toEqual(['driver', 'beat'])

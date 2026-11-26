@@ -29,9 +29,11 @@ interface SessionInfo {
   readonly id: string
   readonly model?: ModelRef
   readonly location?: { readonly directory?: string }
+  readonly time?: { readonly updated?: number }  // epoch ms
 }
-// client/src/promise/generated/types.ts `SessionsResponse` (core/src/session/store.ts lists
-// every row when no limit is given; a cursor is followed anyway)
+// client/src/promise/generated/types.ts `SessionsResponse`: core/src/session.ts `Session.list`
+// gives 50 rows a page by default, newest time_updated first, each next page anchored on the
+// last row's (time.updated, id)
 interface SessionsPage { readonly data?: readonly SessionInfo[]; readonly cursor?: { readonly next?: string | null } }
 // plugin/src/promise/session.ts `SessionModelRequest`
 interface ModelRequest { readonly sessionID: string; readonly model: ModelRef; readonly kind: string }
@@ -95,12 +97,19 @@ export function parseRef(text: string): ModelRef | undefined {
 }
 
 // Every session in the store, each page: `whole` false when a page failed (the beat then names
-// no store, so its gaps can't read as deleted sessions)
-export async function listAll(list: NonNullable<DriverHost['session']>['list']): Promise<{ rows: SessionInfo[]; whole: boolean }> {
+// no store, so its gaps can't read as deleted sessions). The pages are newest-updated first, so a
+// session updated while they are read moves ahead of the cursor and was missed, yet the beat named
+// the store and store.driver_server read its task as gone (the review of #1316, 2026-11-25): the
+// first page is read again at the end, its rows not yet seen added, and the listing is whole only
+// when that page reaches back past ``since`` (the listing's start, ms): everything updated since
+// is on it.
+export async function listAll(list: NonNullable<DriverHost['session']>['list'],
+                              since: number = Date.now()): Promise<{ rows: SessionInfo[]; whole: boolean }> {
   if (!list) return { rows: [], whole: false }
   const rows: SessionInfo[] = []
   let cursor: string | undefined
-  for (let page = 0; page < 1000; page++) {
+  for (let page = 0; ; page++) {
+    if (page >= 1000) return { rows, whole: false }
     let got: SessionsPage
     try {
       got = await list(cursor ? { cursor } : {})
@@ -109,10 +118,19 @@ export async function listAll(list: NonNullable<DriverHost['session']>['list']):
     }
     rows.push(...(got?.data ?? []))
     const next = got?.cursor?.next
-    if (!next || next === cursor) return { rows, whole: true }
+    if (!next || next === cursor) break
     cursor = next
   }
-  return { rows, whole: false }
+  let first: readonly SessionInfo[]
+  try {
+    first = (await list({}))?.data ?? []
+  } catch {
+    return { rows, whole: false }
+  }
+  const seen = new Set(rows.map((r) => r?.id))
+  rows.push(...first.filter((r) => r && !seen.has(r.id)))
+  const oldest = first.at(-1)?.time?.updated
+  return { rows, whole: first.length === 0 || (typeof oldest === 'number' && oldest < since) }
 }
 
 // The beat for one listing begun at ``ts`` (seconds): each session's selection and directory,
@@ -286,8 +304,9 @@ export async function startDriver(host: DriverHost, run: Run = wbRunner(host.opt
 // that failed is simply missing, and store.HEARTBEAT_FRESH reads it as unknown, never gone
 export async function beatOnce(host: DriverHost, run: Run, used: ReadonlyMap<string, Used>,
                                pid: number = process.pid): Promise<Ran | undefined> {
-  const ts = Date.now() / 1000
-  const { rows, whole } = await listAll(host.session?.list)
+  const began = Date.now()
+  const ts = began / 1000
+  const { rows, whole } = await listAll(host.session?.list, began)
   if (!whole && rows.length === 0) return undefined
   const store = whole ? storePath(process.env, host.app?.channel) : undefined
   return run(['driver', 'beat'], JSON.stringify(beatOf(pid, store, ts, rows, used)))

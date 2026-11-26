@@ -987,6 +987,40 @@ class DriverLease(Base):
         self.assertNotIn(BIG, models.keep_loaded())
         wait_phase("t-small", {"review"})
 
+    def test_a_task_that_waits_on_a_drivers_model_is_told_the_way_out_and_its_own_session_that_it_waits_on_itself(self):
+        # the review of #1317 (2026-11-25): the wait ends only when Ollama lets the model go or the
+        # session idles DRIVER_HOLD, and a driver polling its own task keeps both fresh
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        self.drive()
+        held = models.driver_holders(models.discover()[SMALL])
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "WB_TASK", "OPENCODE_SESSION_ID")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            other = cli._driver_way_out(held)
+            os.environ["OPENCODE_SESSION_ID"] = "ses_d"
+            own = cli._driver_way_out(held)
+        self.assertIn(f"; the driver's model leaves only once Ollama unloads it or its session is idle "
+                      f"{store.DRIVER_HOLD // 60} min: a smaller model for either side", other)
+        self.assertIn(f"; this session's own {BIG} leaves only once", own)
+        self.assertIn("so it waits on this session", own)
+        self.assertEqual(cli._driver_way_out({}), "")
+
+    def test_a_job_that_takes_the_gpu_to_itself_unloads_a_drivers_model_as_before(self):
+        # the review of #1317 (2026-11-25): wb image, wb audio, --unload-for-tests and wb optimize
+        # free the GPU with no model (free_gpu's ``of`` None), and no exclusive lease waits for a
+        # driver; kept loaded, a generation ran beside the driver's 20 GB and spilled
+        self.drive()
+        big = models.discover()[BIG]
+        self.assertIn(BIG, models.keep_loaded())                  # a coding round keeps it
+        self.assertNotIn(BIG, models.keep_loaded(drivers=False))
+        self.assertTrue(models.freed(big))                        # media.settle waits for it to go
+        asked, real = [], models.keep_loaded
+        with mock.patch.object(models, "keep_loaded", lambda drivers=True: asked.append(drivers) or real(drivers)), \
+                mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "discover", lambda *a, **k: {}):
+            models.free_gpu(say=lambda m: None)                    # the GPU to itself
+            models.free_gpu(keep={BIG}, say=lambda m: None, of=big)  # a task's load
+        self.assertEqual(asked, [False, True])
+
     def test_a_driver_model_that_fits_beside_the_tasks_runs_with_it_and_others_hold_nothing(self):
         os.environ["WB_FAKE_GPU_GB"] = "48"           # both fit
         self.drive()

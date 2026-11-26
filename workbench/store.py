@@ -622,20 +622,22 @@ def driver_fill(task) -> None:
 DRIVER_HOLD = 1800  # seconds
 
 
-def driver_models() -> set[str]:
+def driver_models(session: str | None = None) -> set[str]:
     """The models this machine's live OpenCode sessions drive with (#1317): each session row of
     a fresh beat of a running server whose `used` (its last model request) is within DRIVER_HOLD,
     by its OpenCode id (`provider/model`, as discover() names a GPU one; an API one never
-    matches a GPU model). models.keep_loaded adds them, so nothing wb does unloads them, and the
-    GPU lease counts the memory of those resident (models.driver_holders)."""
+    matches a GPU model). models.keep_loaded adds them, so no coding round unloads them, and the
+    GPU lease counts the memory of those resident (models.driver_holders). ``session``: that
+    session's alone (wb start's note on a task that waits for its own driver's model)."""
     now, out = time.time(), set()
     for hb in heartbeats():
         if not _beating(hb):
             continue
-        for row in hb["sessions"].values():
+        for sid, row in hb["sessions"].items():
             used = row.get("used") if isinstance(row, dict) else None
             if isinstance(used, (int, float)) and not isinstance(used, bool) and math.isfinite(used) \
-                    and now - used <= DRIVER_HOLD and isinstance(row.get("model"), str) and row["model"]:
+                    and now - used <= DRIVER_HOLD and isinstance(row.get("model"), str) and row["model"] \
+                    and session in (None, sid):
                 out.add(row["model"])
     return out
 

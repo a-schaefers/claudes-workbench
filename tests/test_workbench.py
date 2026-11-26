@@ -40374,12 +40374,18 @@ class Routes(Base):
         self.assertFalse(self.dry("driver", "session")["gate"])   # taking it off needs no yes
         self.assertEqual(self.route("driver", "session")[0], 0)
         self.assertNotIn("driver", self.doc())
-        # an id OpenCode wouldn't parse is refused, a hand edit's too, never read as no pin
+        # an id OpenCode wouldn't parse is refused
         self.assertEqual(self.route("driver", "nomodel")[0], 3)
         self.assertEqual(self.route("driver", "x/y", "trivial")[0], 1)
-        self.path.write_text(json.dumps({"driver": "x#y/z"}))
-        with self.assertRaises(routes.RoutesError):
-            routes.read()
+
+    def test_a_hand_edited_driver_pin_that_isnt_an_id_reads_as_no_pin_and_the_roles_still_read(self):
+        # the review of #1316 (2026-11-25): refused, it made routes.json unreadable, so every wb
+        # start exited 3, Claude Code's too, while the mod (which never reads `driver`) went on
+        self.path.write_text(json.dumps({"driver": "x#y/z", "day_usd": 4}))
+        doc = routes.read()
+        self.assertNotIn("driver", doc)
+        self.assertEqual(doc["day_usd"], 4)
+        self.assertEqual(json.loads(self.route("driver", "--json")[1]), {"driver": "session"})
 
 
 class OpenCodeDriver(Base):

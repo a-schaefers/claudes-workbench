@@ -388,7 +388,7 @@ def turns(who: str, say, wait: bool, *engines: dict):
         for _, m in sorted(remote.items()):
             stack.enter_context(models.GpuLease(None, who, say, wait=wait, on=m))
             if m.engine == "ollama" and not models._fake():
-                held = models.keep_loaded()
+                held = models.keep_loaded(drivers=False)  # the box to itself, as free_gpu
                 names = [n for n in models._ollama_loaded(m.root) if n and not models._kept_name(n, held)]
                 mine = models.box_mine(m.root)  # this machine's own loads there (#893 watches them)
                 theirs = [n for n in names if not any(models._matches(x, {n}) for x in mine)]

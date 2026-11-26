@@ -195,12 +195,13 @@ def normalize(doc) -> dict:
     busy = doc.get("busy", "wait")
     if busy not in BUSY:
         raise RoutesError(f"busy is {busy!r}, not {' or '.join(BUSY)}")
-    # the driver pin (#1316): kept only when it pins one, so a file without it reads as before
-    drv = doc.get("driver", DRIVER_SESSION)
-    if drv is not None and drv != DRIVER_SESSION and driver_ref(drv) is None:
-        raise RoutesError(f"driver is {drv!r}, not an OpenCode model id (provider/model, #variant "
-                          f"allowed) or {DRIVER_SESSION}")
-    pinned = {"driver": drv} if drv not in (None, DRIVER_SESSION) else {}
+    # the driver pin (#1316): kept only when it pins one, so a file without it reads as before.
+    # One that isn't an OpenCode id reads as no pin rather than an unreadable file: refused, a
+    # hand edit's typo made every wb start exit 3, Claude Code's too, while the mod's routesValid
+    # (which never reads `driver`) went on telling Claude the roles (the review of #1316,
+    # 2026-11-25). wb writes only a parsed one (driver_change).
+    drv = doc.get("driver")
+    pinned = {"driver": drv} if drv != DRIVER_SESSION and driver_ref(drv) is not None else {}
     return {"v": 1, "use": use, "busy": busy, "day_usd": _cap(doc.get("day_usd")), "roles": out, **pinned}
 
 

@@ -868,6 +868,22 @@ def _gpu_wait(m: models.Model, me: str | None = None) -> tuple[dict, bool]:
     return held, bool(held) and not models.admits(m, held)
 
 
+def _driver_way_out(held: dict) -> str:
+    """What a wait on a live driver's model needs said (#1317, the review of 2026-11-25): it ends
+    only when Ollama lets the model go (its keep-alive) or the session has been idle
+    store.DRIVER_HOLD, and the driver's own session, polling its task, keeps both fresh. ""
+    when no driver holds the GPU."""
+    drv = sorted(h["model"] for h in held.values() if h.get("driver"))
+    if not drv:
+        return ""
+    sid = store.opencode_session()
+    own = sorted(set(drv) & store.driver_models(sid)) if sid else []
+    who = f"this session's own {', '.join(own)}" if own else "the driver's model"
+    return (f"; {who} leaves only once Ollama unloads it or its session is idle "
+            f"{store.DRIVER_HOLD // 60} min{', so it waits on this session' if own else ''}: "
+            "a smaller model for either side, an API role or an API driver runs it sooner")
+
+
 def _preempt_bench(m: models.Model, me: str | None = None) -> str:
     """Real work first: the bench's replays that keep `m` off the GPU are stopped (the driver
     records them preempted and replays them once no real task runs). An overnight run must
@@ -964,7 +980,7 @@ def _gpu_note(task: store.Task) -> str:
         _say(_preempt_bench(m, task.name))
     held, waits = _gpu_wait(m, task.name) if m else ({}, False)
     return (f"note: the GPU is busy with {', '.join(sorted({h['task'] for h in held.values()}))}; "
-            f"{task.name} waits as queued until it's free") if waits else ""
+            f"{task.name} waits as queued until it's free{_driver_way_out(held)}") if waits else ""
 
 
 # --- commands -----------------------------------------------------------------------------------
@@ -2012,7 +2028,8 @@ def cmd_start(a):
         if slots_full:
             print(f"note: {_slot_note(m, a.name)}")
     elif waits:  # where it runs beside others or loads first is the runner's to do (#1322)
-        print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free")
+        print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free"
+              + _driver_way_out(held))
     if state["available"] and not api and (others := models.box_others(m)):  # another machine's task on the same box (#812)
         print(f"note: {urlparse(m.root).hostname} has {', '.join(others)} loaded, which no task here "
               f"runs: the runner loads {m.name} once it has gone {models.BOX_QUIET} s without a "

@@ -3773,11 +3773,16 @@ and nothing here changes that path.
   `OPENCODE_DB`, else `opencode.db` on the release channels or with
   `OPENCODE_DISABLE_CHANNEL_DB`, else `opencode-<channel>.db`, under `XDG_DATA_HOME`'s
   `opencode/`; `cli/src/database-path.ts`), and only for a whole listing: a failed page leaves it
-  out, so its sessions can say live, never gone. Nothing listed at all writes no beat. A hook or
+  out, so its sessions can say live, never gone. The pages are newest-updated first (50 a page), so
+  a session updated while they are read moves ahead of the cursor: `listAll` reads the first page
+  again at the end, adds its rows not yet seen, and calls the listing whole only when that page's
+  oldest `time.updated` is before the listing began (or it is empty); else no `store` (the review of
+  #1316). Nothing listed at all writes no beat. A hook or
   event stream the server refuses costs only its piece. wb's own OpenCode calls remove the plugin
   (`models.plugin_off`), so they never beat.
-- **The pin.** routes.json's top-level `driver` (`routes.normalize`; absent, or `session`: each
-  session's own choice) is an optional standing default, not a fourth role: nothing routes a task
+- **The pin.** routes.json's top-level `driver` (`routes.normalize`; absent, `session`, or a hand
+  edit that isn't an id `routes.driver_ref` parses: each session's own choice, never an unreadable
+  file, as the mod's `routesValid` doesn't read the key) is an optional standing default, not a fourth role: nothing routes a task
   by it. `wb route driver <provider/model>[#variant]|session` sets it (`routes.driver_change`): a GPU
   model's (`models.gpu_side`) needs no yes; any other id is taken for an API model, failing closed,
   and from a model's call takes the host's dialog (`route-ok.json`, as a role's API change),
@@ -3808,13 +3813,21 @@ A driver on this machine's GPU (#1317) is held like a running task's model. `sto
 the models of the sessions in this machine's fresh beats (`HEARTBEAT_FRESH`, the server running)
 that drove within `store.DRIVER_HOLD` 1800 s (`used`). `models.keep_loaded()` adds them, so a
 round's `free_gpu` never unloads the driver's model and its next turn doesn't reload it and evict
-the agent's. `models.driver_holders(m)`: each such model `discover()` finds on `m`'s GPU, not `m`
+the agent's. Only against coding loads: a job that takes the GPU to itself (`wb image`, `wb audio`,
+`--unload-for-tests`, `wb optimize`: `free_gpu` with no `of`, `media.settle`'s `models.freed`, a
+box's turn, `optimize.candidates`) reads `keep_loaded(drivers=False)` and unloads the driver's
+model as before, its next turn reloading it; no exclusive lease waits for a driver, which may be
+the one waiting on its own `wb image`. `models.driver_holders(m)`: each such model `discover()` finds on `m`'s GPU, not `m`
 itself (the same model shares), and resident, as an admission-only holder
 (`driver:<id>`, `models.DRIVER_HOLDER`, never written to gpu.json): `GpuLease` admits `m` beside
 it only when `admits` says both fit, else the task queues, `waiting for the GPU (held by the
 driver's <id> (<GB> GB))`, re-checked each `QUEUE_POLL` while queued (`_driver_waits`), and
 `load()`'s `_fits_beside` counts it as kept. `wb start` names it (`the GPU is busy with the
-driver's …`, `cli._gpu_wait`); a bench never preempts it (`_preempt_bench`). An API driver, a
+driver's …`, `cli._gpu_wait`) and the way out (`cli._driver_way_out`: it leaves only once Ollama
+unloads it or its session idles `DRIVER_HOLD`; a smaller model for either side, an API role or an
+API driver runs it sooner; `this session's own <id>`, `so it waits on this session`, when the
+caller's `OPENCODE_SESSION_ID` drives on it, `store.driver_models(session)`); a bench never
+preempts it (`_preempt_bench`). An API driver, a
 stale beat or a session idle past `DRIVER_HOLD` holds nothing (`DriverLease`).
 
 ## Seeing what the agent does
@@ -4488,7 +4501,8 @@ provider:
 - `keep_loaded` (top level): ids or Ollama names never unloaded, stopped or measured by `wb
   optimize` (#254); an id only when it starts with a configured provider, else a whole Ollama name,
   untagged as `:latest` (`models._kept_name`, #461); `models.keep_loaded()` adds the models this
-  machine's live OpenCode drivers run on (`store.driver_models`, *A local driver on the GPU*, #1317);
+  machine's live OpenCode drivers run on (`store.driver_models`, *A local driver on the GPU*, #1317),
+  except for a job that takes the GPU to itself (`keep_loaded(drivers=False)`);
 - `variant_of`/`replaces`: a `wb optimize apply` variant's source and parent; one record
   (`router.lineage`), the variant first (#584, #723); `wb model retire` keeps both;
 - `cost`: `wb model price` (#1135): an API model's own prices, `[{input, output, cache?: {read?,
@@ -8018,7 +8032,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   is Claude Code's to check (`mod/tsconfig.json` extends the types `claude plugin` generates).
   CI's kernel job runs it after the Bun tests.
 - **Tested** by `opencode-plugin/test/driver.test.ts` (the store path, the ref parser, a beat's rows,
-  every page listed, the beat on wb's stdin, primary requests alone recorded and a `/models` pick,
+  every page listed, a session updated mid-listing too, the beat on wb's stdin, primary requests alone recorded and a `/models` pick,
   the pin, the RPC), `RealOpenCodePlugin`'s
   `test_the_plugins_server_part_beats_every_session_of_its_store_through_wb` (a real server's beat
   names its session, store and directory; the RPC answers), and
@@ -9635,7 +9649,8 @@ doc needs its own `!/` line).
 - **What OpenCode reads from a project** → `context.PROJECT_SKILL_DIRS`, `agents_files`, `PROJECT_CONFIGS`,
   `project_config_instructions`; RealOpenCode's #994 test; *What the project's own config gave, handed back*.
 - **The driver's pin** (routes.json `driver`, `wb route driver`, #1316) → the `driver` Settings row (`settings._driver_row`,
-  `_argv`), the plugin's `applyPin` (reads `wb route driver --json`), and `wb driver`'s `pin`.
+  `_argv`), the plugin's `applyPin` (reads `wb route driver --json`), and `wb driver`'s `pin`; the mod's
+  `routesValid` never reads it, so `routes.normalize` reads a bad one as no pin, never refuses the file.
 - **The roles** (#1014): **routes.json's keys** (`routes.normalize`) → the mod's reader (`readRoutes`, `routesValid`,
   `routesPath` with `routes.path`); **`routes.summary`** ↔ the mod's `routesSummary` (the
   context block and the echo say it; `Routes` and register.test.tsx check one fixture each), and
