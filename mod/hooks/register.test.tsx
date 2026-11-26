@@ -4,6 +4,7 @@ import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { modeline } from './modeline.js'
 import { flowCommands, flowDescription } from './flows.js'
+import { OPENCODE } from './story.js'
 import type { WbTask } from '../types'
 
 // the no-break space the pane holds a unit whole with (`GPU 2+3`, `per M`, `61 tok/s`; #1048's review)
@@ -638,6 +639,39 @@ test('a run\'s notice no longer true is acknowledged unsaid, and one held for th
   expect(woken.join('\n')).not.toContain('PAUSED')
   expect(woken.filter(t => t.includes('MERGE'))).toHaveLength(1) // sent once the turn ended
   expect(files['/wb/runs/waits/acked']).toBe(String(ts0))
+})
+
+test('#1491: a run done hours before the session started wakes it once, and its first context names the run with no task open', async ($, on) => {
+  // a scheduled flow fires with no Claude: by the morning its run_done was 7 h old, past the hour a
+  // task's notice is due within, and a run has no rewake under it; and wb status's run lines come
+  // after `no open tasks`, so the context block was dropped whole
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  run(files, 'aud', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })      // no session: by directory
+  const old = ts0 - 7 * 3600
+  const text = '[workbench] Run `aud` is done: 2 result(s), 0 filtered, 0 null, 0 not run · $0. Read it: wb run report aud'
+  notice(files, { ts: old, run: 'aud', kind: 'run_done', phase: 'review', text })
+  fakeTasks(on, files, [])
+  const STATUS = 'no open tasks (wb status --all shows closed ones)\n' +
+    'run aud · flow triage · review · triage 1 done · $0 of $0\n  why: its final stage is Claude\'s'
+  const acks: string[][] = []
+  const ack = wbAckRun(files, acks)
+  on('process.run', (_: any, e: any) => e.argv[1] === 'status'
+    ? { value: { exitCode: 0, stdout: STATUS, stderr: '' } } : ack(_, e))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench')?.text ?? ''
+  expect(block).toContain('run aud · flow triage · review · triage 1 done')
+  expect(block).toContain("why: its final stage is Claude's")
+  expect(block).not.toContain('no open tasks')
+  await clock.advance(3000)
+  expect(woken).toEqual([text])                                     // an idle poll's one wake
+  expect(acks).toEqual([['ack', 'aud', String(old), '--run']])
+  await clock.advance(120_000)
+  expect(woken).toHaveLength(1)                                     // once
 })
 
 test('a new Claude Code process in the project adopts the tasks of one that is gone', async ($, on) => {
@@ -2150,6 +2184,25 @@ test('a closed task compacts Claude early, keeping the delegation state; open ta
   files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'discarded', round: 2, updated_at: ts + 12 })
   await clock.advance(2000)
   expect(compactions.length).toBe(2)
+})
+
+test('#1515: the open-tasks block follows a task with wb wait, never a bare wb watch, in the OpenCode plugin\'s words', async ($, on) => {
+  // wb watch follows a task until it closes: a driver that ran it on its own task at review waited
+  // out the Bash tool's two minutes. wb wait ends when the task needs the driver
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'fix-it   review   1 q', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const text = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench')?.text ?? ''
+  expect(text).toContain('fix-it   review')
+  expect(text).toContain('`wb wait <name>`')
+  expect(text).not.toMatch(/`wb watch <name>`/)
+  expect(text.endsWith(`\n${OPENCODE['tasks.pickup']}`)).toBe(true) // the plugin's TASKS_NOTE ends with the same line
+  await clock.advance(2000) // the load's own calls settle before the test ends
 })
 
 test('a session that never delegated is not compacted when a task closes', async ($, on) => {
@@ -5632,7 +5685,7 @@ test('#1041: a stored said-2 (no workflows in it) is declined as said-1 is: no r
 
 test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block when on, nothing when off, one row per change', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = { '/wb/workflows.json': JSON.stringify({ mode: 'on' }) }
+  const files: Record<string, string> = { '/wb/workflows.json': JSON.stringify({ deepmode: 'on' }) }
   fakeTasks(on, files, [])
   on('ui.toast', () => ({ value: undefined }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
@@ -5656,18 +5709,18 @@ test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block
   expect(block?.text).toContain('merge logic first, then tests, then UI or docs')
   await clock.advance(31_000)
   const before = rows.length
-  files['/wb/workflows.json'] = JSON.stringify({ mode: 'off' })            // the user turns it off (a terminal, the pane)
+  files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'off' })            // the user turns it off (a terminal, the pane)
   await clock.advance(31_000)
   await clock.advance(31_000)
   expect(rows.slice(before)).toEqual(['[workbench] Dynamic workflows are now off (the user\'s choice; `wb deepmode` shows it): ' +
     'run one task at a time again, as the /workbench skill says.'])
-  files['/wb/workflows.json'] = JSON.stringify({ mode: 'on' })
+  files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'on' })
   await clock.advance(31_000)
   await clock.advance(31_000)
   expect(rows.slice(before + 1)).toEqual([expect.stringMatching(/^\[workbench\] Dynamic workflows are on/)])
   expect(asked).toEqual([])                                                  // rows, never a turn of their own
   // off, the default: no block at all
-  files['/wb/workflows.json'] = JSON.stringify({ mode: 'off' })
+  files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'off' })
   await clock.advance(31_000)
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('dynamic-workflows')
 })
@@ -5691,6 +5744,41 @@ test('#1041: without workflows.json Dynamic workflows are off, and the conversat
   expect(names).toContain('workbench-mode')
   expect(names).not.toContain('dynamic-workflows')
   expect(rows.filter(r => r.includes('Dynamic workflows'))).toEqual([])
+})
+
+test('#1507: a 2.1 Dynamic workflows on starts deepmode off, and the next load is told so once', async ($, on) => {
+  // 2.1's `mode: on` meant Claude may start several tasks at once; read as 2.2's deepmode it made
+  // every substantive request a deep workflow, unasked. wb deepmode --moved records it off and
+  // says the story's line once; the mod toasts it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/workflows.json': JSON.stringify({ mode: 'on', ts: 1 }) }
+  fakeTasks(on, files, [])
+  const LINE = 'Deepmode is off: … /deepmode on turns it on.'
+  const ran: string[] = []
+  on('process.run', (_: any, e: any) => {
+    const line = e.argv.slice(1).join(' ')
+    ran.push(line)
+    if (line === 'deepmode --moved') {
+      files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'off', ts: 2 }) // as wb writes it
+      return { value: { exitCode: 0, stdout: `${LINE}\n`, stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(2000)
+  expect(ran.filter(l => l.startsWith('deepmode'))).toEqual(['deepmode --moved'])
+  expect(toasts.filter(t => t.includes('Deepmode'))).toEqual([`workbench: ${LINE}`])
+  const skill = await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  expect(skill.text).not.toContain('Dynamic workflows are on')                 // off, as 2.1's on reads now
+  // the next load: deepmode's own key is there, so nothing is run or said again
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(2000)
+  expect(ran.filter(l => l.startsWith('deepmode'))).toEqual(['deepmode --moved'])
+  expect(toasts.filter(t => t.includes('Deepmode'))).toHaveLength(1)
 })
 
 test('#1014: the mod\'s summary of the roles reads as routes.summary does', () => {

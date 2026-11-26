@@ -1002,6 +1002,15 @@ class Lifecycle(Base):
         self.assertIn("wb-no-such-opencode isn't on PATH", err.getvalue())
         self.assertFalse(store.Task("t-nooc").dir.exists())
 
+    def test_start_tells_only_a_terminal_caller_to_wait_never_an_opencode_driver(self):
+        # #1514 (2026-11-26): `next: wb wait <task>` reached an OpenCode driver too, whose procedure
+        # is to end its turn for the plugin's wake, so a driver that obeyed it held its turn in a wait
+        with mock.patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_x", "OPENCODE": "1"}):
+            out = self.start("t-ocnext", "ok")
+        self.assertIn("started t-ocnext", out)
+        self.assertNotIn("next:", out)
+        self.assertTrue(self.start("t-termnext", "ok").endswith("\nnext: wb wait t-termnext\n"))
+
     def test_start_returns_at_once_and_the_runner_checks_the_base(self):
         # The base check ran inside wb start, which a slow suite pushed past Claude's two-minute
         # Bash limit, leaving a task queued with no runner (the 2026-11-16 audit).
@@ -19327,6 +19336,24 @@ class Discovery(Base):
         self.assertEqual(models.resolve("mimo").id, "ollama/mimo-v2.6:9b-q8_0")
         self.assertEqual(models.resolve("strata").id, "strata/strata")
 
+    def test_a_config_with_both_provider_shapes_discovers_the_models_of_each(self):
+        # #1508 (2026-11-26): an older `provider` block beside a hand-written V2 `providers` one
+        # hid every V2 model from wb (read as one shape or the other), though OpenCode 2.4.1 loads
+        # both; the agent's layer left the V2 provider out too
+        from workbench import models
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({
+            "provider": {"ollama": OPENCODE_CONFIG["provider"]["ollama"]},
+            "providers": {"lms": {"package": "@ai-sdk/openai-compatible",
+                                  "settings": {"baseURL": "http://127.0.0.1:1234/v1"},
+                                  "models": {"coder": {}}}}}))
+        found = models.discover()
+        self.assertIn("ollama/qwen3.8-27b", found)
+        self.assertIn("lms/coder", found)
+        self.assertEqual(sorted(p[0] for p in models.configured_providers()), ["lms", "ollama"])
+        self.assertTrue(models.gpu_side("lms/coder"))
+        self.assertTrue(models.gpu_side("ollama/qwen3.8-27b"))
+        self.assertEqual(sorted(models.agent_providers()["provider"]), ["lms", "ollama"])
+
     def test_auth_key_reads_opencode_v2s_export(self):
         # #1010 (2026-11-22): OpenCode 2.x keeps `opencode auth login`'s keys in its database and
         # writes no auth.json, so auth_key always read "" and a local server behind a key read
@@ -22962,6 +22989,60 @@ class ScheduledRuns(Base):
         self.assertIn("skipped: significant role", run_wb("schedule", "list"))
         self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
 
+    def test_a_role_whose_key_is_only_exported_in_the_shell_is_noted_at_add_and_a_fire_without_it_is_skipped(self):
+        # #1495: wb writes no key into a unit, so a fire's every API start exited 3 (a backlog's
+        # headless Claude spending its turns on them), and a read there turned hosted.json's env
+        # row into "no key" for the web app's Settings and the terminal alike
+        from workbench import models, schedule
+        catalog = Path(self.tmp.name) / "catalog.json"
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", {"type": "env", "name": "XENV_API_KEY"})]}))
+        os.environ.update(WB_FAKE_CATALOG=str(catalog), WB_FAKE_API="xenv=env", XENV_API_KEY="xenv-not-a-real-key")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"significant": {
+            "via": "api", "api": "xenv/grok-9"}}}))
+        self.assertEqual(models.hosted(fresh=True)["xenv/grok-9"].key, "env:XENV_API_KEY")
+        out = self.add()
+        self.assertIn("note: the significant role's key is $XENV_API_KEY in your shell, which a fire gets "
+                      "only if your user manager has it (wb writes no key into a unit): `opencode auth "
+                      "login xenv` stores it, else such a fire is skipped", out)
+        self.assertIsNone(schedule.spend_skip())                     # where it is set, the fire runs
+        os.environ.pop("XENV_API_KEY")                                # the timer's (or the service's) environment
+        models.hosted(fresh=True)                                     # a read there keeps the terminal's row
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "env:XENV_API_KEY")
+        self.assertIn("$XENV_API_KEY isn't set where wb start ran",
+                      models.status(models.lookup("xenv/grok-9", cached=True))["why"])   # not "no key"
+        self.assertIn("$XENV_API_KEY isn't set", cli._route_pane()["providers"]["xenv"]["why"])  # Settings' row
+        self.assertEqual(schedule.spend_skip(), "significant role: its key is $XENV_API_KEY, which this fire's "
+                         "environment lacks (wb writes no key into a unit): store it with `opencode auth login xenv`")
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_a_catalog_read_without_the_exported_key_keeps_its_models_so_add_notes_it_and_a_fire_skips(self):
+        # #1496, 2026-11-26: OpenCode 2.4.1 lists an env provider's models only while its variable
+        # is set (the fake does too), so the web app service's Settings read (or a fire's) kept
+        # #1495's provider row but not the role's model: spend_skip's cached lookup found none and
+        # the fire ran, every start in it failing, and wb schedule add's note went unsaid
+        from workbench import models, schedule
+        catalog = Path(self.tmp.name) / "catalog.json"
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", {"type": "env", "name": "XENV_API_KEY"})]}))
+        os.environ.update(WB_FAKE_CATALOG=str(catalog), WB_FAKE_API="xenv=env", XENV_API_KEY="xenv-not-a-real-key")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"significant": {
+            "via": "api", "api": "xenv/grok-9"}}}))
+        self.assertIn("xenv/grok-9", models.hosted(fresh=True))         # the terminal's read
+        with mock.patch.dict(os.environ):
+            os.environ.pop("XENV_API_KEY")                              # the service's read
+            models.hosted(fresh=True)                                   # its catalog lists no grok-9
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "env:XENV_API_KEY")
+        self.assertIn("note: the significant role's key is $XENV_API_KEY in your shell", self.add())
+        os.environ.pop("XENV_API_KEY")                                  # the timer's environment
+        models.hosted(fresh=True)
+        self.assertIn("its key is $XENV_API_KEY, which this fire's environment lacks", schedule.spend_skip())
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
     def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
         # the review of #1204: every fire on a date was batch night-<date>, so a second one took
         # the first's tasks (its row counted them again, its Claude was handed them to review),
@@ -23035,6 +23116,49 @@ class ScheduledRuns(Base):
         [(ok, said)] = schedule.doctor_lines()
         self.assertFalse(ok)
         self.assertIn("its unit is gone", said)
+
+    def test_on_wsl_add_says_the_distro_stops_once_no_terminal_is_open_and_how_to_keep_it_running(self):
+        # #1511: WSL stops the distro about 15 s after the last terminal closes, its timers with it,
+        # and add said only linger, which is needed there but not enough
+        from workbench import hardware
+        with mock.patch.object(hardware, "system", return_value="wsl"):
+            out = self.add("night")
+        self.assertIn("note: WSL stops this distro about 15 s after its last terminal closes", out)
+        self.assertIn(r"instanceIdleTimeout=-1 under [general] in %UserProfile%\.wslconfig", out)
+        with mock.patch.object(hardware, "system", return_value="linux"):
+            self.assertNotIn("WSL stops", self.add("day"))
+
+    def test_a_schedule_added_from_opencodes_install_fires_its_newest_generation_and_doctor_says_when_none_is_left(self):
+        # #1497: the unit named the adding generation's bin/wb, which ran its old code after
+        # OpenCode updated, then exited 2 once OpenCode collected it, with no row and doctor ok
+        from workbench import schedule
+        tmp = Path(self.tmp.name)
+        os.environ["XDG_CACHE_HOME"] = str(tmp / "cache")
+        key = tmp / "cache/opencode/npm/git-workbench-0123456789ab"
+
+        def generation(n: str) -> Path:
+            pkg = key / n / "node_modules/opencode-workbench"
+            (pkg / "bin").mkdir(parents=True)
+            (pkg / "bin/wb").write_text("import sys\nprint(sys.argv[0], *sys.argv[1:])\n")  # says which ran
+            return pkg
+
+        first = generation("1")
+        with mock.patch.object(schedule, "PKG_ROOT", first):
+            self.add()
+        unit = (Path(os.environ["XDG_CONFIG_HOME"]) / "systemd/user/wb-schedule-night.service").read_text()
+        argv = shlex.split(re.search(r"^ExecStart=(.*)$", unit, re.M)[1])
+        shutil.rmtree(key / "1")                       # OpenCode updated twice and collected the first
+        for n in ("2", "10"):
+            generation(n)
+        ran = subprocess.run(argv, capture_output=True, text=True)
+        self.assertEqual(ran.stdout.split(), [str((key / "10/node_modules/opencode-workbench/bin/wb").resolve()),
+                                              "schedule", "fire", "night"], ran.stderr)
+        self.assertEqual([ok for ok, _ in schedule.doctor_lines()], [True])
+        shutil.rmtree(key)                              # the plugin removed: no wb left to fire
+        [(ok, said)] = schedule.doctor_lines()
+        self.assertFalse(ok)
+        self.assertIn("its wb is gone", said)
+        self.assertNotEqual(subprocess.run(argv, capture_output=True).returncode, 0)
 
 
 class Notes(Base):
@@ -24580,11 +24704,32 @@ class DynamicWorkflows(Base):
         self.assertFalse((store.home() / "workflows.json").exists())
         self.assertIn("Dynamic workflows (deepmode): On. substantive requests run as deep workflows (wb run)",
                       run_wb("workflows", "on"))
-        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "on")
+        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["deepmode"], "on")  # #1507
         self.assertEqual(cli.workflows_mode(), "on")
         self.assertIn("On.", run_wb("workflows"))
         self.assertIn("Off (default)", run_wb("workflows", "off"))
-        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "off")
+        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["deepmode"], "off")
+
+    def test_a_2_1_on_starts_2_2_with_deepmode_off(self):
+        # #1507 (2026-11-26): 2.1's on (`mode`) meant Claude may start several tasks at once; read as
+        # 2.2's deepmode it made every substantive request a deep workflow, unasked. It starts off,
+        # and the hosts' once-a-load `wb deepmode --moved` says so once (the story's line)
+        path = store.home() / "workflows.json"
+        path.write_text(json.dumps({"mode": "on", "ts": 1}))
+        self.assertEqual(cli.workflows_mode(), "off")
+        self.assertIn("Off (default)", run_wb("deepmode"))
+        said = run_wb("deepmode", "--moved")
+        self.assertEqual(said, cli.story.text("moved.deepmode") + "\n")
+        self.assertIn("/deepmode on", said)
+        self.assertEqual(json.loads(path.read_text())["deepmode"], "off")
+        self.assertEqual(run_wb("deepmode", "--moved"), "")            # once
+        self.assertEqual(cli.workflows_mode(), "off")
+        # a 2.1 off, or a choice made in 2.2, says nothing
+        for doc in ({"mode": "off"}, {"deepmode": "on", "mode": "on"}):
+            path.write_text(json.dumps(doc))
+            self.assertEqual(run_wb("deepmode", "--moved"), "")
+            self.assertEqual(json.loads(path.read_text()), doc)
+        self.assertEqual(cli.workflows_mode(), "on")
 
     def test_a_workflows_json_wb_cannot_read_or_does_not_know_is_off(self):
         for text in ("not json", '{"mode": "maybe"}', '["on"]'):
@@ -25144,6 +25289,33 @@ class Setup(Base):
             self.assertTrue(second.exists())
             self.assertNotIn("older than", self.setup(cmd="doctor")[1])
 
+    def test_a_refresh_to_a_new_copy_keeps_the_users_wake_off_and_env_keys_in_the_entrys_options(self):
+        # #1505: the move to a new copy wrote only wb and this shell's WB_*, so wb update dropped
+        # wake: "off" (the one way to turn the wakes off) and the user's env keys, unasked
+        from workbench import ocplugin
+        self.opencode_home()
+        clone, git = plugin_repo(Path(self.tmp.name) / "clone")
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(ocplugin, "PKG_ROOT", clone), mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
+            ocplugin.install()
+            cfg = json.loads(conf.read_text())
+            first = cfg["plugins"][0]["package"]
+            opts = cfg["plugins"][0]["options"]
+            cfg["plugins"][0]["options"] = {**opts, "wake": "off", "env": {**opts.get("env", {}), "WB_EXTRA_X": "/x"}}
+            conf.write_text(json.dumps(cfg))
+            (clone / "opencode-plugin/server.ts").write_text("// changed\n")
+            git("commit", "-qam", "the plugin changed")
+            self.assertTrue(ocplugin.refresh())
+            entry = json.loads(conf.read_text())["plugins"][0]
+            self.assertNotEqual(entry["package"], first)
+            self.assertEqual(entry["options"]["wake"], "off")
+            self.assertEqual(entry["options"]["env"]["WB_EXTRA_X"], "/x")
+            self.assertEqual(entry["options"]["env"]["WB_HOME"], os.path.abspath(os.environ["WB_HOME"]))
+            self.assertEqual(entry["options"]["wb"], str(clone / "bin/wb"))
+            with mock.patch.dict(os.environ, {"WB_HOME": ""}):    # a shell that sets no WB_*: the env stays
+                ocplugin.install()
+            self.assertEqual(json.loads(conf.read_text())["plugins"][0]["options"]["env"]["WB_EXTRA_X"], "/x")
+
     def test_every_file_the_opencode_plugin_imports_from_beside_it_comes_with_each_install(self):
         # #1333: the TUI part draws the splash from the Claude Code mod's own splash.ts and
         # apprentice.ts (`../mod/hooks/…`), and #1312's panel its Tasks view (tasks.ts, core.ts
@@ -25387,7 +25559,7 @@ class Setup(Base):
             self.assertIn(f"ok  install: OpenCode's, at {pkg}: {said}\n", out)
             self.assertNotIn("git can't read", out)
             # Claude Code's wb link and skill aren't BAD here (#1321's finding 26), and wb setup
-            # is no answer: it refuses (below)
+            # is no answer: it links nothing (below)
             self.assertIn("--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below "
                           f"says which); for your own terminal, a clone's: git clone https://github.com/"
                           f"{ocplugin.REPO}, then bin/wb setup --opencode there", out)
@@ -25398,12 +25570,17 @@ class Setup(Base):
                 self.assertEqual(self.setup("list", cmd="patch")[0], 1)
             self.assertIn(f"wb patch works on a clone of workbench: this wb is OpenCode's install at {pkg}",
                           err.getvalue())
-            # nor links or options naming a directory OpenCode replaces on update, pinning an old wb
+            # nor links or options naming a directory OpenCode replaces on update, pinning an old wb;
+            # but First run's checklist, API keys line and all, which a refusal before it hid (#1496)
             before = Path(os.environ["WB_OPENCODE_CONFIG"]).read_text()
-            with contextlib.redirect_stderr(err):
-                self.assertEqual(self.setup("--opencode")[0], 1)
-                self.assertEqual(self.setup()[0], 1)
-            self.assertIn(f"wb setup links nothing to OpenCode's install at {pkg}", err.getvalue())
+            for args in (("--opencode",), (), ("--no-service",)):
+                code, out = self.setup(*args)
+                self.assertEqual(code, 0, out)
+                self.assertIn(f"--  wb setup links nothing to OpenCode's install at {pkg}", out)
+                self.assertIn("\nfirst run:\n", out)
+                self.assertIn("--  no API key connected (optional", out)  # step 3's tell, beside a stored key's step 2
+                self.assertNotIn("in Claude Code", out)
+                self.assertTrue(out.endswith("next: wb doctor\n"), out)
             self.assertFalse(os.path.lexists(home / ".local/bin/wb"))
             self.assertEqual(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text(), before)
         self.assertFalse(ocplugin.runs_from_cache())             # this clone isn't
@@ -25614,7 +25791,10 @@ class Setup(Base):
             lines = cli.first_run()
         self.assertTrue(lines[0].startswith("--  OpenCode isn't installed: install OpenCode 2.x"))
         self.assertIn("no model server answers here", lines[1])
-        self.assertIn("no local model registered yet: run /workbench", lines[2])
+        self.assertIn("no local model registered yet: run /workbench in Claude Code", lines[2])
+        with mock.patch.object(cli.models, "discover", return_value={}):   # OpenCode's own (#1496)
+            self.assertEqual(cli.first_run(host="opencode")[2], "--  no local model registered yet: run "
+                             "/workbench in OpenCode (the Workbench agent), and it picks one for this machine (wb scout)")
         for mid in cli.models.discover():
             self.assertNotIn(mid.split("/")[-1], tail + "\n".join(lines))  # names no model
 
@@ -25840,6 +26020,41 @@ class Update(Base):
         self.assertIn(f"→ {second} (was {first})", out)
         self.assertEqual((second / "server.ts").read_text(), "// two\n")
         self.assertFalse(self.calls.exists())                     # OpenCode's alone: no claude step
+
+    def test_an_update_of_claude_codes_marketplace_clone_moves_opencodes_plugin_to_the_new_copy(self):
+        # #1479: wb setup --opencode from the marketplace install loads a copy of its
+        # opencode-plugin/, and setup, doctor and /workbench-update say wb update refreshes it; the
+        # refresh ran on a user's clone only, so the copy stayed at the setup commit for good
+        from workbench import ocplugin
+        tmp = Path(self.tmp.name)
+        os.environ["HOME"] = str(tmp / "home")
+        git = lambda d, *a: subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa
+                                           check=True, capture_output=True)
+        (self.origin / "opencode-plugin").mkdir()
+        shutil.copy(ROOT / "opencode-plugin/package.json", self.origin / "opencode-plugin/package.json")
+        (self.origin / "opencode-plugin/server.ts").write_text("// one\n")
+        git(self.origin, "add", "-A"); git(self.origin, "commit", "-qm", "the plugin")
+        git(self.copy, "pull", "-q", "--ff-only")
+        # Claude Code's marketplace update: a pull of its clone
+        (tmp / "fakebin/claude").write_text(
+            f'#!/bin/sh\necho "$@" >> {self.calls}\n'
+            f'[ "$2" = marketplace ] && git -C {shlex.quote(str(self.copy))} pull -q --ff-only\nexit 0\n')
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(ocplugin, "PKG_ROOT", self.copy), \
+                mock.patch.object(ocplugin, "DIR", self.copy / "opencode-plugin"):
+            self.assertEqual(cli._install_kind(), "marketplace")
+            ocplugin.install()
+            first = json.loads(conf.read_text())["plugins"][0]["package"]
+            (self.origin / "opencode-plugin/server.ts").write_text("// two\n")
+            git(self.origin, "commit", "-qam", "the plugin changed")
+            out = self.update()
+            second = Path(json.loads(conf.read_text())["plugins"][0]["package"])
+            head = git(self.copy, "rev-parse", "HEAD").stdout.decode().strip()
+            self.assertIn("updated marketplace ", out)
+            self.assertIn(f"→ {second} (was {first})", out)
+            self.assertEqual(ocplugin.copy_info(second)["commit"], head)
+            self.assertEqual((second / "server.ts").read_text(), "// two\n")
+            self.assertFalse(any("older than" in line for _, line in ocplugin.doctor_lines()))
 
     def test_a_clone_only_opencodes_plugin_loads_updates_without_claude(self):
         # #1321's findings 4 and 15: wb setup --opencode's clone, which Claude Code doesn't have,
@@ -36087,7 +36302,7 @@ console.log(JSON.stringify({ failed }))
         self.assertTrue(said, out.read_text())
         self.assertIn(json.dumps(runs.DEEPCODE_RULE)[1:-1], said[0])
         self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepmode on")
-        self.assertEqual(json.loads((state / "workflows.json").read_text())["mode"], "on")
+        self.assertEqual(json.loads((state / "workflows.json").read_text())["deepmode"], "on")  # #1507
         toggled = system("deepmode on")
         self.assertTrue(toggled, out.read_text())
         self.assertIn("line set it (wb ran `wb deepmode on`): Dynamic workflows (deepmode): On.", toggled[0])
@@ -39429,7 +39644,10 @@ class ApiHarness(Base):
         self.assertEqual(listed()["deepinfra"], [{"type": "env", "name": "DEEPINFRA_API_KEY"}])
         self.assertEqual(json.loads(self.fake("auth", "export", "deepinfra", "--standalone")[2]), [])
         self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
-                         ["deepinfra", "anthropic"])                   # its models still listed
+                         ["deepinfra", "anthropic"])                   # its models listed while set
+        os.environ.pop("DEEPINFRA_API_KEY")
+        self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
+                         ["anthropic"])                                # and not after, as 2.4.1 (#1496)
 
     def test_a_provider_without_a_key_drops_out_of_every_list_and_its_models_cant_run(self):
         self.catalog()
@@ -45847,6 +46065,25 @@ class ApiSpend(Base):
         self.assertEqual(runner.first_tokens(task, "carry on", fresh=True) - with_none,
                          4 * self.meter.IMAGE_TOKENS)
 
+    def test_a_bedrock_converse_image_counts_at_a_providers_figure_in_the_room_not_its_base64(self):
+        # #1483 (the #1373 audit, 2026-11-26): Converse's image block, as OpenCode 2.4.1 builds it,
+        # names its type in `format` and its base64 in `source.bytes`, so images_in found none and
+        # the room priced a 3 MiB image at 1M tokens, $3.15 at $3/M, refusing a task wb start passed
+        self.cap(100)
+        eyes, m = self.eyes()
+        task = self.api_task("t-converse", eyes)
+        mt = self.meter.for_task(task, m)
+        b64 = "iVBO" * (3 << 18)                                # 3 MiB of base64
+        text = {"text": "look"}
+        image = {"image": {"format": "png", "source": {"bytes": b64}}}
+        body = {"inferenceConfig": {"maxTokens": 32768}, "messages": [
+            {"role": "user", "content": [text, image]}]}
+        bare = {"inferenceConfig": {"maxTokens": 32768}, "messages": [{"role": "user", "content": [text]}]}
+        self.assertEqual(self.meter.images_in(body), (1, len(b64)))
+        with_image, without = mt.room(body, len(json.dumps(body))), mt.room(bare, len(json.dumps(bare)))
+        price = max(p["input"] for p in mt.prices)
+        self.assertLessEqual(without - with_image, (self.meter.IMAGE_TOKENS + 64) * price / 1e6)
+
     def test_a_large_next_spec_counts_in_wb_nexts_look_ahead_so_the_cap_it_names_lets_the_step_through(self):
         # #1173's review (2026-11-24): with a small next spec only the carried context tipped the
         # look ahead, so wb next passing its step's prompt went untested: left out, wb next passed
@@ -46363,10 +46600,10 @@ class ApiSpendKeyhole(_KeyholeTest):
         self.post(kh)                                           # a running total in every chunk
         self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
 
-    def cut(self, kh, path="/chat/completions", read=120):
-        """A streamed request that OpenCode drops after ``read`` bytes of the answer, as wb's
-        _stop does mid-stream; its body's length back."""
-        body = json.dumps({"model": kh.model.name, "stream": True}).encode()
+    def cut(self, kh, path="/chat/completions", read=120, extra=None):
+        """A streamed request (``extra`` more of its body) that OpenCode drops after ``read`` bytes
+        of the answer, as wb's _stop does mid-stream; its body's length back."""
+        body = json.dumps({"model": kh.model.name, "stream": True, **(extra or {})}).encode()
         conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
         conn.request("POST", urllib.parse.urlsplit(kh.base).path + path, body=body,
                      headers={"Authorization": f"Bearer {kh.token}", "Content-Type": "application/json"})
@@ -46414,6 +46651,36 @@ class ApiSpendKeyhole(_KeyholeTest):
         mt.on_usage({"prompt_tokens": 1_000_000, "completion_tokens": 0, "cost": 0.01, "cut": True})
         row = store.read_jsonl(meter.ledger_path())[0][-1]
         self.assertEqual((row["usd"], row["source"], row["cut"]), (3.0, "keyhole", True))
+
+    def test_a_cut_request_carrying_an_image_books_its_input_as_the_room_counts_it_not_its_base64(self):
+        # #1474 (the #1373 audit, 2026-11-26): a cut's input was the body's bytes / 4, so one 3 MiB
+        # image's base64 booked 1M input tokens, $3.15 at $3/M, on the day cap at every wb stop,
+        # steer --now or think nudge; the room counts each image at IMAGE_TOKENS (body_tokens)
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.config = {"cost": [{"input": 3, "output": 15}]}
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        uri = "data:image/png;base64," + "iVBO" * (3 << 18)     # 3 MiB of base64
+        bodies = {"/chat/completions": {"messages": [{"role": "user", "content": [
+                      {"type": "image_url", "image_url": {"url": uri}}]}]},
+                  "/responses": {"input": [{"role": "user", "content": [
+                      {"type": "input_image", "image_url": uri}]}]}}
+        for path, extra in bodies.items():
+            with self.subTest(path):
+                usage = []
+                kh = self.keyhole(m, on_usage=lambda u: (mt.on_usage(u), usage.append(u)))
+                self.up.chunks, self.up.gap = 60, 0.1            # usage only at the end
+                size = self.cut(kh, path, extra=extra)
+                (u,) = self.booked(usage)
+                body = {"model": kh.model.name, "stream": True, **extra}
+                self.assertTrue(u["cut"])
+                self.assertLessEqual(u["prompt_tokens"], meter.body_tokens(body, size) + 1)
+                self.assertLess(u["prompt_tokens"], size / 40)  # nowhere near bytes / 4
+                row = store.read_jsonl(meter.ledger_path())[0][-1]
+                self.assertEqual((row["kind"], row["cut"]), ("step", True))
+                self.assertLess(row["usd"], 0.06)               # not $3.15
 
     def test_an_anthropic_response_cut_keeps_message_starts_input_and_adds_what_streamed(self):
         # #1276: message_start's usage was all a cut Anthropic response booked, its output 1

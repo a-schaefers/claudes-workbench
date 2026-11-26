@@ -603,12 +603,25 @@ async function setDeepmode($: any, on: boolean): Promise<string> {
   return said
 }
 
+// deepmode's own key (#1507, 2026-11-26): 2.1's `mode` on meant Claude may start several tasks at
+// once; read as 2.2's deepmode it made every substantive request a deep workflow, unasked
 async function workflowsMode($: any): Promise<string> {
   try {
-    return JSON.parse(await $.fs.read(`${mem.root}/workflows.json`)).mode === 'on' ? 'on' : 'off'
+    return JSON.parse(await $.fs.read(`${mem.root}/workflows.json`)).deepmode === 'on' ? 'on' : 'off'
   } catch {
     return 'off'
   }
+}
+
+// Once a load with a person there: a 2.1 Dynamic workflows on (workflows.json `mode: on`, no
+// `deepmode`) starts 2.2 off, and `wb deepmode --moved` records it and says so once, the story's
+// `moved.deepmode` line, toasted (#1507); the OpenCode plugin's jobs.ts does the same
+async function deepmodeMoved($: any): Promise<void> {
+  let doc: any = {}
+  try { doc = JSON.parse(await $.fs.read(`${mem.root}/workflows.json`)) ?? {} } catch { return }
+  if (doc?.mode !== 'on' || 'deepmode' in doc) return
+  const { ok, out } = await runWb($, ['deepmode', '--moved'])
+  if (ok && out !== '(no output)') $.ui.toast(`workbench: ${out}`) // nothing: another host said it
 }
 
 const SEND_ASK = 'Send it'
@@ -2831,7 +2844,8 @@ async function deliver($: any, now: number) {
 // A run's own notices (#1278's S9: run_checkpoint, run_done, run_paused, run_stopped, run_failed;
 // rows with `run` and no `task`, runs.Run.notify): the one wake a run gives, to the session it is
 // `mine` to as a task's is (run.json: the session that ran `wb run start`, else by directory: a
-// scheduled run's is the session near its repo in the morning), once (`wb ack --run`, the
+// scheduled run's is the session near its repo in the morning, however old its notice: a run has no
+// rewake, core.ts runNoticesDue, #1491), once (`wb ack --run`, the
 // compare-and-set `wb wait <run>` shares), and only while still true, the run in the phase it
 // was raised in (core.ts runNoticePlan). Its text is the wake whole: it opens `[workbench] Run
 // `<run>``, spend.RUN_WAKE's, and names its next step. A run's items' notices are its driver's
@@ -3277,6 +3291,7 @@ export const register: Register = (on, options) => {
       await checkVersion($)
       startEars($)
       void chatLink($) // the modeline's link, now (#1283)
+      void deepmodeMoved($).catch(() => {}) // 2.1's Dynamic workflows on, said once (#1507)
     }
     return next(e)
   })
@@ -3527,12 +3542,16 @@ export const register: Register = (on, options) => {
     }
     const { ok, out: status, aborted } = await runWb($, ['status', ...(await scope($))])
     if (!ok && !aborted) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
-    if (!ok || status.startsWith('no open tasks')) return { blocks }
+    // with no task open, a run's lines still count: wb status prints them after `no open tasks`, and
+    // dropping the whole text hid a run waiting at review after /clear or overnight, a scheduled
+    // flow's (#1491, 2026-11-26); the OpenCode plugin's upkeep reads them the same way
+    const open = status.startsWith('no open tasks') ? (status.match(/^run [\s\S]*/m)?.[0] ?? '') : status
+    if (!ok || !open) return { blocks }
     return {
       blocks: [...blocks, {
         name: 'workbench',
-        text: `Tasks delegated to agents with wb (the /workbench skill) are open:\n${status}\n` +
-          'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.',
+        // the pick-up line is the story's, the OpenCode plugin's word for word (#1515)
+        text: `Tasks delegated to agents with wb (the /workbench skill) are open:\n${open}\n${SAY['tasks.pickup']}`,
       }],
     }
   })

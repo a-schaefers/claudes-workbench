@@ -250,6 +250,32 @@ test('the jobs: the update check after a turn, the model check after a quiet min
   expect(w.toasts.map(t => t.key)).toEqual(['scout'])
 })
 
+test('#1507: a 2.1 Dynamic workflows on is said once a load, its line toasted, and nothing once deepmode has its own key', async () => {
+  // 2.1's `mode: on` meant the driver may start several tasks at once; 2.2's deepmode runs every
+  // substantive request as a deep workflow, so it starts off and wb deepmode --moved says so once
+  const w = world()
+  w.files[`${HOME}/workflows.json`] = JSON.stringify({ mode: 'on', ts: 1 })
+  const line = 'Deepmode is off: … /deepmode on turns it on.'
+  const run = w.lane.deps.run
+  ;(w.lane.deps as { run: typeof run }).run = async (args, session, ms) => {
+    if (args.join(' ') !== 'deepmode --moved') return run(args, session, ms)
+    w.calls.push('deepmode --moved')
+    w.files[`${HOME}/workflows.json`] = JSON.stringify({ deepmode: 'off', ts: 2 }) // as wb writes it
+    return { code: 0, out: `${line}\n` }
+  }
+  await w.lane.ended('ses_drv')
+  await new Promise(r => setTimeout(() => r(undefined), 5))
+  await w.lane.scan()
+  expect(w.calls.filter(c => c.startsWith('deepmode'))).toEqual(['deepmode --moved'])
+  expect(w.toasts.filter(t => t.key === 'deepmode').map(t => t.message)).toEqual([line])
+  // a later load reads deepmode's own key: nothing run, nothing said
+  const next = world()
+  next.files[`${HOME}/workflows.json`] = w.files[`${HOME}/workflows.json`]!
+  await next.lane.ended('ses_drv')
+  await new Promise(r => setTimeout(() => r(undefined), 5))
+  expect(next.calls.filter(c => c.startsWith('deepmode'))).toEqual([])
+})
+
 test('the jobs\' wb calls get the mod\'s two minutes, as the update check fetches; an ack keeps the short limit', async () => {
   const w = world()
   w.task('t1', P.review)
@@ -349,6 +375,16 @@ test('a run\'s own notice wakes the session that started it once, its text whole
   w.notify({ run: 'cc-run', kind: 'run_done', phase: P.review, ts: ts + 1, text: '' })
   await w.lane.scan()
   expect(w.admitted.length).toBe(1)                                 // once
+})
+
+test('#1491: a run\'s notice hours old still wakes its session once: a run has no rewake under the hour\'s cutoff', async () => {
+  const w = world()
+  const ts = w.now / 1000 - 7 * 3600
+  runFiles(w, 'aud', P.review)
+  w.notify({ run: 'aud', kind: 'run_done', phase: P.review, ts, text: '[workbench] Run `aud` is done' })
+  await w.lane.scan()
+  expect(w.acks()).toEqual([`ack aud ${ts} --run`])
+  expect(w.admitted.map(a => a.text)).toEqual(['[workbench] Run `aud` is done'])
 })
 
 test('a run\'s notice no longer true is acknowledged unsaid, and a busy session gets it once the turn ends', async () => {

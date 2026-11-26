@@ -45,6 +45,7 @@ declare module 'solid-js' {
   import type { JSX } from '@opentui/solid/jsx-runtime'
   export function createMemo<T>(fn: () => T): () => T
   export function createEffect(fn: () => void): void
+  export function createRoot<T>(fn: (dispose: () => void) => T): T
   export function For<T>(props: { readonly each: readonly T[]; readonly children: (item: T, index: () => number) => JSX.Element }): JSX.Element
 }
 

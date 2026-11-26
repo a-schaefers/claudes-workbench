@@ -47,11 +47,16 @@ DRIVERS: dict[str, dict[str, str]] = {
 # (what a waiting dialog is, for `state.waiting`'s {what}), `note.*` (the thread's waiting row,
 # whose bytes the mod's tests and the phone's pushes know), `receipt.*` (a message's meta),
 # `prompts` and `lane` (the Settings cards), `doc.rule` (the docs' block), `link.*` (wb's own
-# lines on where the web app is: wb setup, wb chat on, wb doctor), `refusal.*` (what a host tells
+# lines on where the web app is: wb setup, wb chat on, wb doctor), `moved.deepmode` (`wb deepmode
+# --moved`'s one line, which both hosts toast once: a 2.1 Dynamic workflows on starts 2.2 off,
+# #1507), `refusal.*` (what a host tells
 # its driver instead of a dialog nobody watches: the mod's AWAY_QUESTION, AWAY_PLAN and
 # CONSENT_WAITING, the plugin's AWAY_QUESTION, through the generated mod/hooks/story.ts), and
 # `skill.*` (the driver's own procedure: SKILL.md's and reference/driving.md's blocks, which the
-# OpenCode plugin's skill.ts swaps for OpenCode's text from the same module).
+# OpenCode plugin's skill.ts swaps for OpenCode's text from the same module), and `tasks.pickup`
+# (the open-tasks context block's last line, both hosts' word for word: it named `wb watch`, which
+# follows a task until it closes, so a driver on one at review waited out its shell's timeout,
+# #1515, 2026-11-26; `wb wait` ends when the task needs the driver).
 TEXTS: dict[str, str] = {
     "purpose": "Message {who} from anywhere: most work can run from here. A prompt {who} raises waits in "
                "its terminal (`ssh` + `tmux`); run {who} with permissions granted to skip those. "
@@ -91,6 +96,11 @@ TEXTS: dict[str, str] = {
     "link.where": "Open the web app to message {who} from anywhere and change your settings: its link is on the "
                   "/workbench pane's modeline, and `wb chat url` prints it (the token in it is the key: keep it private).",
     "link.reach": "To open it on your phone over Tailscale: `wb chat reach tailnet`.",
+    "moved.deepmode": "Deepmode is off: in 2.2, on runs every substantive request as a deep workflow (wb run) on "
+                      "your agents, within the day cap, so 2.1's Dynamic workflows on didn't carry over. "
+                      "/deepmode on turns it on.",
+    "tasks.pickup": "Pick them up from here: `wb report <name>` for one (`wb run report <name>` for a run), "
+                    "`wb wait <name>` to follow it until it needs you.",
     "refusal.question": "The user is away: ask in the web chat ({reply}) and end your turn.",
     "refusal.plan": "Post the plan in the web chat and end your turn; approval is at the terminal.",
     "refusal.consent": "{Who} is waiting on a workbench dialog in the terminal: answer it there.",
@@ -112,11 +122,13 @@ TEXTS: dict[str, str] = {
 # A refusal and a skill block are a host's own (OpenCode has no plan dialog to refuse).
 HOSTS = ("claude-code", "opencode")
 ONLY: dict[str, tuple[str, ...]] = {"next.grant": HOSTS, "refusal.question": HOSTS, "refusal.plan": ("claude-code",),
-                                    "refusal.consent": HOSTS, "skill.rule": HOSTS, "skill.prompts": HOSTS}
+                                    "refusal.consent": HOSTS, "skill.rule": HOSTS, "skill.prompts": HOSTS,
+                                    "tasks.pickup": HOSTS}
 
 # What the hosts' generated mod/hooks/story.ts carries, filled for each host a key is said for:
 # the mod (register.tsx) and the OpenCode plugin (chat.ts, skill.ts) import it.
-HOST: tuple[str, ...] = ("refusal.question", "refusal.plan", "refusal.consent", "skill.rule", "skill.prompts")
+HOST: tuple[str, ...] = ("refusal.question", "refusal.plan", "refusal.consent", "skill.rule", "skill.prompts",
+                         "tasks.pickup")
 
 # What the web app's generated story.ts carries: the keys its page reads (`data-story`, app.ts).
 PAGE: tuple[str, ...] = ("purpose", "rule.terminal", "rule.chat", "rule.settings", "receipt.blocked", "prompts", "lane")

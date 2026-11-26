@@ -922,15 +922,22 @@ def _driver_way_out(held: dict) -> str:
     """What a wait on a live driver's model needs said (#1317, the review of 2026-11-25): it ends
     only when Ollama lets the model go (its keep-alive) or the session has been idle
     store.DRIVER_HOLD, and the driver's own session, polling its task, keeps both fresh. ""
-    when no driver holds the GPU."""
+    when no driver holds the GPU. A server engine's model never unloads and shares the GPU with
+    nothing, so there no smaller model helps: only the driver's own one (#1476, 2026-11-26)."""
     drv = sorted(h["model"] for h in held.values() if h.get("driver"))
     if not drv:
         return ""
     sid = store.opencode_session()
     own = sorted(set(drv) & store.driver_models(sid)) if sid else []
     who = f"this session's own {', '.join(own)}" if own else "the driver's model"
-    return (f"; {who} leaves only once Ollama unloads it or its session is idle "
-            f"{store.DRIVER_HOLD // 60} min{', so it waits on this session' if own else ''}: "
+    found = models.discover()
+    server = [d for d in drv if (m := found.get(d)) and m.engine != "ollama"]
+    waits = f"{store.DRIVER_HOLD // 60} min{', so it waits on this session' if own else ''}"
+    if server:
+        return (f"; {who} stays loaded on its server (it never unloads) until its session is idle "
+                f"{waits}: the driver's own model ({', '.join(server)}), an API role or an API driver "
+                "runs it sooner")
+    return (f"; {who} leaves only once Ollama unloads it or its session is idle {waits}: "
             "a smaller model for either side, an API role or an API driver runs it sooner")
 
 
@@ -2174,7 +2181,10 @@ def cmd_start(a):
         print(f"note: held until {runner.clock(at)} (--after): queued until then, checkout and all; "
               "the machine is kept awake meanwhile where wb can, and a reboot before then fails it "
               f"as interrupted (wb resume {a.name} holds it again)")
-    if not os.environ.get("CLAUDECODE"):  # under Claude Code the mod wakes Claude (#1322)
+    # Only a terminal caller is told to wait: under Claude Code the mod wakes Claude (#1322), and an
+    # OpenCode driver's procedure is to end its turn for the plugin's wake, or with wakes off to wait
+    # only on the user's ask; the line held a driver's turn in a wait (#1514, 2026-11-26).
+    if store.caller_kind() == "terminal":
         print(f"next: wb wait {a.name}")
 
 
@@ -4739,12 +4749,31 @@ WORKFLOWS = {"off": ("Off", "Claude runs one task at a time; deepcode asks for a
              "on": ("On", "substantive requests run as deep workflows (wb run) on the user's agents, each "
                           "item on its role's model; the GPUs, the provider slots and the day cap decide.")}
 WORKFLOWS_LABEL = "Dynamic workflows (deepmode)"
+# #1507 (2026-11-26): the choice is kept under `deepmode`, not 2.1's `mode`. 2.1's on meant Claude
+# may start several tasks at once for a request; 2.2's runs every substantive request as a deep
+# workflow, budgeted at what is left of the day cap, so a 2.1 on read as 2.2's changed what every
+# request did without the user asked. A 2.1 on starts 2.2 off, and `wb deepmode --moved` (each
+# host, once a load) says so once, the story's `moved.deepmode`.
+DEEPMODE_KEY = "deepmode"
 
 
 def workflows_mode() -> str:
     doc = store.read_json(store.home() / "workflows.json", {})
-    mode = doc.get("mode") if isinstance(doc, dict) else None
+    mode = doc.get(DEEPMODE_KEY) if isinstance(doc, dict) else None
     return mode if mode in WORKFLOWS else "off"
+
+
+def deepmode_moved() -> str:
+    """The one line a 2.1 Dynamic workflows on gets (#1507), once: workflows.json holding 2.1's
+    `mode: on` and no `deepmode` is written as deepmode off, the choice 2.2 reads it as, under a
+    lock so two hosts loading at once say it once; "" for any other file."""
+    path = store.home() / "workflows.json"
+    with store.locked(store.home() / "locks" / "workflows.lock"):
+        doc = store.read_json(path, {})
+        if not isinstance(doc, dict) or DEEPMODE_KEY in doc or doc.get("mode") != "on":
+            return ""
+        store.write_json(path, {DEEPMODE_KEY: "off", "ts": store.now()})
+    return story.text("moved.deepmode")
 
 
 def cmd_workflows(a):
@@ -4754,8 +4783,14 @@ def cmd_workflows(a):
             die("--rule prints the deepcode rule; set deepmode without it")
         print(runs.DEEPCODE_RULE)
         return
+    if getattr(a, "moved", False):
+        if a.state:
+            die("--moved says once that 2.1's Dynamic workflows didn't carry over; set deepmode without it")
+        if line := deepmode_moved():
+            print(line)
+        return
     if a.state:
-        store.write_json(store.home() / "workflows.json", {"mode": a.state, "ts": store.now()})
+        store.write_json(store.home() / "workflows.json", {DEEPMODE_KEY: a.state, "ts": store.now()})
     label, why = WORKFLOWS[workflows_mode()]
     print(f"{WORKFLOWS_LABEL}: {label}{' (default)' if label == 'Off' else ''}. {why}")
 
@@ -5733,13 +5768,15 @@ def cmd_models(a):
             mark = "→" if i == 0 and sc.state["available"] else " "
             print(f" {mark} {sc.model.id:34} {sc.line()}" + (
                 f" · out of the band on {sc.tries} task(s): one task in {router.EXPLORE_ONE_IN} "
-                "explores it" if sc.model.id in few else ""))
+                "explores it" if sc.model.id in few else "")
+                + (f" · waits on the driver's {', '.join(sc.waits_on)}" if sc.waits_on else ""))
         for m in found.values():
             if not router.allowed(m, size):
                 print(f"   {m.id:34} not for {size} tasks (wb model sizes)")
     print("\n" + "\n".join(_api_section(True)[0]))
     if a.set_default:
-        top, why = router.choose("significant", down=down, catalog=catalog)
+        # OpenCode's default outlives the driver's session: never moved off by it (#1476)
+        top, why = router.choose("significant", down=down, catalog=catalog, drivers=False)
         if top is None:
             die(why)
         try:
@@ -7951,11 +7988,18 @@ def cmd_setup(a):
     ~/.claude/skills: #1296, row 8)."""
     if _install_kind() == "opencode":
         # a generation directory OpenCode replaces on its next update and later removes: links, a
-        # service unit and options naming it would outlive it, and pin the plugin to an old wb
-        die(f"wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
-            f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
-            f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
-            f"setup --opencode there")
+        # service unit and options naming it would outlive it, and pin the plugin to an old wb.
+        # The checklist still: refused before it, First run's step 1 failed on the main OpenCode
+        # install and its API keys line was never said (#1496, 2026-11-26)
+        print(f"--  wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
+              f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
+              f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
+              f"setup --opencode there")
+        print("first run:")
+        for line in first_run(host="opencode"):
+            print(line)
+        print("next: wb doctor")
+        sys.exit(0)
     links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb")]
     if not a.opencode:
         links.append((context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench"))
@@ -8005,13 +8049,15 @@ def cmd_setup(a):
                   f"without it, #1200). {path_advice()}")
     if not a.no_service and (said := install_service(a.force)):
         print(said)
+        if said.startswith("ok") and (note := schedule.wsl_idle_note()):  # a WSL unit stops with the distro (#1511)
+            print(f"--  {note}")
     try:  # a minute or two, said up front; a task started meanwhile goes first
         for line in optimize.start(if_due=True):
             print(f"--  {line}")
     except (RuntimeError, OSError):
         pass
     print("first run:")  # what a working setup still needs, each with its fix (#111)
-    for line in first_run():
+    for line in first_run(host="opencode" if a.opencode else "claude-code"):
         print(line)
     if chat.is_on():  # where the web app is: setup printed no word of it (#1355)
         print("--  " + story.text("link.where", "opencode" if a.opencode else "claude-code"))
@@ -8135,11 +8181,13 @@ def api_key_lines(keys: dict | None) -> list[str]:
     return out + need
 
 
-def first_run() -> list[str]:
+def first_run(host: str = "claude-code") -> list[str]:
     """wb setup's checklist, one line each: OpenCode 2.x, a model server answering, a registered
     model, the API keys OpenCode holds (#1024), Landlock; a missing one says how to get it. It
     names no model: Claude picks one for this machine (wb scout), so a newer one slots in without a
-    code change. With an API key stored and no local model, the GPU lines read as optional."""
+    code change. With an API key stored and no local model, the GPU lines read as optional.
+    ``host``: "opencode" (wb setup --opencode, or from OpenCode's install) names /workbench in
+    OpenCode, not Claude Code (#1496)."""
     out = []
     good, said = _tool_version(runner.opencode_bin())
     major = re.search(r"(\d+)\.\d+", said) if good else None
@@ -8195,8 +8243,10 @@ def first_run() -> list[str]:
                    "(wb model add <p>/<m> --url <baseURL>)"
                    + (f"; {models.WSL_NAT}" if models.windows_host() else ""))
     out.append(f"ok  {len(found)} local model(s) registered" if found else NO_LOCAL_OPTIONAL if stored else
-               "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
-               "for this machine (wb scout)")
+               ("--  no local model registered yet: run /workbench in OpenCode (the Workbench agent), and "
+                "it picks one for this machine (wb scout)" if host == "opencode" else
+                "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
+                "for this machine (wb scout)"))
     # a provider of the user's that discovery passed over (another host, not opted in): its fix
     # here too, as wb doctor and wb models say it; wb setup said nothing of it (#1109, 2026-11-23).
     # One on a public host may be a hosted one added by hand: /connect too (#1109's review)
@@ -8612,8 +8662,12 @@ def cmd_update(a):
         if rebased:
             print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
     say_later()
-    if kind == "clone":  # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/
-        try:             # (#1321's findings 16 and N2): moved to HEAD's when that changed
+    # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/ (#1321's findings 16
+    # and N2): moved to HEAD's when that changed. Claude Code's marketplace clone too, which wb
+    # setup --opencode copies from as well: gated to "clone", its copy stayed at the setup commit
+    # while setup, doctor and /workbench-update said wb update refreshes it (#1479, 2026-11-26)
+    if kind in ("clone", "marketplace"):
+        try:
             for line in ocplugin.refresh():
                 print(line)
         except (RuntimeError, OSError, gitops.GitError) as e:
@@ -8893,6 +8947,8 @@ def cmd_doctor(a):
     for why in logout_stops():
         if chat.is_on() or "wb-chat" not in why or "runners" in why:
             print(f"--  {why}")
+    if (chat.is_on() or schedule.names()) and (note := schedule.wsl_idle_note()):  # #1511
+        print(f"--  {note}")
     good, said = chat_line()
     if good is None:
         print(f"--  {said}")
@@ -9645,6 +9701,8 @@ def parser() -> argparse.ArgumentParser:
                            if word == "deepmode" else "the same as wb deepmode")
         s.add_argument("state", nargs="?", choices=["on", "off"])
         s.add_argument("--rule", action="store_true", help="the rule a host adds when the user types deepcode")
+        s.add_argument("--moved", action="store_true", help="once, for a host: the line saying a 2.1 Dynamic "
+                       "workflows on starts 2.2 with deepmode off (#1507); nothing otherwise")
         s.set_defaults(f=cmd_workflows)
     s = sub.add_parser("run", help="deep workflows (#1278): a flow's items as tasks on the user's agents, "
                        "driven in the background; Claude is woken at checkpoints and the end")

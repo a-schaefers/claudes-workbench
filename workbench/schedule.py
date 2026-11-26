@@ -201,10 +201,50 @@ def unit_files(name: str) -> list[Path]:
     return [unit_dir() / f"{UNIT}{name}.timer", unit_dir() / f"{UNIT}{name}.service"]
 
 
-def fire_argv(name: str) -> list[str]:
+# A fire from OpenCode's install: the newest generation's bin/wb under the cache key, found at
+# fire time (newest_wb's, standard library only: it runs before any wb). A unit naming the adding
+# generation's ran its code until OpenCode collected it, then exited 2 unseen (#1497, 2026-11-26)
+_NEWEST = ("import glob,os,sys; k,r,*a=sys.argv[1:]; "
+           "f=sorted(glob.glob(os.path.join(glob.escape(k),'*',r)),"
+           "key=lambda p:os.path.relpath(p,k).split(os.sep)[0].zfill(20)); "
+           "f or sys.exit('no Workbench left under '+k+': OpenCode removed its install'); "
+           "os.execv(sys.executable,[sys.executable,'-X','utf8',f[-1],*a])")
+
+
+def unit_wb() -> dict:
+    """The wb a schedule's unit runs, kept in schedule.json: `wb`, this copy's bin/wb; from
+    OpenCode's install, whose every update is a new generation `<key>/<n>/node_modules/<package>`
+    and which removes the old ones, also `wb_cache`: [the key's directory, bin/wb's path under a
+    generation] (#1497)."""
+    from . import ocplugin
+    root = PKG_ROOT.resolve()
+    out: dict = {"wb": str(PKG_ROOT / "bin" / "wb")}
+    key = root.parent.parent.parent
+    if ocplugin.runs_from_cache(root) and root.parent.name == "node_modules" and any(
+            key != c.resolve() and key.is_relative_to(c.resolve()) for c in ocplugin.package_caches()):
+        out["wb_cache"] = [str(key), str(Path("node_modules", root.name, "bin", "wb"))]
+    return out
+
+
+def newest_wb(s: dict) -> Path | None:
+    """The wb a schedule's fire would run now (_NEWEST's choice for a cache install), None when
+    it is gone; a schedule from before #1497 names none: this copy's."""
+    if cache := s.get("wb_cache"):
+        key, rel = cache
+        found = sorted(Path(key).glob(f"*/{rel}"), key=lambda p: p.relative_to(key).parts[0].zfill(20))
+        return found[-1] if found else None
+    wb = Path(s.get("wb") or PKG_ROOT / "bin" / "wb")
+    return wb if wb.exists() else None
+
+
+def fire_argv(name: str, s: dict | None = None) -> list[str]:
     """What the unit runs: this Python and this clone's bin/wb, by full path, so neither the unit's
-    PATH nor a missing ~/.local/bin link decides which wb fires."""
-    return [sys.executable, "-X", "utf8", str(PKG_ROOT / "bin" / "wb"), "schedule", "fire", name]
+    PATH nor a missing ~/.local/bin link decides which wb fires; from OpenCode's install the newest
+    generation's (``s``'s `wb_cache`, _NEWEST)."""
+    w = s if s is not None else read(name) or unit_wb()
+    if cache := w.get("wb_cache"):
+        return [sys.executable, "-X", "utf8", "-c", _NEWEST, *cache, "schedule", "fire", name]
+    return [sys.executable, "-X", "utf8", w.get("wb") or str(PKG_ROOT / "bin" / "wb"), "schedule", "fire", name]
 
 
 def unit_env() -> dict:
@@ -229,7 +269,7 @@ def systemd_units(name: str, s: dict) -> dict[str, str]:
     service = (f"[Unit]\nDescription=workbench schedule {name}: {what.replace('%', '%%')}\n\n"
                "[Service]\nType=oneshot\n"
                f"WorkingDirectory={s['repo'].replace('%', '%%')}\n{env}"  # a path, never quoted
-               f"ExecStart={' '.join(_sd_quote(w, exec_line=True) for w in fire_argv(name))}\n"
+               f"ExecStart={' '.join(_sd_quote(w, exec_line=True) for w in fire_argv(name, s))}\n"
                # a night's run: no start timeout (FIRE_HOURS bounds it); the runners it starts
                # live on in scopes of their own (cli.detach), and KillMode=process keeps them where
                # systemd-run can't make one
@@ -244,7 +284,7 @@ def systemd_units(name: str, s: dict) -> dict[str, str]:
 def launchd_plist(name: str, s: dict) -> bytes:
     when = s["at"]["launchd"]
     log = str(sched_dir(name) / "fire.log")
-    return plistlib.dumps({"Label": f"{LABEL}{name}", "ProgramArguments": fire_argv(name),
+    return plistlib.dumps({"Label": f"{LABEL}{name}", "ProgramArguments": fire_argv(name, s),
                            "EnvironmentVariables": s["env"], "WorkingDirectory": s["repo"],
                            "StartCalendarInterval": when[0] if len(when) == 1 else when,
                            "StandardOutPath": log, "StandardErrorPath": log})
@@ -324,6 +364,20 @@ def linger_note() -> str | None:
     return None
 
 
+# WSL stops a distro about 15 s after its last terminal closes (.wslconfig's instanceIdleTimeout,
+# 15000 ms by default), and its user manager's timers and services with it: a 02:00 fire ran the
+# next morning, and the web app was down overnight, with nothing saying why (#1511, 2026-11-26)
+WSL_IDLE = ("WSL stops this distro about 15 s after its last terminal closes, its timers and the web "
+            "app's service with it (a missed fire runs when it next starts): instanceIdleTimeout=-1 "
+            "under [general] in %UserProfile%\\.wslconfig keeps it running")
+
+
+def wsl_idle_note() -> str | None:
+    """WSL_IDLE on WSL, else None: wb schedule add's, wb setup's service line's, wb doctor's."""
+    from . import hardware
+    return WSL_IDLE if hardware.system() == "wsl" else None
+
+
 # --- The commands --------------------------------------------------------------------------------
 
 def _flow_check(name: str, flow_name: str, params: list[str], budget: float | None, top: Path) -> tuple[dict, list[str]]:
@@ -378,7 +432,7 @@ def add(name: str, file: str | None, repo: str, at: str, turns: int | None = Non
         raise ScheduleError("--max-turns goes with --file (Claude's turns), and is at least 1")
     fl, notes = _flow_check(name, flow, params or [], budget_usd, top) if flow else ({}, [])
     s = {"name": name, **({"file": str(path)} if path else fl), "repo": str(top), "at": parse_at(at),
-         **({} if flow else {"max_turns": turns or TURNS}), "env": unit_env(), "created_at": store.now()}
+         **({} if flow else {"max_turns": turns or TURNS}), "env": unit_env(), **unit_wb(), "created_at": store.now()}
     d = sched_dir(name)
     d.mkdir(parents=True, exist_ok=True)
     try:
@@ -403,6 +457,30 @@ def add(name: str, file: str | None, repo: str, at: str, turns: int | None = Non
                    "a fire fails until they are")
     if note := linger_note():
         out.append(f"note: {note}")
+    out += [f"note: {n}" for n in _env_key_notes()]
+    if note := wsl_idle_note():
+        out.append(f"note: {note}")
+    return out
+
+
+def _env_key_notes() -> list[str]:
+    """env_key_note for each role on API (#1495); none when routes.json can't be read (a fire
+    skips then, said in its row)."""
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        return []
+    out = []
+    for role in routes.ROLES:
+        mid = doc["roles"][role].get("api")
+        if routes.effective_via(doc, role) != "api" or not mid:
+            continue
+        try:
+            m = models.lookup(mid, cached=True)
+        except Exception:
+            m = None
+        if m is not None and (note := env_key_note(role, m)):
+            out.append(note)
     return out
 
 
@@ -488,9 +566,34 @@ def _fire_env(name: str) -> dict:
     return env
 
 
+def env_key_note(role: str, m) -> str | None:
+    """A role whose model's key is only $VAR in the shell (#1495): wb writes no key into a unit, so
+    a fire sees it only where the user manager has it. wb schedule add's note."""
+    from . import keyhole
+    if not str(m.key).startswith("env:"):
+        return None
+    return (f"the {role} role's key is ${m.key[4:]} in your shell, which a fire gets only if your user "
+            f"manager has it (wb writes no key into a unit): `{keyhole.login(m.provider)}` stores it, "
+            f"else such a fire is skipped")
+
+
+def _env_key_skip(role: str, m) -> str | None:
+    """Why a fire can't start ``m`` for want of its exported key here, else None: each of its wb
+    starts exited 3, a flow's items not_run and a backlog's headless Claude spent its turns on
+    them (#1495, 2026-11-26)."""
+    from . import keyhole
+    if m is None or not str(m.key).startswith("env:") or not (why := models.env_why(m.provider, m.key[4:])):
+        return None
+    if models._env_unseen(m.key):
+        return (f"{role} role: its key is ${m.key[4:]}, which this fire's environment lacks (wb writes "
+                f"no key into a unit): store it with `{keyhole.login(m.provider)}`")
+    return f"{role} role: {why}"
+
+
 def spend_skip() -> str | None:
     """Why tonight's fire is skipped for money: an API role (routes.effective_via) that meter.refusal
-    refuses: no day cap at all (meter.no_cap), today's spend at it, or no price. None when every
+    refuses: no day cap at all (meter.no_cap), today's spend at it, or no price; or whose key is
+    an exported variable this fire's environment lacks (_env_key_skip, #1495). None when every
     role is on the GPU, or each API role has room. routes.json unreadable is a skip too."""
     try:
         doc = routes.read()
@@ -512,7 +615,7 @@ def spend_skip() -> str | None:
             why = f"{role} role: API spend today is {meter.usd(t)} of the {meter.usd(cap)} day cap"
         else:
             why = None
-        if why:
+        if why := why or _env_key_skip(role, m):
             return why
     return None
 
@@ -595,7 +698,7 @@ def _tasks_of(batch: str) -> tuple[list[dict], float | None]:
 
 def fire(name: str) -> int:
     """`wb schedule fire`, the unit's command: one headless Claude run on the backlog, one runs.jsonl
-    row. Skips (a row saying why) while the last fire lives, or for money (spend_skip)."""
+    row. Skips (a row saying why) while the last fire lives, or for money or a key (spend_skip)."""
     s = read(name)
     if s is None:
         print(f"wb schedule fire: no schedule {name!r}", file=sys.stderr)
@@ -695,8 +798,9 @@ def doctor_lines() -> list[tuple[bool, str]]:
         last = summary(rows[-1]) if rows else "never fired yet"
         path = (s.get("env") or {}).get("PATH", "")
         gaps = [f"{p} not on its PATH" for p in needs(s) if not shutil.which(p, path=path)]
-        if not (PKG_ROOT / "bin" / "wb").exists():
-            gaps.append(f"{PKG_ROOT / 'bin' / 'wb'} is gone")
+        if newest_wb(s) is None:  # the unit's own, not this wb's (#1497): it said ok while each fire exited 2
+            where = s["wb_cache"][0] if s.get("wb_cache") else s.get("wb") or PKG_ROOT / "bin" / "wb"
+            gaps.append(f"its wb is gone ({where}): wb schedule rm {name}, then add")
         if not all(p.exists() for p in unit_files(name)):
             gaps.append("its unit is gone (wb schedule rm, then add)")
         out.append((not gaps, f"schedule {name} ({(s.get('at') or {}).get('said')}): last {last}"

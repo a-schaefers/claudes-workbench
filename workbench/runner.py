@@ -1134,6 +1134,10 @@ NOTE_HEAD = "A note from Claude, your reviewer, before you go on."
 NUDGE = ("You have been thinking for {mins} minutes without a tool call. Stop planning and act "
          "now: make the next edit, one file per tool call, smallest first, and run the tests "
          "as soon as there is something to test. Keep each thought short; decide as you go.")
+# A report task's think nudge: it has no edit to make or tests to run (#1489, 2026-11-26). The
+# words up to "Stop planning" are NUDGE's, which transcript and the fake know it by.
+REPORT_NUDGE = ("You have been thinking for {mins} minutes without a tool call. Stop planning and "
+                "finish now: send your result with submit_result, or end with the object.")
 # The runner's own steer when the explore guard (events.StuckDetector's `no_edit`) first trips in
 # a session; a second trip in that session stops the round (#1134, D1). Of 52 big-repo GPU bench
 # runs (2026-11-21/22), 9 of the 11 failures were no_edit stops: 5 of them self-review rounds with
@@ -2026,8 +2030,11 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         power = _Power()
         power.start()
 
-    detector = StuckDetector(**{"no_edit": no_edit_limit(st.get("window"), api=api_task(task)),
-                                **spec.get("stuck", {})},
+    # A report can't edit (context.report_rules), so the explore guard only counted its reading:
+    # told at 40 calls on the GPU to "make the first edit now", stopped at 80 (#1489, 2026-11-26).
+    # Its repeat and error guards, the wall and silence hold it.
+    explore_limit = float("inf") if spec.get("report") else no_edit_limit(st.get("window"), api=api_task(task))
+    detector = StuckDetector(**{"no_edit": explore_limit, **spec.get("stuck", {})},
                              worktree=task.worktree, workdir=task.workdir)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past its call's `timeout` it does, and
@@ -2345,7 +2352,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             task.set_status(nudged_round=n)
             # no wake: the next round's report says "nudged once" (#1322, 2026-11-24), as
             # _reading_full became an event on 2026-11-17
-            _runner_nudge(task, n, NUDGE.format(mins=mins))
+            _runner_nudge(task, n, (REPORT_NUDGE if spec.get("report") else NUDGE).format(mins=mins))
         if out["stuck"]:
             # by: the provider's or the spend cap's stop is no lesson about the agent
             # (lessons.gather; #1020)
@@ -4886,6 +4893,12 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
         return OLD_STORE
     if st["session"] == st.get("compact_failed_session"):  # it can't go on, nor be kept (#969)
         return COMPACTION_FAILED
+    # A report's repair round (SCHEMA_FIX) asks the session to resend the object it just sent:
+    # its newest message, inside what a compaction keeps verbatim. A fresh session after a
+    # compaction had neither the object nor the reading behind it, so it redid the report or made
+    # up a valid one (#1478, 2026-11-26)
+    if st.get("round_for") == "schema_fix":
+        return None
     if st.get("context") == "keep":
         return None
     if st.get("context") == "full":  # handed over mid-round; after OpenCode compacted it (#774)

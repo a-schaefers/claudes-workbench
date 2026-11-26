@@ -416,44 +416,10 @@ def _plan_name(m) -> str:
 # A real task's first step read 16,161 input tokens, about 65 KB of body (#1173, 2026-11-24).
 FIRST_TOKENS = 16_384
 
-# An image in a request (#1199's review): OpenCode sends each `run -f` image, and the read tool's,
-# as base64, a data: URI (OpenAI's image_url, an OpenAI-compatible server's) or a `data` field
-# beside its image media type (Anthropic's source, Google's inlineData). At its bytes / 4 one
-# 10 MiB image read as 3.5M tokens, $10.49 at $3/M input: past a $10 cap every request carrying
-# it was refused, and wb start, counting no image, had let the task start (#1118's failure
-# again). A provider counts an image by its pixels after its own downscale, a few thousand
-# tokens (Anthropic's about 1,600, OpenAI's tiles about 1,100, a Qwen-VL's up to 16,384): the
-# room and runner.first_tokens count each at that worst, its base64 left out.
-IMAGE_TOKENS = 16_384
-MEDIA_KEYS = ("media_type", "mimeType", "mime_type", "mediaType")
-
-
-def images_in(body) -> tuple[int, int]:
-    """A request body's images: how many, and the characters of their base64 (each a data: URI,
-    or a `data` string beside an image/ media type), which the room leaves out of its bytes / 4."""
-    n = chars = 0
-    todo = [body]
-    while todo:
-        x = todo.pop()
-        if isinstance(x, dict):
-            data = x.get("data")
-            if isinstance(data, str) and any(isinstance(x.get(k), str) and x[k].startswith("image/")
-                                             for k in MEDIA_KEYS):
-                n, chars = n + 1, chars + len(data)
-            else:
-                todo.extend(x.values())
-        elif isinstance(x, list):
-            todo.extend(x)
-        elif isinstance(x, str) and x.startswith("data:image/") and ";base64," in x[:128]:
-            n, chars = n + 1, chars + len(x)
-    return n, chars
-
-
-def body_tokens(body, size: int) -> float:
-    """A request's input as the room reckons it: its bytes / 4, each image at IMAGE_TOKENS in
-    place of its base64 (images_in)."""
-    n, chars = images_in(body) if isinstance(body, (dict, list)) else (0, 0)
-    return max(size - chars, 0) / 4 + n * IMAGE_TOKENS
+# The room's image count lives in the keyhole, whose cut estimate uses it too (#1474, 2026-11-26):
+# there a cut response's input was its body's bytes / 4, an image's base64 included.
+IMAGE_TOKENS, MEDIA_KEYS = keyhole.IMAGE_TOKENS, keyhole.MEDIA_KEYS
+images_in, body_tokens = keyhole.images_in, keyhole.body_tokens
 
 
 def request_floor(m, tokens: int = FIRST_TOKENS) -> float | None:

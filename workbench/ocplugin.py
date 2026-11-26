@@ -422,12 +422,18 @@ def install() -> list[str]:
             i = at[0]  # the one OpenCode loads; a second of the same id is a duplicate it refuses
             spec = target(plugins[i])
             old = plugins[i].get("options") if isinstance(plugins[i], dict) else None
+            # the user's own options (wake: "off", the one way to turn wakes off; an env key of
+            # theirs) stay, and env merges key by key: the move to a new copy kept only wb and this
+            # shell's WB_*, so wb update turned the wakes back on unasked (#1505, 2026-11-26)
+            kept = old if isinstance(old, dict) else {}
+            env = {**(kept["env"] if isinstance(kept.get("env"), dict) else {}), **opts.get("env", {})}
+            merged = {**kept, **opts, **({"env": env} if env else {})}
             d = local_dir(spec, path.parent)
             if d is not None and d.resolve() != load.resolve():
-                plugins[i] = {"package": str(load), "options": opts}
+                plugins[i] = {"package": str(load), "options": merged}
                 lines.append(f"ok  the OpenCode plugin in {path} → {load} (was {spec})")
             else:
-                plugins[i] = {"package": spec, "options": {**(old if isinstance(old, dict) else {}), **opts}}
+                plugins[i] = {"package": spec, "options": merged}
                 lines.append(f"ok  the OpenCode plugin {spec} in {path}: its options name {opts['wb']}")
             lines += [f"--  {path} loads the plugin twice ({target(plugins[j])} too): remove one by hand"
                       for j in at[1:]]

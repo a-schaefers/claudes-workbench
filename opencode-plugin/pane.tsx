@@ -15,13 +15,14 @@
 //
 // The TUI part imports this only in setup (tui.ts), never at load: it imports OpenTUI and Solid,
 // which only OpenCode's TUI provides.
-import { createEffect, createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
+import { createEffect, createMemo, createRoot, createSignal, Index, onCleanup, Show, type JSX } from 'solid-js'
 import { TextAttributes } from '@opentui/core'
 import { Apprentice, mountSplash, PANEL, replaySplash, type Panel, type SplashHost } from './splash.tsx'
 import { AGENT, WorkbenchPane, type Link, type Live, type PaneTask, type Tasks } from './pane.ts'
 import { WorkbenchDriver } from './driver.ts'
 import {
-  driverRow, footer, lineRun, MODELS, modelineOf, panelRows, pixels, Poll, runOf, scoped, separator, sidebar, spinAt, target,
+  driverRow, FOCUS_PROMPT, footer, Landing, lineRun, LinkPoll, MODELS, modelineOf, panelRows, pixels, Poll, PromptFocus, runOf, scoped,
+  separator, sidebar, spinAt, target,
   TOKEN, WHO, wrap, type DriverInfo, type Here, type Run, type Token,
 } from './pane-view.ts'
 import { capRow, focusOf, frameOf, speechOf } from '../mod/hooks/tasks.ts'
@@ -61,6 +62,8 @@ export interface PaneHost {
     }): void
     // a reachable command by id (OpenCode's own "Open plugins" action dispatches `plugins.list` so)
     dispatch?(id: string): void
+    // a command's keys as the user has them bound (`<leader>left`), as OpenCode's diff panel shows them
+    shortcuts?(id: string): readonly string[]
   }
   readonly ui: {
     // the prompt's selected model, reactive (2.4.1; none in an older TUI): the next turn's driver
@@ -78,7 +81,7 @@ export interface PaneHost {
 }
 type Host = SplashHost & PaneHost
 // the panel's slot input (plugin/src/tui/context.ts `PanelInput`), beyond splash.tsx's Panel
-type PanelInput = Panel & { readonly close?: () => void }
+type PanelInput = Panel & { readonly close?: () => void; readonly presentation?: 'panel' | 'fullscreen' }
 
 /** A token's colour in the theme; none for a token the theme lacks (an older OpenCode). */
 export function colour(theme: PaneHost['theme'], token: Token | undefined): Colour | undefined {
@@ -109,25 +112,21 @@ function Runs(props: { readonly theme: PaneHost['theme']; readonly runs: readonl
 class Feed {
   readonly state = createSignal<Tasks | null>(null)
   readonly link = createSignal<Link>({ state: 'checking' })
-  private linkAt = -Infinity
   private readonly loop: Poll<Tasks>
+  // the web app's link, for the modeline: asked when the panel draws and each LINK_MS while it shows (#1518)
+  private readonly links: LinkPoll
   constructor(private readonly rpc: Record<string, (input?: unknown) => Promise<unknown>>, private readonly busy: () => boolean) {
     this.loop = new Poll(() => this.rpc.tasks!({}) as Promise<Tasks>, t => this.state[1](t), () => {
       const open = (this.state[0]()?.tasks ?? []).some(t => !CLOSED.has(t.phase))
       return open || this.busy() ? POLL_MS : IDLE_MS
     })
+    this.links = new LinkPoll(() => this.rpc.link!({}) as Promise<Link>, l => this.link[1](l), busy)
   }
   start() { void this.loop.now() }
-  stop() { this.loop.stop() }
+  stop() { this.loop.stop(); this.links.stop() }
   /** Read now (a press that opens the panel): still the one loop. */
   poll() { return this.loop.now() }
-  // the web app's link, for the modeline: asked when the panel draws, kept a minute (pane.ts LINK_MS)
-  wantLink() {
-    const now = Date.now()
-    if (now - this.linkAt < 60_000) return
-    this.linkAt = now
-    void (this.rpc.link!({}) as Promise<Link>).then(l => this.link[1](l), () => {})
-  }
+  wantLink() { void this.links.want() }
 }
 
 const hereOf = (host: Host, sessionID: string): Here => ({
@@ -231,10 +230,17 @@ function Page(props: { readonly host: Host; readonly feed: Feed; readonly panel:
     return c ? capRow(tasks(), c.spent, c.cap, cols(), undefined, c.est) : null
   }
   const ml = () => modelineOf(props.feed.link[0](), cols())
+  // while the panel has the keyboard beside the prompt, the way back to it, as OpenCode's diff
+  // panel says it (#1509): Esc alone closed the panel
+  const back = () => {
+    const key = props.panel.focused && props.panel.presentation !== 'fullscreen' ? host.keymap.shortcuts?.(FOCUS_PROMPT)[0] : undefined
+    return key ? `${key} focus prompt · esc close` : ''
+  }
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0} paddingX={1}
       onSizeChange={function () { setSize({ w: this.width - 2, h: this.height }) }}>
+      <Show when={back()}><text wrapMode="none" fg={theme.text.muted}>{back()}</text></Show>
       <Show when={driverRow(driver(), cols())}>
         <Runs theme={theme} runs={driverRow(driver(), cols()) ?? []} onPress={() => host.keymap.dispatch?.(MODELS)} />
       </Show>
@@ -251,9 +257,12 @@ function Page(props: { readonly host: Host; readonly feed: Feed; readonly panel:
         <scrollbox flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" scrollbarOptions={{ visible: false }}>
           <Index each={history()}>
             {l => {
-              const r = lineRun(l())
-              return <text wrapMode={view() === 'diff' ? 'none' : 'word'} fg={colour(theme, r.fg)}>
-                <span style={{ bg: colour(theme, r.bg), attributes: attrs(r) }}>{r.text}</span>
+              // a memo, never a const: an Index row is made once for its index and only its item
+              // changes, so a line read once here kept the text it was first drawn with (#1472: `d`
+              // showed the transcript under the diff's separator, a 600-line tail froze, 2026-11-26)
+              const r = createMemo(() => lineRun(l()))
+              return <text wrapMode={view() === 'diff' ? 'none' : 'word'} fg={colour(theme, r().fg)}>
+                <span style={{ bg: colour(theme, r().bg), attributes: attrs(r()) }}>{r().text}</span>
               </text>
             }}
           </Index>
@@ -328,16 +337,26 @@ export function mountPane(host: Host, home: string): () => void {
   const [picked, pick] = createSignal('')
   const panelOpen = () => host.ui.panel.current()?.name === PANEL
   const feed = new Feed(rpc, panelOpen)
-  const open = (task = '') => {
+  const focus = new PromptFocus()
+  const landing = new Landing()
+  // `prompt`: the open came from the mode's start, not a press: the prompt keeps the keyboard (#1509)
+  const open = (task = '', prompt = false) => {
     if (task) pick(task)
-    if (!panelOpen()) host.ui.panel.open(PANEL)
+    // wanted before the open, as the panel may be drawn and focused within it
+    if (!panelOpen()) { focus.want(prompt); if (!host.ui.panel.open(PANEL)) focus.want(false) }
     void feed.poll()
   }
   const toggle = () => (panelOpen() ? host.ui.panel.close() : open())
   const stops: (() => void)[] = []
   stops.push(mountSplash(host, home,
     panel => <Page host={host} feed={feed} panel={panel as PanelInput} picked={picked} pick={pick} />,
-    (rows, cols) => { feed.wantLink(); return target(rows, cols, feed.link[0](), !!feed.state[0]()?.cap) }))
+    (rows, cols) => { feed.wantLink(); return target(rows, cols, feed.link[0](), !!feed.state[0]()?.cap) },
+    // the panel host focuses the panel once it is drawn (session-frame.tsx `onTarget`): handed
+    // back then, after the update that drew it
+    panel => {
+      if (!panel) focus.want(false)
+      else if (focus.due(panel.focused)) queueMicrotask(() => host.keymap.dispatch?.(FOCUS_PROMPT))
+    }))
   stops.push(host.ui.slot({
     append: 'sidebar.content',
     render: input => <Section host={host} feed={feed} sessionID={input.sessionID ?? ''} open={open} />,
@@ -357,8 +376,9 @@ export function mountPane(host: Host, home: string): () => void {
     const { sessionID, agent, previous } = e.data
     const route = host.ui.router.current()
     const here = route.type === 'session' && route.sessionID === sessionID
+    if (here) landing.settle()
     if (agent === AGENT && previous !== AGENT && here) {
-      open()
+      open('', true)
       // asked only for the session on screen (--once records each note as said, so one asked for a
       // session elsewhere would be spent unseen), of the model the TUI selects once it follows the
       // new agent (SETTLE_MS)
@@ -374,6 +394,18 @@ export function mountPane(host: Host, home: string): () => void {
       if (here && panelOpen()) host.ui.panel.close()
       replaySplash(host)
     }
+  }))
+  // a session already on Workbench as the TUI comes to it (`opencode -s`, a new TUI) opens the
+  // panel too, once an arrival: OpenCode publishes no agent selection for it (#1517)
+  stops.push(createRoot(dispose => {
+    createEffect(() => {
+      const route = host.ui.router.current()
+      const sessionID = route.type === 'session' ? route.sessionID ?? '' : ''
+      const s = sessionID ? host.data.session.get(sessionID) : undefined
+      // the open outside the effect, which would otherwise track the panel's state it reads
+      if (landing.see(sessionID, s ? s.agent ?? '' : undefined)) queueMicrotask(() => open('', true))
+    })
+    return dispose
   }))
   feed.start()
   return () => {

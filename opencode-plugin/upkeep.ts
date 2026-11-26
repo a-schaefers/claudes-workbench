@@ -32,6 +32,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type * as Core from '../mod/hooks/core.ts'
 import type { StatusFile, TaskFile } from '../mod/types/wire.d.ts'
+import { OPENCODE as SAY } from '../mod/hooks/story.ts'
 import { AGENT } from './agent.ts'
 import { REPLY_ID, typedByUser } from './chat.ts'
 import { sessionRunner, whereOf, type SessionRun } from './commands.ts'
@@ -95,9 +96,10 @@ export const WAKE_OFF_NOTE =
   'Wakes are off (the workbench plugin\'s `wake` option): no [workbench] message will say when a task ' +
   'needs you. After `wb start`, tell the user it runs and that a toast says when it is ready; pick it ' +
   'up when they ask (`wb report <name>`), and wait (`wb wait <name>`) only if they ask you to.'
+// its last line the story's, the mod's word for word: `wb wait`, never `wb watch`, which follows a
+// task until it closes and so held a driver on one at review to its shell's timeout (#1515)
 export const TASKS_NOTE = (status: string) =>
-  `Tasks delegated to agents with wb (your Workbench instructions) are open:\n${status}\n` +
-  'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.'
+  `Tasks delegated to agents with wb (your Workbench instructions) are open:\n${status}\n${SAY['tasks.pickup']}`
 
 // What the facts are read with: the files, wb as the session, the clock and the environment
 export interface Io {
@@ -135,6 +137,24 @@ export function openTasks(k: Kernel, io: Io, home: string, sessionID: string): T
   }
   return out.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 }
+
+// The runs not closed (runs/*/status.json), `name:phase`: wb status lists those in the session's
+// scope, so a run waiting at review with no task open reaches the session too (#1491)
+export function openRuns(io: Io, home: string): string[] {
+  const dir = join(home, 'runs')
+  const out: string[] = []
+  for (const name of io.list(dir)) {
+    const phase = String(json<StatusFile>(io.read(join(dir, name, 'status.json'))).phase ?? '')
+    if (phase && phase !== 'closed') out.push(`${name}:${phase}`)
+  }
+  return out.sort()
+}
+
+// What wb status says is open: all of it, or with no task open its runs' lines alone (they come
+// after `no open tasks`, and dropping the whole text hid a run: #1491); '' for nothing. The mod's
+// prompt.context reads it the same way
+export const openListed = (status: string): string =>
+  status.startsWith('no open tasks') ? (status.match(/^run [\s\S]*/m)?.[0] ?? '') : status
 
 // The roles' file as wb reads it (WB_ROUTES, `~` expanded, else ~/.config/workbench/routes.json)
 export function routesPath(env: Record<string, string | undefined>): string {
@@ -333,16 +353,19 @@ export class Upkeep {
       wakeOff: any && this.host.options?.wake === 'off', // notices.ts's `wake` option (the mod's)
       coding: coding in CODING_RULES ? coding : 'decide',
       routes,
-      workflows: any && json(read('workflows.json')).mode === 'on' ? 'on' : 'off',
+      // deepmode's own key, never 2.1's `mode`, which meant less (#1507)
+      workflows: any && json(read('workflows.json')).deepmode === 'on' ? 'on' : 'off',
     }
-    // the open tasks as wb lists them, for this session in its directory; read again when they change
-    const sig = tasks.map(t => `${t.name}:${t.phase}`).join(' ')
+    // the open tasks and runs as wb lists them, for this session in its directory; read again when
+    // they change (a run's too: one at review with no task open was never said, #1491)
+    const runs = openRuns(this.io, this.home)
+    const sig = [...tasks.map(t => `${t.name}:${t.phase}`), ...runs].join(' ')
     if (sig !== s.tasksSig) {
       s.tasksSig = sig
       s.tasksText = ''
-      if (tasks.length) {
+      if (tasks.length || runs.length) {
         const r = await this.io.run(['status'], { session: sessionID, cwd: s.dir })
-        if (r.ok && r.out && !r.out.startsWith('no open tasks')) s.tasksText = r.out
+        if (r.ok && r.out) s.tasksText = openListed(r.out)
       }
     }
     const away = any && !back && await this.away(sessionID)

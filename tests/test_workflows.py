@@ -113,6 +113,18 @@ class RequiredCheck(unittest.TestCase):
         for trigger in ("'tests/e2e_*'", "'scripts/web.py'", "'scripts/install-tsc.sh'"):
             self.assertEqual(text("chat.yml").count(trigger), 2, trigger)  # push and pull_request
 
+    def test_the_browser_test_runs_when_a_module_whose_output_the_page_draws_changes(self):
+        # #1528 (2026-11-26): e2e_settings drives settings.rows(), the runs strip reads
+        # runs.snapshot, e2e_stats runs wb stats and wb top --json, and chat.py serves savings and
+        # story; a change to one ran no browser test till a later PR touched chat_static/
+        on = text("chat.yml").split("\npermissions:", 1)[0]
+        push, pull = on.split("\n  pull_request:", 1)
+        for name in ("settings", "runs", "stats", "top", "savings", "story"):
+            for trigger in (push, pull):
+                self.assertIn(f"- 'workbench/{name}.py'", trigger, name)
+        for trigger in (push, pull):
+            self.assertIn("- 'mod/types/wire.d.ts'", trigger)
+
     def test_the_opencode_plugin_job_runs_its_tests_and_types_under_the_pinned_opencodes_bun(self):
         # #1328: the plugin's tests ran only inside the kernel's job, as an afterthought; its own
         # job, as the mod has, runs the commands wb patch upstream names for a plugin patch, and

@@ -408,8 +408,12 @@
         if (r && !mine)
             WB.toast(`${r.label || r.key} set to ${valueWord(r.to)} by ${byWord(r.by)}`);
     });
-    // the runs strip's tap (app.ts): Settings at the workflows group, where each run's row is
-    document.addEventListener('wb-settings-group', e => { focusGroup = String(e.detail || ''); draw(); });
+    // the runs strip's tap (app.ts): Settings at the workflows group, where each run's row is.
+    // Drawn now only when Settings shows: the tap's go('settings') shows it on a later hashchange,
+    // and a draw while it was hidden spent focusGroup on a scrollIntoView that did nothing, so a
+    // second visit landed at the top, the card 2,000 px down (#1527, 2026-11-26); show() draws it
+    document.addEventListener('wb-settings-group', e => { focusGroup = String(e.detail || ''); if (showing)
+        draw(); });
     WB.view('settings', {
         mount(r) { root = r; },
         show() { showing = true; load(); },
