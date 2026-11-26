@@ -1004,6 +1004,42 @@ class DriverLease(Base):
         self.assertIn("so it waits on this session", own)
         self.assertEqual(cli._driver_way_out({}), "")
 
+    def test_the_router_prefers_a_model_that_runs_beside_the_drivers_resident_one(self):
+        # #1476 (2026-11-26): the router picked the largest model whatever a live local driver
+        # held, so on one GPU the lead's own task queued behind the lead's session (up to
+        # DRIVER_HOLD on a server driver, which never unloads) while a smaller model ran now
+        from workbench import router
+        mid = "ollama/mid:14b"
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(path.read_text())
+        cfg["provider"]["ollama"]["models"]["mid:14b"] = {}
+        path.write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({
+            BIG: {"weights_gb": 20}, mid: {"weights_gb": 12}, SMALL: {"weights_gb": 5},
+            "strata/strata": {"weights_gb": 10}}))                  # a server: shares with nothing
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        self.assertEqual(router.choose("significant")[0].model.id, BIG)  # no driver: the largest
+        self.drive(model=mid)
+        found = models.discover()
+        self.assertFalse(models.admits(found[BIG], models.driver_holders(found[BIG])))
+        top, why = router.choose("significant")
+        self.assertTrue(models.admits(top.model, models.driver_holders(top.model)), why)
+        self.assertEqual(top.model.id, mid)                     # the driver's own: the two share it
+        self.assertIn(f"the largest model allowed significant work that runs beside the driver's {mid} "
+                      f"now ({BIG}, strata/strata would wait for it)", why)
+        self.assertEqual([s.waits_on for s in router.rank("significant")][-2:], [(mid,), (mid,)])
+        # OpenCode's default outlives the session: never moved off by its driver
+        self.assertEqual(router.choose("significant", drivers=False)[0].model.id, BIG)
+        os.environ["WB_FAKE_GPU_GB"] = "48"                     # room for any two, but a server's
+        self.drive(model="strata/strata")
+        self.assertEqual(router.choose("significant")[0].model.id, "strata/strata")
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "WB_TASK", "OPENCODE_SESSION_ID")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            out = cli._driver_way_out(models.driver_holders(found[SMALL]))
+        self.assertIn("; the driver's model stays loaded on its server (it never unloads) until its session "
+                      f"is idle {store.DRIVER_HOLD // 60} min: the driver's own model (strata/strata)", out)
+        self.assertNotIn("a smaller model", out)
+
     def test_a_job_that_takes_the_gpu_to_itself_unloads_a_drivers_model_as_before(self):
         # the review of #1317 (2026-11-25): wb image, wb audio, --unload-for-tests and wb optimize
         # free the GPU with no model (free_gpu's ``of`` None), and no exclusive lease waits for a

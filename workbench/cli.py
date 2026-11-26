@@ -922,15 +922,22 @@ def _driver_way_out(held: dict) -> str:
     """What a wait on a live driver's model needs said (#1317, the review of 2026-11-25): it ends
     only when Ollama lets the model go (its keep-alive) or the session has been idle
     store.DRIVER_HOLD, and the driver's own session, polling its task, keeps both fresh. ""
-    when no driver holds the GPU."""
+    when no driver holds the GPU. A server engine's model never unloads and shares the GPU with
+    nothing, so there no smaller model helps: only the driver's own one (#1476, 2026-11-26)."""
     drv = sorted(h["model"] for h in held.values() if h.get("driver"))
     if not drv:
         return ""
     sid = store.opencode_session()
     own = sorted(set(drv) & store.driver_models(sid)) if sid else []
     who = f"this session's own {', '.join(own)}" if own else "the driver's model"
-    return (f"; {who} leaves only once Ollama unloads it or its session is idle "
-            f"{store.DRIVER_HOLD // 60} min{', so it waits on this session' if own else ''}: "
+    found = models.discover()
+    server = [d for d in drv if (m := found.get(d)) and m.engine != "ollama"]
+    waits = f"{store.DRIVER_HOLD // 60} min{', so it waits on this session' if own else ''}"
+    if server:
+        return (f"; {who} stays loaded on its server (it never unloads) until its session is idle "
+                f"{waits}: the driver's own model ({', '.join(server)}), an API role or an API driver "
+                "runs it sooner")
+    return (f"; {who} leaves only once Ollama unloads it or its session is idle {waits}: "
             "a smaller model for either side, an API role or an API driver runs it sooner")
 
 
@@ -5694,13 +5701,15 @@ def cmd_models(a):
             mark = "→" if i == 0 and sc.state["available"] else " "
             print(f" {mark} {sc.model.id:34} {sc.line()}" + (
                 f" · out of the band on {sc.tries} task(s): one task in {router.EXPLORE_ONE_IN} "
-                "explores it" if sc.model.id in few else ""))
+                "explores it" if sc.model.id in few else "")
+                + (f" · waits on the driver's {', '.join(sc.waits_on)}" if sc.waits_on else ""))
         for m in found.values():
             if not router.allowed(m, size):
                 print(f"   {m.id:34} not for {size} tasks (wb model sizes)")
     print("\n" + "\n".join(_api_section(True)[0]))
     if a.set_default:
-        top, why = router.choose("significant", down=down, catalog=catalog)
+        # OpenCode's default outlives the driver's session: never moved off by it (#1476)
+        top, why = router.choose("significant", down=down, catalog=catalog, drivers=False)
         if top is None:
             die(why)
         try:

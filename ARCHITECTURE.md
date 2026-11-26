@@ -3935,9 +3935,12 @@ driver's <id> (<GB> GB))`, re-checked each `QUEUE_POLL` while queued (`_driver_w
 `load()`'s `_fits_beside` counts it as kept. `wb start` names it (`the GPU is busy with the
 driver's …`, `cli._gpu_wait`) and the way out (`cli._driver_way_out`: it leaves only once Ollama
 unloads it or its session idles `DRIVER_HOLD`; a smaller model for either side, an API role or an
-API driver runs it sooner; `this session's own <id>`, `so it waits on this session`, when the
+API driver runs it sooner; a server engine's model `stays loaded on its server (it never unloads)`
+until the session idles, and only the driver's own model, an API role or an API driver runs it
+sooner, #1476; `this session's own <id>`, `so it waits on this session`, when the
 caller's `OPENCODE_SESSION_ID` drives on it, `store.driver_models(session)`); a bench never
-preempts it (`_preempt_bench`). An API driver, a
+preempts it (`_preempt_bench`). The router ranks a model that would wait on it (`Score.waits_on`)
+after those that run now (*Found, loaded, chosen*). An API driver, a
 stale beat or a session idle past `DRIVER_HOLD` holds nothing (`DriverLease`).
 
 ## Seeing what the agent does
@@ -4811,7 +4814,13 @@ and another have `COST_MIN` 3 tasks of the size with a results `claude`, one `CO
 cheaper per landed step (`_per_step`: weighted `claude` over `tuning.credit` × steps, #903) goes
 first, never a spilling one over one that fits; why: on 2026-11-18 a smaller model cost Claude more
 in review than a larger one. The rest by quality, unavailable last; only a model that can run is
-weighed or fit-checked. `allowed()`: models.json `sizes` (none left: "no GPU model takes <size>
+weighed or fit-checked. A model that can't load beside a live local driver's resident one
+(`models.driver_holders`, `admits`: `Score.waits_on`, its ids; not `fits`, which says "fits the GPU
+whole") goes after every model that runs now, and isn't explored unless the pick waits too; the
+line says so (`… that runs beside the driver's <id> now (<ids> would wait for it)`), and `wb
+models` marks it `· waits on the driver's <id>`: picked whole, the lead's own task queued behind
+the lead's session (#1476). `--set-default` ranks without it (`drivers=False`): OpenCode's default
+outlives the session. `allowed()`: models.json `sizes` (none left: "no GPU model takes <size>
 tasks (…: limited by wb model sizes; …)").
 **The refusal names the GPU, and the API choice** (#1024): with no model to pick, `choose` returns
 `no GPU model can run: <id>: <why>…`, `no GPU model takes <size> tasks …` or `no GPU models: <why
