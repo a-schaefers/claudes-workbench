@@ -24851,7 +24851,8 @@ class Setup(Base):
                 todo += [(target, t) for t in deps(ROOT / target)]
             imports.add(target)
         self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts",
-                         "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts"} <= imports)
+                         "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts",
+                         "mod/hooks/keywords.ts"} <= imports)  # deep.ts's keywords (#1278)
         # and every mod file the Git install brings is one the plugin needs, itself or through another
         self.assertEqual({f for f in root if f.startswith("mod/")}, {t for t in imports if t.startswith("mod/")})
 
@@ -24867,7 +24868,8 @@ class Setup(Base):
                 mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
             self.assertEqual([p for p, _ in ocplugin.shared_files(clone)],
                              ["mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/kernel.js",
-                              "mod/hooks/modeline.ts", "mod/hooks/splash.ts", "mod/hooks/tasks.ts"])
+                              "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/splash.ts",
+                              "mod/hooks/tasks.ts"])
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
             first = Path(self.plugins()[0]["package"])
@@ -41724,6 +41726,42 @@ class OpenCodeDriver(Base):
         # Claude Code's driver: Claude Code, fixed
         os.environ["CLAUDECODE"] = "1"
         self.assertEqual(self.wb("driver")[1], f"driver: {driver.CLAUDE_CODE}\n")
+
+    def test_wb_driver_model_says_the_tuis_selection_over_the_beats_and_its_notes_once(self):
+        # the live check of #1316's pane (2026-11-26): OpenCode commits a /models pick to the session
+        # only at its next prompt, so the beat said the model it replaced (or none in a new session,
+        # whose /workbench notes were then never said); the TUI hands its selection in --model
+        self.path.write_text(json.dumps({"day_usd": 5, "roles": {
+            "trivial": {"via": "api", "api": "deepseek/deepseek-flash"}}}))
+        now = time.time()
+        store.write_json(store.beat_path(os.getpid()), {
+            "tool": "opencode", "pid": os.getpid(), "ts": now, "store": self.db, "sessions": {
+                "ses_1": {"model": "ollama/q", "dir": self.here, "used": now}, "ses_2": {}}})
+        code, out, err = self.wb("driver", "--session", "ses_1", "--json", "--model", "deepseek/deepseek-flash#fast")
+        self.assertEqual(code, 0, err)
+        d = json.loads(out)
+        self.assertEqual((d["label"], d["model"], d["variant"], d["kind"]),
+                         ("deepseek/deepseek-flash#fast", "deepseek/deepseek-flash", "fast", "api"))
+        self.assertNotIn("used", d)                       # its `used` was the replaced model's
+        # a new session's, which no beat has a model for: its notes said, and once
+        first = json.loads(self.wb("driver", "--session", "ses_2", "--json", "--once",
+                                   "--model", "deepseek/deepseek-flash")[1])
+        self.assertEqual([n["key"] for n in first["notes"]], ["own:deepseek/deepseek-flash"])
+        self.assertEqual(json.loads(self.wb("driver", "--session", "ses_2", "--json", "--once",
+                                            "--model", "deepseek/deepseek-flash")[1])["notes"], [])
+        # the same model as the beat's keeps its `used`; no model leaves the beat's as it was
+        same = json.loads(self.wb("driver", "--session", "ses_1", "--json", "--model", "ollama/q")[1])
+        self.assertEqual((same["label"], same["used"]), ("ollama/q", now))
+        self.assertEqual(json.loads(self.wb("driver", "--session", "ses_1", "--json")[1])["label"], "ollama/q")
+        # not a ref, or no session to say it of: refused
+        for bad in (("--session", "ses_1", "--model", "no slash"), ("--model", "p/m")):
+            code, _, err = self.wb("driver", *bad)
+            self.assertNotEqual(code, 0, bad)
+        self.assertIn("isn't an OpenCode model id", self.wb("driver", "--session", "ses_1", "--model", "p/")[2])
+        beat = {"pid": os.getpid(), "ts": now, "sessions": {"ses_1": {}}}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(beat))):  # a beat takes no flag
+            self.assertIn("takes the plugin's heartbeat on stdin, and no flag",
+                          self.wb("driver", "beat", "--model", "p/m")[2])
 
 
 class _ApiTask:

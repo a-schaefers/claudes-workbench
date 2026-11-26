@@ -1411,6 +1411,29 @@ async function run(engine: string, device?: string) {
       await p.close(); await q.close()
     }
   })
+  await check('with OpenCode listening, the page names OpenCode: the header, the receipt, its reply, and with none listening the wait (#1319)', async () => {
+    // the plugin's claim as chat.hold writes it: the server's pid (this process stands in), `tool` (#1319)
+    writeFileSync(join(home, 'state/chat/listener.json'), JSON.stringify({ session: 'ses_e2e', tool: 'opencode', driver: 'opencode',
+      cwd: '/home/u/project', pid: process.pid, busy: false }))
+    await until(async () => (await page.textContent('#presence-text')).startsWith('OpenCode · listening in ~/project'))
+    const n = messages().length
+    await page.fill('#input', 'over to OpenCode')
+    await page.click('#send')
+    await until(() => messages().length === n + 1)
+    wb('chat', 'ack', messages().at(-1).id, '--by', 'ses_e2e')
+    await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Read by OpenCode'))
+    // its reply from the session's shell, stamped `driver` by chat.writer_driver: never Claude Code's here
+    execFileSync(join(ROOT, 'bin', 'wb'), ['chat', 'reply', '--text', 'OpenCode on it.'],
+      { env: { ...env, CLAUDECODE: '', CLAUDE_PID: '', CLAUDE_CODE_SESSION_ID: '', OPENCODE_SESSION_ID: 'ses_e2e' }, encoding: 'utf8' })
+    if (JSON.stringify(messages().at(-1).driver) !== '{"tool":"opencode"}') throw new Error(JSON.stringify(messages().at(-1)))
+    await until(async () => (await page.locator('.row.claude .meta').last().textContent()).startsWith('OpenCode · '))
+    writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+    await until(async () => (await page.textContent('#presence-text')).includes('no session listening'))
+    await page.fill('#input', 'still there?')
+    await page.click('#send')
+    await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Waiting for an OpenCode session'))
+    if ((await page.locator('.row.user .meta').nth(-2).textContent()).includes('Claude')) throw new Error('a receipt still names Claude')
+  })
   await finish()
 
   async function finish() {
@@ -1609,6 +1632,20 @@ await check('a push for a prompt waiting in the terminal says so, with the comma
   if (got.title !== text || got.body !== 'rm -rf runs/*') throw new Error(JSON.stringify(got))
   const reply = await swSays({ now: 300, push: {}, messages: [note, { id: 'r1', ts: 260, from: 'claude', text: 'Tests pass' }] })
   if (reply.body !== 'Tests pass') throw new Error(JSON.stringify(reply))
+})
+
+await check("a push's title names the driver: a reply's own `driver`, else the listener's, else Claude (#1319)", async () => {
+  const oc = { id: 'r2', ts: 260, from: 'claude', text: 'Done', driver: { tool: 'opencode', model: 'p/m' } }
+  const titles = [
+    (await swSays({ now: 300, push: {}, messages: [oc] })).title,
+    (await swSays({ now: 300, push: {}, messages: [{ id: 'r3', ts: 260, from: 'claude', text: 'Done' }], listener: { tool: 'opencode', driver: { tool: 'opencode' } } })).title,
+    (await swSays({ now: 300, push: {}, messages: [{ id: 'r4', ts: 260, from: 'claude', text: 'Done', driver: { tool: 'claude' } }], listener: { driver: { tool: 'opencode' } } })).title,
+    (await swSays({ now: 300, push: {}, messages: [{ id: 'r5', ts: 260, from: 'claude', text: 'Done' }], listener: null })).title,
+    (await swSays({ now: 300, push: {}, messages: [], listener: { driver: { tool: 'opencode' } } })).title,
+  ]
+  if (JSON.stringify(titles) !== JSON.stringify(['OpenCode', 'OpenCode', 'Claude', 'Claude', 'OpenCode'])) throw new Error(JSON.stringify(titles))
+  const test = await swSays({ now: 300, push: { test: 299 }, messages: [], listener: { driver: { tool: 'opencode' } } })
+  if (test.body !== "You'll hear from OpenCode here while you're away.") throw new Error(JSON.stringify(test))
 })
 
 await check("a notification's click brings the thread: the open page told to show Chat, else a new one at #chat (#1284)", async () => {

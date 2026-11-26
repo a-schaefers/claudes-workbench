@@ -16,15 +16,22 @@ json|file|runs}`; `runs` is an earlier run's final results), `budget_usd`, `budg
 - Its inputs: `items` (a list, or `"{params.<a list param>}"`), or `from` an earlier stage,
   `split` a key of each earlier output that holds a list (one item per entry).
 - `prompt`: the item's spec. Placeholders only substitute: `{item}`, `{item.<key>}`,
-  `{params.<key>}`, `{context}`, `{diff}` (the code stage's change, over a code stage only),
-  `{run}`, `{stage}`, `{base}`; `{{`, `}}` are braces. An object goes in as fenced JSON.
+  `{params.<key>}`, `{context}`, `{diff}` (the code stage's change) and `{report}` (its coder's
+  round report: answers to a refix), both over a code stage only, `{run}`, `{stage}`, `{base}`; `{{`, `}}` are braces. An object goes in as fenced JSON.
 - `flow`: `pipeline` (the default: an item starts once its input is in) or `barrier` (once all
-  are); `batch` N (barrier only: N inputs as one list item); `attempts` N (the same item N times).
+  are); `batch` N (barrier only: N inputs as one list item, each with its key as `id`; the
+  answers must be one per id, a missing one named `unjudged`); `attempts` N (the same item N times).
 - `keep`: `{"path": "verdict", "in": ["confirmed"]}`: the rest are filtered, kept in the report.
+- `compare: true`: a report over a code stage with `attempts`: one item per item, once its
+  attempts ended, its prompt's `{diffs}` every attempt's change, labelled a1..aN (the green ones
+  when two or more are); the `choose` card returns `{best, ranking, why}`.
 - `refix`: on a report over a code stage, `{"path": "must_fix", "max": 1|2}`: a non-empty list
   goes back to the coder as `wb feedback`, then the change is reviewed again.
+- `escalate: [roles]`: on a code stage: an item stuck or failed, or with its review's asks left
+  past refix's max, is tried again from the base on the next role (`<key>#e1`, …); the attempt
+  before is kept. Shipped as `fix-escalate` (trivial, then significant).
 - `on_failure`: `checkpoint` stops the run for you when an item ends with no result; a code item
-  stuck or failed always does.
+  stuck or failed always does (with `escalate`, only once its last role has).
 - `"claude": true` with `from`: a checkpoint of yours. You merge, then `wb run feed`.
 - `max_items` (200): past it, items are `not_run`, named in the report.
 
@@ -43,7 +50,7 @@ Markdown with a frontmatter: `description`, `tools` (read, none, code), `schema`
 `skills`, `ask` (0 for reports), `role`, `est` (`{in, out, min}`: one item's tokens and minutes,
 for the estimate). A card's text is at most 3,000 bytes. A user's own go in
 `~/.config/workbench/roles/` (`$WB_ROLES`), schemas in its `schemas/`; a card can't set a model or
-permissions (dropped, said). Shipped: find, verify, judge (no tools), review, critic; build, fix.
+permissions (dropped, said). Shipped: find, verify, judge (no tools), review, choose, critic; build, fix.
 
 ## One report task by hand
 `wb start <t> --spec <file> --report --card verify` (or `--schema verdict [--tools none]`): the

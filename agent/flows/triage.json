@@ -5,7 +5,7 @@
   "params": {"issues": "list"},
   "stages": [
     {"id": "triage", "card": "judge", "schema": "triage", "items": "{params.issues}", "flow": "barrier", "batch": 5,
-     "prompt": "Here the bar is triage. For each issue below (its id is its number or its first words), return an action: fix (real and worth doing now), close (not real, done, or not worth it), ask (it needs the user's answer) or later; and why, in a sentence.\n\n{item}"},
+     "prompt": "Here the bar is triage. For each issue below, by the id it is given, return an action: fix (real and worth doing now), close (not real, done, or not worth it), ask (it needs the user's answer) or later; and why, in a sentence.\n\n{item}"},
     {"id": "claude", "final": true, "from": "triage"}
   ]
 }

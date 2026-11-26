@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Stands in for `opencode run --format json` in tests. FAKE_SCENARIO picks the behaviour:
+"""Stands in for `opencode run --format json` in tests. FAKE_SCENARIO picks the behaviour
+(FAKE_SCENARIO_BY_TASK, {task: scenario}, one task's by its WB_TASK):
 
   ok     write answer.txt = "42", say so
   patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
@@ -83,7 +84,8 @@
          a file, then ends its message with one JSON object after a line of prose: FAKE_RESULT
          (JSON), else FAKE_RESULT_BY's (a JSON object of prompt substring -> object: the first
          found in the prompt), else an object built from the task's schema (rules/<task>/
-         schema.json: each required key, an enum's first value, 0, "x", [] or {}). A repair
+         schema.json: each required key, an enum's first value, 0, "x", [] or {}; a batch's
+         answer list one entry per `id` of its enum). A repair
          round (its prompt opens "rejected:", runner.SCHEMA_FIX) sends FAKE_RESULT_FIX instead,
          when set. FAKE_RESULT_SEQ (a file holding a JSON list): each round takes its first
          object, before all of these, while any is left. FAKE_SUBMIT: the object goes to the
@@ -408,7 +410,9 @@ if args[:2] == ["session", "list"]:  # transcript.find_session before the first 
         print(f"{sid}\t{title}\t11/22/2026, 11:31:45 PM")
     sys.exit(0)
 session = args[args.index("--session") + 1] if "--session" in args else f"ses_{uuid.uuid4().hex[:12]}"
-scenario = os.environ.get("FAKE_SCENARIO", "ok")
+# FAKE_SCENARIO_BY_TASK: {task name: scenario}, by the agent's WB_TASK (a run's escalation, #1278)
+scenario = (json.loads(os.environ.get("FAKE_SCENARIO_BY_TASK") or "{}").get(os.environ.get("WB_TASK", ""))
+            or os.environ.get("FAKE_SCENARIO", "ok"))
 t = lambda: int(time.time() * 1000)  # noqa: E731
 
 
@@ -857,7 +861,12 @@ if scenario == "report":  # #1278: a read, then prose and one object
             props = sch.get("properties") or {}
             return {k: example(props.get(k, {})) for k in sch.get("required") or ()}
         if t == "array":
-            return [example(sch.get("items") or {}) for _ in range(int(sch.get("minItems") or 0))]
+            out = [example(sch.get("items") or {}) for _ in range(int(sch.get("minItems") or 0))]
+            ids = ((sch.get("items") or {}).get("properties") or {}).get("id", {}).get("enum")
+            for row, one in zip(out, ids or ()):  # a batch's answers (runs.batch_schema): one per id
+                if isinstance(row, dict) and "id" in row:
+                    row["id"] = one
+            return out
         return {"string": "x", "integer": 0, "number": 0, "boolean": False}.get(t)
 
     prompt = args[-1] if args else ""

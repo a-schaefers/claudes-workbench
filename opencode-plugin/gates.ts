@@ -98,6 +98,7 @@ export const ONLY = (task: string) => `workbench: not edited: ${task} is the age
 // --- the shell gate
 
 export interface Gate {
+  readonly word?: string  // the command's own word, lowercased (popd's: the directory unknown after it)
   readonly gate: string
   readonly args: ReadonlyArray<string>
   readonly writes: ReadonlyArray<{ readonly to: string }>
@@ -111,9 +112,41 @@ export interface Command {
   readonly writes: string[]
 }
 
+// A shell call's simple commands as the permission hook should walk them: OpenCode's scan
+// (core/src/shell/parse.ts) leaves a plain `cd`, `pushd` or `popd` out of the resources it hands
+// the hook (a directory change is its external_directory check's, never a command's), so a cd in
+// the line was never seen and a write after it was read from the wrong directory (#1314, the
+// kernel-gates lane notes, 2026-11-26). Each resource is the raw text of its command in the line:
+// the stretch between two holds the commands the scan dropped, and a directory change there is put
+// back in its place. A resource is found where a command starts (the line's start, after a list
+// operator, a group or a keyword), never inside another's words (`cd ls && ls`); one not found
+// in order leaves the scan's list as it is.
+const CWD_WORDS = new Set(['cd', 'pushd', 'popd', 'chdir'])
+const STARTS = /(?:^|[;&|(){}\n]|(?:^|\s)(?:then|do|else|elif|if|while|until|!|time))\s*$/
+export function lineCommands(line: string, resources: ReadonlyArray<string>): string[] {
+  const out: string[] = []
+  let at = 0
+  for (const r of resources) {
+    let i = r ? line.indexOf(r, at) : -1
+    while (i >= 0 && !STARTS.test(line.slice(at, i))) i = line.indexOf(r, i + 1)
+    if (i < 0) return [...resources]
+    out.push(...dropped(line.slice(at, i)))
+    out.push(r)
+    at = i + r.length
+  }
+  return out
+}
+
+// the directory changes in a stretch of a line no resource covers, in order
+function dropped(gap: string): string[] {
+  return gap.split(/&&|\|\||[;|&\n(){}]/).map(x => x.trim().replace(/^(?:(?:then|do|else|elif|if|while|until|!|time)\s+)+/, ''))
+    .filter(x => CWD_WORDS.has((x.split(/\s/, 1)[0] ?? '').toLowerCase()))
+}
+
 // Why a shell call is denied, or '': its simple commands in order (OpenCode's scan, each one's
-// words and redirect targets), run from ``dir``. A cd moves the next commands' directory, as the
-// mod follows it (#1125); after a cd only the shell can resolve, a relative path is unknown.
+// words and redirect targets, the directory changes put back: lineCommands), run from ``dir``. A
+// cd or pushd moves the next commands' directory, as the mod follows it (#1125), a bare one to
+// $HOME; after one only the shell can resolve (`cd "$X"`, `cd -`, a popd), a relative path is unknown.
 export async function shellRefusal(commands: ReadonlyArray<Command>, dir: string, p: Places, classify: Classify,
                                    dry: Dry, real: (path: string) => string = x => x): Promise<string> {
   let here = dir
@@ -127,7 +160,11 @@ export async function shellRefusal(commands: ReadonlyArray<Command>, dir: string
     }
     if (g.gate === 'cd') {
       const to = g.args[0]
-      here = !to || to === '-' || /[$`]/.test(to) ? '' : wordPath(to, here, p)
+      here = !to ? p.user : to === '-' || /[$`]/.test(to) ? '' : wordPath(to, here, p)
+      continue
+    }
+    if (g.word === 'popd' || g.word === 'chdir') {
+      here = ''
       continue
     }
     if (g.gate === 'send') return SEND_VIA_TOOL

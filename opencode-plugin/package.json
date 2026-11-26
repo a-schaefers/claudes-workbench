@@ -32,6 +32,7 @@
     "splash.tsx",
     "upkeep.ts",
     "commands.ts",
+    "deep.ts",
     "pane.ts",
     "pane-view.ts",
     "pane.tsx"

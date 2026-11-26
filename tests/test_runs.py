@@ -360,7 +360,7 @@ class Flows(Base):
 
     def test_every_shipped_flow_holds_and_ends_with_claude(self):
         names = [n for n, where, _ in runs.flow_names() if where == "shipped"]
-        self.assertEqual(sorted(names), ["audit", "best-of", "build", "fix", "lenses", "triage"])
+        self.assertEqual(sorted(names), ["audit", "best-of", "build", "fix", "fix-escalate", "lenses", "triage"])
         for n in names:
             flow = runs.load_flow(n)
             self.assertTrue(runs.stages(flow)[-1]["final"], n)
@@ -396,6 +396,56 @@ class Flows(Base):
         said = self.errs(stages=st)
         self.assertIn("{diff} needs from a code stage", said)
         self.assertIn("refix is {path, max: 1 to 2}", said)
+
+    def test_the_coders_report_is_a_place_over_a_code_stage_only(self):
+        st = json.loads(json.dumps(AUDIT["stages"]))
+        st[1]["prompt"] = "{report}"
+        self.assertIn("{report} needs from a code stage", self.errs(stages=st))
+        st = [{"id": "code", "kind": "code", "items": ["x"]},
+              {"id": "review", "card": "review", "from": "code", "prompt": "{report}\n{diff}"},
+              {"id": "claude", "final": True, "from": "review"}]
+        self.assertEqual(self.errs(stages=st), "")
+
+    def test_a_compare_stage_reads_every_attempts_diffs_over_a_code_stage_with_attempts_only(self):
+        st = [{"id": "code", "kind": "code", "items": ["x"], "attempts": 2},
+              {"id": "choose", "card": "choose", "from": "code", "compare": True, "prompt": "{diffs}"},
+              {"id": "claude", "final": True, "from": "choose"}]
+        self.assertEqual(self.errs(stages=st), "")
+        st[1]["prompt"] = "{diff}"
+        self.assertIn("a compare stage reads {diffs}, every attempt's, not {diff}", self.errs(stages=st))
+        st[1]["prompt"], st[0]["attempts"] = "{diffs}", 1
+        self.assertIn("compare is a report stage over a code stage with attempts of 2 or more", self.errs(stages=st))
+        st[0]["attempts"] = 2
+        st[1].pop("compare")
+        self.assertIn("{diffs} is a compare stage's (compare: true)", self.errs(stages=st))
+
+    def test_a_compare_shows_the_green_attempts_alone_when_two_or_more_are_and_its_schema_names_them(self):
+        def task(name, ok):
+            store.write_json(store.Task(name).dir / "task.json", {"name": name, "base": "HEAD"})
+            store.write_json(store.Task(name).dir / "status.json", {"tests": None if ok is None else {"ok": ok}})
+            return {"task": name, "round": 1, "item": "x"}
+        it = runs.Item("choose", "1", members=[("1#a1", task("c-1", True)), ("1#a2", task("c-2", False)),
+                                               ("1#a3", task("c-3", True))])
+        rows, said = runs._attempts(it)
+        self.assertEqual([r[0] for r in rows], ["a1", "a3"])
+        self.assertEqual(said, "Only the attempts whose tests pass are shown; left out: a2 (tests failed).\n\n")
+        doc = runs.compare_schema({"card": "choose"}, [r[0] for r in rows])
+        self.assertEqual((doc["properties"]["best"]["enum"], doc["properties"]["ranking"]["items"]["enum"]), (["a1", "a3"], ["a1", "a3"]))
+        it.members = it.members[:2]  # one green: all shown, said
+        rows, said = runs._attempts(it)
+        self.assertEqual(([r[0] for r in rows], said), (["a1", "a2"], "Fewer than two attempts pass their tests: all are shown.\n\n"))
+
+    def test_a_batch_member_carries_its_key_as_id_and_its_schema_answers_exactly_the_batch(self):
+        self.assertEqual(runs.member("1.2", {"id": "F9", "claim": "c"}), {"id": "1.2", "claim": "c"})
+        self.assertEqual(runs.member("3", "issue #12: crash"), {"id": "3", "item": "issue #12: crash"})
+        doc = runs.batch_schema({"card": "judge"}, ["1.1", "1.2"])
+        arr = doc["properties"]["judgments"]
+        self.assertEqual((arr["minItems"], arr["maxItems"]), (2, 2))
+        self.assertEqual(arr["items"]["properties"]["id"]["enum"], ["1.1", "1.2"])
+        self.assertEqual(schema.valid(doc), [])
+        self.assertEqual(runs.batch_schema({"card": "judge", "schema": "triage"}, ["1"])["properties"]["items"]
+                         ["items"]["properties"]["id"]["enum"], ["1"])
+        self.assertIsNone(runs.batch_schema({"card": "verify"}, ["1"]))  # a verdict answers by no id
 
     def test_a_template_fills_each_place_and_says_what_it_cut(self):
         out = runs.render("{item.id}: {item} {{literal}} {params.p} {run}/{stage}",
@@ -520,6 +570,11 @@ class Runs(Base):
         code = store.Task("bld-code-1")
         self.assertEqual(code.status["round"], 2)
         self.assertIn("name the answer file in the README", code.round_dir(2).joinpath("prompt.md").read_text())
+        # each review reads the round it reviews' report: the coder's answer to a refix (#1134's study)
+        for review, rnd in (("bld-review-1", 1), ("bld-review-2", 2)):
+            said = store.Task(review).round_dir(1).joinpath("prompt.md").read_text()
+            self.assertIn(f"The coder's report:\ntask bld-code-1 · ", said)
+            self.assertIn(f" · round {rnd} · ", said.split("The coder's report:")[1].split("The change:")[0])
         self.assertIn("1 change(s) at review", self.run_notices("bld")[-1]["text"])
         # the driver took each item's notice (_ack_items): the code at review is no news for the
         # mod's idle net, which reads `acked` against `noticed` (the review of #1278, 2026-11-25)
@@ -688,6 +743,121 @@ class Runs(Base):
         self.assertEqual(sorted(runs.run_tasks(runs.Run("ab"))), ["ab-find-1", "ab-find-2", "ab-judge-1"])
         self.assertIn("A1", store.Task("ab-judge-1").round_dir(1).joinpath("prompt.md").read_text())
         self.assertEqual(len(runs.report_of("ab")["final"]), 1)
+
+    def test_a_batchs_judge_answers_by_its_members_ids_its_trail_lists_them_and_an_unjudged_one_is_named(self):
+        # lenses and triage handed Claude judgments with no trail and without the findings they
+        # judged, ids the judge had to invent, and a skipped finding vanished (#1134's study, #1278)
+        j = lambda fid: {"id": fid, "meets_bar": True, "class": "false result", "why": "w"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Audit area alpha": {"findings": [finding("A1", "claim-one"), finding("A2", "claim-two"),
+                                              finding("A3", "claim-three")], "covered": ["README.md"]},
+            "claim-one": {"judgments": [j("1.1"), j("1.1")]},  # a duplicate in 1.2's place
+            "claim-three": {"judgments": [j("1.3")]}})
+        flow = {"v": 1, "name": "bj", "params": {}, "stages": [
+            {"id": "find", "card": "find", "items": ["alpha"], "prompt": "Audit area {item} now."},
+            {"id": "judge", "card": "judge", "from": "find", "split": "findings", "flow": "barrier",
+             "batch": 2, "prompt": "Judge these:\n{item}"},
+            {"id": "claude", "final": True, "from": "judge"}]}
+        run_wb("run", "start", "bj", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("bj", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        prompt = store.Task("bj-judge-1").round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn('"id": "1.1"', prompt)
+        self.assertIn('"id": "1.2"', prompt)
+        self.assertNotIn('"A1"', prompt)  # the member's key, never the finder's own
+        self.assertEqual(store.Task("bj-judge-1").spec["schema"], str(runs.run_dir("bj") / "schemas" / "judge-1.json"))
+        sch = json.loads((runs.run_dir("bj") / "schemas" / "judge-1.json").read_text())
+        self.assertEqual(sch["properties"]["judgments"]["items"]["properties"]["id"]["enum"], ["1.1", "1.2"])
+        rep = runs.report_of("bj")
+        b1 = next(f for f in rep["final"] if f["key"] == "judge:b1")
+        self.assertEqual([(t["stage"], t["key"], t["result"]["claim"]) for t in b1["trail"]],
+                         [("find", "1.1", "claim-one"), ("find", "1.2", "claim-two")])
+        self.assertEqual(rep["not_run"], [{"key": "judge:1.2", "why": "unjudged: judge:b1 returned nothing for it"}])
+        self.assertIn("judge:1.2: unjudged", run_wb("run", "report", "bj"))
+
+    def test_best_of_has_a_chooser_read_every_attempts_diff_and_claude_gets_its_pick_with_the_attempts_kept(self):
+        # best-of ran 3 builders and a reviewer per diff, and Claude read every review and most
+        # diffs: N times the handoff (#1134's study); the chooser sees them side by side
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Pick the best attempt": {
+            "best": "a2", "ranking": ["a2", "a1", "a3"], "why": "a2 is the smallest"}})
+        run_wb("run", "start", "bo", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("bo", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        (pick,) = [n for n in runs.run_tasks(runs.Run("bo")) if n.startswith("bo-choose-")]
+        prompt = store.Task(pick).round_dir(1).joinpath("prompt.md").read_text()
+        for a, n in (("a1", 1), ("a2", 2), ("a3", 3)):
+            self.assertIn(f"### {a} (task bo-code-{n}; no tests)\n```diff\n", prompt)
+        self.assertIn("+42", prompt)
+        sch = json.loads((runs.run_dir("bo") / "schemas" / f"choose-1.json").read_text())
+        self.assertEqual(sch["properties"]["best"]["enum"], ["a1", "a2", "a3"])
+        rep = runs.report_of("bo")
+        (final,) = rep["final"]
+        self.assertEqual((final["key"], final["result"]["best"]), ("choose:1", "a2"))
+        self.assertEqual([(t["key"], t["result"]["task"]) for t in final["trail"]],
+                         [("1#a1", "bo-code-1"), ("1#a2", "bo-code-2"), ("1#a3", "bo-code-3")])
+        # nothing discarded on the chooser's word: every attempt waits at review for Claude
+        self.assertEqual([(c["task"], c["phase"]) for c in rep["code"]],
+                         [("bo-code-1", "review"), ("bo-code-2", "review"), ("bo-code-3", "review")])
+        for n in (1, 2, 3):
+            run_wb("discard", f"bo-code-{n}")
+
+    def test_an_item_stuck_on_its_role_is_tried_again_from_the_base_on_the_next_escalate_role_before_claude_is_asked(self):
+        # #1134's study: escalating attempts across roles; Claude checkpointed only when the last fails
+        flow = {"v": 1, "name": "esc", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "role": "trivial", "escalate": ["significant"], "items": ["the answer"],
+             "prompt": "Write the answer to answer.txt."},
+            {"id": "claude", "final": True, "from": "code"}]}
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"esc-code-1": "crash"})
+        out = run_wb("run", "start", "esc", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertIn("code trivial (GPU), then significant", out)
+        self.assertEqual(self.wait_run("esc", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        run = runs.Run("esc")
+        self.assertEqual(store.Task("esc-code-1").status["phase"] in ("failed", "stuck", "discarded"), True)
+        self.assertEqual((store.Task("esc-code-2").spec.get("role"), store.Task("esc-code-2").status["phase"]),
+                         ("significant", "review"))
+        self.assertEqual([(r["key"], r["after"], r["role"]) for r in run.journal() if r.get("kind") == "escalated"],
+                         [("1#e1", "1", "significant")])
+        self.assertFalse([r for r in run.journal() if r.get("notice") == "run_checkpoint"])  # Claude not asked
+        rep = runs.report_of("esc")
+        self.assertEqual([(c["key"], c["task"]) for c in rep["code"] if c.get("phase") == "review"], [("code:1#e1", "esc-code-2")])
+        run_wb("discard", "esc-code-2")
+
+    def test_asks_left_past_refix_max_escalate_with_the_attempt_kept_and_the_last_roles_failure_asks_claude(self):
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"fxe-code-2": "crash"})  # the significant role's
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        st = self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))
+        run = runs.Run("fxe")
+        self.assertEqual(st["phase"], "checkpoint", st)
+        self.assertIn("fxe-code-2 (code 1#e1) is ", st["why"])
+        (esc,) = [r for r in run.journal() if r.get("kind") == "escalate"]
+        self.assertEqual((esc["key"], esc["task"], esc["why"]), ("1", "fxe-code-1", "1 ask(s) left after 2 refix(es)"))
+        self.assertEqual([(r["key"], r["role"]) for r in run.journal() if r.get("kind") == "escalated"],
+                         [("1#e1", "significant")])
+        self.assertEqual((store.Task("fxe-code-1").spec.get("role"), store.Task("fxe-code-1").status["phase"]),
+                         ("trivial", "review"))                         # kept for Claude, never discarded
+        rep = runs.report_of("fxe")
+        self.assertIn("escalated: 1 ask(s) of fxe-code-1 left after 2 refix(es)", [x["why"] for x in rep["superseded"]])
+        run_wb("run", "stop", "fxe")
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
+    def test_an_items_role_follows_its_escalation_and_escalate_takes_distinct_roles(self):
+        st = [{"id": "code", "kind": "code", "items": ["x"], "escalate": ["significant", "writing"]},
+              {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 1},
+               "prompt": "{diff}"},
+              {"id": "claude", "final": True, "from": "review"}]
+        self.assertEqual(runs.validate({"v": 1, "name": "x", "stages": st}), [])
+        it = runs.Item("code", "1#e2", None)
+        self.assertEqual((runs.item_role(st[0], it), runs.item_role(st[0], runs.Item("code", "1#e1", None)),
+                          runs.item_role(st[0], runs.Item("code", "1", None))), ("writing", "significant", "significant"))
+        self.assertEqual((runs.escalation("1#a2#e2"), runs.escalation_key("1#a2#e1", 2), runs.escalation("1")),
+                         (2, "1#a2#e2", 0))
+        st[0]["escalate"] = ["significant", "significant"]
+        self.assertIn("escalate is a list of 1 to 3 distinct roles", self.errs(stages=st) if hasattr(self, "errs") else
+                      "; ".join(runs.validate({"v": 1, "name": "x", "stages": st})))
 
     def test_a_skipped_stage_and_items_past_max_items_are_not_run_and_named(self):
         flow = {"v": 1, "name": "cap", "params": {"areas": "list"}, "stages": [
@@ -880,6 +1050,21 @@ class RunsApi(Base):
         while runs.tick(run) and run.status.get("phase") == "running" and time.time() < deadline:
             time.sleep(0.3)
         return run.status
+
+    def test_an_items_ask_in_a_run_is_refused_at_once_never_left_holding_the_gpu_for_its_timeout(self):
+        # the real GPU audit of #1278 (2026-11-26): a finder asked for a path outside its lane,
+        # nobody is told of an item's ask in a run, and it held the GPU its 20-minute ask_timeout
+        run, _ = self.start("ask")
+        os.environ["FAKE_SLEEP"] = "600"
+        runs.tick(run)
+        task = self.wait_item("ask-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        qid = "abcd1234"
+        store.write_json(task.dir / "ask" / f"{qid}.json", {"id": qid, "question": "May I read it?", "path": "/etc"})
+        task.set_status(phase="asking", asking=qid)
+        runs.tick(run)
+        self.assertEqual((task.dir / "ask" / f"{qid}.answer").read_text().strip(), runs.RUN_REFUSED)
+        os.environ["FAKE_SLEEP"] = "0"
+        run_wb("stop", "ask-find-1")
 
     def stopped_mid_round(self, run, name, **status):
         """Item ``name`` started and at work, then stopped as ``status`` says, its runner gone."""

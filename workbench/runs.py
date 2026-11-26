@@ -20,7 +20,7 @@ Files, in $WB_HOME/runs/<run>/: run.json (who started it, the flow whole, its pa
 budgets), status.json (the phase and each stage's counts), journal.jsonl (each item started,
 its output, its null, its not-run, each refix and notice: resume replays it by stage and item),
 inbox/ (Claude's feeds for a `claude` stage), outputs/ (each item's object), specs/ (each item's
-spec), notify.jsonl (the items' notices, the driver's alone), result.json (the end's report),
+spec), schemas/ (each batch's schema), notify.jsonl (the items' notices, the driver's alone), result.json (the end's report),
 acked (the run's notices taken), driver.log.
 """
 import hashlib
@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import cards, gitops, meter, models, routes, spend, store
+from . import ask_mcp, cards, gitops, meter, models, routes, spend, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED = PKG_ROOT / "agent" / "flows"
@@ -45,15 +45,21 @@ STAGE_RE = re.compile(r"^[a-z][a-z0-9]{0,7}\Z")
 FLOW_KEYS = ("v", "name", "description", "params", "budget_usd", "budget_min", "context", "stages")
 STAGE_KEYS = ("id", "card", "kind", "role", "items", "from", "split", "keep", "flow", "batch",
               "attempts", "schema", "tools", "skills", "ask", "setup", "test", "refix", "on_failure",
-              "max_items", "claude", "final", "prompt")
+              "max_items", "claude", "final", "prompt", "compare", "escalate")
 PARAM_TYPES = ("string", "int", "list", "json", "file", "runs")
+RUN_REFUSED = ("No one answers in a run (wb run): Claude reads your result at its end, and nothing outside "
+               "your task's rules can be granted. Do the task without it, and say so in your result.")
+ESCALATE_MAX = 3       # a code stage's `escalate` roles, at most
 MAX_ITEMS = 200        # a stage's items, at most (`max_items`): the rest not_run, named (no silent caps)
 ATTEMPTS_MAX = 5
 REFIX_MAX = 2
 IN_FLIGHT = 6          # a run's items started and not yet done: each is a worktree, and its setup
 TEMPLATE = re.compile(r"\{\{|\}\}|\{([a-z]+)(?:\.([A-Za-z0-9_-]+))?\}")
-PLACES = ("item", "params", "context", "diff", "run", "stage", "base")
-CUTS = {"item": 16_000, "context": 4_000, "diff": 40_000}  # characters of each a spec carries
+PLACES = ("item", "params", "context", "diff", "report", "diffs", "run", "stage", "base")
+CODE_PLACES = ("diff", "report")  # over a code stage only: its change, its coder's round report
+# a compare stage's (`compare`): every attempt's change at an item, labelled a1..aN, the whole cut at
+# CUTS["diff"] shared among them
+CUTS = {"item": 16_000, "context": 4_000, "diff": 40_000, "report": 6_000}  # characters a spec carries
 DEFAULT_PROMPT = "{item}"
 WAITING = object()     # a refix's next review, held until the coder's next round is in
 OPEN = ("running", "checkpoint", "paused")  # the phases a driver runs in: its items' notices are its
@@ -275,6 +281,20 @@ def validate(flow) -> list[str]:
             errs.append(f"{where}: on_failure is checkpoint or absent (null)")
         src = stage_by(flow, s["from"]) if isinstance(s.get("from"), str) else None
         over_code = src is not None and is_code(src) and not src.get("claude")
+        compare = bool(s.get("compare"))
+        if "compare" in s and s["compare"] is not True:
+            errs.append(f"{where}: compare is true or absent")
+        if compare and (code or not over_code or int(src.get("attempts") or 1) < 2):
+            errs.append(f"{where}: compare is a report stage over a code stage with attempts of 2 or more")
+        if compare and any(k in s for k in ("split", "batch", "attempts", "refix")):
+            errs.append(f"{where}: a compare stage takes each item's attempts whole: no split, batch, attempts or refix")
+        esc = s.get("escalate")
+        if esc is not None:
+            if not (isinstance(esc, list) and 1 <= len(esc) <= ESCALATE_MAX and all(r in routes.ROLES for r in esc)
+                    and len(set(esc)) == len(esc)):
+                errs.append(f"{where}: escalate is a list of 1 to {ESCALATE_MAX} distinct roles ({', '.join(routes.ROLES)})")
+            elif not code or s.get("claude"):
+                errs.append(f"{where}: escalate goes on a code stage")
         refix = s.get("refix")
         if refix is not None:
             if not (isinstance(refix, dict) and isinstance(refix.get("path"), str) and set(refix) <= {"path", "max"}
@@ -291,8 +311,12 @@ def validate(flow) -> list[str]:
                 errs.append(f"{where}: unknown placeholder {{{place}}} (known: {', '.join(PLACES)})")
             elif place == "params" and (not sub or sub not in params):
                 errs.append(f"{where}: {{params.{sub}}} isn't a declared param")
-            elif place == "diff" and not over_code:
-                errs.append(f"{where}: {{diff}} needs from a code stage")
+            elif place in CODE_PLACES and not over_code:
+                errs.append(f"{where}: {{{place}}} needs from a code stage")
+            elif place == "diffs" and not compare:
+                errs.append(f"{where}: {{diffs}} is a compare stage's (compare: true)")
+            elif place in CODE_PLACES and compare:
+                errs.append(f"{where}: a compare stage reads {{diffs}}, every attempt's, not {{{place}}}")
             elif place != "item" and place != "params" and sub:
                 errs.append(f"{where}: {{{place}.{sub}}}: only item and params take a key")
         items = s.get("items")
@@ -305,8 +329,9 @@ def validate(flow) -> list[str]:
         # after a code stage, only a report over a code stage's {diff}, or the final: code waits
         # at review for Claude, and nothing may build on code Claude hasn't accepted
         if any(is_code(t) and not t.get("claude") for t in st[:i]) and (code or not over_code
-                                                                      or "{diff}" not in prompt):
-            errs.append(f"{where}: after a code stage comes only a report over its {{diff}}, or final")
+                                                                      or ("{diffs}" if compare else "{diff}") not in prompt):
+            errs.append(f"{where}: after a code stage comes only a report over its {{diff}} (a compare "
+                        "stage's {{diffs}}), or final")
     if st and not st[-1].get("final"):
         errs.append("the last stage is final: Claude's, who has the final say")
     return errs
@@ -368,7 +393,7 @@ def render(text: str, ctx: dict) -> str:
             return _text((ctx.get("params") or {}).get(sub, ""), CUTS["item"])
         if place in CUTS:
             return _text(ctx.get(place) or "", CUTS[place])
-        return str(ctx.get(place) or "")
+        return str(ctx.get(place) or "")  # {diffs} cut each attempt's share already
     return TEMPLATE.sub(one, text)
 
 
@@ -377,6 +402,77 @@ def get_path(obj, path: str):
     for part in path.split("."):
         obj = obj.get(part) if isinstance(obj, dict) else None
     return obj
+
+
+def stage_schema(stage: dict) -> dict | None:
+    """A report stage's schema, its own or its card's; None when it can't be read now."""
+    name = stage.get("schema")
+    if not name and stage.get("card"):
+        try:
+            name = cards.load(stage["card"]).schema
+        except RuntimeError:
+            return None
+    try:
+        return cards.load_schema(name) if name else None
+    except RuntimeError:
+        return None
+
+
+def answers_key(doc: dict | None) -> str | None:
+    """The key of a schema's answer list, one entry per input by `id` (judgments' `judgments`,
+    triage's `items`): its first top-level array of objects that require an `id`. None: no list
+    answers by id, and a batch's coverage isn't checked."""
+    props = (doc or {}).get("properties")
+    for k, sub in (props.items() if isinstance(props, dict) else ()):
+        items = sub.get("items") if isinstance(sub, dict) and sub.get("type") == "array" else None
+        if isinstance(items, dict) and "id" in (items.get("required") or ()):
+            return k
+    return None
+
+
+def batch_schema(stage: dict, ids: list[str]) -> dict | None:
+    """The stage's schema for one batch: its answer list exactly ``ids`` long, each `id` one of
+    them, so an invented, missing or extra id gets the runner's one repair round (SCHEMA_FIX). None
+    when the schema answers by no id."""
+    doc = stage_schema(stage)
+    key = answers_key(doc)
+    if key is None:
+        return None
+    doc = json.loads(json.dumps(doc))
+    arr = doc["properties"][key]
+    arr["minItems"] = arr["maxItems"] = len(ids)
+    arr["items"].setdefault("properties", {})["id"] = {"type": "string", "enum": list(ids)}
+    return doc
+
+
+def compare_schema(stage: dict, labels: list[str]) -> dict | None:
+    """A compare item's schema: its `best` one of the attempts' labels, each of `ranking` too, so an
+    attempt it was never shown is asked again once. None when the schema names neither."""
+    doc = stage_schema(stage)
+    props = (doc or {}).get("properties")
+    if not isinstance(props, dict) or not any(isinstance(props.get(k), dict) for k in ("best", "ranking")):
+        return None
+    doc = json.loads(json.dumps(doc))
+    if isinstance(doc["properties"].get("best"), dict):
+        doc["properties"]["best"]["enum"] = list(labels)
+    rank = doc["properties"].get("ranking")
+    if isinstance(rank, dict) and isinstance(rank.get("items"), dict):
+        rank["items"]["enum"] = list(labels)
+        rank["maxItems"] = len(labels)
+    return doc
+
+
+def unanswered(stage: dict, it: "Item") -> list[str]:
+    """A batch item's member ids its result answered nothing for (a duplicate took a place, or the
+    schema answers by no `id`-enum of the batch's): each goes under not_run as unjudged, never
+    dropped (#1278's no silent caps; the lenses and triage flows lost them, #1134's study)."""
+    if not it.members or it.state != "done" or not isinstance(it.output, dict):
+        return []
+    key = answers_key(stage_schema(stage))
+    if key is None:
+        return []
+    got = {a.get("id") for a in it.output.get(key) or () if isinstance(a, dict)}
+    return [k for k, _ in it.members if k not in got]
 
 
 # --- a run -------------------------------------------------------------------------------------
@@ -415,6 +511,16 @@ class Item:
     why: str = ""
     output: object = None
     src: str | None = None  # the key of the item it came from (the trail)
+    members: list | None = None  # a batch's [(key, value)], each value carrying its key as `id`
+
+
+def member(key: str, v) -> dict:
+    """A batch member as its batch item carries it: its key as `id`, which the judge answers by
+    (the finder's card asks for no id, so a judge given none invented them), an object's own keys
+    after it, anything else under `item`."""
+    if isinstance(v, dict):
+        return {"id": key, **{k: x for k, x in v.items() if k != "id"}}
+    return {"id": key, "item": v}
 
 
 class Run:
@@ -536,6 +642,7 @@ def state(run: Run) -> dict:
     final = {}     # (stage, key) -> (state, why)
     refixes: dict = {}  # (stage, src key) -> [refix rows]
     fed = {}
+    escalated = set()  # (code stage, key): a review's asks left past refix's max sent it on (_take)
     for r in rows:
         k = (r.get("stage"), r.get("key"))
         if r.get("kind") == "item":
@@ -550,6 +657,8 @@ def state(run: Run) -> dict:
             refixes.setdefault((r.get("stage"), r.get("src")), []).append(r)
         elif r.get("kind") == "fed":
             fed[r.get("stage")] = r
+        elif r.get("kind") == "escalate":  # the trigger; "escalated" is the next role's start
+            escalated.add((r.get("stage"), r.get("key")))
     skipped = set(spec.get("skip") or ())
     out: dict = {}
     complete: dict = {}
@@ -573,6 +682,7 @@ def state(run: Run) -> dict:
             complete[sid] = True
             continue
         inputs: list = []
+        groups: dict = {}  # a batch's or a compare item's members, by its key
         if "items" in s:
             inputs = [(str(i + 1), v, None) for i, v in enumerate(_items_of(s, run, params))]
             ready = True
@@ -585,6 +695,15 @@ def state(run: Run) -> dict:
                 out[sid], complete[sid] = None, False
                 continue
             code_src = is_code(stage_by(flow, src) or {})
+            if s.get("compare") and code_src:  # each item's attempts whole, once all of them ended
+                by_item: dict = {}
+                for it in src_items:
+                    by_item.setdefault(it.key.rsplit("#a", 1)[0], []).append(it)
+                for base, its in by_item.items():
+                    if all(i.state not in ("pending", "running", "waiting") for i in its):
+                        groups[base] = [(i.key, i.output) for i in its if i.state == "done"]
+                        inputs.append((base, [v for _, v in groups[base]], None))
+                src_items = []
             for it in src_items:
                 if s.get("refix") and code_src:
                     fixes = refixes.get((sid, it.key)) or []
@@ -613,12 +732,16 @@ def state(run: Run) -> dict:
             inputs = [(f"{k}#a{a}", v, src) for k, v, src in inputs for a in range(1, attempts + 1)]
         batch = int(s.get("batch") or 1)
         if batch > 1:
-            inputs = [(f"b{i // batch + 1}", [v for _, v, _ in inputs[i:i + batch]], None)
-                      for i in range(0, len(inputs), batch)]
+            for i in range(0, len(inputs), batch):
+                groups[f"b{i // batch + 1}"] = [(k, member(k, v)) for k, v, _ in inputs[i:i + batch]]
+            inputs = [(key, [v for _, v in ms], None) for key, ms in groups.items()]
         cap = int(s.get("max_items") or MAX_ITEMS)
+        esc = (s.get("escalate") or []) if is_code(s) else []
         items = []
-        for idx, (key, v, src) in enumerate(inputs):
-            it = Item(sid, key, v, src=src)
+        idx = -1
+        while (idx := idx + 1) < len(inputs):
+            key, v, src = inputs[idx]
+            it = Item(sid, key, v, src=src, members=groups.get(key))
             row = started.get((sid, key))
             if row:
                 it.n, it.task = row.get("n"), row.get("task")
@@ -628,13 +751,20 @@ def state(run: Run) -> dict:
                     it.output = (store.read_json(run.output_file(sid, it.n), {}) or {}).get("result")
             elif sid in skipped:
                 it.state, it.why = "not_run", "skipped (wb run amend --skip)"
-            elif idx >= cap:
+            elif s.get("compare") and len(it.members or ()) < 2:
+                it.state, it.why = "not_run", (f"{len(it.members or ())} of its attempts reached review: "
+                                               "nothing to compare (wb run report names the rest)")
+            elif idx >= cap and "#e" not in key:
                 it.state, it.why = "not_run", f"past the stage's max_items ({cap})"
             elif v is WAITING:
                 it.state, it.input = "waiting", None
             elif it.task:
                 it.state, it.why, it.output = _live(s, it)
             items.append(it)
+            # stuck, failed, or its review's asks left past refix's max: the next role tries it
+            # from the base (#1134's study: escalating attempts across roles)
+            if esc and escalation(key) < len(esc) and (it.state == "null" or (sid, key) in escalated):
+                inputs.append((escalation_key(key, escalation(key) + 1), v, src))
         out[sid] = items
         complete[sid] = ready and ("items" in s or complete.get(s.get("from"), False)) \
             and all(i.state not in ("pending", "running", "waiting") for i in items)
@@ -689,10 +819,27 @@ def _last_line(r: subprocess.CompletedProcess) -> str:
     return (lines[-1] if lines else f"exit {r.returncode}").removeprefix("wb: ")[:300]
 
 
-def stage_model(stage: dict):
-    """The API model a stage's role runs on now, or None for the GPU (or a roles file that can't
-    be read: wb start says why for each item)."""
-    role = stage_role(stage)
+def escalation(key: str) -> int:
+    """An item's escalation: `1#e2` is the stage's second escalate role's try, `1` none."""
+    m = re.search(r"#e(\d+)\Z", key)
+    return int(m.group(1)) if m else 0
+
+
+def escalation_key(key: str, k: int) -> str:
+    return re.sub(r"#e\d+\Z", "", key) + f"#e{k}"
+
+
+def item_role(stage: dict, it: "Item | None" = None) -> str:
+    """The role an item runs on: its stage's, or for an escalation its escalate role."""
+    k = escalation(it.key) if it is not None else 0
+    esc = stage.get("escalate") or []
+    return esc[k - 1] if 0 < k <= len(esc) and esc[k - 1] in routes.ROLES else stage_role(stage)
+
+
+def stage_model(stage: dict, it: "Item | None" = None):
+    """The API model a stage's role (an item's, item_role) runs on now, or None for the GPU (or a
+    roles file that can't be read: wb start says why for each item)."""
+    role = item_role(stage, it)
     try:
         doc = routes.read()
     except routes.RoutesError:
@@ -744,21 +891,88 @@ def _counts(items) -> dict:
     return out
 
 
+def attempt_label(key: str) -> str:
+    """An attempt's label in a compare stage: `1#a2` is a2."""
+    return "a" + key.rsplit("#a", 1)[1] if "#a" in key else key
+
+
+def _diffs_of(run: Run, stage: dict, it: Item) -> str:
+    """{diffs}: each attempt's change at the item, labelled a1..aN with its task and tests, the
+    green ones alone when two or more are (said), each cut to its share of CUTS["diff"]. best-of
+    ran N builders and a reviewer per diff, and Claude read every review and most diffs: N times
+    the handoff (#1134's study, SWE-agent's Chooser)."""
+    rows, said = _attempts(it)
+    share = CUTS["diff"] // max(1, len(rows))
+    parts = []
+    for lab, t, ok in rows:
+        try:
+            d = gitops.diff(t.worktree, t.spec["base"]) if t.worktree.is_dir() else ""
+        except (gitops.GitError, KeyError) as e:
+            d = f"(no diff: {e})"
+        d = d if len(d) <= share else d[:share] + f"\n[… {len(d) - share:,} characters cut]"
+        state = "tests passed" if ok else "tests failed" if ok is False else "no tests"
+        parts.append(f"### {lab} (task {t.name}; {state})\n```diff\n{d or '(no changes)'}\n```")
+    return said + "\n\n".join(parts)
+
+
+def _attempts(it: Item) -> tuple[list, str]:
+    """A compare item's attempts shown, [(label, task, tests ok | None)], and what is said of the
+    rest: the green ones alone when two or more are."""
+    rows = []
+    for key, out in it.members or ():
+        t = store.Task(out.get("task", "")) if isinstance(out, dict) else None
+        if t is None or not t.exists:
+            continue
+        tests = t.status.get("tests")
+        rows.append((attempt_label(key), t, None if not isinstance(tests, dict) else bool(tests.get("ok"))))
+    green = [r for r in rows if r[2]]
+    said = ""
+    if len(green) >= 2 and len(green) < len(rows):
+        said = ("Only the attempts whose tests pass are shown; left out: "
+                + ", ".join(f"{lab} (tests {'failed' if ok is False else 'not run'})" for lab, _, ok in rows if not ok) + ".\n\n")
+        rows = green
+    elif rows and len(green) < 2 and any(ok is not None for _, _, ok in rows):
+        said = "Fewer than two attempts pass their tests: all are shown.\n\n"
+    return rows, said
+
+
 def _spec_of(run: Run, stage: dict, it: Item) -> str:
     spec = run.spec
-    diff = ""
-    if "{diff}" in (stage.get("prompt") or "") and isinstance(it.input, dict) and it.input.get("task"):
+    prompt = stage.get("prompt") or DEFAULT_PROMPT
+    if stage.get("compare"):
+        first = (it.members or [(None, {})])[0][1]
+        return render(prompt, {
+            "item": first.get("item") if isinstance(first, dict) else None, "params": spec.get("params") or {},
+            "context": spec.get("context") or "", "diffs": _diffs_of(run, stage, it), "run": run.name,
+            "stage": stage["id"], "base": spec.get("base", "")})
+    diff = report = ""
+    over_code = isinstance(it.input, dict) and bool(it.input.get("task")) and any(
+        f"{{{p}}}" in prompt for p in CODE_PLACES)
+    if over_code:
         t = store.Task(it.input["task"])
-        try:
-            diff = gitops.diff(t.worktree, t.spec["base"]) if t.exists and t.worktree.is_dir() else ""
-        except (gitops.GitError, KeyError) as e:
-            diff = f"(no diff: {e})"
-        diff = f"```diff\n{diff}\n```" if diff else "(no changes)"
-    item = it.input.get("item") if isinstance(it.input, dict) and "task" in it.input and "{diff}" in (
-        stage.get("prompt") or "") else it.input
-    return render(stage.get("prompt") or DEFAULT_PROMPT, {
+        if "{diff}" in prompt:
+            try:
+                diff = gitops.diff(t.worktree, t.spec["base"]) if t.exists and t.worktree.is_dir() else ""
+            except (gitops.GitError, KeyError) as e:
+                diff = f"(no diff: {e})"
+            diff = f"```diff\n{diff}\n```" if diff else "(no changes)"
+        if "{report}" in prompt:
+            report = _code_report(t, it.input.get("round"))
+    item = it.input.get("item") if over_code else it.input
+    return render(prompt, {
         "item": item, "params": spec.get("params") or {}, "context": spec.get("context") or "",
-        "diff": diff, "run": run.name, "stage": stage["id"], "base": spec.get("base", "")})
+        "diff": diff, "report": report, "run": run.name, "stage": stage["id"], "base": spec.get("base", "")})
+
+
+def _code_report(t: store.Task, n) -> str:
+    """{report}: the reviewed round's report (summary.md: the coder's summary, its test line), so
+    a review after a refix reads the coder's answer to each ask. The refix asked "done, or declined
+    with why" while the next review saw only the item and the diff: a reasoned decline was asked
+    again until `max` ran out, paid rounds burned (#1134's study, on #1278, 2026-11-25)."""
+    if not t.exists:
+        return "(no report: the task is gone)"
+    n = n if isinstance(n, int) and n > 0 else t.status.get("round") or 1
+    return t.report(n).strip() or f"(round {n}'s report is empty)"
 
 
 def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
@@ -770,7 +984,7 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     path = specs / f"{stage['id']}-{n}.md"
     path.write_text(_spec_of(run, stage, it), encoding="utf-8")
     argv = ["start", name, "--spec", str(path), "--repo", spec["repo"], "--base", spec["base"],
-            "--role", stage_role(stage), "--queue", "--group", run.name, "--run", run.name,
+            "--role", item_role(stage, it), "--queue", "--group", run.name, "--run", run.name,
             "--stage", stage["id"], "--item", it.key, "--checkin", "0"]
     if stage.get("card"):
         argv += ["--card", stage["card"]]
@@ -790,7 +1004,14 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     else:
         argv += ["--report", "--ask-budget", str(stage.get("ask") or 0), "--no-self-review",
                  "--no-base-check", "--setup", ""]
-        if stage.get("schema"):
+        doc = compare_schema(stage, [lab for lab, _, _ in _attempts(it)[0]]) if stage.get("compare") \
+            else batch_schema(stage, [k for k, _ in it.members]) if it.members else None
+        if doc is not None:
+            path = run.dir / "schemas" / f"{stage['id']}-{n}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            store.write_json(path, doc)
+            argv += ["--schema", str(path)]
+        elif stage.get("schema"):
             argv += ["--schema", stage["schema"]]
         if stage.get("tools"):
             argv += ["--tools", stage["tools"]]
@@ -835,7 +1056,16 @@ def _take(run: Run, stage: dict, it: Item) -> None:
             src_item = next((i for i in _src_items(run, stage) if i.key == it.src), None)
             fixes = [r for r in run.journal() if r.get("kind") == "refix" and r.get("stage") == stage["id"]
                      and r.get("src") == it.src]
-            if isinstance(asks, list) and asks and src_item and len(fixes) < int(refix.get("max", 1)):
+            src_stage = stage_by(run.flow, stage.get("from")) or {}
+            if isinstance(asks, list) and asks and src_item and len(fixes) >= int(refix.get("max", 1)) \
+                    and escalation(it.src) < len(src_stage.get("escalate") or []):
+                # past refix's max with asks left: the next role tries it from the base, this
+                # attempt kept for Claude (its task stays in review)
+                run.log(kind="escalate", stage=src_stage["id"], key=it.src, task=src_item.task,
+                        why=f"{len(asks)} ask(s) left after {len(fixes)} refix(es)")
+                state, why = "superseded", (f"escalated: {len(asks)} ask(s) of {src_item.task} left after "
+                                            f"{len(fixes)} refix(es)")
+            elif isinstance(asks, list) and asks and src_item and len(fixes) < int(refix.get("max", 1)):
                 code = store.Task(src_item.task)
                 text = ("A reviewer read your change and asks for these before Claude reviews it:\n"
                         + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(asks))
@@ -1044,6 +1274,12 @@ def tick(run: Run) -> bool:
                 continue
             if it.state == "running" and t.status.get("phase") in cli.LIVE:
                 cli.reap(t, quiet=True)
+            if it.state == "running" and t.status.get("phase") == "asking" and (qid := t.status.get("asking")) \
+                    and ask_mcp.is_open(t, qid):
+                # nobody is told of an item's ask in a run (its notices are the driver's): a finder
+                # asking for a path outside its lane held the GPU its 20-minute ask_timeout while
+                # the other finder queued (the real GPU audit of #1278, 2026-11-26); as the bench does
+                ask_mcp.answer_once(t, qid, RUN_REFUSED)
             if t.status.get("phase") not in cli.LIVE and _held(run, it):
                 held.add(it.task)
             elif not is_code(s) and it.state == "running" and t.status.get("phase") not in cli.LIVE:
@@ -1056,6 +1292,7 @@ def tick(run: Run) -> bool:
             if it.task in held:
                 continue
             if is_code(s) and it.state == "null" and s.get("on_failure", "checkpoint") == "checkpoint" \
+                    and escalation(it.key) >= len(s.get("escalate") or []) \
                     and not any(r.get("kind") == "notice" and r.get("item") == it.task for r in run.journal()):
                 run.log(kind="notice", notice="run_checkpoint", item=it.task)
                 _checkpoint(run, f"{it.task} ({s['id']} {it.key}) is {store.Task(it.task).status.get('phase')}: "
@@ -1064,10 +1301,10 @@ def tick(run: Run) -> bool:
         for s in stages(flow):
             if s.get("final") or s.get("claude"):
                 continue
-            m = stage_model(s)
             for it in st.get(s["id"]) or ():
                 if it.state != "pending" or run.status.get("phase") != "running":
                     continue
+                m = stage_model(s, it)
                 if it.task and store.Task(it.task).exists:  # started, its runner not up yet
                     continue
                 if _room(run, s, st, m):
@@ -1080,6 +1317,10 @@ def tick(run: Run) -> bool:
                     break
                 n = 1 + max([r.get("n") or 0 for r in run.journal() if r.get("kind") == "item"
                              and r.get("stage") == s["id"]] or [0])
+                if (k := escalation(it.key)) and not any(r.get("kind") == "escalated" and r.get("stage") == s["id"]
+                                                         and r.get("key") == it.key for r in run.journal()):
+                    prev = escalation_key(it.key, k - 1) if k > 1 else re.sub(r"#e\d+\Z", "", it.key)
+                    run.log(kind="escalated", stage=s["id"], key=it.key, after=prev, role=item_role(s, it))
                 got, why = _start(run, s, it, n)
                 if got in ("not_run", "null"):
                     run.log(kind=got, stage=s["id"], key=it.key, why=why)
@@ -1224,10 +1465,18 @@ def report_of(name: str) -> dict:
     feeds = last.get("from") or next((s["id"] for s in reversed(sts[:-1])), None)
 
     def trail(it):
+        """What ``it`` came from, nearest first: each item up the `from` chain; a batch's
+        members, each as its judge was given it (with its `id`), where a batch's trail stopped
+        at None: lenses' and triage's judgments reached Claude without what they judged (#1134)."""
         out, cur, seen = [], it, set()
-        while cur is not None and cur.src is not None and (cur.stage, cur.key) not in seen:
+        while cur is not None and (cur.stage, cur.key) not in seen:
             seen.add((cur.stage, cur.key))
             src_stage = (stage_by(flow, cur.stage) or {}).get("from")
+            if cur.members is not None:
+                out += [{"stage": src_stage or cur.stage, "key": k, "result": v} for k, v in cur.members]
+                break
+            if cur.src is None:
+                break
             cur = by.get((src_stage, cur.src))
             if cur is not None:
                 out.append({"stage": cur.stage, "key": cur.key, "result": cur.output})
@@ -1250,11 +1499,14 @@ def report_of(name: str) -> dict:
             elif it.state == "superseded":
                 rep["superseded"].append({"key": k, "why": it.why, "result": it.output})
             elif it.state == "null":
-                rep["null"].append({"key": k, "why": it.why})
+                rep["null"].append({"key": k, "why": it.why,
+                                    **({"members": [mk for mk, _ in it.members]} if it.members else {})})
             elif it.state == "not_run":
                 rep["not_run"].append({"key": k, "why": it.why})
             elif it.state in ("pending", "running", "waiting"):
                 rep["pending"].append({"key": k, "task": it.task})
+            for mk in unanswered(s, it):
+                rep["not_run"].append({"key": f"{s['id']}:{mk}", "why": f"unjudged: {k} returned nothing for it"})
     used = spent(run)
     rep["spend"] = {"usd": used["usd"], "budget_usd": run.spec.get("budget_usd"), "gpu_min": used["gpu_min"],
                     "budget_min": run.spec.get("budget_min")}
@@ -1283,7 +1535,8 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
             elif what == "pending":
                 out.append(f"  {r.get('key') or r.get('stage')}: {r.get('task') or r.get('why')}")
             else:
-                out.append(f"  {r['key']}: {r['why']}")
+                out.append(f"  {r['key']}: {r['why']}" + (f" (its items: {', '.join(r['members'])})"
+                                                         if r.get("members") else ""))
     if stage is not None:  # a checkpoint's look at one stage: its every done item
         st = state(Run(rep["run"]))
         for it in st.get(stage) or ():
@@ -1470,9 +1723,13 @@ def cmd_start(a) -> None:
         _die(f"no commit {a.base or 'HEAD'} in {repo}")
     said: list[str] = []
     for s in stages(flow):  # an API role with no cap is refused before any file is written
-        m = stage_model(s) if not (s.get("final") or s.get("claude")) else None
-        if m is not None and not (meter.is_plan(m) or meter.is_free(m)) and meter.cap() is None:
-            _die(f"stage {s['id']} runs on {m.id} (role {stage_role(s)}), and {meter.no_cap()}")
+        if s.get("final") or s.get("claude"):
+            continue
+        for k in range(len(s.get("escalate") or []) + 1):  # its escalate roles' too
+            probe = Item(s["id"], "1" + (f"#e{k}" if k else ""), None)
+            m = stage_model(s, probe)
+            if m is not None and not (meter.is_plan(m) or meter.is_free(m)) and meter.cap() is None:
+                _die(f"stage {s['id']} runs on {m.id} (role {item_role(s, probe)}), and {meter.no_cap()}")
     usd_, mins = _budget(flow, a, said)
     ctx = a.context or ""
     if a.context_file:
@@ -1504,6 +1761,7 @@ def cmd_start(a) -> None:
     run.log(kind="start", flow=flow["name"], flow_sha=spec["flow_sha"])
     pid = spawn(run)
     roles = ", ".join(dict.fromkeys(f"{s['id']} {stage_role(s)}" + (" (API)" if stage_model(s) else " (GPU)")
+                                    + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
                                     for s in stages(flow) if not (s.get("final") or s.get("claude"))))
     est = (meter.usd(est_usd) if est_usd is not None else "unpriced") + (f", GPU ~{est_min:g} min" if est_min else "")
     print(f"run {a.name}: flow {flow['name']} · {roles} · estimate {est}"
