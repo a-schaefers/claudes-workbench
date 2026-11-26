@@ -312,6 +312,75 @@ def tailscale(windows: bool = False) -> dict:
     return {"ip": ips[0] if ips else None, "names": names, "dns": dns.lower()}
 
 
+# Phone reach (#1355): who opens the web app, `wb chat reach local|tailnet` and the Settings row
+# `reach`. `local` is chat.json without a `bind` (localhost, the default); `tailnet` binds this
+# machine's tailnet address too (`bind: ["127.0.0.1", "tailscale"]`), refused while Tailscale
+# isn't up here, so a phone on the user's tailnet opens the link by this machine's name. No LAN
+# option: a wildcard bind is the user's own chat.json edit (`custom`), and the token stays the key.
+# The running server rebinds by itself (serve's replan), so nothing restarts it. https, which push
+# and the home-screen app need, is `tailscale serve`'s, run only on the user's yes.
+REACH = ("local", "tailnet")
+TAILNET_BIND = ["127.0.0.1", "tailscale"]
+LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+
+def reach() -> str:
+    """Who opens the web app, from chat.json's `bind`: `tailnet` (it names `tailscale`), `local`
+    (none, or loopback only) or `custom` (an address of the user's own). ConfigError as settings()."""
+    binds = settings().get("bind") or []
+    if "tailscale" in binds:
+        return "tailnet"
+    return "local" if all(b in LOOPBACK for b in binds) else "custom"
+
+
+def set_reach(to: str) -> dict:
+    """Write chat.json's `bind` for ``to`` (REACH), its other keys kept: {"from", "to", "ts"?: the
+    tailscale() it checked}. ValueError, nothing written, for another value, or `tailnet` while
+    Tailscale isn't up here (its reason)."""
+    if to not in REACH:
+        raise ValueError(f"reach is {' or '.join(REACH)}")
+    was = reach()
+    # the tailnet address plan() binds: this OS's own CLI, never Windows' under WSL (its address
+    # isn't on WSL's interfaces, so the bind would be skipped)
+    ts = tailscale() if to == "tailnet" else {}
+    if to == "tailnet" and not ts.get("ip"):
+        raise ValueError("no tailscale command here: install Tailscale (tailscale.com/download), sign in, then "
+                         "this again" if ts.get("missing") else
+                         "Tailscale isn't up here: `tailscale up`, then this again")
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # the user's file, edited in place under its lock (a link to their dotfiles stays one, #495)
+    with store.edit_config(path, lambda: dict(store.read_json(path, {}) or {})) as conf:
+        if to == "tailnet":
+            conf["bind"] = list(TAILNET_BIND)
+        else:
+            conf.pop("bind", None)
+    return {"from": was, "to": to, **({"ts": ts} if ts else {})}
+
+
+def https_served(port: int) -> bool | None:
+    """Whether `tailscale serve` puts https in front of the chat's ``port`` here: True, False, or
+    None when it can't be told (no CLI, an answer it can't read)."""
+    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin" and os.path.isfile(TAILSCALE_APP)
+                                        else None)
+    if not cli:
+        return None
+    try:
+        r = subprocess.run([cli, "serve", "status", "--json"], capture_output=True, text=True, timeout=5)
+        doc = json.loads(r.stdout or "{}")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    targets = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    for site in (doc.get("Web") or {}).values():
+        for h in ((site or {}).get("Handlers") or {}).values() if isinstance(site, dict) else ():
+            proxy = str((h or {}).get("Proxy") or "") if isinstance(h, dict) else ""
+            if any(proxy.rstrip("/").endswith(t) for t in targets):
+                return True
+    return False
+
+
 _tailnet = {"at": float("-inf"), "name": ""}
 _tailnet_lock = threading.Lock()
 
@@ -2519,15 +2588,15 @@ def settings_rev() -> dict | None:
 
 
 def admin_set(key, value) -> tuple[int, dict]:
-    """POST /api/settings: (status, body). 200 {ok, said, rows, help?}; 400 for no such row or a
-    value it doesn't take (nothing runs); 409 {ok: false, error, rows} when wb refused. A change
-    that went through appends {ts, key, label, from, to, said, help?, by: "web"} to CHANGES."""
+    """POST /api/settings: (status, body). 200 {ok, said, rows, changes, help?}; 400 for no such row
+    or a value it doesn't take (nothing runs); 409 {ok: false, error, rows} when wb refused. A
+    change that went through is {ts, key, label, from, to, said, help?, by: "web"} in CHANGES, which
+    the row's wb child logs (cli.main, settings.logged: one writer for every caller, #1355)."""
     from . import settings as admin
     if not isinstance(key, str):
         return 400, {"error": "no such setting"}
     if isinstance(value, bool) or not isinstance(value, (str, int, float, type(None))):
         return 400, {"error": "not one of its choices"}
-    before = next((r for r in admin.rows() if r["key"] == key), {})
     try:
         done = admin.apply(key, value)
     except KeyError:
@@ -2537,9 +2606,8 @@ def admin_set(key, value) -> tuple[int, dict]:
     rows = admin.rows()
     if not done["ok"]:
         return 409, {"ok": False, "error": done["said"], "rows": rows}
-    admin.record(before, key, value, done, "web")
     helps = {"help": done["help"]} if done.get("help") else {}
-    return 200, {"ok": True, "said": done["said"], "rows": admin.rows(), "changes": admin.changes(), **helps}
+    return 200, {"ok": True, "said": done["said"], "rows": rows, "changes": admin.changes(), **helps}
 
 
 class TopFeed:
@@ -3450,11 +3518,13 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
     def restart(why: str):  # the same command again, in this process: systemd and launchd see
         say(why)            # no exit, and a server wb chat on started has no supervisor to rerun it
         os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
-    if p["skipped"] or "tailscale" in (binds or settings().get("bind") or []):
+    if not binds or p["skipped"]:
         # an address that comes and goes (tailscaled after login, a VPN): once the plan's set
         # changes, rebind. Only a longer list was noticed, so a tailscale-only chat on loopback
         # stayed there when the tailnet came up; and it exited 75, which ended a chat with no
-        # service manager (#200, the 2026-11-19 audit)
+        # service manager (#200, the 2026-11-19 audit). A chat bound by chat.json alone (no
+        # --bind) also rebinds when the user's choice there changes: `wb chat reach` writes it,
+        # and its server runs on with nothing to restart it (#1355)
         def replan():
             while True:
                 time.sleep(REPLAN_EVERY)

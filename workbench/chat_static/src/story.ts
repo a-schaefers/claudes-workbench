@@ -6,19 +6,25 @@ const STORY_DRIVERS: Record<string, Record<string, string>> = {
     "who": "Claude",
     "app": "Claude Code",
     "listen": "and run /workbench",
-    "grant": "claude --permission-mode auto"
+    "grant": "claude --permission-mode auto",
+    "reply": "`wb chat reply`",
+    "prompts": "a permission, an AskUserQuestion question, a plan, an MCP server's form"
   },
   "opencode": {
     "who": "OpenCode",
     "app": "OpenCode",
     "listen": "and type in a session",
-    "grant": "opencode --auto"
+    "grant": "opencode --auto",
+    "reply": "the workbench_chat_reply tool",
+    "prompts": "a permission, a question, an MCP server's form"
   },
   "any": {
     "who": "your driver",
     "app": "your driver",
     "listen": "and run /workbench",
-    "grant": ""
+    "grant": "",
+    "reply": "`wb chat reply`",
+    "prompts": "a permission, a question, a plan, an MCP server's form"
   }
 }
 const STORY_TEXTS: Record<string, string> = {

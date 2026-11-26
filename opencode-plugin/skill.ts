@@ -14,6 +14,7 @@
 // *Couplings*). Pure but for `readSkill`: nothing runs at import.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { OPENCODE as STORY } from '../mod/hooks/story.ts'
 
 export type Host = 'claude-code' | 'opencode'
 
@@ -82,9 +83,23 @@ const wakes = (w: Where): string => (w.wakes
   : "**Don't poll.** Wakes are off (the plugin's `wake` option): no `[workbench]` message will come. Tell the user it runs, "
     + 'and wait (`workbench_wait`, which returns when the task needs you) only if they ask.')
 
+// The story's blocks (#1355): SKILL.md and driving.md carry `<!-- story:<key>:claude-code -->` …
+// `<!-- /story -->`, Claude Code's sentence that scripts/gen_story.py fills from workbench/story.py;
+// OpenCode's is the same key's in the generated mod/hooks/story.ts, put in the block's place
+// whole, markers and all. So a reword in story.py reaches both hosts and no host line here can
+// fall behind it; a block story.py drops leaves its rule unmatched, which fails by name.
+export const STORY_BLOCKS: readonly Rule[] = (Object.keys(STORY) as (keyof typeof STORY)[])
+  .filter((key) => key.startsWith('skill.'))
+  .map((key) => ({
+    from: new RegExp(`<!-- story:${key.replace('.', '\\.')}:claude-code -->\\n[\\s\\S]*?<!-- /story -->\\n`, 'g'),
+    to: STORY[key].replaceAll('$', '$$$$') + '\n',  // a replacement string: `$` is its own escape
+    files: '*' as const,
+  }))
+
 // Claude Code's lines and what each says on OpenCode. The exact lines first, then the ones that
 // recur. Each must match its file (the test fails by name when one doesn't).
 export const HOST_LINES: readonly Rule[] = [
+  ...STORY_BLOCKS,
   // the frontmatter: the reader is the driver, whichever model the user picked in /models
   {
     from: /description: >\n[\s\S]*?(?=\ndisable-model-invocation:)/,
@@ -172,8 +187,6 @@ export const HOST_LINES: readonly Rule[] = [
   line('offer to add it to `~/.claude/CLAUDE.md`, which every session reads', 'offer to add it to `~/.config/opencode/AGENTS.md`, which every OpenCode session reads', ['reference/driving.md']),
   line("a browser tool (Claude in Chrome, the desktop app's browser, a browser MCP server)", 'a browser tool (a browser MCP server, say)', ['reference/driving.md']),
   line("(settings: SKILL.md, *Settings are the user's*)", "(settings: your Workbench instructions, *Settings are the user's*)", ['reference/driving.md']),
-  line('Your prompts (a permission, an AskUserQuestion question, a plan, an MCP server\'s form)', "Your prompts (a permission, a question, an MCP server's form)", ['reference/driving.md']),
-  line('the chat shows one line, "Claude is waiting for you in the terminal"', 'the chat shows one line, that you wait for them in the terminal', ['reference/driving.md']),
   line("While they're away, AskUserQuestion and ExitPlanMode are refused (the mod does it):", "While they're away, ask nothing with the question tool:", ['reference/driving.md']),
   line('a question (AskUserQuestion) or a plan (ExitPlanMode) is refused instead, so ask in the chat (`wb chat reply`) and end your turn',
     'a question or a plan goes in the chat instead (`wb chat reply`), and you end your turn', ['reference/driving.md']),

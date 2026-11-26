@@ -59,8 +59,9 @@ runs the new scripts.
 - **Base URL:** `http://localhost:1337` by default (the port is `wb chat serve --port`; `wb chat
   url` prints the page's link, whose host and port are the base). The server listens on
   localhost unless `~/.config/workbench/chat.json` says otherwise (`bind`: an address,
-  `tailscale`, or `0.0.0.0`; `hosts`: more names to answer to). Reaching it from another machine
-  is the user's own setup, for instance `tailscale serve --bg 1337` for https on the tailnet.
+  `tailscale`, or `0.0.0.0`; `hosts`: more names to answer to). `wb chat reach tailnet` (the
+  Settings row `reach`) binds the tailnet too, by this machine's tailnet name; https there is
+  `tailscale serve --bg 1337`. Reaching it any other way is the user's own setup.
 - **Paths:** every `/api/<x>` below is also served at `/api/v1/<x>`, by the same handler with the
   same rules (an agent's denials too). New clients use `/api/v1/` (workbench 2.1 and later);
   `/api/` stays for the page and older clients, and `ask_workbench.py` keeps it, so it works with
@@ -486,7 +487,8 @@ key, label, from, to, said, help?, by: "web"}`), so the driver in the terminal h
 choice or a number set to the value it had is no change, and isn't. The driver changes a row
 through the same writer with `wb settings set`, on the user's yes in the conversation; its rows
 say who ran it (`by`: `claude` under Claude Code, `opencode` from an OpenCode session, `agent`,
-or `terminal`). Each recorded change moves the state's `settings`, so an open page draws it.
+or `terminal`), and so does a row's own `wb` command typed anywhere (`wb coding ask` at a
+terminal is `by: "terminal"`). Each recorded change moves the state's `settings`, so an open page draws it.
 
 ### `GET /api/stats` (user only)
 The Stats view's history: `{"feed": <wb stats --json>, "routes": <wb route --json, or null>,

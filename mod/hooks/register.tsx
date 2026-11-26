@@ -76,6 +76,7 @@ import { modeline } from './modeline'
 import { keywords, onlyToggles } from './keywords'
 import { FLOW_NOTE, flowCommands, flowDescription, flowHint, type FlowCommand } from './flows'
 import { sameWait, waitingFact } from './waiting'
+import { CLAUDE_CODE as SAY } from './story'
 import type { Waiting } from './waiting'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, focusOf as focusOfTasks, frameOf, isEst, speechOf, taskLines, viewFacts } from './tasks'
@@ -1200,7 +1201,7 @@ async function askToSend($: any, question: string): Promise<string> {
 // it ("they approve it in the dialog once back") was a round trip for nothing. A dismissed dialog
 // (an interrupt) rejects: no, and askOrNo says where it does show (#1200). ``outcome``: what a
 // no leaves, as its toast says it.
-const CONSENT_WAITING = 'Claude is waiting on a workbench dialog in the terminal: answer it there.'
+const CONSENT_WAITING: string = SAY['refusal.consent']  // the story's (#1355)
 async function consent($: any, question: string, yes: string, no: string, outcome: string): Promise<boolean> {
   if (await away($, await read($, chat))) await runWb($, ['chat', 'reply', `--text=${CONSENT_WAITING}`, '--to=user'], 15_000)
   // the page's state line says this one waits too (#1355); it is never a notice row (due never:
@@ -2591,10 +2592,10 @@ function askText(input: unknown): string {
 // #1340 B and C): with no card on the phone, one would block the turn in a terminal nobody
 // watches, and the phone's messages would queue behind it. The refusal tells Claude what to do
 // instead; at the terminal both stay ordinary dialogs. On the OpenCode path the same words come
-// from `execute.before` (a `permission.hook` deny loses the text, #1319); they move to the
-// shared texts with #1296's core.
-export const AWAY_QUESTION = 'The user is away: ask in the web chat (`wb chat reply`) and end your turn.'
-export const AWAY_PLAN = 'Post the plan in the web chat and end your turn; approval is at the terminal.'
+// from `execute.before` (a `permission.hook` deny loses the text, #1319). The words are the
+// story's (workbench/story.py `refusal.*`), through the generated ./story both hosts import (#1355).
+export const AWAY_QUESTION: string = SAY['refusal.question']
+export const AWAY_PLAN: string = SAY['refusal.plan']
 const AWAY_REFUSAL: Record<string, string> = { AskUserQuestion: AWAY_QUESTION, ExitPlanMode: AWAY_PLAN }
 async function awayRefusal($: any, tool: string): Promise<string> {
   const why = AWAY_REFUSAL[tool]

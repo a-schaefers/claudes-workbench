@@ -24852,7 +24852,7 @@ class Setup(Base):
             imports.add(target)
         self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts",
                          "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts",
-                         "mod/hooks/keywords.ts", "mod/hooks/waiting.ts"} <= imports)  # deep.ts's keywords (#1278), chat.ts's wait (#1355)
+                         "mod/hooks/keywords.ts", "mod/hooks/waiting.ts", "mod/hooks/story.ts"} <= imports)  # deep.ts's keywords (#1278), chat.ts's wait and story (#1355)
         # and every mod file the Git install brings is one the plugin needs, itself or through another
         self.assertEqual({f for f in root if f.startswith("mod/")}, {t for t in imports if t.startswith("mod/")})
 
@@ -24869,7 +24869,7 @@ class Setup(Base):
             self.assertEqual([p for p, _ in ocplugin.shared_files(clone)],
                              ["mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/flows.ts", "mod/hooks/kernel.js",
                               "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/splash.ts",
-                              "mod/hooks/tasks.ts", "mod/hooks/waiting.ts"])
+                              "mod/hooks/story.ts", "mod/hooks/tasks.ts", "mod/hooks/waiting.ts"])
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
             first = Path(self.plugins()[0]["package"])
@@ -25293,6 +25293,20 @@ class Setup(Base):
         self.assertIn("no local model registered yet: run /workbench", lines[2])
         for mid in cli.models.discover():
             self.assertNotIn(mid.split("/")[-1], tail + "\n".join(lines))  # names no model
+
+    def test_setup_ends_saying_where_the_web_app_is_while_it_is_on_1355(self):
+        # #1355's punch list: setup printed no word of the web app; its last line before doctor
+        # says where its link is, for the driver this setup is for (the story's `link.where`)
+        from workbench import chat, story
+        home = Path(self.tmp.name) / "home"
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        out = self.setup("--no-service")[1]
+        where = story.text("link.where", "claude-code")
+        self.assertTrue(out.endswith(f"--  {where}\nnext: wb doctor\n"), out[-500:])
+        self.assertIn("`wb chat url` prints it", where)
+        chat.set_on(False)  # the user's off: no link to point at
+        self.assertNotIn(where, self.setup("--no-service")[1])
 
     def test_setup_drops_the_old_delegate_link_that_now_leads_nowhere(self):
         # 2026-11-17: /delegate became /workbench, leaving ~/.claude/skills/delegate dangling
@@ -29860,7 +29874,7 @@ class WebChat(Base):
         os.utime(listener, (0, 0))                                    # long unwritten
         self.assertEqual(self.chat.listener()["session"], "s")
         self.assertEqual(self.chat.snapshot()["listener"]["session"], "s")
-        self.assertIn("listening: /b/repo", run_wb("chat", "log"))
+        self.assertIn("Claude is listening in /b/repo.", run_wb("chat", "log"))  # the page's state line (#1355)
         store.write_json(listener, {"session": "s", "cwd": "/b/repo", "pid": gone, "start": "1",
                                     "machine": store.machine()})
         self.assertIsNone(self.chat.listener())                       # this machine's: asked here
@@ -29872,6 +29886,8 @@ class WebChat(Base):
         self.assertTrue(self.chat.is_on())                             # no switch.json: on
         out = run_wb("chat", "on", "--port", str(self.port))           # one runs already: kept
         self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
+        from workbench import story  # and the phone's way in while it opens here alone (#1355)
+        self.assertTrue(out.endswith(f"--  {story.text('link.reach')}\n"), out)
         self.assertTrue(self.chat.is_on())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())
         store.write_json(self.chat.chat_dir() / "listener.json", {"session": "s", "pid": os.getpid()})

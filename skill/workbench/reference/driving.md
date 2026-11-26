@@ -73,7 +73,9 @@ While workbench mode is on in a session, the web chat is up: it is on by default
 turns it off (`wb chat off`; change it only when they ask). Its link is on the pane's modeline, and
 nothing else carries it. The terminal stays primary; the chat is a second lane, for while they're
 away, beside the web app's Settings and Stats (settings: SKILL.md, *Settings are the user's*). They can reach you from their phone
-(a server on port 1337; the link is localhost, and reaching it from a phone is the user's own setup). Their message arrives as a prompt that is
+(a server on port 1337; the link is localhost, and `wb chat reach tailnet`, also the Settings row
+Web app reach, opens it to their tailnet: on their ask and yes, as any setting; the https its notifications need is
+`tailscale serve`, which wb prints, run only on their yes). Their message arrives as a prompt that is
 just `[web chat] <their words>` (or, while you're mid-turn, delivered into the turn by the mod,
 with one line saying so); it has the same authority as one typed here. A message may end with
 `[attached: <path> (<size>, <type>)]` lines: files they attached, saved on this machine. Read each
@@ -93,13 +95,11 @@ there, never one asked in the terminal. A message noted as following another ses
 that session's: leave its task alone and tell the user to answer at that session's terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. They are away
 once they use the chat (open it or write there) after they last used the terminal, so a
 `web-chat` block can come with no message from them; a message they type in the terminal, or a
-prompt they answer there, means they are back. Your prompts (a permission, an AskUserQuestion
-question, a plan, an MCP server's form) are answered only in the terminal, never in the chat: the
-terminal is where work gets done, the chat is for a message in a pinch. While one waits, the chat
-shows one line, "Claude is waiting for you in the terminal" and what it is, at the top, within
-seconds (a permission's adds the way to run you with permissions granted, to copy); their phone
-is notified at once while they're away, after half a minute while they're at the terminal; it
-clears when the prompt is answered. So while they're away,
+prompt they answer there, means they are back.
+<!-- story:skill.prompts:claude-code -->
+Your prompts (a permission, an AskUserQuestion question, a plan, an MCP server's form) are answered only in the terminal, never in the chat: the terminal is where work gets done, the chat is for a message in a pinch. While one waits, the chat shows one line at the top within seconds, "Claude is waiting for you in the terminal" and what it is (a permission's adds the way to run you with permissions granted, `claude --permission-mode auto`, to copy); their phone is notified at once while they're away, after half a minute while they're at the terminal; it clears when the prompt is answered.
+<!-- /story -->
+So while they're away,
 before a call that would prompt, tell them in the chat what you need and why: most work still goes
 on from the chat when they run you with permissions granted (their own permission mode and rules,
 the one policy). While they're away, AskUserQuestion and ExitPlanMode are refused (the mod does it):

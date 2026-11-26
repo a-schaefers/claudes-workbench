@@ -49,7 +49,7 @@ or comment without the user's yes for it.
 - Versions are cut by hand: the last number runs .1, .2, .3 at most, then the next minor (1.91,
   1.91.1, 1.91.2, 1.91.3, then 1.92, never 1.91.4); 2.0 only for a change big enough.
 - `chat.py`, `webpush.py`, `chat_static/`: CI's `chat.yml` runs the browser test (Playwright isn't a dependency).
-- `workbench/story.py` (the chat's and docs' sentences): `python3 scripts/gen_story.py` rewrites its copies.
+- `workbench/story.py` (the chat's, hosts' and docs' sentences): `python3 scripts/gen_story.py` rewrites its copies (`mod/hooks/story.ts` too).
   The page's scripts are TypeScript, `chat_static/src/`: edit there, `python3 scripts/web.py build`, commit
   both (the built `.js` never by hand; no new JavaScript anywhere: #1323).
 - `kernel/src`, or a value Tables copies: `python3 scripts/kernel.py check` (the toolchain once;

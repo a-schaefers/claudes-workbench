@@ -117,6 +117,16 @@ class DriverState(Base):
         self.assertEqual(chat.driver_state(lst, [])["line"],
                          "OpenCode is waiting for you in the terminal: a form from an MCP server.")
 
+    def test_wb_chat_log_ends_with_the_pages_state_line_word_for_word(self):
+        # #1355 S2b: `wb chat log` said "listening: <cwd>" or "no session is listening", in words
+        # of its own; it ends with the line the page keeps at the top, a waiting dialog's too
+        self.assertTrue(run_wb("chat", "log").endswith("No session is listening: messages wait.\n"))
+        with mock.patch.object(chat, "listener", return_value={**CLAUDE, "busy": True}):
+            self.assertTrue(run_wb("chat", "log").endswith(f"Claude is working in {chat._tilde(CLAUDE['cwd'])}.\n"))
+            chat.notice("Bash", "make deploy")
+            self.assertTrue(run_wb("chat", "log").endswith(
+                "Claude is waiting for you in the terminal: a permission for Bash.\n"))
+
     def test_the_snapshot_carries_the_driver_state_and_the_newest_settings_change(self):
         snap = chat.snapshot()
         self.assertEqual(snap["driver"]["state"], "none")

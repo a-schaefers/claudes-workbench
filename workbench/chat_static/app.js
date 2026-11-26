@@ -485,7 +485,7 @@
         if (all.length > TASKS_SHOWN)
             named.push(`+${all.length - TASKS_SHOWN} more`);
         const n = (r) => all.filter(t => rank(t) === r).length;
-        const counts = [[n(0), 'running'], [n(1), 'waiting on Claude'], [n(2), 'queued']].filter(([c]) => c);
+        const counts = [[n(0), 'running'], [n(1), `waiting on ${driverName()}`], [n(2), 'queued']].filter(([c]) => c);
         const head = counts.length === 1 && n(0) && all.length <= TASKS_SHOWN ? 'Running'
             : counts.map(([c, what]) => `${c} ${what}`).join(', ');
         return head + ': ' + named.join('; ');
@@ -2323,10 +2323,10 @@
             }
             catch { } installEvt = null; drawSettings(); };
             box.append(b);
-            return para(box, 'Adds Claude to your home screen, with its own window.', 'small');
+            return para(box, 'Adds Workbench to your home screen, with its own window.', 'small');
         }
         if (iosSafari)
-            return para(box, "Tap the Share button ⎋ in Safari's toolbar, then Add to Home Screen. Open Claude from its new icon: on iPhone and iPad, that's what lets it send notifications.");
+            return para(box, "Tap the Share button ⎋ in Safari's toolbar, then Add to Home Screen. Open Workbench from its new icon: on iPhone and iPad, that's what lets it send notifications.");
         if (ios)
             return para(box, 'On iPhone and iPad the app installs from Safari: open this page in Safari, then Share ⎋ → Add to Home Screen.');
         para(box, "Look for Install in your browser's menu or address bar; on a phone, Add to Home Screen.");
@@ -2345,7 +2345,7 @@
         const row = document.createElement('label');
         row.className = 'switch';
         const t = document.createElement('span');
-        t.textContent = 'When Claude answers or needs you';
+        t.textContent = `When ${driverName()} answers or needs you`;
         const sw = document.createElement('input');
         sw.type = 'checkbox';
         sw.setAttribute('role', 'switch');
@@ -2355,8 +2355,8 @@
         sw.onchange = () => setPush(sw.checked);
         row.append(t, sw);
         box.append(row);
-        para(box, pushBusy ? 'Working…' : pushNote || (pushOn ? 'On: this device hears from Claude even with the page closed, unless this page showed it on screen, or you were using the chat on another device then.'
-            : 'Off. Nothing you and Claude write passes through the push service: the phone fetches it from your computer.'), 'small');
+        para(box, pushBusy ? 'Working…' : pushNote || (pushOn ? `On: this device hears from ${driverName()} even with the page closed, unless this page showed it on screen, or you were using the chat on another device then.`
+            : `Off. Nothing you and ${driverName()} write passes through the push service: the phone fetches it from your computer.`), 'small');
         if (pushOn && !pushBusy) {
             const b = document.createElement('button');
             b.type = 'button';

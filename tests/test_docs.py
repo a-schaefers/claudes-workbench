@@ -477,7 +477,7 @@ class DocsForTheWebApp(unittest.TestCase):
         quick = readme[readme.index("## Quickstart"):readme.index("## License")]
         self.assertIn("Settings and Stats live in the web app", quick)
         self.assertIn("`[•_•] Claude's Workbench - http://localhost:1337/#token=…`", quick)
-        self.assertIn("`bind: tailscale`", quick)
+        self.assertIn("`wb chat reach tailnet`", quick)  # #1355's phone reach: chat.json's `bind` by command
 
     def test_what_people_and_claude_read_names_no_pane_tab(self):
         # the pane is Tasks only since #1283: a Settings or Stats tab there no longer exists
@@ -604,6 +604,63 @@ class OneCopyOfWbsShapes(unittest.TestCase):
                     line = re.search(rf"^(?:export )?type {name}\b.*$", f.read_text(), re.M).group(0)
                     self.assertRegex(line, rf"=\s*(?:import\('[^']*types/wire\.js'\)\.)?{name}\s*$",
                                      f"{f.relative_to(ROOT)}: its {name} isn't {self.WIRE}'s")
+
+
+def ts_strings(code: str) -> list[tuple[int, str]]:
+    """The string literals of TypeScript source ``code`` ('…', "…", `…` whole), with their line:
+    outside comments and regular expression literals."""
+    out, i, n, prev = [], 0, len(code), ""
+    while i < n:
+        c = code[i]
+        if code.startswith("//", i):
+            i = code.find("\n", i)
+            i = n if i < 0 else i
+        elif code.startswith("/*", i):
+            i = code.find("*/", i + 2)
+            i = n if i < 0 else i + 2
+        elif c in "'\"`":
+            j, buf = i + 1, []
+            while j < n and code[j] != c and (c == "`" or code[j] != "\n"):
+                buf.append(code[j:j + 2] if code[j] == "\\" else code[j])
+                j += 2 if code[j] == "\\" else 1
+            out.append((code.count("\n", 0, i) + 1, "".join(buf)))
+            i, prev = j + 1, c
+        elif c == "/" and prev and prev in "(,=:[!&|?{};+-*%<>~^":  # a regular expression literal
+            j, cls = i + 1, False
+            while j < n and code[j] != "\n" and (cls or code[j] != "/"):
+                cls = (cls and code[j] != "]") or code[j] == "["
+                j += 2 if code[j] == "\\" else 1
+            i, prev = j + 1, "/"
+        else:
+            prev = c if not c.isspace() else prev
+            i += 1
+    return out
+
+
+class TheDriverIsNamedOnThePage(unittest.TestCase):
+    # #1355: the page named Claude where the driver was meant ("waiting on Claude", "When Claude
+    # answers", "Claude will offer to set it up") to an OpenCode user. A string in the web app's
+    # TypeScript says the driver's name as the state gives it, never "Claude" by itself, but for
+    # the name itself (a driver-name table's value, the fallback before 2.2's rows named theirs),
+    # the app's own name, Claude Code (the host) and the savings score, which counts Claude's
+    # tokens by name (savings.py). story.ts is generated from workbench/story.py.
+    ALLOWED = re.compile(r"Claude's Workbench|Claude Code|Claude tokens|saved Claude")
+
+    def test_no_string_in_the_web_apps_typescript_says_claude_where_the_driver_is_meant(self):
+        src = ROOT / "workbench" / "chat_static" / "src"
+        found = []
+        for f in sorted(src.glob("*.ts")):
+            if f.name == "story.ts" or f.name.endswith(".d.ts"):
+                continue
+            for line, text in ts_strings(f.read_text()):
+                if "Claude" in text and text != "Claude" and "Claude" in self.ALLOWED.sub("", text):
+                    found.append(f"{f.name}:{line}: {text[:120]}")
+        self.assertEqual(found, [])
+
+    def test_the_guard_reads_strings_not_comments_or_patterns(self):
+        code = ("// Claude here\nconst a = 'waiting on Claude' /* Claude */\nconst r = /Claude's/.test(x)\n"
+                "const b = `When ${who}`")
+        self.assertEqual(ts_strings(code), [(2, "waiting on Claude"), (4, "When ${who}")])
 
 
 if __name__ == "__main__":

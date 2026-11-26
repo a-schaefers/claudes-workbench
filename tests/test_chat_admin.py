@@ -208,14 +208,13 @@ class AdminSet(Base):
             self.assertEqual(chat.admin_set("coding", "ask"), (409, {"ok": False, "error": "wb: no", "rows": rows}))
         self.assertFalse(chat.changes_path().exists())
 
-    def test_a_change_needing_claudes_help_carries_it_to_the_page_and_the_record(self):
+    def test_a_change_needing_claudes_help_carries_it_to_the_page_and_leaves_the_record_to_wbs_child(self):
+        # #1355: one writer logs every Settings write, cli.main around the row's own wb (the
+        # server's child here, stood in for): the POST logging it too would log it twice
         rows = [{"key": "probe", "label": "Agent code navigation", "kind": "choice", "value": "off"}]
         done = {"ok": True, "said": "probe: on, but not set up", "help": "Offer to set it up."}
         with mock.patch.object(settings, "rows", return_value=rows), \
                 mock.patch.object(settings, "apply", return_value=done):
             code, r = chat.admin_set("probe", "on")
-        self.assertEqual((code, r["help"]), (200, "Offer to set it up."))
-        rec = store.read_jsonl(chat.changes_path())[0]
-        self.assertEqual([{k: v for k, v in x.items() if k != "ts"} for x in rec],
-                         [{"key": "probe", "label": "Agent code navigation", "from": "off", "to": "on",
-                           "said": "probe: on, but not set up", "help": "Offer to set it up.", "by": "web"}])
+        self.assertEqual((code, r["help"], r["said"]), (200, "Offer to set it up.", "probe: on, but not set up"))
+        self.assertFalse(chat.changes_path().exists())

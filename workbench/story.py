@@ -29,19 +29,29 @@ import re
 # to run it with permissions granted, said only for a
 # permission (Claude Code's `--permission-mode auto` still asks on some calls, which the line
 # doesn't hide: it says "with permissions granted", never "never asks"; OpenCode's `--auto`
-# approves what the rules don't deny).
+# approves what the rules don't deny); `reply` how the driver answers in the chat (the mod's
+# Bash, the OpenCode plugin's tool: opencode-plugin/chat.ts's REPLY_ID); `prompts` the kinds of
+# prompt it raises in its terminal (OpenCode has no plan dialog: Plan is an agent).
 DRIVERS: dict[str, dict[str, str]] = {
     "claude-code": {"who": "Claude", "app": "Claude Code", "listen": "and run /workbench",
-                    "grant": "claude --permission-mode auto"},
-    "opencode": {"who": "OpenCode", "app": "OpenCode", "listen": "and type in a session", "grant": "opencode --auto"},
-    "any": {"who": "your driver", "app": "your driver", "listen": "and run /workbench", "grant": ""},
+                    "grant": "claude --permission-mode auto", "reply": "`wb chat reply`",
+                    "prompts": "a permission, an AskUserQuestion question, a plan, an MCP server's form"},
+    "opencode": {"who": "OpenCode", "app": "OpenCode", "listen": "and type in a session", "grant": "opencode --auto",
+                 "reply": "the workbench_chat_reply tool", "prompts": "a permission, a question, an MCP server's form"},
+    "any": {"who": "your driver", "app": "your driver", "listen": "and run /workbench", "grant": "",
+            "reply": "`wb chat reply`", "prompts": "a permission, a question, a plan, an MCP server's form"},
 }
 
 # Each sentence once. Keys by family: `purpose` (the chat's first-open line, #1341), `rule.*` (the
 # three rules), `state.*` (the driver's state line) and `next.*` (what to do about it), `wait.*`
 # (what a waiting dialog is, for `state.waiting`'s {what}), `note.*` (the thread's waiting row,
 # whose bytes the mod's tests and the phone's pushes know), `receipt.*` (a message's meta),
-# `prompts` and `lane` (the Settings cards), `doc.rule` (the docs' block).
+# `prompts` and `lane` (the Settings cards), `doc.rule` (the docs' block), `link.*` (wb's own
+# lines on where the web app is: wb setup, wb chat on, wb doctor), `refusal.*` (what a host tells
+# its driver instead of a dialog nobody watches: the mod's AWAY_QUESTION, AWAY_PLAN and
+# CONSENT_WAITING, the plugin's AWAY_QUESTION, through the generated mod/hooks/story.ts), and
+# `skill.*` (the driver's own procedure: SKILL.md's and reference/driving.md's blocks, which the
+# OpenCode plugin's skill.ts swaps for OpenCode's text from the same module).
 TEXTS: dict[str, str] = {
     "purpose": "Message {who} from anywhere: most work can run from here. A prompt {who} raises waits in "
                "its terminal (`ssh` + `tmux`); run {who} with permissions granted to skip those. "
@@ -78,18 +88,46 @@ TEXTS: dict[str, str] = {
                 "is answered there. Most work can still run from the web app's chat, more so with {who} run "
                 "with permissions granted. The web app's Settings are the source of truth: {who} changes one "
                 "only on your ask and yes, and never undoes a change you made.",
+    "link.where": "Open the web app to message {who} from anywhere and change your settings: its link is on the "
+                  "/workbench pane's modeline, and `wb chat url` prints it (the token in it is the key: keep it private).",
+    "link.reach": "To open it on your phone over Tailscale: `wb chat reach tailnet`.",
+    "refusal.question": "The user is away: ask in the web chat ({reply}) and end your turn.",
+    "refusal.plan": "Post the plan in the web chat and end your turn; approval is at the terminal.",
+    "refusal.consent": "{Who} is waiting on a workbench dialog in the terminal: answer it there.",
+    "skill.rule": "The terminal is primary: it is where you live (this machine, or over `ssh` + `tmux`), the work "
+                  "is asked for and reviewed here, and a prompt you raise is answered here, never in the chat; "
+                  "the web chat is a second lane for while the user is away, and most work still runs from it, "
+                  "more so when they run you with permissions granted (`{grant}`). The settings live in the web "
+                  "app's Settings (the link on the pane's modeline), the source of truth: what they say is what "
+                  "wb runs by, and you never undo a change the user made there.",
+    "skill.prompts": "Your prompts ({prompts}) are answered only in the terminal, never in the chat: the terminal "
+                     "is where work gets done, the chat is for a message in a pinch. While one waits, the chat "
+                     "shows one line at the top within seconds, \"{Who} is waiting for you in the terminal\" and "
+                     "what it is (a permission's adds the way to run you with permissions granted, `{grant}`, to "
+                     "copy); their phone is notified at once while they're away, after half a minute while they're "
+                     "at the terminal; it clears when the prompt is answered.",
 }
 
 # The drivers a key is said for, when not all: the grant names a command only those two have.
-ONLY: dict[str, tuple[str, ...]] = {"next.grant": ("claude-code", "opencode")}
+# A refusal and a skill block are a host's own (OpenCode has no plan dialog to refuse).
+HOSTS = ("claude-code", "opencode")
+ONLY: dict[str, tuple[str, ...]] = {"next.grant": HOSTS, "refusal.question": HOSTS, "refusal.plan": ("claude-code",),
+                                    "refusal.consent": HOSTS, "skill.rule": HOSTS, "skill.prompts": HOSTS}
+
+# What the hosts' generated mod/hooks/story.ts carries, filled for each host a key is said for:
+# the mod (register.tsx) and the OpenCode plugin (chat.ts, skill.ts) import it.
+HOST: tuple[str, ...] = ("refusal.question", "refusal.plan", "refusal.consent", "skill.rule", "skill.prompts")
 
 # What the web app's generated story.ts carries: the keys its page reads (`data-story`, app.ts).
 PAGE: tuple[str, ...] = ("purpose", "rule.terminal", "rule.chat", "rule.settings", "receipt.blocked", "prompts", "lane")
 
 # The doc blocks gen_story.py fills: {repo path: ((key, driver), ...)}, each one's text between
 # `<!-- story:KEY[:driver] -->` and `<!-- /story -->`.
+# The skill's blocks are Claude Code's text; on OpenCode skill.ts puts the host module's in their place.
 DOCS: dict[str, tuple[tuple[str, str], ...]] = {
     "README.md": (("doc.rule", "any"),),
+    "skill/workbench/SKILL.md": (("skill.rule", "claude-code"),),
+    "skill/workbench/reference/driving.md": (("skill.prompts", "claude-code"),),
 }
 
 FIELD = re.compile(r"\{([A-Za-z_]+)\}")
