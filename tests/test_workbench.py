@@ -24909,8 +24909,14 @@ class Setup(Base):
                       f"in {found}) runs the wb it brings, {ROOT / 'bin/wb'}\n", out)
         (found / "workbench").unlink()
         shutil.copytree(ocplugin.DIR, found / "workbench")
-        self.assertIn(f"ok  the OpenCode plugin {found / 'workbench'} (found in OpenCode's plugins directory, "
-                      f"in {found}) runs wb by name", self.setup(cmd="doctor")[1])
+        # which wb it runs then is PATH's: one there, or none (CI's PATH has no wb: PR #1432)
+        real_which = shutil.which
+        for wb, said in (("/opt/x/wb", "ok  the OpenCode plugin {} (found in OpenCode's plugins directory, in {}) "
+                                       "runs wb by name from OpenCode's PATH (/opt/x/wb's here"),
+                         (None, "BAD the OpenCode plugin {} (found in OpenCode's plugins directory, in {}) "
+                                "brings no wb and finds none on PATH")):
+            with mock.patch.object(shutil, "which", lambda n, *a, wb=wb, **k: wb if n == "wb" else real_which(n, *a, **k)):
+                self.assertIn(said.format(found / "workbench", found), self.setup(cmd="doctor")[1])
 
     def test_a_wb_in_opencodes_package_cache_says_opencode_updates_it_never_a_git_error(self):
         # #1311's third review (2026-11-25): wb run from OpenCode's Git install, no clone: wb update
@@ -34665,7 +34671,9 @@ class RealOpenCodePlugin(Base):
             port = sock.getsockname()[1]
         log = open(self.root / f"serve-{port}.log", "w")
         self.addCleanup(log.close)
-        proc = subprocess.Popen(["opencode", "serve", "--hostname", "127.0.0.1", "--port", str(port),
+        # opencode by its path on this process's PATH: Popen looks a bare name up on the child's,
+        # which a test may narrow to where opencode isn't (CI's, outside /usr/bin: PR #1432)
+        proc = subprocess.Popen([shutil.which("opencode") or "opencode", "serve", "--hostname", "127.0.0.1", "--port", str(port),
                                  "--print-logs"], cwd=self.project, stdout=log, stderr=log,
                                 env={**os.environ, "PWD": str(self.project), **env})
         self.addCleanup(lambda: (proc.kill(), proc.wait()))
