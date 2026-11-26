@@ -6618,8 +6618,9 @@ waiting?, line, next, grant?}`, from the facts the hosts already write. Waiting 
 idle; no live listener is `none` (named by the newest driver that wrote, else `any`), or `off`
 while the chat is switched off (`state.off`, `next.off`: `wb chat on` in a terminal; starting a
 driver can't make it listen then, and `none` told the user to, #1526). The wait is
-the listener claim's own `waiting` (`{kind, tool, since, what?}`, `chat.WAIT_KINDS`), else the
-oldest open notice row under `ASK_STALE` (the one the turn is stuck on). `line` and `next` are the
+the listener claim's own `waiting` (`{kind, tool, since, what?}`, `chat.WAIT_KINDS`), never a
+notice row: the mod posts one from every delegating session, and another session's dialog (or a
+dead one's, for `ASK_STALE`) read as the listener waiting, with its driver's grant (#1481). `line` and `next` are the
 story's `state.*` and `next.*`, `{what}` its `wait.<kind>`; `grant` (`next.grant` and the command)
 only for a permission, on a known driver (`claude --permission-mode auto`, `opencode --auto`): a
 question or a plan waits however the driver runs. The page (`drawState`, `#driver-state`,
@@ -10680,7 +10681,7 @@ skill blocks Claude Code's with OpenCode's in the module,
 each driver it is said for (no "Claude" on OpenCode's), unknown keys and fields raising, the notice rows' bytes, every key
 read somewhere, the HTML's `data-story` text being `any`'s, no string of four words in hand-written `kernel/src`);
 `test_chat_driver.py` (*The driver's state line*: none named by the last driver that wrote, idle and working where it runs,
-waiting beating working and naming the oldest open notice until settled, a stale notice no wait, the claim's own `waiting`
+waiting beating working and naming the claim's prompt until settled, another session's open notice never the listener's wait (#1481), the claim's own `waiting`
 for each kind with the grant only for a permission and never for `any`, odd facts ignored, the snapshot's `driver` and
 `settings`, `wb chat log` ending with the state line; `SettingsProvenance`: a choice or number set to its value logs nothing, an action always, `changes` newest first
 without `said`, each row's `changed` within a week, the stamp the state reads);

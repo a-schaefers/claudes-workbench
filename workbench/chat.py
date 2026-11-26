@@ -1933,8 +1933,10 @@ def listener_view(lst: dict | None) -> dict | None:
 
 # The driver's state (#1355): the one line the page keeps at the top of the chat, from the facts
 # the hosts already write: the listener's claim (`busy`; `waiting`, the oldest dialog up in its
-# terminal for WAITING_AFTER or more, the host's own filter of an auto-accept's flicker), else the
-# oldest open notice row (the waiting line a host posts, #1350). Waiting beats working beats idle;
+# terminal for WAITING_AFTER or more, the host's own filter of an auto-accept's flicker). Never a
+# notice row: the mod posts one from every delegating session, and another session's dialog (or a
+# dead one's, for ASK_STALE) read as the listener waiting, with its driver's grant (#1481,
+# 2026-11-26); both hosts write their own wait in the claim. Waiting beats working beats idle;
 # no live listener is `none`, or `off` while the chat is switched off: only `wb chat on` makes a
 # driver listen then, and the page told the user to start one and run /workbench (#1526). The words are the story's (`state.*`, `next.*`, `wait.*`), and only
 # a permission names the grant (`next.grant`, the driver's own way to run with permissions
@@ -1943,21 +1945,15 @@ WAITING_AFTER = 2.0   # seconds: the hosts' WAITING_AFTER_MS, a dialog answered 
 WAIT_KINDS = ("permission", "question", "plan", "elicitation", "consent")
 
 
-def _waiting_fact(lst: dict | None, rows: list[dict]) -> dict | None:
-    """The dialog the driver waits on, {kind, tool, since, what?}: the claim's `waiting`, else the
-    oldest open notice row under ASK_STALE old (the one the turn is stuck on); None for none."""
+def _waiting_fact(lst: dict | None) -> dict | None:
+    """The dialog the listening driver waits on, {kind, tool, since, what?}: its claim's
+    `waiting`; None for none (#1481: never another session's notice row)."""
     w = (lst or {}).get("waiting")
     if isinstance(w, dict) and w.get("kind") in WAIT_KINDS and isinstance(w.get("since"), (int, float)) \
             and not isinstance(w.get("since"), bool):
         tool = w.get("tool") if isinstance(w.get("tool"), str) else ""
         return {"kind": w["kind"], "tool": tool[:200], "since": float(w["since"]),
                 **({"what": w["what"][:ASK_TEXT]} if isinstance(w.get("what"), str) and w["what"] else {})}
-    now = store.now()
-    for r in rows:
-        if isinstance(r, dict) and r.get("from") == "notice" and now - (r.get("ts") or 0) <= ASK_STALE:
-            kind = r.get("kind") if r.get("kind") in WAIT_KINDS else "permission"
-            return {"kind": kind, "tool": str(r.get("tool") or "")[:200], "since": float(r.get("ts") or 0),
-                    **({"what": r["what"]} if isinstance(r.get("what"), str) and r["what"] else {})}
     return None
 
 
@@ -1976,7 +1972,7 @@ def driver_state(lst: dict | None = _LIVE, rows: list[dict] | None = None) -> di
     driver (story's: claude-code|opencode|any), who, where?, waiting?: {kind, tool, since, what?},
     line, next, grant?: {line, command}}. ``lst``: the live listener (default: listener(); None: none);
     ``rows``: the thread (default: thread()), whose newest driver names a driver with none
-    listening, and whose open notice is a wait the claim doesn't say."""
+    listening."""
     lst = listener() if lst is _LIVE else lst
     rows = thread() if rows is None else rows
     if lst:
@@ -1992,7 +1988,7 @@ def driver_state(lst: dict | None = _LIVE, rows: list[dict] | None = None) -> di
                 "line": story.text(f"state.{state}", driver), "next": story.text(f"next.{state}", driver)}
     where = _tilde(str(lst.get("cwd") or "")) or "its directory"
     out = {"driver": driver, "who": who, "where": where}
-    wait = _waiting_fact(lst, rows)
+    wait = _waiting_fact(lst)
     if wait:
         # an MCP server's name (Claude Code's `mcp:<server>`), else what the host knows: OpenCode
         # names a form by no server

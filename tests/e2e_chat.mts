@@ -444,8 +444,12 @@ async function run(engine: string, device?: string) {
     }
   })
   await check('a prompt waiting in the terminal is the state line at the top, Copy its one button, no thread row and no answer card, and its settling clears it (#959, #1350, #1355)', async () => {
+    // the wait is the listener's claim's, as the host writes it (#1481: another session's notice never is)
+    const waits = (w?: object) => writeFileSync(join(home, 'state/chat/listener.json'),
+      JSON.stringify({ session: 's1', cwd: '/home/u/project', pid: process.pid, busy: false, ...(w ? { waiting: w } : {}) }))
     const id = wb('chat', 'notice', '--tool', 'Bash', '--text', 'rm -rf runs/*').trim()
     if (id.startsWith('skipped')) throw new Error(id)
+    waits({ kind: 'permission', tool: 'Bash', since: Date.now() / 1000, what: 'rm -rf runs/*' })
     const line = page.locator('#driver-state')
     await until(async () => (await line.isVisible()) && (await line.textContent()).includes('Claude is waiting for you in the terminal: a permission for Bash.'))
     if ((await line.locator('.dstate-what').textContent()) !== 'rm -rf runs/*') throw new Error(await line.textContent())
@@ -461,11 +465,13 @@ async function run(engine: string, device?: string) {
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Waiting behind the prompt in the terminal'))
     const plan = wb('chat', 'notice', '--tool', 'ExitPlanMode', '--kind', 'plan').trim()
     if (!wb('chat', 'notice', '--done', id).startsWith('answered')) throw new Error('not settled')
+    waits({ kind: 'plan', tool: 'ExitPlanMode', since: Date.now() / 1000 })
     // the oldest open prompt is the one named: now the plan's, which names no permissions
     await until(async () => (await line.textContent()).includes('a plan to approve'))
     if ((await line.textContent()).includes('permissions granted') || (await line.locator('button').count())) throw new Error('a plan names permissions')
     // settled there: the line clears
     if (!wb('chat', 'notice', '--done', plan).startsWith('answered')) throw new Error('not settled')
+    waits()
     await until(async () => await line.isHidden())
   })
   await check('Stats shows what the week\'s tasks saved Claude, once: the badge and its one line', async () => {
