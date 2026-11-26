@@ -24222,10 +24222,11 @@ class DynamicWorkflows(Base):
     """Dynamic workflows (#1041): off by default, `wb workflows on|off` keeps the choice in
     workflows.json beside coding.json, which the mod reads for its dynamic-workflows block."""
     def test_off_by_default_and_wb_workflows_keeps_the_choice_where_the_mod_reads_it(self):
-        self.assertEqual(run_wb("workflows"), "Dynamic workflows: Off (default). Claude runs one task "
-                                              "at a time.\n")
+        # #1278 named it deepmode: the label says both names, and wb workflows stays wb deepmode's
+        self.assertEqual(run_wb("workflows"), "Dynamic workflows (deepmode): Off (default). Claude runs one "
+                                              "task at a time; deepcode asks for a deep workflow once.\n")
         self.assertFalse((store.home() / "workflows.json").exists())
-        self.assertIn("Dynamic workflows: On. Claude may split a request into tasks that run at once",
+        self.assertIn("Dynamic workflows (deepmode): On. substantive requests run as deep workflows (wb run)",
                       run_wb("workflows", "on"))
         self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "on")
         self.assertEqual(cli.workflows_mode(), "on")
@@ -24243,14 +24244,15 @@ class DynamicWorkflows(Base):
             run_wb("workflows", "maybe")
         self.assertFalse((store.home() / "workflows.json").exists())
 
-    def test_the_skill_says_one_task_at_a_time_when_off_and_how_to_fan_out_when_on(self):
+    def test_the_skill_says_one_task_at_a_time_when_off_and_a_deep_workflow_when_on(self):
         skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
         setting = skill.split("- **Dynamic workflows**")[1].split("\n- **")[0]
         self.assertIn("off (the default), run **one task at a time**", setting)
         self.assertIn("only on\n  their yes", setting)
-        fan = skill.split("- **Fan-out**")[1].split("\n- **")[0]
-        for said in ("(spec, size, role, acceptance command)", "one\n  name prefix",
-                     "say the plan in one line", "accept logic first, then tests, then UI or docs"):
+        # #1278's plan §6: *Deep workflows* replaces the fan-out of tasks Claude started at once
+        fan = " ".join(skill.split("- **Fan-out**")[1].split("\n- **")[0].split())
+        for said in ("is a deep workflow: one `wb run start`, never several tasks you start at once yourself",
+                     "*Deep workflows*", "accept logic first, then tests, then UI or docs"):
             self.assertIn(said, fan)
 
     def wb(self, *argv):
@@ -24264,14 +24266,14 @@ class DynamicWorkflows(Base):
         return code, out.getvalue(), err.getvalue()
 
     def test_a_fan_out_passes_one_group(self):
-        # #1048: the skill and the mod's rule say to pass the shared prefix as --group on each
-        # start, and the tasks so started carry the one group the pane draws under one header
-        skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
-        fan = " ".join(skill.split("- **Fan-out**")[1].split("\n- **")[0].split())  # any wrap
-        self.assertIn("pass `--group <prefix>` (`--group auth`) on each `wb start`", fan)
+        # #1048: tasks started with one --group carry the group the pane draws under one header;
+        # since #1278 a run's driver passes it (runs._start: --group <run>), and the mod's rule
+        # sends a fan-out to wb run, its wake a background wb wait (the review of #1278)
         mod = (Path(__file__).parent.parent / "mod/hooks/register.tsx").read_text()
-        rule = mod.split("const WORKFLOWS_RULE = ")[1].split("\nconst ")[0]
-        self.assertIn("pass it as `--group <prefix>` on each `wb start`", rule)
+        rule = " ".join(mod.split("const WORKFLOWS_RULE = ")[1].split("\nconst ")[0].split())
+        self.assertIn("start it once with `wb run start`", rule)
+        self.assertIn("`wb wait <run>` in the background", rule)
+        self.assertIn('"--group", run.name', (Path(__file__).parent.parent / "workbench/runs.py").read_text())
         with mock.patch.object(cli, "spawn_runner", lambda task: 0):
             for name in ("auth-logic", "auth-tests", "auth-docs"):
                 run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
@@ -33098,7 +33100,7 @@ class Top(Base):
         drm = Path(self.tmp.name, "empty")
         drm.mkdir()
         snap = self.top(drm).tick()
-        self.assertEqual(sorted(snap), ["every", "gpus", "queue", "rack", "running", "ts"])
+        self.assertEqual(sorted(snap), ["every", "gpus", "queue", "rack", "running", "runs", "ts"])
         (r,) = snap["running"]
         self.assertEqual({k: r[k] for k in ("task", "model", "label", "phase", "round", "tok_s",
                                              "tok_s_from", "read_tok_s", "context_used",
@@ -33334,7 +33336,7 @@ class Top(Base):
                 time.sleep(0.05)
             self.assertTrue(wait_gone(int((bindir / "pid").read_text()), 10), "nvidia-smi outlived wb top")
         first = json.loads(out.read_text().splitlines()[0])
-        self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "ts"])
+        self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "runs", "ts"])
 
     def test_ctrl_z_gives_the_terminal_back_and_fg_takes_it_again_so_one_q_quits(self):
         # #607: stopped with the alternate screen up and the cursor hidden, and after `fg` the

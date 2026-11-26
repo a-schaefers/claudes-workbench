@@ -22,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import hardware, meter, models, router, stats, store
+from . import hardware, meter, models, router, runs, stats, store
 from .transcript import plain
 
 EVERY = 2          # seconds between ticks without stats.json `every`
@@ -622,7 +622,8 @@ class Top:
             running = self.running(found, now)  # with the servers' live objects
         pools = self.pools()
         return {"ts": round(now, 1), "every": self.every, "gpus": gpus, "running": running,
-                "rack": self.rack_now(pools), "queue": self.queue(pools, now)}
+                "rack": self.rack_now(pools), "queue": self.queue(pools, now),
+                "runs": runs.snapshot()}  # #1278: the deep workflows, for the pane's and the web's strip
 
 
 # ---- the terminal view ----

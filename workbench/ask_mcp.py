@@ -1,4 +1,5 @@
-"""MCP server (stdio, newline-delimited JSON-RPC) giving the local agent one tool: ask_reviewer.
+"""MCP server (stdio, newline-delimited JSON-RPC) giving the local agent ask_reviewer, and a report
+task its submit_result too (#1278).
 
 OpenCode starts it for each round (each `opencode run`) through the task's config layer, with
 WB_TASK naming the task, inside the agent's lane. A call writes the question to ask/<id>.json,
@@ -22,7 +23,7 @@ import threading
 import time
 import uuid
 
-from . import __version__, store
+from . import __version__, schema, store
 from .watch import Watcher
 
 PROTOCOL = "2025-06-18"
@@ -57,6 +58,54 @@ TOOL = {
         "required": ["question"],
     },
 }
+
+
+# A report task's second tool (#1278): its result, checked against the task's schema, which is the
+# tool's inputSchema too, so OpenCode validates the arguments first and hands its errors back to
+# the model (its tool runtime, 2.3.2). The server checks again (schema.check) and writes the object
+# to ask/result.json, the lane's one place; the runner, outside it, reads it and checks it a
+# third time (runner.result_of): nothing the agent writes is trusted outside the lane.
+SUBMIT = "submit_result"
+SUBMIT_DESCRIPTION = ("Send your task's result: the whole JSON object your task's schema asks for, "
+                      "once, when you are done. Errors come back to you; fix them and call again "
+                      "with the whole object.")
+RESULT = "result.json"  # in ask/
+SUBMITTED = ("Result received. You are done: end your turn now with a one-line summary, and "
+             "don't call this again.")
+
+
+def schema_file(task: store.Task):
+    """A report task's schema, as wb start wrote it in its rules (cli.SCHEMA_FILE)."""
+    return store.home() / "rules" / task.name / "schema.json"
+
+
+def submit_tool(task: store.Task) -> dict | None:
+    """submit_result for a report task whose schema reads, else None (a code task has only
+    ask_reviewer)."""
+    if not task.spec.get("report"):
+        return None
+    try:
+        doc = json.loads(schema_file(task).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if schema.valid(doc):
+        return None
+    return {"name": SUBMIT, "description": SUBMIT_DESCRIPTION, "inputSchema": doc}
+
+
+def submit(task: store.Task, args) -> tuple[bool, str]:
+    """A submit_result call: (taken, the text the agent gets back)."""
+    tool = submit_tool(task)
+    if tool is None:
+        return False, "submit_result: this task has no result schema"
+    if not isinstance(args, dict):
+        return False, "rejected: the arguments are one JSON object, the result itself"
+    errs = schema.check(args, tool["inputSchema"])
+    if errs:
+        return False, ("rejected: " + "; ".join(errs) + ". Call submit_result again with the whole "
+                       "object.")
+    store.write_json(ask_dir(task) / RESULT, {"ts": time.time(), "result": args})
+    return True, SUBMITTED
 
 
 PERMISSION_BUDGET = 8  # requests for a refused command, directory or port, per task: a cap on a stuck loop
@@ -416,13 +465,21 @@ def handle(msg: dict, task: store.Task):
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": [TOOL]}
+        result = {"tools": [TOOL, *filter(None, [submit_tool(task)])]}
         try:  # OpenCode listed the tool: the runner's round report checks for it (LISTED)
             (ask_dir(task) / LISTED).touch()
         except OSError:
             pass
     elif method == "tools/call":
         params = msg.get("params") or {}
+        if params.get("name") == SUBMIT:  # a report task's result (#1278)
+            try:
+                ok, text = submit(task, params.get("arguments"))
+            except OSError as exc:  # a full disk: the agent can still end with the object
+                ok, text = False, (f"submit_result failed ({exc.strerror or exc}): end your last "
+                                   "message with the object instead")
+            return {"jsonrpc": "2.0", "id": mid, "result": {
+                "isError": not ok, "content": [{"type": "text", "text": text}]}}
         if params.get("name") != TOOL["name"]:
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32602, "message": f"unknown tool {params.get('name')}"}}

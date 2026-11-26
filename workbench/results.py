@@ -139,6 +139,10 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
                         **_apart(steps, "deleted", ("files", "removed"))}}
               if outcome == "accepted" else {}),
            **({"trial": True} if spec.get("trial") else {}),
+           # a report task's (#1278): no coding step, so store.results leaves it out of the
+           # learners' evidence; its card and run, for a run's report
+           **({"report": True, "card": (spec.get("card") or {}).get("name"), "run": spec.get("run"),
+               "stage": spec.get("stage")} if spec.get("report") else {}),
            # on only: a task with every experiment off ran as main does
            **({"experiments": on} if (on := sorted(k for k, v in (spec.get("experiments") or {}).items()
                                                     if v)) else {}),
@@ -535,9 +539,12 @@ def table(only: set | None = None) -> str:
     stopped = sum(1 for r in shown if stopped_outside(r) and not r.get("spec_gaps")
                   and r.get("ran", True))  # one that never ran is counted as that (#1245)
     never = len(shown) - len(rows) - gaps - stopped
-    trials = len(store.results(trials=True)) - len(every)
+    # a report task's row (#1278) is no trial: both were counted as trials (the review of #1278,
+    # 2026-11-25), so a run's finders read as checks of workbench itself
+    trials = len(store.results(trials=True, reports=False)) - len(every)
+    reports = len(store.results(trials=False, reports=True)) - len(every)
     # one line, the nonzero counts only (#1322, 2026-11-24): up to six footnote lines before
-    said = [f"{n} {what}" for n, what in ((trials, "trials"), (gaps, "spec gaps"),
+    said = [f"{n} {what}" for n, what in ((trials, "trials"), (reports, "report tasks"), (gaps, "spec gaps"),
                                           (stopped, "outside stops"), (never, "never ran")) if n]
     left_out = "\nleft out: " + ", ".join(said) if said else ""
     if not rows:
