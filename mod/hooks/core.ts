@@ -41,3 +41,18 @@ export const owns = (facts: OwnerFacts): ReturnType<typeof K.owns> => K.owns(fac
 // or one of the session's own tasks open since
 export const awayNow = (webAt: number, now: number, tasks: ReadonlyArray<PhaseFacts & { mine: boolean }>): boolean =>
   K.awayNow({ webAt: Number(webAt) || 0, now, tasks: tasks.map(t => ({ phase: String(t.phase ?? ''), parked: !!t.parked, mine: !!t.mine })) })
+
+// Which notices are due a look (Kernel.Notice): per task its questions and newest notice, none
+// over an hour old (`picks`: indices into `rows`), and each task's newest notice (`noticed`)
+export const noticesDue = (rows: ReadonlyArray<Record<string, unknown>>, startedAt: number, now: number): ReturnType<typeof K.noticesDue> =>
+  K.noticesDue({
+    rows: rows.map(r => ({ task: String(r.task ?? ''), kind: String(r.kind ?? ''), ts: Number(r.ts) || 0,
+      tasks: Array.isArray(r.tasks) ? r.tasks.map(String) : [] })),
+    startedAt, now,
+  })
+// One due notice judged (Kernel.Notice): still true, toasted, and the act: skip, none, steer,
+// hold, wake, ack or missed
+export const noticePlan = (facts: Parameters<typeof K.noticePlan>[0]): ReturnType<typeof K.noticePlan> => K.noticePlan(facts)
+// The rewake check (Kernel.Notice): recent, a candidate now, due, and the kind its phase stands for
+export const rewakePlan = (facts: Parameters<typeof K.rewakePlan>[0]): ReturnType<typeof K.rewakePlan> =>
+  K.rewakePlan({ ...facts, phase: String(facts.phase ?? ''), parked: !!facts.parked })

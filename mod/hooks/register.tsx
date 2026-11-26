@@ -75,7 +75,7 @@ import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, taskLines } from './tasks'
-import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, NEEDS, NO_ANSWER, openCounts, owns, PARKS, phaseOf, WAKE_OPENING } from './core'
+import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, WAKE_OPENING } from './core'
 import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
@@ -85,7 +85,9 @@ const PANE = 'workbench'
 const POLL_MS = 1500 // the clock's redraw while a task runs
 const SAFETY_MS = 30_000 // a poll at least this often, whatever the watcher says
 const KEEP_CLOSED_MS = 30 * 60 * 1000 // closed tasks stay in the pane for half an hour
-const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older than an hour
+// a settings change from the web app older than an hour is no news, as a notice that old wakes
+// no one (the kernel's noticesDue)
+const OLDEST_WAKE_MS = 60 * 60 * 1000
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
@@ -149,11 +151,10 @@ export const awayNow = (webAt: number, now: number, list: WbTask[], isMine: (t: 
 // Whether the weekly model check and the automatic optimize may run: no task anywhere active (the
 // GPU's, and a check's question beside a running task's), and none of this session's waiting on
 // Claude lately. Any task open at any age once gated both, so one stuck, failed or unreviewed
-// task left after a quit stopped them for good (#541); one idle past REWAKE_MAX_MS waits for a
+// task left after a quit stopped them for good (#541); one idle past rewake's 12 hours waits for a
 // session long gone, as rewake judges it; a parked one waits for no one.
 export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) => boolean): boolean {
-  return !list.some(t => ACTIVE.has(t.phase) ||
-    (phaseOf(t).waits && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
+  return !list.some(t => ACTIVE.has(t.phase) || rewakeOf(t, now, isMine(t)).recent)
 }
 // Away is the user's, not one session's (#688): the listening session records the last web
 // message in chat/away.json and a prompt typed in any session clears it, so every delegating
@@ -2260,7 +2261,7 @@ async function readTail($: any, path: string, max: number): Promise<{ text: stri
     return null
   }
 }
-const NOTIFY_TAIL = 1 << 20 // far more than OLDEST_WAKE_MS's hour of notices
+const NOTIFY_TAIL = 1 << 20 // far more than an hour of notices (noticesDue's)
 const EVENTS_TAIL = 64 << 10 // the pane shows a task's last four events
 
 // A task's last four events, read again only when events.jsonl's size or mtime changed: every
@@ -3364,17 +3365,13 @@ async function deliver($: any, now: number) {
     if (file.key) mem.notifyRows = file
   }
   if (file.key === mem.lastNotify && !mem.busy) return
-  // Per task, its newest notice and every question: two asked at once (parallel tool calls) are
-  // both open, and the newest alone hid the first, its agent blocked (the 2026-11-16 audit).
-  const due = new Map<string, Row[]>()
-  for (const row of file.rows) {
-    // Every notice counts for rewake, however old: a notice delivered before a reload (or by
-    // another session) is news Claude had, not a lost one (the 2026-11-16 audit).
-    // a batch's notice is news for each task it names (acked with it), or rewake woke for the rest
-    for (const n of [row.task, ...(batchOf(row) ?? [])]) mem.noticed.set(n, Math.max(mem.noticed.get(n) ?? 0, row.ts))
-    if (row.ts * 1000 < Math.max(mem.startedAt, now) - OLDEST_WAKE_MS) continue
-    due.set(row.task, [...(due.get(row.task) ?? []).filter(r => r.kind === 'question'), row])
-  }
+  // Per task, its newest notice and every question, none over an hour old: the kernel's
+  // noticesDue (Kernel.Notice). Every notice counts for rewake, however old, a batch's for each
+  // task it names (`noticed`): news Claude had, not a lost one (the 2026-11-16 audit).
+  const { due: picked, noticed } = noticesDue(file.rows, mem.startedAt, now)
+  for (const n of noticed) mem.noticed.set(n.task, Math.max(mem.noticed.get(n.task) ?? 0, n.ts))
+  const rows0 = file.rows
+  const due = picked.map(d => [d.task, d.picks.map(i => rows0[i]!)] as const)
   // A wake held for the turn leaves the file unseen, so the poll after the turn sends it: a second
   // task's wake held while the first one's turn ran was never sent (the 2026-11-16 audit).
   let held = false
@@ -3390,31 +3387,34 @@ async function deliver($: any, now: number) {
     // sent back is acknowledged and dropped.
     const status = await readJson($, `${root}/tasks/${name}/status.json`)
     for (const row of rows) {
-      if (row.ts <= acked) continue
-      const current = row.kind === 'checkin'
-        ? phaseOf({ phase: String(status.phase ?? ''), parked: false }).running // a check-in is news while the task still runs
-        : row.kind === 'question' && row.id
-          // this question, still unanswered, while the task still asks: a question the runner
-          // dropped (timed out, its round ended or stopped) woke Claude for nobody (the 0.90 review)
-          ? status.phase === 'asking' && await asking($, name, String(row.id))
-          : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
+      const key = `${name}:${row.ts}`
+      // what to do with it is the kernel's noticePlan (Kernel.Notice): still true (a check-in
+      // while the task runs; this question, still unanswered, while the task asks: one the runner
+      // dropped woke Claude for nobody, the 0.90 review; else the phase its kind names), toasted
+      // once, and the act. The host reads the facts and carries it out
+      const question = row.ts > acked && row.kind === 'question' && !!row.id
+      const plan = noticePlan({
+        kind: String(row.kind ?? ''), hasId: !!row.id, phase: String(status.phase ?? ''),
+        questionOpen: question && await asking($, name, String(row.id)), ts: Number(row.ts), acked,
+        own, wake: mem.wake, busy: mem.busy, toasted: mem.toasted.has(key), heldAsk: mem.heldAsks.has(key),
+      })
+      if (plan.act === 'skip') continue
       const batch = batchOf(row)
       const headline = headlineOf(row)
-      const key = `${name}:${row.ts}`
-      if (current && !mem.toasted.has(key)) {
+      if (plan.toast) {
         mem.toasted.add(key)
         $.ui.toast(`workbench: ${name} ${headline}`)
       }
-      if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
+      if (plan.act === 'none') continue // the toast only: the notice stays for its session or wb wait
       const next = await nextOf($, row, name)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
       const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
-      if (mem.busy && current) {
+      if (plan.act === 'steer' || plan.act === 'hold') {
         // A question can't wait for the turn to end: its agent is blocked, and after the ask
         // timeout it guesses (a 20-minute review turn, #542). It goes into the running turn, as
         // a web message does; refused, it is held like the rest, which deliver once the turn ends.
-        if (row.kind === 'question') {
+        if (plan.act === 'steer') {
           if (!(await take($, name, row.ts))) { acked = row.ts; continue } // another session's wake took it
           await raiseAck($, ackPath, row.ts) // acknowledge before sending: never twice
           if (await intoTurn($, text)) {
@@ -3428,13 +3428,13 @@ async function deliver($: any, now: number) {
         continue
       }
       const prev = acked
-      if (current && !(await take($, name, row.ts))) { acked = row.ts; continue } // taken by another
+      if (plan.act === 'wake' && !(await take($, name, row.ts))) { acked = row.ts; continue } // taken by another
       await raiseAck($, ackPath, row.ts) // acknowledge before waking: never wake twice
       acked = row.ts
-      if (!current) {
+      if (plan.act !== 'wake') {
         // held through the turn and timed out unseen: said, not acknowledged in silence (#542)
-        if (mem.heldAsks.delete(key) && row.id && (ACTIVE.has(status.phase) || NEEDS.has(status.phase))
-          && (await $.fs.read(`${root}/tasks/${name}/ask/${row.id}.answer`).catch(() => '')).startsWith(NO_ANSWER)) {
+        mem.heldAsks.delete(key)
+        if (plan.act === 'missed' && (await $.fs.read(`${root}/tasks/${name}/ask/${row.id}.answer`).catch(() => '')).startsWith(NO_ANSWER)) {
           void wake($, name, `${WAKE_OPENING} \`${name}\` asked a question while you were busy.\n\n${row.text}\n\n` +
             MISSED_NOTE(name), prev, row.ts)
         }
@@ -3527,15 +3527,19 @@ async function wake($: any, name: string, text: string, prev: number, ts: number
 
 // The safety net under deliver: a task of this session's waiting on Claude whose news never
 // reached it (a lost or swallowed notice; on 2026-11-16 a failure sat unseen for an hour) wakes
-// Claude anyway, once, after a minute of Claude being idle. `acked` past the task's newest notice
-// (or, with none, the moment it entered that state) means Claude has had the news.
+// Claude anyway, once, after a minute of Claude being idle: the kernel's rewakePlan (Kernel.Notice).
+// `acked` past the task's newest notice (or, with none, the moment it entered that state) means
+// Claude has had the news; one idle past 12 hours waited for a session long gone (wb status shows it).
+// A minute, as rewake waits: a failed send to the web chat, or a queued prompt, is tried again then
 const REWAKE_MS = 60_000
-const REWAKE_MAX_MS = 12 * 3600_000 // older than this, it waited for a session long gone: wb status shows it
+const rewakeOf = (t: WbTask, now: number, own: boolean, had = { acked: 0, seen: -1, marked: 0 }) => rewakePlan({
+  phase: t.phase, parked: t.parked, mine: own, updatedAt: t.updatedAt, now, busy: mem.busy, wake: mem.wake,
+  dropped: mem.dropped.get(t.name) ?? 0, ...had,
+})
 async function rewake($: any, now: number, list: WbTask[]) {
-  if (mem.busy || !mem.wake) return
   for (const t of list) {
-    if (!phaseOf(t).waits || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
-    if (now - (mem.dropped.get(t.name) ?? 0) < REWAKE_MS) continue // dropped: once a minute
+    const own = mine(t)
+    if (!rewakeOf(t, now, own).candidate) continue // dropped: once a minute too
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     // Claude had the news if it acked the task's latest notice: the runner's last status write
@@ -3543,11 +3547,10 @@ async function rewake($: any, now: number, list: WbTask[]) {
     // The task's own `noticed` mark too (Task.notify): after a reload mem.noticed holds only
     // notify.jsonl's last 1 MiB, and a review whose notice had left it woke Claude again (#844)
     const marked = Number(await $.fs.read(`${mem.root}/tasks/${t.name}/noticed`).catch(() => '')) || 0
-    const seen = mem.noticed.get(t.name)
-    const noticed = seen !== undefined || marked ? Math.max(seen ?? 0, marked) : undefined
-    if (noticed !== undefined ? acked >= noticed : acked * 1000 >= t.updatedAt) continue
+    const plan = rewakeOf(t, now, own, { acked, seen: mem.noticed.get(t.name) ?? -1, marked })
+    if (!plan.due) continue
     await $.fs.write(ackPath, String(now / 1000))
-    const kind = t.phase === 'asking' ? 'question' : t.phase
+    const kind = plan.kind
     // its newest notice says why it stopped, as deliver's wake would have: from the phase alone a
     // provider's, the day cap's, a local-only or an Agents-GPU stop woke as "got stuck … Steer it
     // with wb feedback", which wb refuses or which runs a round on an agent that wasn't stuck

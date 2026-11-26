@@ -29,6 +29,9 @@ defined (`tests/test_kernel.py`).
 | `phaseOf` | Kernel.Phase | what a task's phase means: active, running, working, needs Claude, waits, stopped, done, closed | mod/hooks/register.tsx:waitsOnClaude, mod/hooks/register.tsx:RUNNING, mod/hooks/tasks.ts:WORKING | core.ts; register.tsx, tasks.ts |
 | `openCounts` | Kernel.Phase | a list of tasks tallied by open phase, in `store.OPEN_ORDER`, and how many are done | mod/hooks/tasks.ts:COUNTED | core.ts; tasks.ts (the pane's group header), register.tsx (the status line); the web app's strip from #1325's M5 |
 | `owns` | Kernel.Owner | whose task it is: the session's, and the session's to adopt once its own is gone; `cli._scope` is its twin | mod/hooks/register.tsx:parts, mod/hooks/register.tsx:within, mod/hooks/register.tsx:spotOf, mod/hooks/register.tsx:near, mod/hooks/register.tsx:ranHere | core.ts; register.tsx; the OpenCode plugin from #1313 |
+| `noticesDue` | Kernel.Notice | which notices are due a look: per task its questions and newest notice within the hour, and each task's newest notice however old | born:#1325 | core.ts; register.tsx (`deliver`); the OpenCode plugin from #1313 |
+| `noticePlan` | Kernel.Notice | one due notice judged: still true, toasted once, and the act (skip, none, steer, hold, wake, ack, missed) | born:#1325 | core.ts; register.tsx (`deliver`); the OpenCode plugin from #1313 (steer and queue) |
+| `rewakePlan` | Kernel.Notice | the rewake net: recent, a candidate now, due, and the notice kind a phase stands for | mod/hooks/register.tsx:REWAKE_MAX_MS | core.ts; register.tsx (`rewake`, `quietForJobs`); the OpenCode plugin from #1313 (its idle re-wake) |
 | `awayNow` | Kernel.Away | whether the user is away from the terminal: the web chat used lately, or one of the session's tasks open since | mod/hooks/register.tsx:AWAY_MS | core.ts; register.tsx; the OpenCode plugin from #1319 |
 
 ## Modules
@@ -40,6 +43,7 @@ defined (`tests/test_kernel.py`).
 | Kernel.Phase | `phaseOf`, `openCounts` |
 | Kernel.Owner | `owns` |
 | Kernel.Away | `awayNow` |
+| Kernel.Notice | `noticesDue`, `noticePlan`, `rewakePlan` |
 
 ## Rulings
 
@@ -73,8 +77,13 @@ Final, from #1356's production plan (#1354), with the owner's ruling on the gate
   whether its file system folds case) and the kernel compares them; `cli._scope` is `owns`'s twin
   (`kernel.owns_twin`), and wb's own scope stays the lock. `register.tsx`'s `mine` and `awayNow`
   are adapters over them.
-- **Next, by the owner's ruling (2026-11-25, on #1325 and #1356):** Notice (M3 in TypeScript,
-  M4 ported), the mode machine and `compactPlan` move in; `taskParts` stays out (rendering).
+- **Notice (M3, M4):** the decisions in `deliver` and `rewake` (which notices are due, whether
+  one is still true, toast once, steer or hold mid-turn, the rewake backoff) are the kernel's; the
+  host reads the files, runs `wb ack`'s compare-and-set (the lock, `claim_ack`), submits and says
+  the words. M3's TypeScript step was the parity run itself: main's inline code against the port,
+  over seeded histories, before the inline copy was deleted.
+- **Next, by the owner's ruling (2026-11-25, on #1325 and #1356):** the mode machine and
+  `compactPlan` move in; `taskParts` stays out (rendering).
 
 ## Budget
 

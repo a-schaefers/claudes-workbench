@@ -6,10 +6,11 @@ module Props (props) where
 
 import Prelude
 
-import Data.Array (all, any, concatMap, elem, filter, foldl, index, intersect, length, mapWithIndex, nub, range, sort)
-import Data.Int (toNumber)
-import Data.Maybe (fromMaybe)
+import Data.Array (all, any, concatMap, elem, filter, foldl, index, intersect, last, length, mapWithIndex, nub, range, sort)
+import Data.Int (floor, toNumber)
+import Data.Maybe (fromMaybe, maybe)
 import Kernel.Away (awayNow)
+import Kernel.Notice (noticePlan, noticesDue, rewakePlan)
 import Kernel.Owner (owns)
 import Kernel.Phase (openCounts, phaseOf)
 import Kernel.Tables (tables)
@@ -51,16 +52,22 @@ run seed n = (foldl step { s: start seed, out: [] } (if n < 1 then [] else range
       tl = tasksFrom (next s3)
       ow = ownerFrom tl.s
       aw = awayFrom ow.s tl.tasks
+      nd = rowsFrom aw.s
+      np = planFrom nd.s
+      rp = rewakeFrom np.s
       say :: forall a b. Show a => Show b => a -> b -> String -> String
       say x got what = "seed " <> show seed <> " case " <> show i <> ": " <> show x <> " gave " <> show got
         <> ": "
         <> what
     in
-      { s: aw.s
+      { s: rp.s
       , out: acc.out <> map (say facts (phaseOf facts)) (judge facts)
           <> map (say tl.tasks (openCounts { tasks: tl.tasks })) (judgeCounts tl.tasks)
           <> map (say ow.facts (owns ow.facts)) (judgeOwner ow.facts)
           <> map (say aw.facts (awayNow aw.facts)) (judgeAway aw.facts)
+          <> map (say nd.facts (noticesDue nd.facts)) (judgeDue nd.facts)
+          <> map (say np.facts (noticePlan np.facts)) (judgePlan np.facts)
+          <> map (say rp.facts (rewakePlan rp.facts)) (judgeRewake rp.facts)
       }
 
 -- | The phase round-trips: each flag says which of wb's sets the phase is in (store.py, through
@@ -154,6 +161,127 @@ judgeAway f =
   open t = t.mine && (p.active || p.waits)
     where
     p = phaseOf { phase: t.phase, parked: t.parked }
+
+type DueFacts = { rows :: Array { task :: String, kind :: String, ts :: Number, tasks :: Array String }, startedAt :: Number, now :: Number }
+
+-- | The notices due: each pick within the hour and its own task's, increasing, every question of
+-- | the task in the hour picked, and at most one other, its newest notice, last; `noticed` at or
+-- | past every notice of the task, a batch's for each task it names.
+judgeDue :: DueFacts -> Array String
+judgeDue f =
+  check (all (\d -> all (\k -> maybe false (\r -> r.task == d.task && r.ts * 1000.0 >= since) (at k)) d.picks) d0.due)
+    "a pick is another task's, or over an hour old"
+    <> check (all (\d -> sort d.picks == d.picks && nub d.picks == d.picks) d0.due) "picks out of order"
+    <> check (all (\d -> length (filter (\k -> not (question k)) d.picks) <= 1) d0.due) "two notices of a task due besides its questions"
+    <> check (all (\d -> maybe true (\k -> k == lastOf d.task) (last d.picks)) d0.due) "a task's newest notice in the hour is not its last pick"
+    <> check (all (\r -> any (\n -> n.task == r.task && n.ts >= r.ts) d0.noticed && all (\t -> any (\n -> n.task == t && n.ts >= r.ts) d0.noticed) r.tasks) f.rows)
+      "noticed is behind a notice"
+  where
+  d0 = noticesDue f
+  since = max f.startedAt f.now - 3600000.0
+  at k = index f.rows (floor k)
+  question k = maybe false (\r -> r.kind == "question") (at k)
+  lastOf t = foldl (\acc i -> if maybe false (\r -> r.task == t && r.ts * 1000.0 >= since) (index f.rows i) then toNumber i else acc) (-1.0)
+    (range 0 (length f.rows - 1))
+
+type PlanFacts =
+  { kind :: String, hasId :: Boolean, phase :: String, questionOpen :: Boolean, ts :: Number, acked :: Number
+  , own :: Boolean, wake :: Boolean, busy :: Boolean, toasted :: Boolean, heldAsk :: Boolean }
+
+-- | A notice is delivered at most once while it is true: acknowledged, it is skipped, untoasted;
+-- | only a true notice of this session's, with wakes on, wakes or steers; never one mid-turn but a
+-- | question; a toast only for a true one not toasted before.
+judgePlan :: PlanFacts -> Array String
+judgePlan f =
+  check (elem a [ "skip", "none", "steer", "hold", "wake", "ack", "missed" ]) "an act outside the closed set"
+    <> check ((f.ts <= f.acked) == (a == "skip")) "skipped is not acknowledged"
+    <> check (not (a == "skip") || not p.toast) "toasted when acknowledged"
+    <> check (p.toast == (a /= "skip" && p.current && not f.toasted)) "toasted is not true and not toasted before"
+    <> check (not (a == "wake" || a == "steer" || a == "hold") || p.current && f.own && f.wake) "delivered when not true, not its own, or wakes off"
+    <> check (not (a == "wake") || not f.busy) "woken mid-turn"
+    <> check (not (a == "steer") || f.busy && f.kind == "question") "steered what isn't a question mid-turn"
+    <> check (not (a == "hold") || f.busy && f.kind /= "question") "held a question its agent waits on"
+    <> check (not (a == "missed") || f.heldAsk && f.hasId && not p.current) "missed what wasn't held, or is still true"
+    <> check ((a == "none") == (a /= "skip" && not (f.own && f.wake))) "none is not another session's or wakes off"
+  where
+  p = noticePlan f
+  a = p.act
+
+type RewakeFacts =
+  { phase :: String, parked :: Boolean, mine :: Boolean, updatedAt :: Number, now :: Number, busy :: Boolean
+  , wake :: Boolean, dropped :: Number, acked :: Number, seen :: Number, marked :: Number }
+
+-- | The rewake net: due only for a candidate, a candidate only when recent, idle, wakes on, between
+-- | a minute and twelve hours, a minute past a dropped wake; recent only a task of this session's
+-- | waiting on Claude; never twice: acked now, it is not due again.
+judgeRewake :: RewakeFacts -> Array String
+judgeRewake f =
+  check (not r.due || r.candidate) "due but not a candidate"
+    <> check (not r.candidate || r.recent && not f.busy && f.wake && age >= 60000.0 && age <= 43200000.0 && f.now - f.dropped >= 60000.0)
+      "a candidate busy, with wakes off, too soon, too late or just dropped"
+    <> check (r.recent == (f.mine && w.waits && age <= 43200000.0)) "recent is not this session's waiting within twelve hours"
+    <> check (not (rewakePlan f { acked = f.now / 1000.0 + 1.0 }).due) "due again once acked now"
+    <> check ((r.kind == "question") == (w.active && w.needsClaude)) "the kind is not a question exactly while it asks"
+  where
+  r = rewakePlan f
+  w = phaseOf { phase: f.phase, parked: f.parked }
+  age = f.now - f.updatedAt
+
+rowsFrom :: Int -> { s :: Int, facts :: DueFacts }
+rowsFrom s0 = { s: built.s, facts: { rows: built.rows, startedAt: 1.0e12 - toNumber (s0 `mod` 3) * 3600000.0, now: 1.0e12 } }
+  where
+  built = foldl add { s: next s0, rows: [] } (range 1 (s0 `mod` 9))
+  add acc _ =
+    let
+      a = next acc.s
+      b = next a
+      c = next b
+    in
+      { s: c
+      , rows: acc.rows <> [ { task: pick [ "a", "b", "c" ] a, kind: pick [ "question", "review", "checkin", "stuck" ] b
+                            , ts: (1.0e12 - toNumber (c `mod` 7200) * 1000.0) / 1000.0
+                            , tasks: if c `mod` 5 == 0 then [ pick [ "a", "d" ] b ] else [] } ]
+      }
+
+planFrom :: Int -> { s :: Int, facts :: PlanFacts }
+planFrom s0 =
+  { s: r 11
+  , facts:
+      { kind: pick [ "review", "stuck", "failed", "question", "checkin", "", "paused" ] (r 0)
+      , hasId: r 1 `mod` 3 /= 0
+      , phase: pick (phases <> [ "", "paused" ]) (r 2)
+      , questionOpen: r 3 `mod` 2 == 0
+      , ts: toNumber (r 4 `mod` 5)
+      , acked: toNumber (r 5 `mod` 5)
+      , own: r 6 `mod` 4 /= 0
+      , wake: r 7 `mod` 5 /= 0
+      , busy: r 8 `mod` 3 == 0
+      , toasted: r 9 `mod` 4 == 0
+      , heldAsk: r 10 `mod` 3 == 0
+      }
+  }
+  where
+  r k = foldl (\x _ -> next x) s0 (range 0 k)
+
+rewakeFrom :: Int -> { s :: Int, facts :: RewakeFacts }
+rewakeFrom s0 =
+  { s: r 10
+  , facts:
+      { phase: pick (phases <> [ "paused" ]) (r 0)
+      , parked: r 1 `mod` 3 == 0
+      , mine: r 2 `mod` 4 /= 0
+      , updatedAt: 1.0e12 - toNumber (r 3 `mod` 50000) * 1000.0
+      , now: 1.0e12
+      , busy: r 4 `mod` 4 == 0
+      , wake: r 5 `mod` 5 /= 0
+      , dropped: if r 6 `mod` 3 == 0 then 0.0 else 1.0e12 - toNumber (r 6 `mod` 120) * 1000.0
+      , acked: (1.0e12 - toNumber (r 7 `mod` 50000) * 1000.0) / 1000.0
+      , seen: if r 8 `mod` 3 == 0 then -1.0 else (1.0e12 - toNumber (r 8 `mod` 50000) * 1000.0) / 1000.0
+      , marked: if r 9 `mod` 2 == 0 then 0.0 else (1.0e12 - toNumber (r 9 `mod` 50000) * 1000.0) / 1000.0
+      }
+  }
+  where
+  r k = foldl (\x _ -> next x) s0 (range 0 k)
 
 check :: Boolean -> String -> Array String
 check ok what = if ok then [] else [ what ]

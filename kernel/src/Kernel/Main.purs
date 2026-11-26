@@ -2,12 +2,14 @@
 -- | so esbuild bundles only what crosses into TypeScript (mod/hooks/core.ts).
 module Kernel.Main
   ( module Kernel.Away
+  , module Kernel.Notice
   , module Kernel.Owner
   , module Kernel.Phase
   , module Kernel.Tables
   ) where
 
 import Kernel.Away (awayNow)
+import Kernel.Notice (noticePlan, noticesDue, rewakePlan)
 import Kernel.Owner (owns)
 import Kernel.Phase (openCounts, phaseOf)
 import Kernel.Tables (tables)
