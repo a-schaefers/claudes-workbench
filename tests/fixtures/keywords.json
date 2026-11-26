@@ -1,0 +1,17 @@
+{
+  "_doc": "#1278: what the hosts' keyword detection must say for each text, as runs.keywords does (the Claude Code mod, the OpenCode plugin, the kernel's Keywords, #1325). deepcode: the word, whole, outside backticks and fences. deepmode: a line of its own, `deepmode on` or `deepmode off`; the last such line wins; null when none.",
+  "cases": [
+    {"text": "deepcode fix the flaky login test", "deepcode": true, "deepmode": null},
+    {"text": "please DeepCode this: audit the parser", "deepcode": true, "deepmode": null},
+    {"text": "what does `deepcode` do?", "deepcode": false, "deepmode": null},
+    {"text": "```\ndeepcode\n```\nexplain this block", "deepcode": false, "deepmode": null},
+    {"text": "the deepcoder repo, and deep-code, and deepcode-ish", "deepcode": false, "deepmode": null},
+    {"text": "ultracode the migration", "deepcode": false, "deepmode": null},
+    {"text": "deepmode on", "deepcode": false, "deepmode": true},
+    {"text": "  Deepmode OFF.  ", "deepcode": false, "deepmode": false},
+    {"text": "turn deepmode on please", "deepcode": false, "deepmode": null},
+    {"text": "deepmode on\nthen later\ndeepmode off", "deepcode": false, "deepmode": false},
+    {"text": "deepmode on\ndeepcode rename the flag", "deepcode": true, "deepmode": true},
+    {"text": "", "deepcode": false, "deepmode": null}
+  ]
+}
