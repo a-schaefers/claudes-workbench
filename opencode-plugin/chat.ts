@@ -21,6 +21,7 @@ import type { ServerContext } from './host.d.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv, wbHome } from './wb.ts'
 import type { ChatMsg, ChatOpen, ListenerClaim } from '../mod/types/wire.d.ts'
 import { sameWait, waitingFact, type Waiting } from '../mod/hooks/waiting.ts'
+import { OPENCODE as SAY } from '../mod/hooks/story.ts'
 
 export const POLL_MS = 2_000          // a look at chat/open.json (a file read, no wb run)
 export const CHECK_MS = 60_000        // `wb chat url --json`: on or off, as the mod's CHAT_CHECK_MS
@@ -48,7 +49,9 @@ export const AGENT_NOTE = '(Another agent wrote this through the web chat\'s API
 // #1340 B: while away, a question is refused into the web chat, never a form in a terminal
 // nobody watches (the mod's AWAY_QUESTION, naming the tool here); from `execute.before`, since a
 // `permission.hook` deny loses the text. C (a plan) has no dialog on OpenCode: Plan is an agent.
-export const AWAY_QUESTION = `The user is away: ask in the web chat (the ${REPLY_ID} tool) and end your turn.`
+// The words are the story's (workbench/story.py `refusal.question`, naming REPLY_ID: a test holds
+// the two together), through the generated mod/hooks/story.ts the mod imports too (#1355).
+export const AWAY_QUESTION: string = SAY['refusal.question']
 
 export type Row = Record<string, any>
 export type Run = (args: string[], opts?: { session?: string; cwd?: string }) => Promise<{ ok: boolean; out: string }>

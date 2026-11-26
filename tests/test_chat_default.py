@@ -179,6 +179,12 @@ class ChatDefault(Base):
         self.assertEqual([c.args for c in waited.call_args_list], [(port, None), (port, 4242)])
 
 
+def service_lines(out: str) -> list[str]:
+    """wb setup's lines about the web app's service: every line naming the web app but the story's
+    `link.where`, where its link is, which setup ends with while the chat is on (#1355)."""
+    return [x for x in out.splitlines() if "web app" in x and not x.startswith("--  Open the web app")]
+
+
 class SetupService(Base):
     """wb setup installs the web app's service (#1281); --no-service skips it."""
     def setUp(self):
@@ -227,7 +233,7 @@ class SetupService(Base):
         self.assertFalse((self.home / ".config/systemd").exists())
         self.assertFalse((self.home / "Library").exists())
         self.assertEqual(self.ran(), [])
-        self.assertNotIn("web app", out)
+        self.assertEqual(service_lines(out), [])
 
     def test_setup_links_the_unit_and_enables_it_once_and_again_safely(self):
         # the server `wb chat on` started stops first, so the unit gets the port
@@ -241,13 +247,13 @@ class SetupService(Base):
         self.assertTrue(unit.is_symlink())
         self.assertEqual(unit.resolve(), (ROOT / "systemd/wb-chat.service").resolve())
         self.assertEqual(self.ran()[-3:], ["--user daemon-reload", "--user enable wb-chat", "--user restart wb-chat"])
-        lines = [x for x in out.splitlines() if "web app" in x]
+        lines = service_lines(out)
         self.assertEqual(lines, [f"ok  web app kept up by systemd's wb-chat ({unit} → "
                                  f"{ROOT / 'systemd/wb-chat.service'} (linked))"])
         self.assertEqual(fake.wait(timeout=10), -signal.SIGTERM)
         code, out = self.setup()                                            # again: nothing new
         self.assertEqual(code, 0, out)
-        self.assertEqual([x for x in out.splitlines() if "web app" in x],
+        self.assertEqual(service_lines(out),
                          [f"ok  web app kept up by systemd's wb-chat ({unit} → {ROOT / 'systemd/wb-chat.service'})"])
         self.assertEqual(self.ran().count("--user enable wb-chat"), 2)
         self.assertEqual(self.ran()[-1], "--user start wb-chat")          # the drop-in unchanged: no restart
@@ -285,7 +291,7 @@ class SetupService(Base):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.ran()[-1], "--user disable --now wb-chat")
         ensured.assert_called_once_with(chat.port())
-        self.assertEqual([x for x in out.splitlines() if "web app" in x],
+        self.assertEqual(service_lines(out),
                          [f"--  web app service: systemd's wb-chat didn't answer within {chat.START_WAIT} s, so setup "
                           "stopped it (systemctl --user disable --now wb-chat) and wb started its own server "
                           "instead; journalctl --user -u wb-chat says why, then wb setup again"])
@@ -296,7 +302,7 @@ class SetupService(Base):
         self.assertEqual(code, 0, out)
         self.assertFalse((self.home / ".config/systemd").exists())
         self.assertEqual(self.ran(), ["--user show-environment"])
-        self.assertNotIn("web app", out)
+        self.assertEqual(service_lines(out), [])  # no word of the service
         self.manager.write_text(str(self.home))
         chat.set_on(False)
         code, out = self.setup()

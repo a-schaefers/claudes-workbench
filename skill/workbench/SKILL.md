@@ -288,9 +288,10 @@ on the role's API model, as you set`; and a role's **fallback** (`wb route <role
 <provider/model>|gpu|none`) takes a task whose API model's provider is out of credit, rate-limited or
 down, at the start or once mid-task (`on the role's fallback, as you set`; the report's `fallback:`
 line). Never set a fallback yourself: recommend one (another provider's model, or `gpu`) when a
-provider's stops keep the user's tasks waiting, and run it only when they ask. The terminal is primary: the work is asked for and reviewed
-here, and the web chat is a second lane for while the user is away. The settings live in the web
-app's Settings (the link on the pane's modeline), and what they say is what wb runs by.
+provider's stops keep the user's tasks waiting, and run it only when they ask.
+<!-- story:skill.rule:claude-code -->
+The terminal is primary: it is where you live (this machine, or over `ssh` + `tmux`), the work is asked for and reviewed here, and a prompt you raise is answered here, never in the chat; the web chat is a second lane for while the user is away, and most work still runs from it, more so when they run you with permissions granted (`claude --permission-mode auto`). The settings live in the web app's Settings (the link on the pane's modeline), the source of truth: what they say is what wb runs by, and you never undo a change the user made there.
+<!-- /story -->
 Point the user there; when they ask you to change a setting, help: run its `wb` command on their
 yes (a role through the dialog, as above).
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you

@@ -43,7 +43,7 @@ from pathlib import Path
 
 from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savings, store
 
-GROUPS = ("shared", "gpu", "api", "setup", "workflows", "terminal", "experimental")  # display order
+GROUPS = ("shared", "web", "gpu", "api", "setup", "workflows", "terminal", "experimental")  # display order (`web`: the web app's own, #1355)
 KINDS = ("choice", "number", "info", "action", "note")
 ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_apply)
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
@@ -102,6 +102,14 @@ SPLASH = [("on", "Enabled (default)", "The first /workbench of a session opens w
 PROBE = [("off", "Off (default)", "The agent reads whole files, as without the experiment."),
          ("on", "On (large files only)", f"The agent may extract one function of a file over "
           f"{context.PROBE_FILE_LINES:,} lines with probe, instead of reading it whole (github.com/probelabs/probe).")]
+# Who opens the web app (#1355's phone reach, `wb chat reach`): this machine, or the user's tailnet
+# too; never a LAN option, and the token stays the key either way
+REACH = [("local", "This machine (default)", "Only this machine opens the web app (from elsewhere, an `ssh -L` "
+          "forward of its port)."),
+         ("tailnet", "My tailnet", "Your devices on Tailscale open it at this machine's tailnet name, the link's token "
+          "still the key. Notifications and the home-screen app need https: `tailscale serve` gives it.")]
+REACH_CUSTOM = ("custom", "Addresses of your own (chat.json's bind)", "chat.json names addresses of its own; "
+                "picking one here replaces them.")
 MEDIA = [("image", "Image engine", "image"), ("speech", "Speech engine", "audio"),
          ("sfx", "Sound effects engine", "audio"), ("music", "Music engine", "audio")]
 LOWEST_SAID = "thinking at its lowest effort"  # runner.THINKING_LOWEST's opening (the mod's thinkStops: Couplings)
@@ -124,12 +132,49 @@ def _probe_help(value, said: str) -> str | None:
     return PROBE_HELP.format(said=said) if value == "on" and "not set up" in said else None
 
 
+# The note for the driver when the web app is just opened to the tailnet with no https in front of
+# it (`wb chat reach tailnet` says `https: not served`): the phone opens it, but notifications and
+# the home-screen app need https, which `tailscale serve` gives on the user's yes
+REACH_HELP = (
+    "The web app is now open to the user's tailnet, but nothing serves it over https there, so their "
+    "phone can open it while notifications and the home-screen app can't work yet. wb says: {said}\n"
+    "Offer to run the `tailscale serve` command wb printed, which puts Tailscale's https in front of "
+    "it on their tailnet only, and run it only on their yes.")
+
+
+def _reach_help(value, said: str) -> str | None:
+    return REACH_HELP.format(said=said) if value == "tailnet" and "not served" in said else None
+
+
 # key -> (value, wb's line) -> the note for Claude, or None: a setting whose chosen value can need
 # Claude's help to work names it here
-HELP = {"probe": _probe_help}
+HELP = {"probe": _probe_help, "reach": _reach_help}
 
 
 BY = ("web", "claude")  # apply()'s writers: the web app's click, Claude's `wb settings set`
+
+# Each row's label, as the web app shows it and settings-changes.jsonl records it: the fixed ones
+# here, a role's from routes.LABELS (label_of), a model's tasks row from its id
+LABELS = {"agents": "Agents", "busy": "When the GPU is busy", "driver": "Driver", "coding": "Claude coding",
+          "workflows": "Dynamic workflows", "cap": "API day cap", "progress": "Progress checks",
+          "reach": "Web app reach", "splash": "Opening animation", "probe": "Agent code navigation",
+          "optimize": "Optimize"}
+ROLE_LABELS = {"role": "{}", "gpu": "{} GPU model", "api": "{} API model", "think": "{} thinking",
+               "review": "{} self-review thinking"}
+
+
+def label_of(key: str) -> str:
+    """Row ``key``'s label (a model's tasks row by its id: the web app's names it by its label)."""
+    head, _, rest = key.partition("-")
+    if key in LABELS:
+        return LABELS[key]
+    if head in ROLE_LABELS and rest in routes.LABELS:
+        return ROLE_LABELS[head].format(routes.LABELS[rest])
+    if head == "size":
+        return f"{rest} tasks"
+    if head == "media":
+        return next((lab for kind, lab, _ in MEDIA if kind == rest), key)
+    return key
 
 
 def child_env(by: str = "web") -> dict[str, str]:
@@ -314,7 +359,7 @@ def _driver_row(r: dict, m: dict | None) -> dict:
     own, the GPU models, then API models as the API rows list them; else, without the OpenCode
     plugin, an info row reading Claude Code (fixed)."""
     if not _opencode_path():
-        return _info("driver", "shared", "Driver", DRIVER_CLAUDE)
+        return _info("driver", "shared", LABELS["driver"], DRIVER_CLAUDE)
     pin = r.get("driver") or routes.DRIVER_SESSION
     stops = [DRIVER_SESSION]
     for g in (m or {}).get("gpu") or []:
@@ -328,7 +373,7 @@ def _driver_row(r: dict, m: dict | None) -> dict:
                                   f"conversation, your code in it, goes to {who}."))
     if pin not in {v for v, _, _ in stops}:
         stops.append((pin, pin, f"/workbench in OpenCode switches its session to {pin}."))
-    return _choice("driver", "shared", "Driver", stops, pin, other=True)
+    return _choice("driver", "shared", LABELS["driver"], stops, pin, other=True)
 
 
 def _probe_row() -> dict:
@@ -346,7 +391,7 @@ def _probe_row() -> dict:
             found = line.split("and working (", 1)[1].split(")", 1)[0] if "and working (" in line else ""
             named, says = f"{named}, working", says.replace("with probe", f"with probe ({found})" if found else "with probe")
         stops.append((v, named, says))
-    row = _choice("probe", "experimental", "Agent code navigation", stops, mode)
+    row = _choice("probe", "experimental", LABELS["probe"], stops, mode)
     if help := _probe_help(mode, line):
         row["help"] = help
     return row
@@ -376,7 +421,7 @@ def _optimize_row(m: dict) -> dict:
         state = f"measured {n} model{'' if n == 1 else 's'}{when}"
     else:
         state = "not run yet"
-    return {"key": "optimize", "group": "gpu", "label": "Optimize", "kind": "action",
+    return {"key": "optimize", "group": "gpu", "label": LABELS["optimize"], "kind": "action",
             "text": f"Optimize: {state}",
             "choices": [{"value": "start", "label": "Measure now",
                          "says": "Measures this machine for its models (wb optimize start)."}]}
@@ -433,19 +478,19 @@ def _build() -> dict:
     if r is None:
         out.append(_note("roles-why", "shared", why or OLDER_WB))
     else:
-        out.append(_choice("agents", "shared", "Agents", AGENTS, r.get("use") or "both"))
-        out.append(_choice("busy", "shared", "When the GPU is busy", BUSY, r.get("busy") or "wait"))
+        out.append(_choice("agents", "shared", LABELS["agents"], AGENTS, r.get("use") or "both"))
+        out.append(_choice("busy", "shared", LABELS["busy"], BUSY, r.get("busy") or "wait"))
         for name, label, row in roles:
-            out.append(_choice(f"role-{name}", "shared", label,
+            out.append(_choice(f"role-{name}", "shared", label_of(f"role-{name}"),
                                _role_stops(label, row.get("api"), api_name.get(row.get("api"))), row.get("via") or "gpu"))
     if r is not None:
         out.append(_driver_row(r, m))
-    out.append(_choice("coding", "shared", "Claude coding", CODING, cli.coding_mode()))
-    out.append(_choice("workflows", "workflows", "Dynamic workflows", WORKFLOWS, cli.workflows_mode()))
+    out.append(_choice("coding", "shared", LABELS["coding"], CODING, cli.coding_mode()))
+    out.append(_choice("workflows", "workflows", LABELS["workflows"], WORKFLOWS, cli.workflows_mode()))
     out.extend(_run_rows())
     if r is not None:
         cap = r.get("day_usd")
-        out.append(_number("cap", "shared", "API day cap", float(cap) if cap is not None else None, "usd",
+        out.append(_number("cap", "shared", LABELS["cap"], float(cap) if cap is not None else None, "usd",
                            "Needed before an API role; $5 suggested." if cap is None else
                            f"API tasks stop for the day at {routes.money(cap)} of spend."))
     # Stats recording, Live view, Live refresh and the electricity price had rows here, as the
@@ -453,8 +498,15 @@ def _build() -> dict:
     # savings --price keep the rest): a `recording` row read a key stats.settings() no longer has
     prog = progress.settings()
     after = progress.user_after(prog) or 0
-    out.append(_choice("progress", "shared", "Progress checks", _progress_stops(after),
+    out.append(_choice("progress", "shared", LABELS["progress"], _progress_stops(after),
                        "on" if prog.get("on") is True else "off"))
+    try:
+        reach = chat.reach()
+    except chat.ConfigError as e:
+        out.append(_note("reach-why", "web", str(e)))
+    else:
+        out.append(_choice("reach", "web", LABELS["reach"], [*REACH, *([REACH_CUSTOM] if reach == "custom" else [])],
+                           reach))
 
     # gpu
     if r is None:
@@ -466,7 +518,7 @@ def _build() -> dict:
     else:
         for name, label, row in roles:
             gpu = row.get("gpu") or routes.AUTO
-            out.append(_choice(f"gpu-{name}", "gpu", f"{label} GPU model", _gpu_stops(label, m["gpu"], gpu), gpu))
+            out.append(_choice(f"gpu-{name}", "gpu", label_of(f"gpu-{name}"), _gpu_stops(label, m["gpu"], gpu), gpu))
         for g in m["gpu"]:  # every discovered model: the pane's six-row cap went with the pane
             sizes = g.get("sizes") or []
             out.append(_choice(f"size-{g['id']}", "gpu", f"{g.get('label') or g['id']} tasks", SIZES,
@@ -493,21 +545,21 @@ def _build() -> dict:
                 others = [x.get("api") for n, _, x in roles if n != name and x.get("api")]
                 api = row.get("api") or ""
                 stops = _api_stops(label, m, api, others)
-                c = _choice(f"api-{name}", "api", f"{label} API model", stops, api or None, other=True)
+                c = _choice(f"api-{name}", "api", label_of(f"api-{name}"), stops, api or None, other=True)
                 if not api:
                     c["says"] = f"{label} has no API model: it runs on the GPU."
                 out.append(c)
             for name, label, row in roles:
-                out.append(_choice(f"think-{name}", "api", f"{label} thinking",
+                out.append(_choice(f"think-{name}", "api", label_of(f"think-{name}"),
                                    _think_stops({"api": None, "thinking": "off", **row}), row.get("thinking") or "off"))
             for name, label, row in roles:
                 if row.get("api"):
-                    out.append(_choice(f"review-{name}", "api", f"{label} self-review thinking", REVIEW,
+                    out.append(_choice(f"review-{name}", "api", label_of(f"review-{name}"), REVIEW,
                                        row.get("thinking_review") or "off"))
             out.append(_info("api-spend", "api", "Spend today", _spend_line(r)))
 
     out += setup_rows()
-    out.append(_choice("splash", "terminal", "Opening animation", SPLASH, "on" if cli.splash_on() else "off"))
+    out.append(_choice("splash", "terminal", LABELS["splash"], SPLASH, "on" if cli.splash_on() else "off"))
     out.append(_probe_row())
     order = {g: i for i, g in enumerate(GROUPS)}
     out.sort(key=lambda x: order[x["group"]])  # stable: each group's rows keep their order
@@ -614,6 +666,8 @@ def _argv(row: dict, value) -> list[str]:
         return ["experiment", "probe", value]
     if key == "optimize":
         return ["optimize", "start"]
+    if key == "reach":
+        return ["chat", "reach", value]
     if key == "driver":
         return ["route", "driver", value]
     if head == "run":
@@ -711,6 +765,131 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
     store.append_jsonl(chat.changes_path(), entry)
     store.write_json(chat.chat_dir() / REV, {k: entry[k] for k in ("ts", "key", "label", "to", "by")})
     return entry
+
+
+# Every write logged in one place (#1355): cli.main, around the command it runs. A Settings row is
+# a wb command line (_argv); key_for reads that line back into the row and its value, so whoever
+# types the row's own command (the web app's child, Claude's `wb settings set` child, the OpenCode
+# driver's shell, the user at a terminal) logs one row of settings-changes.jsonl, `by` actor():
+# before #1355's wave 3 only the web app's POST and `wb settings set` logged, so `wb coding ask`
+# typed at a terminal changed the row with no stamp and no open page heard of it. Only the rows'
+# own command lines count: a combined one (`wb route significant api --api x`) logs nothing.
+ROUTE_FLAGS = {"--gpu": "gpu", "--api": "api", "--thinking": "think", "--thinking-review": "review"}
+LOGGED = ("route", "coding", "workflows", "progress", "splash", "experiment", "optimize", "model", "image",
+          "audio", "chat")  # the commands key_for reads: cli.main imports this module only for them
+
+
+def key_for(argv: list[str]) -> tuple[str, str] | None:
+    """The row a wb command line writes and the value, _argv's inverse: (key, value), or None for
+    a line that is no row's own (a read, a dry run, a flag a row's command doesn't take)."""
+    a = [str(x) for x in argv]
+    for i, x in enumerate(a):  # `--api=x` as `--api x`
+        if x.startswith("--") and "=" in x:
+            a[i:i + 1] = x.split("=", 1)
+            break
+    if not a or any(x.startswith("-") and x not in (*ROUTE_FLAGS, "--default", "--port") for x in a):
+        return None  # a dry run, --json, a flag no row's command takes
+    cmd, rest = a[0], a[1:]
+    if cmd == "route":
+        if len(rest) == 2 and not rest[1].startswith("-"):
+            if rest[0] in ("all", "busy"):
+                return ("agents" if rest[0] == "all" else "busy"), rest[1]
+            if rest[0] in ("cap", "driver"):
+                return rest[0], rest[1]
+            if rest[0] in routes.ROLES and rest[1] in ("gpu", "api"):
+                return f"role-{rest[0]}", rest[1]
+        if len(rest) == 3 and rest[0] in routes.ROLES and rest[1] in ROUTE_FLAGS and not rest[2].startswith("-"):
+            return f"{ROUTE_FLAGS[rest[1]]}-{rest[0]}", rest[2]
+        return None
+    if cmd in ("coding", "workflows", "progress", "splash") and len(rest) == 1 and not rest[0].startswith("-"):
+        return cmd, rest[0]
+    if cmd == "experiment" and len(rest) == 2 and rest[0] == "probe":
+        return "probe", rest[1]
+    if a == ["optimize", "start"]:
+        return "optimize", "start"
+    if cmd == "chat" and rest[:1] == ["reach"] and (len(rest) == 2 or (len(rest) == 4 and rest[2] == "--port")):
+        return "reach", rest[1]
+    if cmd == "model" and len(rest) >= 2 and rest[0] == "sizes" and not any(x.startswith("-") for x in rest):
+        sizes = sorted(set(rest[2:]))
+        return f"size-{rest[1]}", sizes[0] if len(sizes) == 1 else "all"
+    if cmd in ("image", "audio") and len(rest) == 2 and rest[0] == "--default":
+        kind = "image" if cmd == "image" else _audio_kind(rest[1])
+        return (f"media-{kind}", rest[1]) if kind else None
+    return None
+
+
+def _audio_kind(engine: str) -> str | None:
+    from . import audio
+    try:
+        e = audio.engines().get(engine)
+    except (RuntimeError, OSError):
+        return None
+    kind = audio.kind_of(e) if e else None
+    return kind if any(k == kind for k, _, _ in MEDIA) else None
+
+
+def current(key: str):
+    """Row ``key``'s value now, read in this process from the files the row's command writes (never
+    the rows' `wb route --json` and `wb models --json` children: cli.main asks before and after
+    each write); None for none, an action, or a file that can't be read."""
+    head, _, rest = key.partition("-")
+    try:
+        if key in ("agents", "busy", "cap", "driver") or (head in ROLE_LABELS and rest in routes.ROLES):
+            doc = routes.read()
+            if key == "agents":
+                return doc.get("use") or "both"
+            if key == "busy":
+                return doc.get("busy") or "wait"
+            if key == "cap":
+                return float(doc["day_usd"]) if doc.get("day_usd") is not None else None
+            if key == "driver":
+                return doc.get("driver") or routes.DRIVER_SESSION
+            row = doc["roles"].get(rest) or {}
+            return {"role": row.get("via") or "gpu", "gpu": row.get("gpu") or routes.AUTO, "api": row.get("api") or None,
+                    "think": row.get("thinking") or "off", "review": row.get("thinking_review") or "off"}[head]
+        if key == "coding":
+            return cli.coding_mode()
+        if key == "workflows":
+            return cli.workflows_mode()
+        if key == "progress":
+            return "on" if progress.settings().get("on") is True else "off"
+        if key == "splash":
+            return "on" if cli.splash_on() else "off"
+        if key == "probe":
+            return context.experiments().get("probe", "off")
+        if key == "reach":
+            return chat.reach()
+        if head == "size":
+            from . import models
+            sizes = (models._overrides().get(rest) or {}).get("sizes") or []
+            return sizes[0] if len(sizes) == 1 else "all"
+        if head == "media":
+            from . import audio, images
+            kinds = {"image": images.choices()} if rest == "image" else audio.choices()
+            return (kinds.get(rest) or {}).get("default")
+    except (routes.RoutesError, chat.ConfigError, RuntimeError, OSError, ValueError, KeyError, TypeError):
+        return None
+    return None
+
+
+def actor() -> str:
+    """Who a write is by: the caller (store.caller_kind: `agent`, `claude`, `opencode`), else `web`
+    for the web app's child (WB_ACTOR, which child_env sets; Claude's own WB_ACTOR=web stays
+    Claude's), else `terminal`."""
+    kind = store.caller_kind()
+    return "web" if kind == "terminal" and os.environ.get(ACTOR) == "web" else kind
+
+
+def logged(key: str, value: str, before, said: str, by: str | None = None) -> dict | None:
+    """Log a write that went through (cli.main's): record() with the row's value ``before`` and
+    after it, wb's last line ``said`` and the note HELP gives for it; None for a no-op."""
+    kind = "action" if key == "optimize" else "number" if key == "cap" else "choice"
+    after = current(key)
+    to = value if kind == "action" or after is None else after
+    said = said or "done"
+    done = {"said": said, **({"help": h} if key in HELP and (h := HELP[key](value, said)) else {})}
+    return record({"key": key, "label": label_of(key), "kind": kind, "value": before}, key, to, done,
+                  by or actor())
 
 
 # Who changed a setting, as the page shows it (#1355, "A Settings change made while Claude is

@@ -119,7 +119,7 @@ class OpenCodeChat(Base):
         r = chat.thread()[-1]
         self.assertEqual((r["re"], r["to"], r["turn_by"]), ([m["id"]], ["user"], "ses_a"))
         self.assertIn("OpenCode: all green", run_wb("chat", "log"))
-        self.assertIn("listening: /p (OpenCode)", run_wb("chat", "log"))
+        self.assertIn("OpenCode is listening in /p.", run_wb("chat", "log"))  # the page's state line (#1355)
 
     def test_an_opencode_sessions_report_never_threads_onto_a_claude_code_listeners_message(self):
         store.write_json(chat.chat_dir() / "listener.json",

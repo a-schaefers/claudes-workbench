@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, cards, chat, context, driver, gitops, hardware, images, lane,
                lessons, media, models, ocplugin, optimize, patches, progress, results, router, routes, runs,
-               savings, scan, skills, stats, store, transcript, tuning, verify, webpush)
+               savings, scan, skills, stats, store, story, transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from . import keyhole
@@ -3835,7 +3835,7 @@ def cmd_splash(a):
 # to explain the options and, on the user's clear ask and yes in the conversation, change one
 # through the same writer the web app uses (the owner, 2026-11-24: "claude is an interactive
 # assistant to the web panel, in case a user gets confused about the options"; "We trust Claude")
-SETTINGS_GROUPS = {"shared": "Shared", "gpu": "GPU", "api": "API", "terminal": "Terminal",
+SETTINGS_GROUPS = {"shared": "Shared", "web": "Web app", "gpu": "GPU", "api": "API", "terminal": "Terminal",
                    "experimental": "Experimental"}
 SETTINGS_SET = "wb settings set <key> <value> changes one, on the user's clear ask and yes"
 
@@ -3881,7 +3881,8 @@ def cmd_settings(a):
     """List every Settings row, or set one as Claude (#1287): through settings.apply, wb's own
     command for the row run with this environment, so under Claude Code a change wb route gates
     (a role to API, the cap) still waits for the mod's dialog. A change that went through is a
-    settings-changes.jsonl row, by claude (terminal outside Claude Code)."""
+    settings-changes.jsonl row that child logs (cli.main), by claude (opencode under an OpenCode
+    driver, terminal outside both)."""
     from . import settings  # it imports this module
     if a.action == "offers":  # the web's changes due a word to the driver (#1334)
         got = settings.offers(spend=a.if_due)
@@ -3903,7 +3904,6 @@ def cmd_settings(a):
             if code:
                 sys.exit(code)
             return
-        before = next((r for r in settings.rows() if r["key"] == a.key), {})
         done = settings.apply(a.key, a.value, by="claude")
     except KeyError:
         die(f"no setting {a.key!r}: wb settings lists them", 2)
@@ -3913,8 +3913,7 @@ def cmd_settings(a):
         said = done["said"]
         print(said if said.startswith("wb:") else f"wb: {said}", file=sys.stderr)
         sys.exit(3)
-    settings.record(before, a.key, a.value, done, store.caller_kind())  # agent, claude, opencode (#1309), terminal
-    print(done["said"])
+    print(done["said"])  # the row's own wb, its child, logged the change (cli.main, #1355)
     if done.get("help"):
         print(done["help"])
 
@@ -7440,6 +7439,8 @@ def cmd_chat(a):
               f"web chat on: started its server ({_chat_started()}): {got['url']}")
         for why in logout_stops():  # its unit is a user service: a logout stops it (#351)
             print(f"--  {why}")
+        if (said := reach_hint()):  # the phone's way in (#1355)
+            print(f"--  {said}")
     elif a.action == "off":
         chat.set_on(False)
         if chat.stop_started():
@@ -7502,6 +7503,8 @@ def cmd_chat(a):
         if not ok:
             die(f"standing by: {(claim or {}).get('tool') or 'claude'} listens in {(claim or {}).get('cwd', '?')}")
         print("listening")
+    elif a.action == "reach":  # who opens the web app: this machine, or the tailnet too (#1355)
+        chat_reach(a.id, a.port)
     elif a.action == "away":  # the OpenCode plugin's: is the user away from the terminal (#1319)
         print("away" if chat.away(store.opencode_session() or a.by or "") else "here")
     elif a.action == "back":  # and back at it: they typed, or answered a dialog there
@@ -7536,9 +7539,50 @@ def cmd_chat(a):
                                                         if isinstance(r.get("driver"), dict) else None, "Claude")))
             files = "".join(f" [attached: {f.get('path')}]" for f in r.get("files") or [] if isinstance(f, dict))
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}{files}")
-        lst = chat.listener()
-        print((f"listening: {lst.get('cwd')}" + (" (OpenCode)" if lst.get("tool") == "opencode" else ""))
-              if lst else "no session is listening")
+        print(chat.driver_state()["line"])  # the page's state line, word for word (#1355)
+
+
+def reach_hint() -> str:
+    """The story's `link.reach` while the web app opens on this machine alone, else ""."""
+    try:
+        return story.text("link.reach") if chat.reach() == "local" else ""
+    except chat.ConfigError:
+        return ""
+
+
+def chat_reach(to: str | None, port: int) -> None:
+    """`wb chat reach [local|tailnet]` (#1355): who opens the web app. No value: which it is. A
+    change writes chat.json's `bind` (chat.set_reach), which the running server rebinds to within
+    chat.REPLAN_EVERY; for the tailnet, the name to open and whether https is served there (push
+    and the home-screen app need it: `tailscale serve`, the driver's to offer, run on a yes)."""
+    if to is None:
+        try:
+            now = chat.reach()
+        except chat.ConfigError as e:
+            die(str(e))
+        print(f"web app reach: {now}" + {"local": " (this machine only)", "tailnet": " (this machine and your tailnet)",
+                                          "custom": " (chat.json's own bind)"}[now])
+        return
+    try:
+        got = chat.set_reach(to)
+    except ValueError as e:
+        die(f"wb chat reach {to}: {e}")
+    except chat.ConfigError as e:
+        die(str(e))
+    if to == "local":
+        print("web app reach: local (this machine only)" + ("" if got["from"] == "local" else
+              f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"))
+        return
+    ts = got["ts"]
+    name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts["ip"]
+    print(f"web app reach: tailnet: http://{name}:{port}/ with the link's #token=… (`wb chat url`), within "
+          f"{chat.REPLAN_EVERY} s")
+    served = chat.https_served(port)
+    if served:
+        print(f"https: served at https://{ts.get('dns') or name}/ (notifications and the home-screen app work there)")
+    else:  # settings.REACH_HELP's cue: `not served`
+        print(f"https: not served: notifications and the home-screen app need it; `tailscale serve --bg {port}` "
+              "serves it on your tailnet only")
 
 
 def chat_token(what: str | None, name: str | None) -> None:
@@ -7930,6 +7974,8 @@ def cmd_setup(a):
     print("first run:")  # what a working setup still needs, each with its fix (#111)
     for line in first_run():
         print(line)
+    if chat.is_on():  # where the web app is: setup printed no word of it (#1355)
+        print("--  " + story.text("link.where", "opencode" if a.opencode else "claude-code"))
     print("next: wb doctor")
     sys.exit(1 if bad else 0)
 
@@ -8813,6 +8859,8 @@ def cmd_doctor(a):
         print(f"--  {said}")
     else:
         line(good, said)
+        if good and shutil.which("tailscale") and (hint := reach_hint()):  # the phone's way in (#1355)
+            print(f"--  {hint}")
     for good, said in schedule.doctor_lines():  # wb schedule (#1204)
         line(good, said)
     # #516: a warning, not BAD: a server or a desktop that never sleeps is fine. Its own name: once
@@ -9112,7 +9160,13 @@ def main(argv=None):
     except OSError:
         pass  # a measurement's record never stops a command
     try:
-        a.f(a)
+        raw = list(sys.argv[1:] if argv is None else argv)
+        write = _setting_write(raw)
+        if write is None:
+            a.f(a)
+        else:
+            with write:
+                a.f(a)
     except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
         die(str(e))
     except UnicodeError as e:  # text no encoding takes: a line, not a traceback (#873)
@@ -9130,6 +9184,58 @@ def main(argv=None):
         print(f"wb crashed: a bug in workbench. {patches.driver_name()} can fix it for you as a local patch "
               f"(wb patch) and offer it upstream ({PKG_ROOT / 'CONTRIBUTING.md'})", file=sys.stderr)
         sys.exit(1)
+
+
+class _Said:
+    """sys.stdout as it was, remembering the last line written: a Settings write's `said`."""
+
+    def __init__(self, out):
+        self.out, self.text = out, ""
+
+    def write(self, data):
+        self.text = (self.text + data)[-4096:]
+        return self.out.write(data)
+
+    def last(self) -> str:
+        return next((ln.strip() for ln in reversed(self.text.splitlines()) if ln.strip()), "")
+
+    def __getattr__(self, name):
+        return getattr(self.out, name)
+
+
+class _SettingWrite:
+    """One Settings row's write, logged once in one place (#1355): the row's value before the
+    command runs, wb's last line while it runs, and after it exits 0 settings.logged's row of
+    settings-changes.jsonl (from, to, by whom: settings.actor), which stamps chat/settings-rev.json
+    so an open page redraws. A refusal (a nonzero exit, an error) logs nothing; nor does a no-op."""
+
+    def __init__(self, settings, key: str, value: str):
+        self.settings, self.key, self.value = settings, key, value
+
+    def __enter__(self):
+        self.before = self.settings.current(self.key)
+        self.out = sys.stdout
+        sys.stdout = self.said = _Said(self.out)
+        return self
+
+    def __exit__(self, et, e, tb):
+        sys.stdout = self.out
+        if et is None or (et is SystemExit and e.code in (0, None)):
+            try:
+                self.settings.logged(self.key, self.value, self.before, self.said.last())
+            except OSError:
+                pass  # the log never fails the change it logs
+        return False
+
+
+def _setting_write(raw: list[str]) -> _SettingWrite | None:
+    """The log of a Settings row's own command line (settings.key_for), or None for any other."""
+    if not raw or raw[0] not in ("route", "coding", "workflows", "progress", "splash", "experiment", "optimize",
+                                 "model", "image", "audio", "chat"):  # settings.LOGGED: no import for the rest
+        return None
+    from . import settings  # it imports this module
+    hit = settings.key_for(raw)
+    return _SettingWrite(settings, *hit) if hit else None
 
 
 def _candidates(v: str) -> int:
@@ -9781,14 +9887,15 @@ def parser() -> argparse.ArgumentParser:
                        "the thread (log), receipts (ack, claim), what waits (pending), the line "
                        "that a dialog waits in the terminal (notice: the mod's), other agents' tokens "
                        "(token add|list|revoke), a turn's end (ended: the mod's), and the "
-                       "OpenCode plugin's claim on it (listener), away and back")
+                       "OpenCode plugin's claim on it (listener), away and back, and who opens it "
+                       "(reach local|tailnet)")
     s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
                                       "claim", "pending", "notice", "token", "ended", "listener",
-                                      "away", "back"], nargs="?",
+                                      "away", "back", "reach"], nargs="?",
                    default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; listen: the clips (wb "
                    "audio's takes, up to 8); token: add, list or revoke; ended: the messages the "
-                   "turn took")
+                   "turn took; reach: local or tailnet (none: which it is)")
     s.add_argument("verdict", nargs="?", help="token: the agent's name")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
     s.add_argument("--tool", help="notice: the tool asking")

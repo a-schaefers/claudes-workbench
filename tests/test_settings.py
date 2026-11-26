@@ -22,7 +22,8 @@ def expected(key: str, value) -> list[str]:
              "workflows": ["workflows", value],
              "progress": ["progress", value], "splash": ["splash", value],
              "probe": ["experiment", "probe", value], "optimize": ["optimize", "start"],
-             "cap": ["route", "cap", value], "driver": ["route", "driver", value]}
+             "cap": ["route", "cap", value], "driver": ["route", "driver", value],
+             "reach": ["chat", "reach", value]}
     if key in fixed:
         return fixed[key]
     return {"role": ["route", rest, value], "gpu": ["route", rest, "--gpu", value],
@@ -78,7 +79,7 @@ class Settings(Rows):
         json.dumps(rows)  # JSON-safe
         for want in ("agents", "busy", "role-significant", "coding", "workflows", "cap",
                      "progress", "gpu-trivial", "optimize", "api-connected", "api-writing",
-                     "think-trivial", "review-trivial", "api-spend", "splash", "probe"):
+                     "think-trivial", "review-trivial", "api-spend", "splash", "probe", "reach"):
             self.assertIn(want, keys)
         self.assertNotIn("review-writing", keys)  # only a role with an API model (#1059)
         self.assertNotIn("chat", keys)   # the web app is always on now
@@ -444,6 +445,79 @@ class ClaudeSets(Rows):
                                                 for r in context.denied_shell())]
         for cmd in ("wb settings set coding ask", "wb settings", "wb settings set role-trivial api"):
             self.assertEqual(tw.Permission.verdict(rules, cmd), "deny", cmd)
+
+
+class OneWriter(Rows):
+    """Every Settings write logged in one place (#1355): cli.main, around a row's own wb command
+    line, whoever runs it (the web app's child, Claude's `wb settings set` child, an OpenCode
+    driver's shell, the user's terminal), once, `by` settings.actor()."""
+
+    def changes(self) -> list[dict]:
+        from workbench import chat
+        p = chat.changes_path()
+        return [json.loads(ln) for ln in p.read_text().splitlines()] if p.exists() else []
+
+    def test_every_rows_own_command_line_reads_back_as_its_key_and_value(self):
+        rows = [r for r in settings.rows() if r["kind"] not in ("info", "note")]
+        self.assertGreater(len(rows), 15)
+        for r in rows:
+            values = ["6"] if r["kind"] == "number" else [c["value"] for c in r["choices"]]
+            for v in values:
+                with self.subTest(key=r["key"], value=v):
+                    self.assertEqual(settings.key_for(settings._argv(r, v)), (r["key"], v))
+        # the rows a test's machine may lack: a model's tasks, an engine, the OpenCode driver
+        self.assertEqual(settings.key_for(["model", "sizes", "local/m", "trivial"]), ("size-local/m", "trivial"))
+        self.assertEqual(settings.key_for(["model", "sizes", "local/m"]), ("size-local/m", "all"))
+        self.assertEqual(settings.key_for(["image", "--default", "comfy"]), ("media-image", "comfy"))
+        with mock.patch.object(settings, "_audio_kind", return_value="music"):
+            self.assertEqual(settings.key_for(["audio", "--default", "ace"]), ("media-music", "ace"))
+        self.assertEqual(settings.key_for(["route", "driver", "ollama/x#high"]), ("driver", "ollama/x#high"))
+        self.assertEqual(settings.key_for(["route", "trivial", "--api=deepseek/x"]), ("api-trivial", "deepseek/x"))
+
+    def test_a_read_a_dry_run_or_a_combined_line_is_no_rows_write(self):
+        for argv in (["route"], ["route", "--json"], ["route", "--dry-run", "cap", "5"], ["route", "trivial"],
+                     ["route", "significant", "api", "--api", "x"], ["route", "trivial", "fallback", "gpu"],
+                     ["coding"], ["settings", "set", "coding", "ask"], ["optimize", "start", "--if-due"],
+                     ["chat", "log"], ["chat", "reach"], ["experiment"], ["model", "sizes", "m", "--x"],
+                     ["experiment", "probe", "--json"], ["image", "--default", "--list"]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(settings.key_for(argv))
+
+    def test_a_change_at_the_terminal_logs_once_by_the_terminal_with_wbs_line_and_a_no_op_logs_nothing(self):
+        from workbench import chat, cli
+        out = tw.run_wb("coding", "ask")
+        self.assertEqual(cli.coding_mode(), "ask")
+        [row] = self.changes()
+        self.assertEqual({k: row[k] for k in ("key", "label", "from", "to", "said", "by")},
+                         {"key": "coding", "label": "Claude coding", "from": "decide", "to": "ask",
+                          "said": out.strip(), "by": "terminal"})
+        self.assertEqual(chat.settings_rev()["key"], "coding")  # an open page redraws
+        tw.run_wb("coding", "ask")
+        self.assertEqual(len(self.changes()), 1)
+        tw.run_wb("route", "cap", "7")
+        self.assertEqual([(c["key"], c["from"], c["to"]) for c in self.changes()][-1], ("cap", 5.0, 7.0))
+        tw.run_wb("route", "--dry-run", "cap", "9")
+        tw.run_wb("route", "--json")
+        self.assertEqual(len(self.changes()), 2)
+
+    def test_the_writer_is_who_runs_it_and_the_web_apps_mark_never_hides_a_driver(self):
+        for env, by in (({"WB_ACTOR": "web"}, "web"), ({"CLAUDECODE": "1", "WB_ACTOR": "web"}, "claude"),
+                        ({"OPENCODE_SESSION_ID": "ses_abc123"}, "opencode")):
+            with self.subTest(by=by), mock.patch.dict(os.environ, env):
+                tw.run_wb("workflows", "on" if by != "claude" else "off")
+                self.assertEqual(self.changes()[-1]["by"], by)
+        self.assertEqual([c["to"] for c in self.changes()], ["on", "off", "on"])
+
+    def test_a_refused_write_logs_nothing(self):
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {
+            "significant": {"via": "gpu", "api": "deepseek/deepseek-flash"}}}))
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}), redirect_stderr(err), self.assertRaises(SystemExit) as e:
+            tw.run_wb("route", "significant", "api")  # gated: the mod's dialog approved none
+        self.assertEqual(e.exception.code, 3, err.getvalue())
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            tw.run_wb("coding", "sometimes")
+        self.assertEqual(self.changes(), [])
 
 
 class SettingsOffers(tw.Base):

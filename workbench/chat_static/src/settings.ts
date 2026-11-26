@@ -10,13 +10,16 @@
 // again with no reload, a draft kept, and a change this page didn't make is toasted on any view.
 (() => {
   'use strict'
-  const GROUPS = [['shared', 'Agents and roles'], ['gpu', 'GPU'], ['api', 'API'],
+  const GROUPS = [['shared', 'Agents and roles'], ['web', 'Web app'], ['gpu', 'GPU'], ['api', 'API'],
     ['setup', 'What your agents get'], ['workflows', 'Deep workflows'], ['terminal', 'Terminal'],
     ['experimental', 'Experimental']]
   const SEG_MAX = 4                     // a segmented control up to this many choices, a <select> past it
   const OTHER = '\u0000other'           // the select's "Other model…" (never a model id: a NUL)
   const UNITS: Record<string, string[]> = { usd: ['$', '/day'] }
-  const HELP_SAID = 'Claude will offer to set it up.'  // the pane's toast, when a choice needs Claude's help
+  // the pane's toast, when a choice needs the driver's help: named as the state names it (#1355:
+  // OpenCode's user read that Claude would offer), else the story's `any`
+  let who = 'your driver'
+  const helpSaid = () => `${who.charAt(0).toUpperCase()}${who.slice(1)} will offer to set it up.`
 
   let root: HTMLElement | null = null
   let rows: SettingRow[] | null = null  // the last rows the server sent
@@ -85,7 +88,7 @@
       if (Array.isArray(body.changes)) changes = body.changes
       if (r.ok && body.ok && typeof body.detail === 'string') details.set(key, body.detail)
       said = r.ok && body.ok ? body.said || 'Done.' : body.error || body.said || `the server said ${r.status}`
-      if (r.ok && body.ok && body.help) said = `${/[.!?]$/.test(said) ? said : said + '.'} ${HELP_SAID}`
+      if (r.ok && body.ok && body.help) said = `${/[.!?]$/.test(said) ? said : said + '.'} ${helpSaid()}`
     } catch { said = "The computer didn't answer: Settings shows what it says now."; lost = true }
     wrote = reads + 1
     lastWrite = Date.now()
@@ -296,6 +299,7 @@
   // a change made anywhere: the state's `settings` moved (the first state only sets the mark)
   let rev: number | null = null
   WB.on('state', (s: ChatState) => {
+    if (s.driver && s.driver.who) who = s.driver.who
     const r = s.settings, ts = r ? r.ts : 0
     if (rev === null) { rev = ts; return }
     if (ts === rev) return

@@ -17,5 +17,6 @@
             "mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts", "mod/hooks/core.ts",
             "mod/hooks/kernel.js", "mod/hooks/modeline.ts", "mod/hooks/keywords.ts", "mod/hooks/flows.ts", "mod/hooks/waiting.ts",
             "mod/hooks/shell.ts",
+            "mod/hooks/story.ts",
             "LICENSE"]
 }

@@ -53,14 +53,20 @@ class Story(unittest.TestCase):
 
     def test_a_one_byte_edit_to_a_generated_copy_fails_the_check(self):
         page = Path("workbench") / "chat_static" / "src" / "story.ts"
+        host = Path("mod") / "hooks" / "story.ts"
+        skill = Path("skill") / "workbench"
         for rel, old, new in ((page, "Message {who}", "Message {who}!"),
-                              (Path("README.md"), "never undoes a change you made", "never undoes a change")):
+                              (Path("README.md"), "never undoes a change you made", "never undoes a change"),
+                              (host, "and end your turn.", "and end your turn"),
+                              (skill / "SKILL.md", "never undo a change the user made there", "never undo a change"),
+                              (skill / "reference" / "driving.md", "it clears when the prompt is answered", "it clears")):
             with self.subTest(copy=str(rel)), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                for f in (page, Path("README.md")):
+                for f in (page, host, *map(Path, story.DOCS)):
                     (root / f).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy(ROOT / f, root / f)
-                with mock.patch.object(gen_story, "ROOT", root), mock.patch.object(gen_story, "PAGE_TS", root / page):
+                with mock.patch.object(gen_story, "ROOT", root), mock.patch.object(gen_story, "PAGE_TS", root / page), \
+                        mock.patch.object(gen_story, "HOST_TS", root / host):
                     self.assertEqual(gen_story.check(), [])
                     body = (root / rel).read_text()
                     self.assertIn(old, body)
@@ -126,8 +132,47 @@ class Story(unittest.TestCase):
         self.assertEqual(chat.WAITING_GRANT, " Run it with permissions granted to work from the chat.")
         self.assertEqual(story.text("note.waiting", "opencode"), "OpenCode is waiting for you in the terminal.")
 
+    def test_the_hosts_module_says_the_refusals_each_host_said_before_it_byte_for_byte(self):
+        # #1355: the mod's AWAY_QUESTION, AWAY_PLAN and CONSENT_WAITING and the plugin's
+        # AWAY_QUESTION moved into the story; the mod's tests and the turns that read them know
+        # these bytes, and the plugin's names its reply tool (opencode-plugin/chat.ts REPLY_ID)
+        self.assertEqual(story.text("refusal.question", "claude-code"),
+                         "The user is away: ask in the web chat (`wb chat reply`) and end your turn.")
+        self.assertEqual(story.text("refusal.plan", "claude-code"),
+                         "Post the plan in the web chat and end your turn; approval is at the terminal.")
+        self.assertEqual(story.text("refusal.consent", "claude-code"),
+                         "Claude is waiting on a workbench dialog in the terminal: answer it there.")
+        self.assertEqual(story.text("refusal.question", "opencode"),
+                         "The user is away: ask in the web chat (the workbench_chat_reply tool) and end your turn.")
+        with self.assertRaises(ValueError):  # OpenCode has no plan dialog: Plan is an agent
+            story.text("refusal.plan", "opencode")
+        reg = (ROOT / "mod" / "hooks" / "register.tsx").read_text()
+        for name, key in (("AWAY_QUESTION", "refusal.question"), ("AWAY_PLAN", "refusal.plan"),
+                          ("CONSENT_WAITING", "refusal.consent")):
+            with self.subTest(name=name):
+                self.assertRegex(reg, rf"const {name}: string = SAY\['{re.escape(key)}'\]")
+        self.assertIn("export const AWAY_QUESTION: string = SAY['refusal.question']",
+                      (ROOT / "opencode-plugin" / "chat.ts").read_text())
+
+    def test_the_skill_blocks_are_claude_codes_and_the_hosts_module_has_opencodes(self):
+        # #1355: SKILL.md and driving.md carry Claude Code's sentence; opencode-plugin/skill.ts
+        # swaps in OpenCode's from mod/hooks/story.ts, so its rewrite can't fall behind a reword
+        for rel, blocks in story.DOCS.items():
+            if not rel.startswith("skill/"):
+                continue
+            body = (ROOT / rel).read_text()
+            for key, driver in blocks:
+                with self.subTest(rel=rel, key=key):
+                    self.assertEqual(driver, "claude-code")
+                    self.assertIn(f"<!-- story:{key}:claude-code -->\n{story.text(key, driver)}\n<!-- /story -->\n", body)
+                    self.assertIn(key, story.HOST)
+                    self.assertIn(json.dumps(story.text(key, "opencode"), ensure_ascii=False), gen_story.host_ts())
+                    self.assertNotIn("Claude", story.text(key, "opencode"))
+
     def test_every_key_has_a_reader(self):
         src = "\n".join(p.read_text() for p in sorted((ROOT / "workbench").glob("*.py")) if p.name != "story.py")
+        hosts = "\n".join(p.read_text() for p in [ROOT / "mod" / "hooks" / "register.tsx",
+                                                     *sorted((ROOT / "opencode-plugin").glob("*.ts"))])
         page = (ROOT / "workbench" / "chat_static" / "src" / "app.ts").read_text() \
             + (ROOT / "workbench" / "chat_static" / "index.html").read_text()
         docs = {k for blocks in story.DOCS.values() for k, _ in blocks}
@@ -137,7 +182,7 @@ class Story(unittest.TestCase):
         for key in story.TEXTS:
             with self.subTest(key=key):
                 read = (f'story.text("{key}"' in src or f"'{key}'" in page or f'data-story="{key}"' in page
-                        or key in docs or key in computed)
+                        or key in docs or key in computed or (key in story.HOST and f"SAY['{key}']" in hosts))
                 self.assertTrue(read, f"{key}: nothing reads it")
                 if key in story.PAGE:
                     self.assertTrue(f"'{key}'" in page or f'data-story="{key}"' in page, f"{key}: in PAGE, unread there")

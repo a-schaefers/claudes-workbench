@@ -275,6 +275,7 @@ PLUGIN_SHARED = ("mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/kernel.d
                  "mod/hooks/waiting.ts",  # the driver's wait for the page's state line, one for both hosts (#1355)
                  "mod/hooks/flows.ts",  # a flow as a slash command, one for both hosts (#1295)
                  "mod/hooks/shell.ts",  # a command line as bash reads it, the upstream gate's, one for both hosts (#1296)
+                 "mod/hooks/story.ts",  # the story's host texts and skill blocks, generated, one for both hosts (#1355)
                  "mod/types/wire.d.ts")  # wb's shapes, its readers' types (#1323)
 KERNEL_CHECK = "python3 scripts/kernel.py check"
 MOD_TESTS = "claude plugin validate mod && claude plugin test mod"
