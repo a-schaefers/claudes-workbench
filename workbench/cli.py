@@ -3302,9 +3302,13 @@ def _park_waiting(a) -> str:
 @one_at_a_time
 def cmd_stop(a):
     if a.all:
-        # everything, without --repo/--session: the bench's driver too, first, so it starts nothing
+        # everything, unscoped: the bench's driver too, first, so it starts nothing. Unscoped is
+        # _caller's scope, not the flags: an OpenCode driver's bare `wb stop --all` (its quit) is
+        # that session's, and killed a bench run another session or a terminal started (#1500,
+        # 2026-11-26); a terminal, or --all-sessions, still stops it
         driver, far = None, ""
-        if not (a.repo or a.session):
+        scope = _caller(a)
+        if not (scope[0] or scope[1]):
             try:
                 driver = bench.stop_driver()
             except RuntimeError as e:  # another machine's run: that one's to stop there, and the
@@ -3312,7 +3316,7 @@ def cmd_stop(a):
         # each run's driver next (#1278), so it starts no item; its items stop with the rest
         drivers = [f"wb run {r.name}" for r in runs._runs_in_scope(a)
                    if r.open() and runs.stop(r, "stopped with every agent (wb stop --all)", items=False) is not None]
-        mine, others = _scope(_open_tasks(), *_caller(a))
+        mine, others = _scope(_open_tasks(), *scope)
         stopped = ([f"wb bench (pid {driver})"] if driver else []) + drivers + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))

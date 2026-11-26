@@ -9312,6 +9312,25 @@ class Steering(Base):
         self.assertEqual(store.Task("t-far1").status["phase"], "stuck")
         self.assertFalse(cli.runner_alive(store.Task("t-far1")))
 
+    def test_an_opencode_sessions_stop_all_leaves_a_bench_run_alone(self):
+        # #1500 (the #1373 audit, 2026-11-26): the OpenCode plugin's quit, a bare `wb stop --all`
+        # scoped to its session by _caller, killed a bench run another session or a terminal
+        # started, as only --repo/--session kept it; a terminal's call still stops it
+        from workbench import bench
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "WB_TASK")}
+        with mock.patch.object(bench, "stop_driver", return_value=4242) as stop, \
+                mock.patch.dict(os.environ, {**env, "OPENCODE_SESSION_ID": "ses_quit1500"}, clear=True):
+            out = run_wb("stop", "--all")
+        stop.assert_not_called()
+        self.assertNotIn("wb bench", out)
+        with mock.patch.object(bench, "stop_driver", return_value=4242) as stop, \
+                mock.patch.dict(os.environ, env, clear=True):
+            os.environ.pop("OPENCODE_SESSION_ID", None)
+            out = run_wb("stop", "--all")
+        stop.assert_called_once()
+        self.assertIn("stopped: wb bench (pid 4242)", out)
+
     def test_another_machines_runner_that_stopped_beating_is_reaped_and_stoppable_here(self):
         # #872 (Claude's audit of 1.90.24): a runner killed with its machine (a recreated
         # container with a new host name, a reimaged machine) kept its task running for good:
