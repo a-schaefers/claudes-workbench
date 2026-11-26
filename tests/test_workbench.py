@@ -6032,6 +6032,18 @@ class RepoProfile(Base):
                          "make lint && (pytest || pytest --lf)")
         self.assertEqual(context.with_repo_test("npm ci\nnpm run lint", "npm test"), "(npm ci\nnpm run lint) && npm test")
 
+    def test_a_comment_in_the_repos_standing_test_never_hides_the_tasks_own_test(self):
+        # #1475 (2026-11-26): `echo lint  # team lint && exit 1` was all comment after `lint`, so
+        # every task's tests passed without running; a `#` in the task's own test too
+        for standing, test in (("echo lint  # team lint", "exit 1"), ("echo lint", "true; exit 1  # note"),
+                               ("echo a\necho lint # last", "exit 1")):
+            line = context.with_repo_test(standing, test)
+            for sh in filter(None, (shutil.which("bash"), shutil.which("zsh"))):
+                self.assertEqual(subprocess.run([sh, "-c", line], capture_output=True).returncode, 1,
+                                 f"{sh}: {line!r}")
+            self.assertEqual(subprocess.run(["bash", "-c", context.with_repo_test(standing.replace("echo lint", "false"), "true")],
+                                            capture_output=True).returncode, 1)
+
     def test_the_repos_skills_are_handed_to_every_task_there_and_a_missing_one_is_named(self):
         lib = Path(os.environ["WB_SKILLS"])
         write_skill(lib / "house-style", "house-style", "Use when writing this repo's code.")

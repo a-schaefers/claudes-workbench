@@ -688,8 +688,10 @@ def with_repo_test(standing: str | None, test: str | None) -> str | None:
     """The acceptance command a task runs: commands.json `repos.<path>.test`, the repo's standing
     one (a team's lint and format, which NO_HOOKS keeps from running as a pre-commit hook), then
     the task's own --test, both to pass (#1295, P2). One whose every simple command --test already
-runs isn't run twice (`make` before `make test` is); a part
-    a shell would split otherwise (`;`, a newline, `||`, a lone `&`) goes in parentheses."""
+    runs isn't run twice (`make` before `make test` is); a part a shell would split otherwise
+    (`;`, a newline, `||`, a lone `&`) goes in parentheses, and one with a `#` ends in a newline
+    inside them: `lint  # note && pytest` commented the task's own test out and passed untested
+    (#1475, 2026-11-26)."""
     standing = (standing or "").strip()
     if not standing:
         return test
@@ -697,8 +699,15 @@ runs isn't run twice (`make` before `make test` is); a part
         return standing
     if all(c in _simple_commands(test) for c in _simple_commands(standing)):  # --test runs it already
         return test
-    wrap = lambda c: f"({c})" if re.search(r"[;\n]|\|\||(?<!&)&(?!&)", c) else c  # noqa: E731
-    return f"{wrap(standing)} && {wrap(test.strip())}"
+    return f"{_shell_part(standing)} && {_shell_part(test.strip())}"
+
+
+def _shell_part(c: str) -> str:
+    """``c`` as one part of an `a && b` line: in parentheses when a shell would split it; one with
+    a `#` ends in a newline before the `)`, which a comment ate (#1475)."""
+    if "#" in c:
+        return f"({c}\n)"
+    return f"({c})" if re.search(r"[;\n]|\|\||(?<!&)&(?!&)", c) else c
 
 
 def commands_conf() -> dict:
