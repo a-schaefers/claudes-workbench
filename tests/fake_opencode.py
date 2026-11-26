@@ -83,7 +83,8 @@
          a file, then ends its message with one JSON object after a line of prose: FAKE_RESULT
          (JSON), else FAKE_RESULT_BY's (a JSON object of prompt substring -> object: the first
          found in the prompt), else an object built from the task's schema (rules/<task>/
-         schema.json: each required key, an enum's first value, 0, "x", [] or {}). A repair
+         schema.json: each required key, an enum's first value, 0, "x", [] or {}; a batch's
+         answer list one entry per `id` of its enum). A repair
          round (its prompt opens "rejected:", runner.SCHEMA_FIX) sends FAKE_RESULT_FIX instead,
          when set. FAKE_RESULT_SEQ (a file holding a JSON list): each round takes its first
          object, before all of these, while any is left. FAKE_SUBMIT: the object goes to the
@@ -857,7 +858,12 @@ if scenario == "report":  # #1278: a read, then prose and one object
             props = sch.get("properties") or {}
             return {k: example(props.get(k, {})) for k in sch.get("required") or ()}
         if t == "array":
-            return [example(sch.get("items") or {}) for _ in range(int(sch.get("minItems") or 0))]
+            out = [example(sch.get("items") or {}) for _ in range(int(sch.get("minItems") or 0))]
+            ids = ((sch.get("items") or {}).get("properties") or {}).get("id", {}).get("enum")
+            for row, one in zip(out, ids or ()):  # a batch's answers (runs.batch_schema): one per id
+                if isinstance(row, dict) and "id" in row:
+                    row["id"] = one
+            return out
         return {"string": "x", "integer": 0, "number": 0, "boolean": False}.get(t)
 
     prompt = args[-1] if args else ""
