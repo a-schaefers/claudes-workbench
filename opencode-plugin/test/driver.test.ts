@@ -170,6 +170,22 @@ test('the pin applies routes.json\'s driver unless it is session or already the 
   expect(await applyPin(host, 's', broken, new Map())).toEqual({ applied: false, why: 'routes.json can\'t be read' })
 })
 
+test('a pin wb says can\'t run is never switched to, and its why comes back (#1530)', async () => {
+  // OpenCode 2.4.1 switches a session to any id, so a pin with no key failed every turn after /workbench
+  const picks: object[] = []
+  const host: DriverHost = {
+    options: {}, rpc: { register: async () => ({ dispose: async () => {} }) },
+    session: { switchModel: async (input) => { picks.push(input) } },
+  }
+  const why = 'no key for anthropic'
+  const wb = fakeWb({ 'route driver': JSON.stringify({ driver: 'anthropic/m', runs: false, why }) })
+  expect(await applyPin(host, 's', wb.run, new Map())).toEqual(
+    { applied: false, model: 'anthropic/m', why: `anthropic/m not applied: ${why}` })
+  expect(picks).toEqual([])
+  const runs = fakeWb({ 'route driver': JSON.stringify({ driver: 'p/m', runs: true, why: '' }) })
+  expect(await applyPin(host, 's', runs.run, new Map())).toEqual({ applied: true, model: 'p/m' })
+})
+
 test('the driver RPC answers wb driver --json for the session, --once when asked', async () => {
   const handlers: Record<string, (input: unknown) => Promise<unknown>> = {}
   const host: DriverHost = {

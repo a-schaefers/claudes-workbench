@@ -481,8 +481,14 @@ def _build() -> dict:
         out.append(_choice("agents", "shared", LABELS["agents"], AGENTS, r.get("use") or "both"))
         out.append(_choice("busy", "shared", LABELS["busy"], BUSY, r.get("busy") or "wait"))
         for name, label, row in roles:
-            out.append(_choice(f"role-{name}", "shared", label_of(f"role-{name}"),
-                               _role_stops(label, row.get("api"), api_name.get(row.get("api"))), row.get("via") or "gpu"))
+            c = _choice(f"role-{name}", "shared", label_of(f"role-{name}"),
+                        _role_stops(label, row.get("api"), api_name.get(row.get("api"))), row.get("via") or "gpu")
+            # a role on an API model that can't run says why: with no key for its provider the
+            # rows said it runs there, and nothing said it couldn't (#1529, 2026-11-26)
+            st = row.get("api_status")
+            if row.get("via") == "api" and isinstance(st, dict) and st.get("available") is False:
+                c["says"] = f"{label} can't run on {row.get('api')}: {st.get('why') or 'wb route says why'}."
+            out.append(c)
     if r is not None:
         out.append(_driver_row(r, m))
     out.append(_choice("coding", "shared", LABELS["coding"], CODING, cli.coding_mode()))

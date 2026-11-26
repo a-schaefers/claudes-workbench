@@ -4045,13 +4045,22 @@ def _runs_held(m: models.Model, seen: dict | None = None) -> bool:
     return seen[m.provider, m.key]
 
 
+def _catalog_miss(mid: str) -> str:
+    """wb route's refusal of an id the catalog doesn't list: for a provider OpenCode holds no key
+    for, its fix too (models.no_key_note): ROUTE_CATALOG alone led to another provider's model
+    (#1529, 2026-11-26)."""
+    if pid := models.keyless_provider(mid):
+        return f"{ROUTE_CATALOG}; {models.no_key_note(pid)}"
+    failed = models.hosted_error()
+    return ROUTE_CATALOG + (f" (its read failed: {failed})" if failed else "")
+
+
 def _route_api(mid: str, role: str) -> models.Model:
     """The API model a role may name: OpenCode's exact id (fragments never match an API id), of
     kind api, with a key a task runs with (_runs_held); else exit 3 with discovery's why."""
     m = models.lookup(mid)
     if m is None:
-        why = models.hosted_error()
-        die(ROUTE_CATALOG + (f" (its read failed: {why})" if why else ""), 3)
+        die(_catalog_miss(mid), 3)
     if m.kind != "api":
         die(f"{mid} is a GPU model: wb route {role} --gpu {mid} pins it", 3)
     st = models.status(m)
@@ -4220,7 +4229,7 @@ def _route_show(as_json: bool) -> None:
             # the cached catalog: the pane draws from this, and never waits on OpenCode (#1023)
             m = models.lookup(row["api"], cached=True) if row.get("api") else None
             api = None if not row.get("api") else \
-                {"available": False, "resident": False, "why": "not in OpenCode's catalog now"} \
+                {"available": False, "resident": False, "why": models.unlisted_why(row["api"])} \
                 if m is None else models.status(m)
             out["roles"][r] = {**row, "label": routes.LABELS[r], "api_status": api,
                                "gpu_found": None if row["gpu"] == routes.AUTO else row["gpu"] in models.discover()}
@@ -4234,13 +4243,14 @@ def _route_show(as_json: bool) -> None:
     for r in routes.ROLES:
         row = doc["roles"][r]
         gone = row.get("api") and models.lookup(row["api"]) is None
+        gone = gone and f" ({models.unlisted_why(row['api'])})"  # a missing key says so (#1529)
         if row["via"] == "api":
-            bits = [f"API {row['api']} ({_who(row['api'])})" + (" (not in OpenCode's catalog now)" if gone else ""),
+            bits = [f"API {row['api']} ({_who(row['api'])})" + (gone or ""),
                     routes.thinking_said(row), *([f"backends {', '.join(row['order'])}"] if row.get("order") else [])]
         else:
             bits = ["GPU (the router picks)" if row["gpu"] == routes.AUTO else f"GPU {row['gpu']} (pinned)"]
             if row.get("api"):
-                bits.append(f"API kept: {row['api']}" + (" (not in OpenCode's catalog now)" if gone else ""))
+                bits.append(f"API kept: {row['api']}" + (gone or ""))
             if row["thinking"] == "on":
                 bits.append("thinking on")
             elif row.get("thinking_review") == "on":  # kept for API, as routes.summary says it (#1059)
@@ -4513,14 +4523,21 @@ def _route_driver(a) -> None:
             pin = routes.read().get("driver")
         except routes.RoutesError as e:
             die(routes.unreadable(e), 3)
-        print(json.dumps({"driver": pin or routes.DRIVER_SESSION}) if a.json else
-              f"driver: {pin} ({routes.DRIVER_APPLIED})" if pin else
+        # whether it runs, which the plugin's /workbench reads before it switches (#1530)
+        why = driver.pin_why(pin) if pin else ""
+        print(json.dumps({"driver": pin or routes.DRIVER_SESSION,
+                          **({"runs": not why, "why": why} if pin else {})}) if a.json else
+              f"driver: {pin} ({routes.DRIVER_APPLIED})" + (f"; can't run now: {why}" if why else "") if pin else
               "driver: each OpenCode session's own (/models), no pin")
         return
     pin = a.target
     if pin != routes.DRIVER_SESSION and routes.driver_ref(pin) is None:
         die(f"{pin!r} isn't an OpenCode model id: provider/model, #variant allowed (opencode models "
             f"lists them), or {routes.DRIVER_SESSION}", 3)
+    # a pin OpenCode can't route, refused before the dialog asks: switchModel takes any id, and
+    # every turn of the session failed (#1530, 2026-11-26)
+    if why := driver.pin_why(pin):
+        die(f"{pin} can't be the driver: {why}", 3)
     argv = ["route", "driver", pin]
 
     def changed(doc) -> routes.Change:
@@ -4555,8 +4572,7 @@ def _route_pairs(a) -> None:
             pairs.append((role, target, None))
             continue
         if models.lookup(target) is None:
-            why = models.hosted_error()
-            die(f"{role} {target}: {ROUTE_CATALOG}" + (f" (its read failed: {why})" if why else ""), 3)
+            die(f"{role} {target}: {_catalog_miss(target)}", 3)
         m = _route_api(target, role)
         if m.provider == routes.OPENROUTER:  # its backends (--order) are chosen in a wb route of their own
             die(f"{role} {m.id}: an OpenRouter role is set in a wb route of its own", 3)
@@ -4693,8 +4709,9 @@ def cmd_driver(a):
     if not found:
         print(f"no OpenCode session has driven here in the last {store.DRIVER_HOLD // 60} min "
               "(the plugin's heartbeat lists none)")
-    print(f"pin: {pin} ({routes.DRIVER_APPLIED})" if pin != routes.DRIVER_SESSION else
-          "pin: none (each session's own /models; wb route driver <id> sets one)")
+    why = driver.pin_why(pin)  # #1530
+    print(f"pin: {pin} ({routes.DRIVER_APPLIED})" + (f"; can't run now: {why}" if why else "")
+          if pin != routes.DRIVER_SESSION else "pin: none (each session's own /models; wb route driver <id> sets one)")
 
 
 def cmd_coding(a):
@@ -5901,7 +5918,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
                 mid = str(r.get("api") or "")
                 m = cat.get(mid)
                 st = models.status(m) if m else None
-                state = ("no API model set" if not mid else "not in OpenCode's catalog now" if not st
+                state = ("no API model set" if not mid else models.unlisted_why(mid) if not st
                          else "ready" if st["available"] else st["why"])
                 lines.append(f"  {role:12} {mid or 'api'}  {state} · thinking {r.get('thinking') or 'off'}{when}")
                 if m:  # what plan mode sizes a step to, before any wb start prints it (#1131, 2026-11-23)
@@ -5935,8 +5952,12 @@ def _api_list(text: str) -> None:
         hits = match(models.hosted(fresh=True))
     if not hits:
         err = models.hosted_error()
+        # OpenCode lists a provider's models only once it holds a key: "contains 'claude'" with
+        # no Anthropic key read as no such model (#1529, 2026-11-26)
         print(f"no API model in OpenCode's catalog contains {text!r}"
-              + (f" (the catalog can't be read: {err})" if err else ": wb models counts them per provider"))
+              + (f" (the catalog can't be read: {err})" if err else
+                 ": wb models counts them per provider; OpenCode lists a provider's models only once "
+                 "it holds a key (`opencode auth login <provider>` in a terminal adds one)"))
         return
     for m in hits[:API_LIST_MAX]:
         cost = m.config.get("cost")
