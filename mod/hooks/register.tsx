@@ -66,7 +66,8 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbModels, WbPane, WbRoutes, WbSaid, WbTask } from '../types'
+import type { WbChat, WbLine, WbLive, WbPane, WbSaid, WbTask } from '../types'
+import type { ChatOpen, ListenerClaim, ModelsJson as WbModels, NoticeRow, RouteJson as WbRoutes, StatusFile, TaskFile } from '../types/wire.js'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
@@ -372,7 +373,8 @@ const parseLines = (text: string): Row[] =>
     }
   })
 
-const readJson = async ($: any, path: string): Promise<Row> =>
+// a JSON file of wb's (one of wire.d.ts's shapes, `T`), {} for one missing or torn
+const readJson = async <T extends object = Row>($: any, path: string): Promise<Partial<T>> =>
   $.fs.read(path).then((t: string) => JSON.parse(t)).catch(() => ({}))
 
 // Words broken into lines of at most n characters (a longer word is cut across lines). The
@@ -446,7 +448,7 @@ const BATCH_NEXT = (names: string[]) => names.length > 1
     'them all, in the order they were started (`wb resume <name>` one, `wb discard <name>` drops one).'
   : `Nothing went wrong in the task itself: \`wb resume ${names[0]}\` continues it in a fresh ` +
     `session, \`wb discard ${names[0]}\` drops it.`
-const batchOf = (row: Row): string[] | null =>
+const batchOf = (row: NoticeRow): string[] | null =>
   Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
 // A stop at the day's API spend cap (#1019, cause `spend`) is the user's call: feedback would run
 // a round that stops again at once, so the wake asks for their decision, as the notice does. Each
@@ -487,7 +489,7 @@ const LOCAL_ONLY_HEADLINE = 'was stopped: its repo became local-only'
 // local-only stop had next steps of their own, restating the notice and that Claude never changes
 // a role or lifts local-only (#1322): wb's notice says each remedy.
 const THE_STEP = new Set(['guard', 'agent'])
-const outsideTheStep = (row: Row) => typeof row.cause === 'string' && !THE_STEP.has(row.cause)
+const outsideTheStep = (row: NoticeRow) => typeof row.cause === 'string' && !THE_STEP.has(row.cause)
 const OUTSIDE_HEADLINE: Record<string, string> = {
   stuck: 'was stopped (not its agent\'s doing)',
   failed: 'failed (not its agent\'s doing)',
@@ -1841,7 +1843,7 @@ const mem = {
   startedAt: 0,
   lastDrawn: '',
   lastNotify: '-', // notify.jsonl's size and mtime when last read
-  notifyRows: { key: '', rows: [] as Row[] }, // its rows as last parsed, under that key (#921)
+  notifyRows: { key: '', rows: [] as NoticeRow[] }, // its rows as last parsed, under that key (#921)
   paneOpened: false,
   polling: false,
   watching: false,
@@ -1975,24 +1977,24 @@ const ownPid = (t: { claude_pid?: number; claude_start?: string }) =>
 // session drops it. Unrecorded, it stayed every nearby session's for good, and the one resumed
 // with `claude --resume` too: both woke for its review and both could act on it (#687). Returns
 // task.json as it stands after the claim, whoever won.
-async function claim($: any, name: string, sp: Row): Promise<Row> {
+async function claim($: any, name: string, sp: Partial<TaskFile>): Promise<Partial<TaskFile>> {
   if (!mem.claudePid || !sp.session || !mem.ids.size || !mem.deadPids.has(pidKey(sp)) || ownPid(sp)) return sp
   if (!ownerOf(sp).claims) return sp // neither its id nor near it: never this session's to adopt
   const id = await $.session.id().catch(() => '')
   const ids = [...new Set([id, ...mem.ids].filter(Boolean))]
   const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)
-  const now = await readJson($, `${mem.root}/tasks/${name}/task.json`)
+  const now = await readJson<TaskFile>($, `${mem.root}/tasks/${name}/task.json`)
   if (!r.ok && now.claude_pid === sp.claude_pid) mem.deadPids.delete(pidKey(sp)) // wb couldn't say: not ours to claim
   // a task adopted into this session was being delegated: the mode comes back with it (#689).
   // Not one the user's quit parked, nor one handed back to Claude (taken over): adopting those
   // turned the mode back on against /workbench-quit or the hand-back (#834).
-  if (r.ok && delegatedWork(await readJson($, `${mem.root}/tasks/${name}/status.json`))) await workbenchMode($, true)
+  if (r.ok && delegatedWork(await readJson<StatusFile>($, `${mem.root}/tasks/${name}/status.json`))) await workbenchMode($, true)
   return now.name ? now : sp
 }
 
 // Whether a task (its status.json) is still delegated work: running, or waiting on Claude and
 // neither parked by a quit (store.parked, #698) nor taken over by Claude (#834)
-const delegatedWork = (st: Row) => {
+const delegatedWork = (st: Partial<StatusFile>) => {
   const phase = String(st.phase ?? 'queued')
   const p = phaseOf({ phase, parked: !!st.parked })
   return p.active || (p.waits && !st.taken_over)
@@ -2101,14 +2103,14 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
     names.add(ent.name)
     if (mem.gone.has(ent.name)) continue
     const base = `${dir}/${ent.name}`
-    const st = await readJson($, `${base}/status.json`)
+    const st = await readJson<StatusFile>($, `${base}/status.json`)
     const phase = String(st.phase ?? 'queued')
     const updatedAt = Number(st.updated_at ?? 0) * 1000
     if (!ACTIVE.has(phase) && !NEEDS.has(phase) && now - updatedAt > KEEP_CLOSED_MS) {
       if (CLOSED.has(phase)) mem.gone.add(ent.name)
       continue
     }
-    let sp = await readJson($, `${base}/task.json`)
+    let sp = await readJson<TaskFile>($, `${base}/task.json`)
     if (!sp.name || sp.bench) continue // a replay of wb bench's: no one's task, never shown or woken
     let recent: string[] = []
     if (ACTIVE.has(phase) || NEEDS.has(phase)) {
@@ -2117,7 +2119,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       recent = await recentEvents($, ent.name, `${base}/events.jsonl`)
     }
     list.push({
-      name: sp.name, phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
+      name: String(sp.name), phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
       label: String(sp.model_label ?? ''),
       // how it was routed (#1016): task.json's via, role and provider, and its routing line
       via: sp.via === 'api' ? 'api' : 'gpu', role: String(sp.role ?? ''), provider: String(sp.provider_name ?? sp.provider ?? ''),
@@ -2770,7 +2772,7 @@ async function settingsTurns($: any, now: number) {
   const key = stat ? `${stat.size}@${stat.mtimeMs}` : ''
   if (!key || key === mem.settingsKey) return
   const st = await read($, chat)
-  const claim = await readJson($, `${mem.root}/chat/listener.json`)
+  const claim = await readJson<ListenerClaim>($, `${mem.root}/chat/listener.json`)
   if (await claimStands($, claim, st.key, now)) return // the listening session's: read again once it is this one's
   const got = await readTail($, path, SETTINGS_TAIL)
   if (!got) return
@@ -2835,7 +2837,7 @@ const ELSEWHERE_NOTE = '(This follows another Claude Code session\'s message in 
 // alive, or, whether it lives unknown, the file fresh. Both the listener and settingsTurns ask it:
 // a session that ended in workbench mode leaves its claim, so read as standing, a web change's
 // help reached no session ever after (review of #1283, 2026-11-24).
-async function claimStands($: any, claim: Row, self: string, now: number): Promise<boolean> {
+async function claimStands($: any, claim: ListenerClaim, self: string, now: number): Promise<boolean> {
   if (!claim.session || claim.session === self) return false
   // whether it lives unknown, its claim stands while the file is fresh: read as gone, two
   // sessions took the listener from each other on every poll, each write the other's event (#700).
@@ -2863,7 +2865,7 @@ async function listen($: any, now: number) {
   if (!st.delegating || !webOn(st)) return
   const dir = `${mem.root}/chat`
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
-  const claim = await readJson($, `${dir}/listener.json`)
+  const claim = await readJson<ListenerClaim>($, `${dir}/listener.json`)
   const theirs = claim.session && claim.session !== st.key
   // another session listens: this one stands by, but for the user's answers to its own rows (#1096)
   const standby = await claimStands($, claim, st.key, now)
@@ -2975,7 +2977,7 @@ async function listen($: any, now: number) {
 // files' size. The tails it replaces lost a message behind 4 MiB of replies (#329, the audit of
 // 1.4); they remain for a wb from before the index.
 async function unread($: any, dir: string): Promise<Row[]> {
-  const work = await readJson($, `${dir}/open.json`)
+  const work = await readJson<ChatOpen>($, `${dir}/open.json`)
   if (work.messages && typeof work.messages === 'object') {
     return (Object.values(work.messages) as Row[]).sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))
   }
@@ -3133,7 +3135,8 @@ async function deliver($: any, now: number) {
       warnOnce($, 'notify', `can't read ${path}, so no wake can come: wb doctor`)
       return
     }
-    file = { key: got.key && `${path}:${got.key}`, rows: parseLines(got.text) }
+    // wb writes each row whole (store.Task.notify); the kernel's noticesDue coerces each field it reads
+    file = { key: got.key && `${path}:${got.key}`, rows: parseLines(got.text) as NoticeRow[] }
     if (file.key) mem.notifyRows = file
   }
   if (file.key === mem.lastNotify && !mem.busy) return
@@ -3151,13 +3154,13 @@ async function deliver($: any, now: number) {
     const ackPath = `${root}/tasks/${name}/acked`
     let acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     if (rows.every(r => r.ts <= acked)) continue
-    let spec = await readJson($, `${root}/tasks/${name}/task.json`)
+    let spec = await readJson<TaskFile>($, `${root}/tasks/${name}/task.json`)
     await noteClaude($, spec, now)
     spec = await claim($, name, spec)
     const own = mine(spec)
     // Only wake for news still true: a review notice for a task since discarded, accepted or
     // sent back is acknowledged and dropped.
-    const status = await readJson($, `${root}/tasks/${name}/status.json`)
+    const status = await readJson<StatusFile>($, `${root}/tasks/${name}/status.json`)
     for (const row of rows) {
       const key = `${name}:${row.ts}`
       // what to do with it is the kernel's noticePlan (Kernel.Notice): still true (a check-in
@@ -3220,7 +3223,7 @@ async function deliver($: any, now: number) {
 }
 
 // A notice's headline and next step, by its kind and cause: deliver's and rewake's (#1384)
-function headlineOf(row: Row): string {
+function headlineOf(row: NoticeRow): string {
   const batch = batchOf(row)
   return batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
     : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE
@@ -3228,7 +3231,7 @@ function headlineOf(row: Row): string {
     : (outsideTheStep(row) ? OUTSIDE_HEADLINE[row.kind] : undefined) ?? HEADLINE[row.kind] ?? row.kind
 }
 
-async function nextOf($: any, row: Row, name: string): Promise<string> {
+async function nextOf($: any, row: NoticeRow, name: string): Promise<string> {
   const batch = batchOf(row)
   // a batch's wake ends with its resume, not the failure's next step (#544)
   return batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
@@ -3425,7 +3428,7 @@ async function workbenchMode($: any, on: boolean) {
     await update($, splashed, () => false) // the next /workbench opens it again, with the animation (#963)
     await $.ui.close({ id: PANE }).catch(() => {})
     const path = `${mem.root}/chat/listener.json` // stop listening: the page and other sessions see it now
-    const claim = await readJson($, path)
+    const claim = await readJson<ListenerClaim>($, path)
     if (claim.session === (await read($, chat)).key) {
       await $.fs.write(path, '{}').catch(() => {})
       mem.listenerBody = ''

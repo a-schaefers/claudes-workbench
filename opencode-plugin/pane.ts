@@ -25,6 +25,7 @@ import { wbEnv, wbHome, type Options } from './wb.ts'
 import { apiWorking, isEst, UNWRITTEN, viewFacts, type TaskFacts } from '../mod/hooks/tasks.ts'
 import { LINK_STATES, linkDown, type Link } from '../mod/hooks/modeline.ts'
 import { ACTIVE, CLOSED, NEEDS, PARKS } from '../mod/hooks/core.ts'
+import type { ChatLink, RouteJson, StatusFile, TaskFile, WatchLine } from '../mod/types/wire.d.ts'
 
 export const AGENT = 'workbench'        // the Workbench agent's id (agent.ts, #1335)
 export const COMMAND = 'workbench'
@@ -35,15 +36,13 @@ export const ROLES_MS = 10_000          // `wb route --json`, kept (the mod's RO
 export const LINK_MS = 60_000           // `wb chat url --json`, kept (the chat's CHECK_MS)
 export const DIFF_CHARS = 200_000       // the most of a diff the panel takes
 
-type Row = Record<string, any>
-
 /** One task as the panel reads it: the Tasks view's facts, and its owner keys for the kernel. */
 export type PaneTask = TaskFacts & {
   readonly session: string; readonly driver: string; readonly cwd: string; readonly repo: string; readonly subdir: string
 }
 export interface Cap { readonly spent: number; readonly cap: number | null; readonly est: boolean }
 export interface Tasks { readonly now: number; readonly home: string; readonly tasks: PaneTask[]; readonly cap: Cap | null }
-export interface Line { readonly s: string; readonly t: string }
+export type Line = Readonly<WatchLine>
 export interface Live { readonly task: string; readonly lines: Line[]; readonly why?: string }
 export type { Link }
 
@@ -85,7 +84,8 @@ export const realFiles: Files = {
   },
 }
 
-const json = (text: string | undefined): Row => {
+// a JSON object wb wrote (wire.d.ts's shape `T`), {} for a file missing, torn or not an object
+const json = <T extends object>(text: string | undefined): Partial<T> => {
   try {
     const v = JSON.parse(text ?? '')
     return v && typeof v === 'object' && !Array.isArray(v) ? v : {}
@@ -95,7 +95,7 @@ const json = (text: string | undefined): Row => {
 }
 
 // task.json `driver` as store.driver_of names it: `opencode`, else `claude` with a session, else ''
-const driverOf = (sp: Row): string =>
+const driverOf = (sp: TaskFile): string =>
   typeof sp.driver === 'string' ? sp.driver : sp.driver?.tool === 'opencode' ? 'opencode' : sp.session ? 'claude' : ''
 
 /** Every listed task, read from its task.json and status.json (the mod's `scan`, less what only
@@ -108,14 +108,14 @@ export function scanTasks(home: string, now: number, gone: Set<string>, files: F
   const list: PaneTask[] = []
   for (const name of names) {
     if (gone.has(name)) continue
-    const st = json(files.read(join(dir, name, 'status.json')))
+    const st = json<StatusFile>(files.read(join(dir, name, 'status.json')))
     const phase = String(st.phase ?? UNWRITTEN)
     const updatedAt = Number(st.updated_at ?? 0) * 1000
     if (!ACTIVE.has(phase) && !NEEDS.has(phase) && now - updatedAt > KEEP_CLOSED_MS) {
       if (CLOSED.has(phase)) gone.add(name)
       continue
     }
-    const sp = json(files.read(join(dir, name, 'task.json')))
+    const sp = json<TaskFile>(files.read(join(dir, name, 'task.json')))
     if (!sp.name || sp.bench) continue // a replay of wb bench's: no one's task
     list.push({
       name: String(sp.name), phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
@@ -156,14 +156,14 @@ export function diffLines(text: string): Line[] {
 
 /** The day cap's numbers from `wb route --json` (routes.json's `day_usd`, the ledger's `spend_today`) */
 export function capOf(routeJson: string): Cap | null {
-  const r = json(routeJson)
+  const r = json<RouteJson>(routeJson)
   if (!r.spend_today && r.day_usd === undefined) return null
   return { spent: Number(r.spend_today?.usd ?? 0) || 0, cap: typeof r.day_usd === 'number' ? r.day_usd : null,
     est: isEst(r.spend_today?.prices) }
 }
 
 export function linkOf(ran: { code: number; stdout: string; stderr: string }): Link {
-  const r = json(ran.stdout)
+  const r = json<ChatLink>(ran.stdout)
   const state = String(r.state ?? '')
   if (ran.code === 0 && LINK_STATES.has(state)) {
     return { state: state as Link['state'], ...(r.url ? { url: String(r.url) } : {}), ...(r.why ? { why: String(r.why) } : {}) }
@@ -208,7 +208,7 @@ export class PaneData {
   async transcript(task: string): Promise<Live> {
     if (!NAME.test(task)) return { task, lines: [], why: `${task} isn't a task's name` }
     const now = this.now()
-    const st = json(this.files.read(join(this.home, 'tasks', task, 'status.json')))
+    const st = json<StatusFile>(this.files.read(join(this.home, 'tasks', task, 'status.json')))
     const key = `${st.updated_at ?? ''}`
     const had = this.live.get(task)
     if (had && (ACTIVE.has(String(st.phase)) ? now - had.at < LIVE_MS : had.key === key)) return had.live

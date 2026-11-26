@@ -13,6 +13,7 @@
 // time against this machine's typical length as words with a tilde, never a bar, and only with
 // TYPICAL_MIN timed tasks behind it. No percentage of a task: nobody knows how much of one is done.
 import type { WbTask } from '../types'
+import type { StatusFile, TaskFile } from '../types/wire.js'
 import type { Pose } from './apprentice'
 import { ACTIVE, CLOSED, NEEDS, openCounts, phaseOf } from './core'
 
@@ -523,10 +524,9 @@ export function capRow(list: TaskFacts[], spent: number, cap: number | null, col
  * on rows from before it (the catalog's) */
 export const isEst = (prices: unknown) => prices !== 'yours' && prices !== 'provider'
 
-type Json = Record<string, any>
 /** The Tasks view's facts of a task (#1048), from the task.json (`sp`) and status.json (`st`)
  * already read: nothing new is read for them */
-export function viewFacts(sp: Json, st: Json) {
+export function viewFacts(sp: TaskFile, st: StatusFile) {
   const num = (x: unknown) => (Number.isFinite(Number(x)) ? Number(x) : 0)
   const live = st.live_used && typeof st.live_used === 'object' ? st.live_used : {}
   const api = st.api && typeof st.api === 'object' ? st.api : null

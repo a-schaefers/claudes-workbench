@@ -3,17 +3,26 @@
 // gets there; the tasks' news stays in the Tasks view, the status line and the notices (the
 // ticker the modeline carried before, #976, went with it). `wb chat url --json` (chat.ensure)
 // says how the web app stands: its link while up, why not otherwise.
-import type { WbChat } from '../types'
+import type { WbChat, WbLine } from '../types'
+import type { ChatLink, WatchLine } from '../types/wire.js'
 import { FACE } from './apprentice'
 
 export const MODELINE = "Claude's Workbench"
 
 /** The link a modeline shows: `wb chat url --json` as the mod last read it (WbChat's `link`). */
 export type Link = WbChat['link']
+// every state chat.ensure says (wire.d.ts's ChatLink), and none it doesn't
+const STATES: Record<ChatLink['state'], 1> = { up: 1, started: 1, off: 1, blocked: 1, failed: 1 }
 /** What `wb chat url --json` says, read as a Link (OpenCode's panel's, pane.ts `linkOf`), and the
  * link it is when that can't be read: the plugin spells no phase, and `failed` is one (#1312). */
-export const LINK_STATES: ReadonlySet<string> = new Set(['up', 'started', 'off', 'blocked', 'failed'])
+export const LINK_STATES: ReadonlySet<string> = new Set(Object.keys(STATES))
 export const linkDown = (why: string): Link => ({ state: 'failed', why })
+
+// types/index.d.ts restates wire.d.ts's WatchLine and ChatLink (Claude Code's contract imports
+// nothing): held equal here, so a change to one fails the plugin's type check (#1323)
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+type Holds<T extends true> = T
+export type WireHeld = [Holds<Same<WbLine, WatchLine>>, Holds<Same<Link, Omit<ChatLink, 'state'> & { state: ChatLink['state'] | 'checking' }>>]
 
 const width = (s: string) => [...s].length
 // cut to n columns, an ellipsis last when cut (every character the modeline draws is one column)
