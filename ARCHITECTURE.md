@@ -3837,6 +3837,11 @@ plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*)
   directory rule claims a gone owner's task only for the same driver (`store.driver_of`), so neither
   host's sessions take the other's tasks by directory. `wb status`, a bare `wb wait` (a notice
   goes to the session that owns its task), `stop`/`takeover`/`resume --all` follow it.
+  OpenCode's `/clear` and `/new` start a new session with a new id, which owns none of the old
+  one's tasks (OpenCode keeps no ledger of ids, as the mod does): from an OpenCode driver, `wb
+  status`'s `open elsewhere` line ends with `cli.OPENCODE_WAY_BACK` (`/sessions` goes back to the
+  owner) when an OpenCode session holds one of them (`cli._elsewhere_line`), and the prompt's
+  *Yours* calls `/clear` safe only with no task open (`skill.ts`, #1498).
 - **Adoption.** `wb adopt <task>` from an OpenCode driver (`cli._adopt_opencode`) takes a task
   whose owner is gone, from either driver: an OpenCode session `gone` by its store's heartbeat, a
   Claude Code process gone (`cli._gone`; one with no `claude_pid` is not known gone); a user moving
@@ -8876,7 +8881,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     user asks; the user's two commands as the plugin's (`commands.ts`, #1315), which `the plugin runs
     them, switches this session to the Build agent (which closes the Workbench panel) and tells you
     what it did` (#1312), and SKILL.md's "Without the mod, the user may ask for the same in words"
-    left out (wherever the prompt is, the commands are); a rule's later change as
+    left out (wherever the prompt is, the commands are); *Yours*' `/clear` as a new session that
+    owns none of the open tasks, safe only with none open, `/sessions` the way back (#1498); a rule's later change as
     `an update of that context block` (the entry's, `upkeep.ts`), never a `[workbench]` note. The
     recipes are the typed tools (`tools.ts`, #1335): `TOOLS_NOTE` after the wb line (the everyday
     tools, use them for `wb start`, `status`, `diff`, `feedback`, `accept`, `discard`, the shell for
@@ -9806,7 +9812,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0 none); unnamed: `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` (that batch's tasks alone, whichever session's: a scheduled run's headless Claude, which would otherwise take the repo's daytime tasks by directory, #1204) | Reaps, blocks (inotify), prints `[<kind>] <task>\n<text>`, claiming it (`cli.claim_ack`: one waiter or the mod wins, #696); skips notices no longer true. Named: closed exits 2; taken elsewhere "(already delivered once)"; no notice `[<phase>] <task> (no notice: <last>)`. Bare, no open task: exit 2. A run named (#1278, `cli._wait_run`): its next notice still true (`runs.due`), `[<kind>] run <run>`; unnamed, the caller's runs' notices (`runs._runs_in_scope`) come before its tasks'. |
-| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` | Reaps. A line per open task; `?` when its runner died within `REAP_GRACE`; a `via` column (`gpu`, `api`) before the model, 24 wide (`cli.status_model`: an API task's `provider/model`, the provider never cut, a vendor segment between cut to `…/` and the model's own name, the id's last segment, kept, its end when it alone overflows, `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash` as `deepinfra/…ek-V4.1-Flash`: two models of one vendor read apart, #1117; a GPU task's last segment, #1016). Named: `worktree:`, `cli.use_line`, `experiments_off`. Parked tasks fold into one `parked by wb stop --all …` line without `--all` (#541); scoped, `open elsewhere (other sessions'): …`. Unnamed, a line per run in the scope after the tasks (`cli._run_lines`, `runs.status_line`), a dead driver reaped first. |
+| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` | Reaps. A line per open task; `?` when its runner died within `REAP_GRACE`; a `via` column (`gpu`, `api`) before the model, 24 wide (`cli.status_model`: an API task's `provider/model`, the provider never cut, a vendor segment between cut to `…/` and the model's own name, the id's last segment, kept, its end when it alone overflows, `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash` as `deepinfra/…ek-V4.1-Flash`: two models of one vendor read apart, #1117; a GPU task's last segment, #1016). Named: `worktree:`, `cli.use_line`, `experiments_off`. Parked tasks fold into one `parked by wb stop --all …` line without `--all` (#541); scoped, `open elsewhere (other sessions'): …`, from an OpenCode driver ending with `cli.OPENCODE_WAY_BACK` when an OpenCode session holds one (`/sessions` goes back to it, #1498). Unnamed, a line per run in the scope after the tasks (`cli._run_lines`, `runs.status_line`), a dead driver reaped first. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden, the pane's), `--last N` (hidden), `--export` (hidden, the OpenCode plugin's child sessions) | `transcript.follow`; default the latest open task, never a bench replay (#555). The header's `routed:` line, and with `--json` a `routed` row after `meta` (`transcript.routed_text`, #1016). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The events, one line per `transcript.LOG_KINDS` kind (`EVENT_KINDS`, `text`, `tool`; `transcript.log_body`, which the web chat's task sheet shows too, #1201) (#861); `-n` counts printed lines, `step` rows dropped first (#861); `-f` follows until it needs Claude, reaping, flushing (#90, #545). |
 | `wb report <task>` | `--round N` | summary.md (`store.Task.report`), then the newest regression check (`verify.report_lines`) without `--round`; the web chat's task sheet shows both (#1201). |
