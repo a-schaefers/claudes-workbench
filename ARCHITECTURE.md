@@ -1146,7 +1146,9 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   `schedule.spend_skip`: any role on API (`routes.effective_via`) that `meter.refusal` refuses
   (no day cap, `meter.no_cap`; today at it; no price), or whose key is an exported variable this
   fire's environment lacks (`schedule._env_key_skip`, `its key is $VAR, which this fire's environment
-  lacks (wb writes no key into a unit): store it with …`: each start exited 3, #1495), skips the
+  lacks (wb writes no key into a unit): store it with …`: each start exited 3, #1495; unless
+  `auth list`, asked again through `models._fresh_key`, now gives a key that runs, as one stored
+  with `opencode auth login` after the note does: hosted.json's env row outlived it, #1538), skips the
   night, as an unreadable routes.json does: headless, nobody can be asked for a cap or a role change. Else it holds an inhibitor on
   itself (`cli.keep_awake`: Claude waits between tasks too) and runs `claude -p --output-format
   json --max-turns N --permission-mode dontAsk --tools Bash,Read,Grep,Glob --allowedTools

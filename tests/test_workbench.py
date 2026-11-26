@@ -23081,6 +23081,30 @@ class ScheduledRuns(Base):
         self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
         self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
 
+    def test_a_key_stored_after_wb_schedule_adds_note_lets_the_next_fire_run(self):
+        # #1538, 2026-11-26: the note said `opencode auth login xenv` stores the key, but the
+        # fire's cached lookup kept hosted.json's env row, so every fire skipped on advice followed
+        from workbench import models, schedule
+        catalog = Path(self.tmp.name) / "catalog.json"
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", {"type": "env", "name": "XENV_API_KEY"})]}))
+        os.environ.update(WB_FAKE_CATALOG=str(catalog), WB_FAKE_API="xenv=env", XENV_API_KEY="xenv-not-a-real-key")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"significant": {
+            "via": "api", "api": "xenv/grok-9"}}}))
+        self.assertEqual(models.hosted(fresh=True)["xenv/grok-9"].key, "env:XENV_API_KEY")
+        self.assertIn("`opencode auth login xenv` stores it, else such a fire is skipped", self.add())
+        # the user stores it, and the timer's environment has no variable: auth list shows the stored key
+        catalog.write_text(json.dumps({"data": [api_entry("xenv", "grok-9")],
+                                       "auth": [key_row("xenv", "XEnv", STORED)]}))
+        os.environ.pop("XENV_API_KEY")
+        os.environ.pop("WB_FAKE_API")
+        models._AUTH_FRESH.clear()                                     # a fire is a process of its own
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "env:XENV_API_KEY")  # no fresh read
+        self.assertIsNone(schedule.spend_skip())
+        self.assertEqual(models.lookup("xenv/grok-9", cached=True).key, "stored")   # written back
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
+
     def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
         # the review of #1204: every fire on a date was batch night-<date>, so a second one took
         # the first's tasks (its row counted them again, its Claude was handed them to review),

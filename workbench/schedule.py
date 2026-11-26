@@ -584,6 +584,11 @@ def _env_key_skip(role: str, m) -> str | None:
     from . import keyhole
     if m is None or not str(m.key).startswith("env:") or not (why := models.env_why(m.provider, m.key[4:])):
         return None
+    # `auth list` again: a key stored since (`opencode auth login`, as add's note advised) left
+    # hosted.json's env row in place until its TTL, so every fire skipped on advice already
+    # followed (#1538, 2026-11-26); _fresh_key writes the new source back for the pane and Settings
+    if models.key_runs(m.provider, models._fresh_key(m)[0]):
+        return None
     if models._env_unseen(m.key):
         return (f"{role} role: its key is ${m.key[4:]}, which this fire's environment lacks (wb writes "
                 f"no key into a unit): store it with `{keyhole.login(m.provider)}`")
