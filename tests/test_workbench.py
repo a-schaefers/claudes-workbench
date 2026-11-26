@@ -24710,6 +24710,33 @@ class Setup(Base):
         self.assertTrue(ocplugin.ours(alone, ROOT) and not ocplugin.brings_wb(alone))
         self.assertFalse(ocplugin.ours("github:a-schaefers/workbench-other#main", ROOT))
 
+    def test_the_plugins_copy_carries_the_kernels_membrane_and_a_kernel_rebuilt_alone_makes_a_new_one(self):
+        # #1313: the plugin's notices import ../mod/hooks/core.ts and its kernel.js, which a copy of
+        # opencode-plugin/ alone lacks; and a copy keyed by that tree alone would run an old kernel
+        # after a rebuild that changed nothing else there
+        from workbench import ocplugin
+        self.opencode_home()
+        clone, git = plugin_repo(Path(self.tmp.name) / "clone")
+        with mock.patch.object(ocplugin, "PKG_ROOT", clone):
+            first, _ = ocplugin.make_copy()
+            shared = [f for f, _ in ocplugin.shared_files(clone)]  # the root package.json's mod/ files
+            for f in ("mod/hooks/core.ts", "mod/hooks/kernel.js"):
+                self.assertIn(f, shared)
+                self.assertEqual((first.parent / f).read_bytes(), (clone / f).read_bytes(), f)
+            (clone / "mod/hooks/kernel.js").write_text((clone / "mod/hooks/kernel.js").read_text() + "\n// rebuilt\n")
+            git("commit", "-qam", "the kernel rebuilt")
+            second, _ = ocplugin.make_copy()
+            self.assertNotEqual(second, first)
+            self.assertTrue((second.parent / "mod/hooks/kernel.js").read_text().endswith("// rebuilt\n"))
+            self.assertEqual(ocplugin.copy_info(second)["tree"], ocplugin.head_tree(clone)[1])
+        # a commit from before the plugin imported the kernel: keyed by its tree, as before
+        old = Path(self.tmp.name) / "old"
+        shutil.copytree(ROOT / "opencode-plugin", old / "opencode-plugin", ignore=shutil.ignore_patterns("test"))
+        run = lambda *a: subprocess.run(["git", "-C", str(old), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                        check=True, capture_output=True, text=True).stdout.strip()
+        run("init", "-q"); run("add", "-A"); run("commit", "-qm", "old")
+        self.assertEqual(ocplugin.head_tree(old)[1], run("rev-parse", "HEAD:opencode-plugin"))
+
     def test_wb_setup_opencode_loads_a_copy_of_whats_committed_which_a_new_commit_refreshes(self):
         # #1321's finding 16: the entry named the clone's live opencode-plugin/, which OpenCode
         # watches and reloads on every change, so each save ran uncommitted (a patch under test
@@ -28924,6 +28951,32 @@ class ModelSet(Base):
             run_wb("scout", "--due")
         self.assertEqual(due.exception.code, 1)
         self.assertIn("days ago: kept all", run_wb("scout"))
+
+    def test_scout_if_due_offers_the_weekly_check_once_a_due_period_as_the_mod_does(self):
+        # the OpenCode plugin's idle check (#1334): the mod's scoutIfDue rule, moved into wb, on the
+        # same scout.json, so an offer by either host spends the period's for both
+        from workbench import cli
+
+        def offer():
+            try:
+                return run_wb("scout", "--if-due").strip(), 0
+            except SystemExit as e:
+                return "", e.code
+        self.assertEqual(offer(), (cli.SCOUT_OFFER, 0))  # never checked: due
+        self.assertTrue(cli.scout_state()["offered_at"])
+        self.assertEqual(offer(), ("", 1))                # offered since it fell due: not again
+        run_wb("scout", "--done")
+        self.assertEqual(offer(), ("", 1))                # just done
+        path = store.home() / "scout.json"
+        st = json.loads(path.read_text())
+        week = cli.SCOUT_EVERY_DAYS * 86400
+        # a week on (the last offer came before that check): due again, once
+        path.write_text(json.dumps({**st, "done_at": store.now() - week - 60, "offered_at": store.now() - week - 120}))
+        self.assertEqual(offer(), (cli.SCOUT_OFFER, 0))
+        self.assertEqual(offer(), ("", 1))
+        # the mod's own offer (its offered_at, written past the due date) counts the same
+        path.write_text(json.dumps({"done_at": store.now() - week - 60, "offered_at": store.now() - 30}))
+        self.assertEqual(offer(), ("", 1))
 
     def test_the_watch_list_comes_back_every_check_until_settled(self):
         self.assertNotIn("watch list", run_wb("scout"))
@@ -35187,6 +35240,95 @@ class RealOpenCodePlugin(Base):
         got = json.loads(self.ask(url, "api", "POST", "/api/rpc/workbench-driver/driver",
                                   "-d", json.dumps({"input": {"sessionID": sid}})))
         self.assertEqual((got["output"]["tool"], got["output"]["session"]), ("opencode", sid), got)
+
+    def test_a_review_notice_reaches_its_session_once_and_a_resend_under_its_id_adds_nothing(self):
+        # #1313 (the host-shape decision's critic, 3): the server part's `wb events` hears the
+        # notice, `wb ack` takes it, and it goes in as one synthetic message whose id is bound to
+        # the task, kind and ts; sent again (the mark put back, as a second server or a restart
+        # would), OpenCode's inbox gives back the first and nothing new is added
+        from workbench import ocplugin
+        home = self.root / "wb-state"
+        # no provider: the wake's turn ends at once, asking no model (OpenCode Zen's free ones answered)
+        self.conf.write_text(json.dumps({"enabled_providers": ["none-such"], "plugins": [{"package": str(ocplugin.DIR),
+                                         "options": {"wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(home)}}}]}))
+        url = self.serve(WB_HOME="")
+        self.listed(url, ocplugin.PLUGIN_ID)
+        sid = json.loads(self.ask(url, "api", "POST", "/api/session", "-d",
+                                  json.dumps({"location": {"directory": str(self.project)}})))["data"]["id"]
+        os.environ["WB_HOME"] = str(home)
+        task = store.Task("t-1313")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-1313", "session": sid, "driver": {"tool": "opencode"}}))
+        (task.dir / "status.json").write_text(json.dumps({"phase": "review", "updated_at": store.now()}))
+
+        def ours() -> list:
+            got = []
+            for path in (f"/api/session/{sid}/inbox", f"/api/session/{sid}/message"):
+                out = json.loads(self.ask(url, "api", "GET", path) or "{}")
+                rows = out.get("data", out) if isinstance(out, dict) else out
+                got += [r for r in (rows if isinstance(rows, list) else rows.get("items", []) if isinstance(rows, dict) else [])
+                        if isinstance(r, dict) and (r.get("metadata") or r.get("payload", {}).get("metadata") or {}).get("source") == "workbench.notice"]
+            return got
+        ts = store.now()
+        store.append_jsonl(store.home() / "notify.jsonl", {"task": "t-1313", "kind": "review", "ts": ts, "text": "the diff"})
+        end = time.monotonic() + 90
+        while not ours():
+            self.assertLess(time.monotonic(), end, self.ask(url, "api", "GET", f"/api/session/{sid}"))
+            time.sleep(0.5)
+        self.assertEqual(float((task.dir / "acked").read_text()), ts)
+        time.sleep(3)
+        self.assertEqual(len({r["id"] for r in ours()}), 1)
+        (task.dir / "acked").write_text("0")       # as if never taken: it is sent again, under the same id
+        store.append_jsonl(store.home() / "notify.jsonl", {"task": "t-other", "kind": "review", "ts": ts + 1, "text": ""})
+        end = time.monotonic() + 60
+        while float((task.dir / "acked").read_text() or 0) != ts:
+            self.assertLess(time.monotonic(), end, (ours(), self.ask(url, "api", "GET", f"/api/session/{sid}")))
+            time.sleep(0.5)
+        time.sleep(3)
+        self.assertEqual(len({r["id"] for r in ours()}), 1)
+
+    def test_a_web_settings_change_with_help_gets_one_offer_in_the_session_the_user_typed_in(self):
+        # #1334's live acceptance: once a turn ended here, a `help` row in settings-changes.jsonl
+        # is offered once, in the session the user last typed in, and the mark keeps a second
+        # look from offering it again
+        from workbench import chat, ocplugin
+        home = self.root / "wb-state"
+        os.environ["WB_HOME"] = str(home)
+        # the prompt reaches the plugin's chat part too, whose `wb chat url` brings a chat server up
+        # while the chat is on (its default): one outlived this test (PR #1447's CI)
+        chat.set_on(False)
+        self.conf.write_text(json.dumps({"enabled_providers": ["none-such"], "plugins": [{"package": str(ocplugin.DIR),
+                                         "options": {"wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(home)}}}]}))
+        url = self.serve(WB_HOME="")
+        self.listed(url, ocplugin.PLUGIN_ID)
+        sid = json.loads(self.ask(url, "api", "POST", "/api/session", "-d",
+                                  json.dumps({"location": {"directory": str(self.project)}})))["data"]["id"]
+
+        def offers() -> list:
+            got = []
+            for path in (f"/api/session/{sid}/inbox", f"/api/session/{sid}/message"):
+                out = json.loads(self.ask(url, "api", "GET", path) or "{}")
+                rows = out.get("data", out) if isinstance(out, dict) else out
+                for r in (rows if isinstance(rows, list) else rows.get("items", []) if isinstance(rows, dict) else []):
+                    meta = (r.get("metadata") or r.get("payload", {}).get("metadata") or {}) if isinstance(r, dict) else {}
+                    if meta.get("source") == "workbench.notice" and meta.get("kind") == "settings":
+                        got.append(r)
+            return got
+        # the user types here: the prompt hook names the session, and the turn (no provider) ends
+        self.ask(url, "api", "POST", f"/api/session/{sid}/prompt", "-d", json.dumps({"text": "hello"}))
+        ts = store.now()
+        store.append_jsonl(store.home() / "settings-changes.jsonl", {
+            "ts": ts, "by": "web", "key": "probe", "label": "Probe", "from": False, "to": True,
+            "help": "It needs the probe tool installed."})
+        end = time.monotonic() + 90
+        while not offers():
+            self.assertLess(time.monotonic(), end, self.ask(url, "api", "GET", f"/api/session/{sid}"))
+            time.sleep(0.5)
+        self.assertEqual(store.read_json(store.home() / "settings-offered.json", {}).get("ts"), ts)
+        time.sleep(20)  # past the next timer look (SCAN_MS 15 s)
+        got = offers()
+        self.assertEqual(len({r["id"] for r in got}), 1, got)
+        self.assertIn("The user changed Probe from", json.dumps(got[0]))
 
     def test_a_real_opencode_loads_wb_setup_opencodes_copy_and_never_the_clones_live_edits(self):
         # #1321's finding 16: OpenCode watches a configured local plugin and reloads it on every
