@@ -348,7 +348,22 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
     out = {"tasks": 0, "cost": 0.0, "unknown": 0, "plan": 0, "trials": 0,
            "claude": 0, "self_est": 0, "by_provider": {}}
     for r in rows:
-        if r.get("kind") != "api" or (r.get("ts") or 0) < since:
+        if (r.get("ts") or 0) < since:
+            continue
+        if isinstance(fb := r.get("fallback_paid"), dict) and isinstance(fb.get("cost"), (int, float)):
+            # a GPU fallback's row, the API rounds before it (#1523): their dollars and provider;
+            # its Claude side is the GPU score's
+            p = out["by_provider"].setdefault(str(fb.get("provider") or "?"), {"tasks": 0, "cost": 0.0, "unknown": 0})
+            out["tasks"] += 1
+            p["tasks"] += 1
+            out["trials"] += bool(r.get("trial"))
+            out["cost"] += fb["cost"]
+            p["cost"] += fb["cost"]
+            if fb["cost"]:
+                p.setdefault("bases", set()).add(fb.get("prices") if fb.get("prices") in meter.BASES
+                                                 else meter.CATALOG)
+            continue
+        if r.get("kind") != "api":
             continue
         api = r.get("api") if isinstance(r.get("api"), dict) else {}
         p = out["by_provider"].setdefault(str(r.get("provider") or "?"),
@@ -384,10 +399,14 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
 def paid(row: dict) -> str:
     """An API task's money at its close, for wb accept's and discard's line: `paid ≈$0.12`,
     `paid: unknown` (no price, or no figure came back: said alike, #1322), `plan usage (…)`;
-    "" for a GPU task. Its Claude side isn't said there: a line of estimates on every close cost
-    Claude tokens and changed nothing it did (#1322)."""
+    `paid ≈$0.42 (before the GPU fallback)` for a task its API rounds paid for before it moved
+    (`fallback_paid`, #1523); "" for a GPU task. Its Claude side isn't said there: a line of
+    estimates on every close cost Claude tokens and changed nothing it did (#1322)."""
     from .results import row_basis, row_cost
     if row.get("kind") != "api":
+        fb = row.get("fallback_paid")
+        if isinstance(fb, dict) and isinstance(fb.get("cost"), (int, float)):
+            return f"paid {money(fb['cost'], fb.get('prices') or meter.CATALOG)} (before the GPU fallback)"
         return ""
     api = row.get("api") if isinstance(row.get("api"), dict) else {}
     if api.get("source") == "plan":

@@ -48746,6 +48746,28 @@ class ApiStats(Base):
         gpu = results.record(store.Task(self.api_task("t-gpu", via=None).name), "discarded")
         self.assertEqual((gpu["kind"], "api" in gpu), ("gpu", False))
 
+    def test_a_task_moved_to_its_gpu_fallback_keeps_what_its_api_rounds_paid(self):
+        # #1523 (2026-11-26): task.json as runner._fallback_move leaves it (routes.fallback_routed's
+        # `via: gpu`) made the row a GPU one with no money: wb accept said no "paid", and wb savings
+        # and Stats left out the $0.42 the ledger and the day cap had counted
+        from workbench import results, savings, spend
+        now = store.now()
+        moved = {"via": "gpu", "model": "ollama/mimo", "fallback": True, "fallback_from": "deepseek/deepseek-flash"}
+        t = self.api_task("t-fbpaid", {"api": {"usd": 0.42}}, **moved)
+        self.booked(0.30, now - 60, task="t-fbpaid")
+        self.booked(0.12, now - 30, task="t-fbpaid")
+        bare = self.api_task("t-fbfree", **moved)                   # moved before it paid anything
+        with mock.patch.object(spend, "usage_by_step", return_value=(self.USAGE, [])):
+            row, free = results.record(t, "accepted"), results.record(bare, "accepted")
+        self.assertEqual((row["kind"], "api" in row), ("gpu", False))  # the GPU model's, as before
+        self.assertEqual(row["fallback_paid"], {"cost": 0.42, "prices": "catalog", "provider": "deepseek"})
+        self.assertEqual(savings.paid(row), "paid ≈$0.42 (before the GPU fallback)")
+        a = savings.api_totals([row])
+        self.assertEqual((a["tasks"], a["cost"], a["by_provider"]["deepseek"]["cost"]), (1, 0.42, 0.42))
+        self.assertEqual(a["claude"], 0)                               # the GPU score's, not the API side's
+        self.assertNotIn("fallback_paid", free)
+        self.assertEqual((savings.paid(free), savings.api_totals([free])["tasks"]), ("", 0))
+
     def test_a_task_with_two_sessions_records_the_sum_of_both_sessions_cost(self):
         from workbench import results
         os.environ["FAKE_COST"] = "0.21"
@@ -48872,6 +48894,36 @@ class ApiStats(Base):
         self.assertEqual(runner._spend_part(store.Task(a.name)), " · cost unknown")
         a.set_status(api={"usd": 0.2})                              # the meter's key (#1019)
         self.assertEqual(runner._spend_part(store.Task(a.name)), " · ≈$0.20 so far")
+
+    def test_a_plan_tasks_round_report_and_wb_top_say_plan_usage_never_dollars_so_far(self):
+        # #1522 (2026-11-26): a plan task read "$0 so far" (a coding plan's 0 prices) or a catalog
+        # estimate (OpenCode Go's) in the round report, wb top and the web, where its close said
+        # plan usage; a model only the meter's status `api.plan` names (gone from hosted.json) too
+        from workbench import results, top
+        now = time.time()
+        go = self.api_task("t-plan-go", {"phase": "running", "updated_at": now},  # no `api` booked yet
+                           model=SPEND_GO, provider="opencode-go")
+        gone = self.api_task("t-plan-gone", {"phase": "running", "updated_at": now,
+                                             "api": {"usd": None, "plan": "deepseek"}}, model="deepseek/gone-1")
+        for t in (go, gone):
+            store.append_jsonl(t.dir / "events.jsonl", {"ts": now - 5, "round": 1, "kind": "step",
+                                                        "in": 10, "out": 5, "cost": 0.03})
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: None), \
+                mock.patch.object(hardware, "_run", lambda *argv: ""):
+            snap = top.Top(2, drm=drm).tick()
+        run = {r["task"]: r for r in snap["running"]}
+        for t, plan in ((go, "opencode-go"), (gone, "deepseek")):
+            t = store.Task(t.name)
+            self.assertEqual(runner._spend_part(t), f" · plan usage ({plan})")
+            self.assertIsNone(results.spend_so_far(t))
+            self.assertEqual(run[t.name]["plan"], plan)
+            self.assertNotIn("spend", run[t.name])
+        go.set_status(api={"usd": None, "plan": "opencode-go"})     # what the meter books for a plan
+        self.assertEqual(runner._spend_part(store.Task(go.name)), " · plan usage (opencode-go)")
+        self.assertIn("API opencode-go · plan usage", top.render(snap, 200, color=False))
 
     def test_a_step_event_keeps_opencodes_cost_and_the_cache_read_and_write_apart(self):
         from workbench import events
