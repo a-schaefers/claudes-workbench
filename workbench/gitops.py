@@ -1292,6 +1292,28 @@ def keep_review(cwd: Path, task: str, rnd: int, tree: str) -> bool:
                           tree), check=False).returncode
 
 
+# A run's review item's base (#1503, 2026-11-26): round ``rnd``'s review tree committed on the
+# coder's base, so the reviewer's worktree holds the change it reviews. REVIEW_REF is a bare tree
+# no worktree can check out, so every review started at the run's base, searched for the change
+# and retyped it from the diff to run a test, on the base. Under the coder's REVIEW_REF, so
+# drop_reviews deletes it with them; committed as wb, never signed: it lands on no branch.
+REVIEWED_REF = "refs/workbench/review/{}/{}-commit"
+REVIEWED_IDENT = {"GIT_AUTHOR_NAME": "workbench", "GIT_AUTHOR_EMAIL": "workbench@localhost",
+            "GIT_COMMITTER_NAME": "workbench", "GIT_COMMITTER_EMAIL": "workbench@localhost"}
+
+
+def review_commit(repo: Path, task: str, rnd: int, tree: str, parent: str) -> str | None:
+    """Round ``rnd``'s review ``tree`` of ``task`` as a commit on ``parent``, pinned at
+    REVIEWED_REF; None when git can't make or pin it."""
+    r = _run(repo, ("commit-tree", "--no-gpg-sign", "-p", parent, "-m",
+                    f"workbench: {task} round {rnd}, as reviewed", tree), env=REVIEWED_IDENT, check=False)
+    sha = r.stdout.decode().strip() if not r.returncode else ""
+    if not sha or _run(repo, ("update-ref", "-m", "workbench: reviewed", REVIEWED_REF.format(task, rnd), sha),
+                       check=False).returncode:
+        return None
+    return sha
+
+
 def drop_reviews(repo: Path, task: str) -> int:
     """Delete every REVIEW_REF of ``task``, in one transaction; how many there were."""
     refs = git(repo, "for-each-ref", "--format=%(refname)", REVIEW_REF.format(task, ""),

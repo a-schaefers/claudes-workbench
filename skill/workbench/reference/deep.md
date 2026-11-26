@@ -27,8 +27,10 @@ not on a repo's flow), `stages`. Each stage:
   answers must be one per id, a missing one named `unjudged`); `attempts` N (the same item N times).
 - `keep`: `{"path": "verdict", "in": ["confirmed"]}`: the rest are filtered, kept in the report.
 - `compare: true`: a report over a code stage with `attempts`: one item per item, once its
-  attempts ended, its prompt's `{diffs}` every attempt's change, labelled a1..aN (the green ones
-  when two or more are); the `choose` card returns `{best, ranking, why}`.
+  attempts (and an earlier stage's reviews of them) ended, its prompt's `{diffs}` every attempt's
+  change, labelled a1..aN (the green ones when two or more are), each with its review; the
+  `choose` card returns `{best, ranking, why}`. A stage no later one reads (best-of's reviews) is
+  in `wb run report` under `results`.
 - `refix`: on a report over a code stage, `{"path": "must_fix", "max": 1|2}`: a non-empty list
   goes back to the coder as `wb feedback`, then the change is reviewed again.
 - `escalate: [roles]`: on a code stage: an item stuck or failed, or with its review's asks left

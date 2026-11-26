@@ -1319,7 +1319,8 @@ Every review tree of the step is kept, not only the last (#1198): `review_diff(t
 n's to status `review_trees` (`{tree, left, keep}`, `gitops.review_snapshot`: `keep` the paths
 left out, `dir/` or a file, by top-level directory past `KEEP_MAX` 100) and pins it at
 `refs/workbench/review/<task>/<n>` (`gitops.REVIEW_REF`, `keep_review`) in the user's repo, so gc
-can't prune it; a ref to a tree, which `git log --all` skips. The refs go at `wb next` (a rewind
+can't prune it; a ref to a tree, which `git log --all` skips (a run's review item adds a commit of it beside it,
+`<n>-commit`: *Deep workflows*). The refs go at `wb next` (a rewind
 never crosses a step's commit) and at accept and discard (`cli._closed`, `_finish_record`;
 `gitops.drop_reviews`, one `update-ref --stdin`). `wb rewind <task> <n>` (`cli.cmd_rewind`)
 puts the files back with `gitops.restore_tree`: only what differs between the worktree's own
@@ -9807,7 +9808,8 @@ an object of `runs.PARAM_KEYS` `{type, description, default, choices, optional}`
 #1295: a param left out takes its `default`, or stays absent when `optional`; `choices` for a string or int),
 `command` (below), `from` (a copy's), stages
 `items` or `from` (+ `split`), `keep`, `flow` pipeline|barrier, `batch`, `attempts`, `refix`, `on_failure`,
-`max_items` (`MAX_ITEMS` 200, the rest `not_run`, named), `claude`, `final`, and `prompt` (the item's spec, by
+`max_items` (`MAX_ITEMS` 200 distinct items, the rest `not_run`, named; a refix's reviews of one change, `1`,
+`1~r1`, …, count once, and an item started is never cut: #1484), `claude`, `final`, and `prompt` (the item's spec, by
 default `{item}`; `runs.render` only substitutes, an object as fenced JSON, each place cut at `runs.CUTS`, said).
 Over a code stage (`runs.CODE_PLACES`) a report's prompt may carry `{diff}` and `{report}`: the reviewed round's
 report (`store.Task.report`: the coder's summary and test line, `runs._code_report`), so a review after a refix
@@ -9825,10 +9827,13 @@ batch, attempts or refix): one item per item of the code stage, once all its att
 attempts that reached review (fewer than two: `not_run`, nothing to compare). Its prompt's `{diffs}`
 (`runs._diffs_of`) carries each attempt's diff as `### a<k> (task <t>; tests passed|failed|no tests)`, each
 cut to its share of `CUTS['diff']`; only the green ones when two or more are, the rest named
-(`runs._attempts`); its schema `runs.compare_schema`: `best` and `ranking` one of the labels shown. The
-shipped best-of is code → review → choose (the `choose` card, `choice` schema `{best, ranking, why}`) →
-Claude, whose final row carries the pick and, as its trail, every attempt's task: nothing is discarded on
-the chooser's word (#1134's study: Claude read every review and most diffs, N times the handoff; SWE-agent's
+(`runs._attempts`); its schema `runs.compare_schema`: `best` and `ranking` one of the labels shown. When an
+earlier report stage reviews the same code stage, a compare item waits for its attempts' reviews too, and
+`{diffs}` carries each one's under its attempt, `Its review: {verdict, must_fix, summary}` (`runs._review_of`,
+cut at `REVIEW_CUT` 2,000; `Item.reviews`): best-of paid for three reviews that reached neither the chooser
+nor Claude (#1504). The shipped best-of is code → review → choose (the `choose` card, `choice` schema
+`{best, ranking, why}`) → Claude, whose final row carries the pick and, as its trail, every attempt's task,
+and whose report's `results` carry each review: nothing is discarded on the chooser's word (#1134's study: Claude read every review and most diffs, N times the handoff; SWE-agent's
 Chooser).
 **Escalation** (`escalate: [roles]` on a code stage, 1 to `ESCALATE_MAX` 3 distinct `routes.ROLES`): an item
 that ends null (stuck, failed, discarded), or whose review's asks are left once refix's `max` is spent (`_take`
@@ -9893,8 +9898,12 @@ are) and has room (`_room`: `IN_FLIGHT` 6 items; an API stage's provider slots, 
 while a task of the user's waits for one, `cli._api_pending`; on the GPU one waiting item per stage). Each start
 is `wb start <run>-<stage>-<n> --spec specs/… --role R --queue --group <run> --run --stage --item --checkin 0`,
 a report's with `--report --card --schema --tools --ask-budget 0 --no-self-review --no-base-check --setup ''`
-(`runs._start`), a subprocess, so refusals are the user's: an exit 3 that is the day cap's own (`meter.RESETS`,
-"it resets at local midnight", anywhere in what wb start said) pauses the run, or under `--overnight` is tried
+(`runs._start`). Its `--base` is the run's, but for a report over one code item (no compare) the reviewed
+round's tree committed on it (`runs._base_of`, `gitops.review_commit`, pinned at `gitops.REVIEWED_REF`
+`refs/workbench/review/<code task>/<n>-commit`, gone with the code task's review refs), so a reviewer's worktree
+holds the change it reviews: at the base, reviewers retyped it from the diff to run a test, on the base (#1503);
+a chooser's stays at the base, each attempt only in its diff. Each start is a subprocess, so refusals are the
+user's: an exit 3 that is the day cap's own (`meter.RESETS`, "it resets at local midnight", anywhere in what wb start said) pauses the run, or under `--overnight` is tried
 again each tick (journal `retry`); any other exit 3 (no cap, no price, an unreadable routes.json, which say "day
 cap" too and never clear) is `not_run`; a start that timed out (124) once its task exists is the item's,
 running (a runner that never came is reaped, a stop from outside); else `null`. The journal row comes first, so a
@@ -10000,7 +10009,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb deepmode [on\|off]`, `wb workflows [on\|off]` | `--rule` (prints `runs.DEEPCODE_RULE`, the rule a host adds when the user types `deepcode`); `--moved` (once: a 2.1 `mode: on` written as deepmode off and the story's `moved.deepmode` printed, else nothing; the hosts' once a load, #1507) | *Dynamic workflows (deepmode)* (#1041, #1278): `$WB_HOME/workflows.json`; off by default. One command under two names. |
 | `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--args TEXT` (a flow's slash command's line as typed: `runs.parse_args`, its one param whole, else `k=v` words), `--dry-run`, `--repo DIR` (.: any directory in the repo, read from its top, and each item's `wb start --repo` is DIR, so its package is found, run.json `package_dir`, #1494), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE` (kept whole in run.json; past `runs.CUTS` 4,000 characters a line says each spec's `{context}` carries the first 4,000, and the spec says the cut, #1519), `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param (a `choices` one not among them; a `files` one matching nothing committed at the base, or over `runs.FILES_MAX` 1,000), a stage on an API role with no day cap (`meter.no_cap`), and with exit 3 `stage <id>: ` and wb start's own line for a stage (or escalate) role on API whose model can't be found (`runs.role_cant_run`: no API model, or one the catalog doesn't list, a missing key named, `models.unlisted_why`; read fresh, so a cold hosted.json never says a working API role is the GPU's, #1532), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `stop: wb run stop <run>` and that its notices wake the session as a task's (without the mod or the plugin, `wb wait <run>` in the background). `--dry-run` (#1295) stops after the cap check and the budget, before any file: a line per stage (its card or code, role and side, where its items come from, those `unless_exists` skips), each items stage's first spec cut at `runs.DRY_SPEC_CUT` 1,500 characters, and the estimate (`runs.dry_run`); exit 0, or 1 on a refusal (3 for a role that can't run). |
 | `wb run status [<run>]` | `--all`, `--json`, `--all-sessions` (and, suppressed, `--repo DIR`, `--session ID`) | Reaps a dead driver (`runs.reap`: `stopped`, one `run_stopped`); a line per run in the caller's scope (`runs.status_line`). |
-| `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, filtered, superseded, null, not_run, pending, code (each code item's task that exists: one refused at its start is `not_run` alone, and the `run_done` notice's `change(s) at review` counts none, #1531), spend; every item accounted for. |
+| `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, results (each done item of a stage no later one reads, with its trail: best-of's reviews, #1504), filtered, superseded, null, not_run, pending, code (each code item's task that exists: one refused at its start is `not_run` alone, and the `run_done` notice's `change(s) at review` counts none, #1531), spend; every item accounted for. |
 | `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`); from the web app (`WB_ACTOR=web`, no model's variables) its why is `runs.WEB_STOP` and a `run_stopped` notice tells the run's session. Resume (refused closed or at `review`, `runs._ended`): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
 | `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items are `not_run`. |
 | `wb run feed <run> <stage> --file <json\|->` | | A `claude` checkpoint's merge: a JSON list, `inbox/<stage>-feed`; the run goes on. Refused on a closed run or one at `review`, before the inbox is written. |
