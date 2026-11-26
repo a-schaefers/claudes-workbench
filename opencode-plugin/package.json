@@ -1,0 +1,15 @@
+{
+  "name": "opencode-workbench",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Workbench inside OpenCode: the plugin's server, TUI and RPC parts (#1311). A Git install reports its commit, not this version.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./server.ts",
+    "./server": "./server.ts",
+    "./tui": "./tui.ts",
+    "./rpc": "./rpc.ts"
+  },
+  "files": ["server.ts", "tui.ts", "rpc.ts", "wb.ts"]
+}

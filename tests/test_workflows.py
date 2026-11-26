@@ -86,10 +86,11 @@ class RequiredCheck(unittest.TestCase):
         # toolchain, and the goldens must hold under OpenCode's Bun as under Claude Code
         kernel = job("check.yml", "kernel")
         steps = ["scripts/install-opencode.sh", "actions/cache@", "python3 scripts/kernel.py fetch",
-                 "python3 scripts/kernel.py check", "BUN_BE_BUN=1 opencode test opencode-plugin/test"]
+                 "python3 scripts/kernel.py check", "BUN_BE_BUN=1 opencode test opencode-plugin/test",
+                 "BUN_BE_BUN=1 opencode check -p opencode-plugin"]  # the plugin's types (#1311)
         at = [kernel.find(s) for s in steps]
         self.assertNotIn(-1, at, steps)
-        self.assertEqual(at, sorted(at), "in this order: Bun, the cache, fetch, check, the Bun goldens")
+        self.assertEqual(at, sorted(at), "in this order: Bun, the cache, fetch, check, the Bun goldens, the types")
         self.assertIn("hashFiles('kernel/toolchain.json', 'kernel/spago.lock')", kernel)
         self.assertNotIn("paths:", kernel)
 

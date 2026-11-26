@@ -55,7 +55,7 @@ or comment without the user's yes for it.
 
 ## Layout
 `workbench/` is the Python package: standard library only, 3.11+ (CI's floor; developed on 3.14).
-No dependencies, no packaging: it runs from the clone, on Linux, WSL2 and macOS (Landlock on Linux,
+No dependencies, no packaging: it runs from the clone (or OpenCode's Git install of it), on Linux, WSL2 and macOS (Landlock on Linux,
 Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `store.py`: task files, atomic JSON, locked JSONL, `Task`. Every other part talks through them.
 - `cli.py`: `wb` and `PROTOCOL` (the agent's rules; `WRITING_PROTOCOL`, the writing role's, same fold). `runner.py`: the detached per-task driver,
@@ -108,6 +108,10 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   fetched by hash into `~/.cache/workbench/kernel`) into the committed `mod/hooks/kernel.js`, imported only by
   `mod/hooks/core.ts` (`register.tsx` and `tasks.ts` read its tables there); its seeded props in `kernel/test`;
   a change to a value its Tables copy needs `python3 scripts/kernel.py build` (ARCHITECTURE.md, *The kernel*).
+  `opencode-plugin/`: the OpenCode plugin (server, TUI, RPC parts, TypeScript, nothing at import; typed by
+  `BUN_BE_BUN=1 opencode check -p opencode-plugin`); `ocplugin.py` installs it (`wb setup --opencode`) and
+  names it for `wb doctor`; every task's layer removes it (`"-workbench"`); the root `package.json` is OpenCode's
+  Git install, the plugin with its wb (`files`: what wb reads at run time) (ARCHITECTURE.md, *The OpenCode plugin*).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
   GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API; `chat-api.yaml`, its OpenAPI).

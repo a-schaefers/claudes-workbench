@@ -587,6 +587,12 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
     over = models._merge(timeouts, pins.get("provider") or {})
     if over := models._merge(over, (keyhole_over or {}).get("provider") or {}):
         ours["provider"] = over
+    # the plugin's removal again, after the user's own content `plugins` (#1311): the content
+    # loads after the layer, so a plugin entry of theirs there would add it back (a later add
+    # re-enables, core/src/plugin/supervisor.ts); theirs are kept, ours comes last
+    if isinstance(layer.get("plugins"), list):
+        theirs = models.users_config_content().get("plugins")
+        ours["plugins"] = [*(theirs if isinstance(theirs, list) else []), *layer["plugins"]]
     content = {**users, **ours}
     if over and isinstance(users.get("provider"), dict):
         content["provider"] = models._merge(users["provider"], over)

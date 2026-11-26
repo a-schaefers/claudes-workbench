@@ -28,8 +28,8 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, stats, store,
-               transcript, tuning, verify, webpush)
+               media, models, ocplugin, optimize, patches, progress, results, router, routes, savings, scan, skills,
+               stats, store, transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from . import keyhole
@@ -7425,9 +7425,20 @@ def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
     development (2026-11-16: the plugin install copies only mod/, so these two come from here);
-    then the web app's service (install_service), unless --no-service."""
-    links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb"),
-             (context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench")]
+    then the web app's service (install_service), unless --no-service. With --opencode, the
+    OpenCode path's fallback (#1311): the wb link and the OpenCode plugin's entry
+    (ocplugin.install), never Claude Code's skill link, which OpenCode would also list (it scans
+    ~/.claude/skills: #1296, row 8)."""
+    if _install_kind() == "opencode":
+        # a generation directory OpenCode replaces on its next update and later removes: links, a
+        # service unit and options naming it would outlive it, and pin the plugin to an old wb
+        die(f"wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
+            f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
+            f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
+            f"setup --opencode there")
+    links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb")]
+    if not a.opencode:
+        links.append((context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench"))
     bad = False
     for at, to in links:
         if at.is_symlink() and at.resolve() == to.resolve():
@@ -7445,13 +7456,28 @@ def cmd_setup(a):
         at.parent.mkdir(parents=True, exist_ok=True)
         at.symlink_to(to)
         print(f"ok  {at} → {to} " + (f"(was {was})" if was is not None else "(made)"))
+    if a.opencode:
+        try:
+            for said in ocplugin.install():
+                print(said)
+        except RuntimeError as e:  # own_config's refusal: the change, to make by hand
+            bad = True
+            print(f"BAD {e}")
+        try:  # the clone holding this user's patches, as wb patch init's is: a later init from a
+            # marketplace install reuses it, never a second clone splitting them (#1321's finding 14)
+            patches.note_install(PKG_ROOT)
+        except (gitops.GitError, OSError):
+            pass
     old = context.claude_home() / "skills/delegate"  # /delegate became /workbench (2026-11-17)
     if old.is_symlink() and not old.exists() and os.readlink(old).rstrip("/").endswith("skill/delegate"):
         old.unlink()
         print(f"ok  {old} removed: /delegate is now /workbench")
     bindir = str(Path.home() / ".local/bin")
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-        if mod_listed():  # the plugin's bin/ and the mod's lookup cover Claude Code (#1190)
+        if a.opencode:  # the plugin runs the wb its options name, whatever OpenCode's PATH
+            print(f"--  {bindir} isn't on PATH: OpenCode's plugin runs {PKG_ROOT / 'bin/wb'} (its "
+                  f"options), so only your own terminal lacks it. {path_advice(claude=False)}")
+        elif mod_listed():  # the plugin's bin/ and the mod's lookup cover Claude Code (#1190)
             print(f"--  {bindir} isn't on PATH: Claude Code runs wb from the plugin's bin/ and the "
                   f"marketplace clone, so only your own terminal lacks it. {path_advice(claude=False)}")
         else:
@@ -7813,14 +7839,32 @@ def _mod_behind() -> str | None:
 
 
 def _install_kind() -> str:
-    """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "clone":
+    """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "opencode":
+    OpenCode's install, a package in its package cache that OpenCode replaces, no git clone
+    (ocplugin.runs_from_cache: git's errors were said for it, #1311's third review); "clone":
     one the user owns (a developer's, or wb patch init's). Under either plugins root the mod's
     gateConf counts: <CLAUDE_CONFIG_DIR or ~/.claude>/plugins, and CLAUDE_CODE_PLUGIN_CACHE_DIR,
     where Claude Code keeps the marketplace clone when it is set: read there as the user's own,
     wb update skipped the rescue and Claude Code's re-clone wiped the local commits (#1099,
     2026-11-23)."""
+    if ocplugin.runs_from_cache():
+        return "opencode"
     here = PKG_ROOT.resolve()
     return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in _plugin_roots()) else "clone"
+
+
+def _claude_has_workbench() -> bool:
+    """Whether Claude Code has workbench: the mod installed, or its marketplace known in either
+    plugins root (known_marketplaces.json's `workbench`)."""
+    if mod_listed():
+        return True
+    for r in _plugin_roots():
+        try:
+            if "workbench" in store.read_json(r / "known_marketplaces.json", {}):
+                return True
+        except (OSError, ValueError, TypeError):
+            pass
+    return False
 
 
 def _plugin_roots() -> list[Path]:
@@ -7869,6 +7913,10 @@ def cmd_update(a):
     and a clone's patches on branch `local` rebased onto the news (#1005).
     --check only says whether there is news; --if-due asks the network at most weekly."""
     kind = _install_kind()
+    if kind == "opencode":  # nothing of wb's to pull or rebase: never a git error (#1311's third review)
+        print(f"OpenCode's install at {PKG_ROOT}: {ocplugin.updated_by()}" if a.check else
+              f"wb update leaves OpenCode's install at {PKG_ROOT} to OpenCode: {ocplugin.updated_by()}")
+        return
     if kind == "clone" and not a.check and patches.branch(PKG_ROOT) == patches.PATCH_BRANCH:
         patches.note_install(PKG_ROOT)  # the mod reads which clone holds the patches (#1005)
     path = store.home() / "update.json"
@@ -7912,8 +7960,12 @@ def cmd_update(a):
     # every check that can refuse comes before any task is stopped: --stop stopped every
     # session's tasks, then died on a dirty clone, a missing claude, a failed fetch, or found
     # nothing new, each task resumed in a fresh session on the same code (#775)
+    # a clone OpenCode's plugin loads, which Claude Code doesn't have (wb setup --opencode, the
+    # OpenCode path's fallback): pulled and rebased alone. Claude's steps refused it without
+    # claude, and with claude failed on a marketplace it doesn't know (#1321's findings 4 and 15)
+    claude_steps = not (kind == "clone" and ocplugin.loaded_from() and not _claude_has_workbench())
     steps = [["claude", "plugin", "marketplace", "update", "workbench"],
-             ["claude", "plugin", "update", "workbench@workbench"]]
+             ["claude", "plugin", "update", "workbench@workbench"]] if claude_steps else []
     behind = None  # a marketplace copy is one commit deep: its news can't be counted beforehand
     rebased = None  # a clone's patches on `local`, rebased onto the news (#1005)
     settled = patches.Settled(set(), [], [], [])  # what became of the pull requests wb patch send opened
@@ -7932,7 +7984,7 @@ def cmd_update(a):
     if (market := _marketplace_clone()) and (refusal := patches.marketplace_refusal(  # saved first,
             market, None if market == PKG_ROOT else PKG_ROOT)):  # then refused (#1005, #1326)
         die(refusal)
-    if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
+    if claude_steps and not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
         die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "
             "in Claude Code, or put claude on PATH)")
     if kind == "clone":
@@ -8032,11 +8084,18 @@ def cmd_update(a):
             n = f" ({int(gitops.git(PKG_ROOT, 'rev-list', '--count', f'{before}..{to}'))} commit(s))"
         except (gitops.GitError, ValueError):
             n = ""
-        print(f"updated {kind} {before[:7]}..{after[:7]}{n}; /reload-plugins or a restart picks up "
-              "the pane")
+        print(f"updated {kind} {before[:7]}..{after[:7]}{n}; " + ("/reload-plugins or a restart picks up "
+              "the pane" if claude_steps else "OpenCode loads its plugin from this clone: restart "
+              "OpenCode if it doesn't pick it up"))
         if rebased:
             print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
     say_later()
+    if kind == "clone":  # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/
+        try:             # (#1321's findings 16 and N2): moved to HEAD's when that changed
+            for line in ocplugin.refresh():
+                print(line)
+        except (RuntimeError, OSError, gitops.GitError) as e:
+            print(f"couldn't refresh the OpenCode plugin's copy (wb setup --opencode does): {e}")
     if kind == "clone":  # a pull request merged: its pr/ branch, worktree and body go (#1005)
         try:
             for line in [*patches.closed_lines(PKG_ROOT, settled), *patches.retire_sent(PKG_ROOT),
@@ -8050,6 +8109,10 @@ def cmd_patch(a):
     """wb patch: the user's own fixes to workbench, as commits on branch `local` of a clone they
     own, kept across wb update and offered upstream (#1005)."""
     kind = _install_kind()
+    if kind == "opencode":  # every action reads or moves a clone's branch `local`
+        die(f"wb patch works on a clone of workbench: this wb is OpenCode's install at {PKG_ROOT}, "
+            f"which OpenCode replaces when it updates (git clone https://github.com/{ocplugin.REPO}, "
+            f"then bin/wb setup --opencode there)")
     if a.action == "init":
         if kind == "clone":
             print(patches.clone_note(PKG_ROOT))
@@ -8062,7 +8125,7 @@ def cmd_patch(a):
         live = [t for t in store.all_tasks() if runner_alive(t)]
         if live:  # it moves the code, the git shim and the lane out from under them
             die(f"tasks are running ({_running(live, a)}): run wb patch init when they finish")
-        patches.init(PKG_ROOT, patches.source_dir(a.dir))
+        patches.init(PKG_ROOT, patches.source_dir(a.dir, PKG_ROOT))
     elif a.action == "list":
         patches.list_patches(PKG_ROOT, kind)
     elif a.action == "drop":
@@ -8270,6 +8333,13 @@ def cmd_doctor(a):
     old = bool(have) and have < gitops.GIT_FLOOR  # #527: init -b and the rest, unchecked
     line(good and not old, said + (f": workbench needs git {'.'.join(map(str, gitops.GIT_FLOOR))} "
                                    "or newer; upgrade it" if old else ""))
+    try:  # the OpenCode path's installs (#1311): optional, so none only informs
+        oc_lines = ocplugin.doctor_lines()
+    except RuntimeError as e:  # a config file that doesn't parse or can't be read (#1311's review)
+        oc_lines = [(None, f"the OpenCode plugin: {e}")]
+    # the OpenCode path alone: Claude Code's wb link and skill aren't BAD there (#1321's finding 26)
+    kind = _install_kind()
+    opencode_only = not mod_listed() and (kind == "opencode" or any(good is not None for good, _ in oc_lines))
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
     # (the 2026-11-16 audit: doctor said ok beside "the mod can't run it")
     on_path, wb_bin = shutil.which("wb"), os.environ.get("WB_BIN")
@@ -8285,6 +8355,12 @@ def cmd_doctor(a):
         print("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/; for "
               "your own terminal, " + (path_advice(claude=False) if linked
                                        else "link bin/wb into a PATH directory (wb setup)"))
+    elif opencode_only:  # the plugin runs the wb it names or brings (#1311)
+        print("--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below says "
+              "which); for your own terminal, " + (
+                  path_advice(claude=False) if linked else
+                  f"a clone's: git clone https://github.com/{ocplugin.REPO}, then bin/wb setup --opencode "
+                  "there" if kind == "opencode" else "link bin/wb into a PATH directory (wb setup --opencode)"))
     else:
         line(False, f"wb isn't on PATH: Claude runs it by name in Bash; the mod runs {mod_wb(wb_bin, on_path, linked)}; "
              + (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
@@ -8531,21 +8607,32 @@ def cmd_doctor(a):
               "(no-new-privileges stops snap-confine): install them another way, or turn the lane "
               'off with commands.json "paths": ["*"]')
     skill = context.claude_home() / "skills/workbench/SKILL.md"
-    line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
-         f"/workbench isn't in {skill.parent.parent}: wb setup links it")
-    elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
     listed = mod_listed()  # information only: a mod loaded another way isn't listed here
+    if skill.exists() or not opencode_only:
+        line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
+             f"/workbench isn't in {skill.parent.parent}: wb setup links it")
+    else:  # OpenCode alone, set up by wb setup --opencode, which links no Claude Code skill
+        print(f"--  /workbench isn't in {skill.parent.parent}: Claude Code's path only (wb setup links it)")
+    elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
     stale = _mod_behind() if listed else None
     print(f"--  the Claude Code mod is installed as of {stale}, older than this clone's mod: wb update "
           "refreshes it" if stale else
           "ok  the Claude Code mod is installed (workbench@workbench)" if listed else
           "--  the Claude Code mod (the pane, the wake-ups) isn't among Claude Code's installed "
           "plugins: claude plugin install workbench@workbench, unless it loads another way")
-    try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
-        for row in patches.doctor_lines(PKG_ROOT, _install_kind()):
-            print(row)
-    except (gitops.GitError, OSError) as e:
-        print(f"--  install: {PKG_ROOT}, which git can't read: {e}")
+    for good, said in oc_lines:
+        if good is None:
+            print(f"--  {said}")
+        else:
+            line(good, said)
+    if kind == "opencode":  # no clone: git's error was said (#1311's third review)
+        print(f"ok  install: OpenCode's, at {PKG_ROOT}: {ocplugin.updated_by()}")
+    else:
+        try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
+            for row in patches.doctor_lines(PKG_ROOT, kind):
+                print(row)
+        except (gitops.GitError, OSError) as e:
+            print(f"--  install: {PKG_ROOT}, which git can't read: {e}")
     for row in experiment_lines():
         print(f"--  experiment {row}")
     sys.exit(0 if ok else 1)
@@ -9263,6 +9350,9 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_trial)
     s = sub.add_parser("setup", help="link wb onto PATH and /workbench into Claude Code's skills, "
                                      "from this copy, and keep the web app up (its systemd or launchd service)")
+    s.add_argument("--opencode", action="store_true", help="for OpenCode alone: link wb and add this "
+                   "copy's OpenCode plugin to OpenCode's config, with this wb in its options "
+                   f"(OpenCode's own install, {ocplugin.ADD}, brings its wb: after it, this names a clone's)")
     # a link of wb's that points elsewhere is replaced by default (#1322); --force now only
     # replaces a web app service unit link that points elsewhere, kept and used without it
     s.add_argument("--force", action="store_true", help="replace the web app's service unit link "
