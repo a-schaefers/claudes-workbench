@@ -8804,7 +8804,8 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   change (`rewoken`). Looked at by the idle hook (`experimental.idle`: what it admits runs in the
   same execution), each execution's end and the timer.
 - **Wakes off**: the config entry's options `wake: "off"` (the mod's option): toasts only, no
-  synthetic, no rewake, no settings offer turn.
+  synthetic, no rewake, no settings offer turn; the upkeep's `workbench-wake` entry tells the
+  driver so (`upkeep.ts`, #1315).
 - **Toasts** go to the TUI part over the RPC `WorkbenchNotices` (`id: "workbench-notices"`, no
   methods, the event `toast` `{key, title, message, variant, sessionID, notify}`), emitted from every
   instance's registration; `notices-tui.ts`'s `noticesTui` subscribes (`client.rpc(...).events.on`)
