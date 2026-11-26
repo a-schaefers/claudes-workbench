@@ -271,7 +271,8 @@ def is_test(path) -> bool:
 PLUGIN_SHARED = ("mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/kernel.d.ts", "mod/hooks/golden/",
                  "mod/hooks/splash.ts", "mod/hooks/apprentice.ts",  # the splash, one for both hosts (#1333)
                  "mod/hooks/tasks.ts", "mod/hooks/modeline.ts",  # the Tasks view, one for both hosts (#1312)
-                 "mod/hooks/keywords.ts")  # deepcode and deepmode typed, one for both hosts (#1278)
+                 "mod/hooks/keywords.ts",  # deepcode and deepmode typed, one for both hosts (#1278)
+                 "mod/types/wire.d.ts")  # wb's shapes, its readers' types (#1323)
 KERNEL_CHECK = "python3 scripts/kernel.py check"
 MOD_TESTS = "claude plugin validate mod && claude plugin test mod"
 PLUGIN_TESTS = "BUN_BE_BUN=1 opencode test opencode-plugin/test && BUN_BE_BUN=1 opencode check -p opencode-plugin"
