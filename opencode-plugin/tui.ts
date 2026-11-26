@@ -10,6 +10,7 @@ import type { PaneHost } from './pane.tsx'
 import { Workbench, type Status } from './rpc.ts'
 import { consentTui } from './consent-tui.ts'
 import { noticesTui } from './notices-tui.ts'
+import { childrenTui } from './children-tui.ts'
 
 // where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
 // install of the whole repository does (#1311's review, 2026-11-25)
@@ -21,7 +22,8 @@ const plugin: TuiPlugin = {
     if (process.env.WB_TASK) return
     const stopConsent = consentTui(ctx) // the consent gates' forms (#1314)
     const stopNotices = noticesTui(ctx) // the notices' toasts and desktop notifications (#1313)
-    const stopAll = () => { stopConsent?.(); stopNotices() }
+    const stopChildren = childrenTui(ctx) // the agents' sessions as the lead's child sessions (#1331)
+    const stopAll = () => { stopConsent?.(); stopNotices(); stopChildren() }
     let st: Status
     try {
       st = (await ctx.client.rpc(Workbench).status({})) as Status

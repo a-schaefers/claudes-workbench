@@ -6042,27 +6042,30 @@ class AutoFix(Base):
         # #779 (the second 2026-11-21 audit): every timeout skipped auto-fix and said to raise
         # --test-timeout, even when the base check had run the whole suite in a second: the
         # change's infinite loop cost a full-length run and a wake auto-fix could have handled
-        self.start("t-hang", "ok", "--auto-fix", "1", "--test-timeout", "4", "--test",
-                   "if grep -qx 42 answer.txt 2>/dev/null; then sleep 30; fi")
-        st = wait_phase("t-hang", {"review", "stuck", "failed"}, timeout=90)
+        # The limit leaves the base check room on a loaded CI runner: at 4 s, a base check of a
+        # grep that took 1.0 s there (past HANG_SHARE of it) read as slow, failing this on two
+        # branches (2026-11-26, #1454 and #1461)
+        self.start("t-hang", "ok", "--auto-fix", "1", "--test-timeout", "12", "--test",
+                   "if grep -qx 42 answer.txt 2>/dev/null; then sleep 60; fi")
+        st = wait_phase("t-hang", {"review", "stuck", "failed"}, timeout=120)
         self.assertEqual((st["phase"], st["round"], st["auto_fixes"]), ("review", 2, 1))
         base = st["base_check"]
         self.assertTrue(base["ok"])
-        self.assertLess(base["secs"], 1)
+        self.assertLessEqual(base["secs"], runner.HANG_SHARE * 12)
         prompt = store.Task("t-hang").round_dir(2).joinpath("prompt.md").read_text()
-        self.assertTrue(prompt.startswith("The acceptance tests fail. They now run past 4s, where "
+        self.assertTrue(prompt.startswith("The acceptance tests fail. They now run past 12s, where "
                                           f"they finished in {base['secs']:g}s on the base: look "
                                           "for a loop that never ends"), prompt[:300])
         self.assertIn("the bug is in this change", prompt)
         # a base check that failed, or another command than the one checked, says nothing of speed
         task = store.Task("t-hang")
-        self.assertEqual(runner.hang(task, 4), {"base": base["secs"], "limit": 4})
-        task.set_status(base_check={**base, "secs": 2.0})          # half the limit: maybe slow
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertEqual(runner.hang(task, 12), {"base": base["secs"], "limit": 12})
+        task.set_status(base_check={**base, "secs": 6.0})          # half the limit: maybe slow
+        self.assertIsNone(runner.hang(task, 12))
         task.set_status(base_check={**base, "ok": False, "exit": 1})
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertIsNone(runner.hang(task, 12))
         task.set_status(base_check={**base, "cmd": "make check"})
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertIsNone(runner.hang(task, 12))
 
     @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_tests_the_lane_refused_a_device_are_not_sent_back_as_the_agents_bug(self):
@@ -9781,6 +9784,33 @@ class Watch(Base):
             for _ in range(3):
                 run_wb("watch", "t-handed", "--json")
         self.assertEqual(sorted(exported), ["ses_new"] * 3 + ["ses_old1", "ses_old2"])
+
+    def test_export_gives_each_sessions_messages_earlier_first_and_never_the_agents_own_info(self):
+        # #1331: the OpenCode plugin's child sessions take only messages from the export, as its
+        # info is the agent's database's (the host-shape decision's critic 2); an earlier session
+        # is exported once, and one whose export failed is named, for the plugin's next look
+        from workbench import transcript
+        t = store.Task("t-kids")
+        store.write_json(t.dir / "task.json", {"name": "t-kids", "created_at": store.now()})
+        t.set_status(phase="review", round=2, session="ses_new", sessions=["ses_old", "ses_busy"])
+        exported = []
+
+        def fake(sid, strict=False, task=None):
+            exported.append(sid)
+            if sid == "ses_busy":
+                return {}
+            return {"info": {"id": sid, "location": {"directory": str(t.worktree)}},
+                    "messages": [{"id": f"msg_{sid}", "type": "user", "text": "x", "time": {"created": 1}}]}
+        with mock.patch.object(transcript, "export", fake):
+            got = [json.loads(run_wb("watch", "t-kids", "--export")) for _ in range(2)]
+        self.assertEqual(got[0], got[1])
+        self.assertEqual(got[0]["task"], "t-kids")
+        self.assertEqual([(s["session"], s["current"]) for s in got[0]["sessions"]],
+                         [("ses_old", False), ("ses_new", True)])
+        self.assertEqual(got[0]["sessions"][0]["messages"][0]["id"], "msg_ses_old")
+        self.assertEqual(got[0]["missing"], ["ses_busy"])             # the plugin asks again
+        self.assertNotIn("info", json.dumps(got[0]))
+        self.assertEqual(sorted(exported), ["ses_busy", "ses_busy", "ses_new", "ses_new", "ses_old"])
 
     def test_an_agent_switch_in_the_export_is_no_message_to_any_reader(self):
         # #1290 (2026-11-24, OpenCode 2.3.2): every round's `--agent wb-code` puts an
@@ -35241,6 +35271,126 @@ class RealOpenCodePlugin(Base):
             if want in out or time.monotonic() > end:
                 return out
             time.sleep(0.5)
+
+    # the TUI part's import (opencode-plugin/children-tui.ts `Children`) against a real server, with
+    # a client of fetch calls shaped as OpenCode's generated one (session.get, session.remove,
+    # experimental.session.import): data in through the environment
+    CHILDREN_SYNC = """
+const auth = 'Basic ' + btoa('opencode:' + process.env.OPENCODE_PASSWORD)
+const call = async (method, path, body) => {
+  const r = await fetch(process.env.URL + path, { method, body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { authorization: auth, 'content-type': 'application/json' } })
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text())
+  return r.status === 204 ? undefined : (await r.json()).data
+}
+const { Children } = await import(process.env.MOD)
+const client = { session: { get: i => call('GET', '/api/session/' + i.sessionID),
+  remove: i => call('DELETE', '/api/session/' + i.sessionID) } }
+const failed = []
+const importer = input => call('POST', '/api/experimental/session/import', input).catch(e => { failed.push(String(e)); throw e })
+const c = new Children(client, importer, async () => JSON.parse(process.env.SESSIONS))
+await c.sync([{ name: 't-kid', phase: 'review', updatedAt: 1, session: process.env.LEAD, driver: 'opencode' }])
+console.log(JSON.stringify({ failed }))
+"""
+
+    def test_a_task_session_is_imported_as_its_leads_child_at_the_leads_location_by_opencodes_import(self):
+        # #1331 (the host-shape decision on #1296): an agent's session is a child of the session
+        # that started its task, in OpenCode's own picker, at the lead's location and never the
+        # worktree (critic 1), its info the membrane's (critic 2), every tool denied. The route is
+        # experimental: this fails by name when OpenCode drops or changes it, and the plugin falls
+        # back to the panel's tail
+        url = self.serve()
+        end = time.monotonic() + 60
+        while True:                               # once the server answers
+            out = self.ask(url, "api", "POST", "/api/session", "-d",
+                           json.dumps({"location": {"directory": str(self.project)}}))
+            if out.startswith("{") or time.monotonic() > end:
+                break
+            time.sleep(0.5)
+        lead = json.loads(out)["data"]
+        worktree = self.root / "state" / "tasks" / "t-kid" / "worktree"
+        at = int(time.time() * 1000)
+        msg = lambda n, kind, **kw: {"id": f"msg_wb1331{n:020d}", "type": kind, "time": {"created": at + n}, **kw}  # noqa: E731
+        sessions = {"task": "t-kid", "sessions": [{"session": "ses_wb1331agent000000000001", "current": True, "messages": [
+            msg(1, "user", text="Write the answer."),
+            msg(2, "location-switched", location={"directory": str(worktree)}),
+            msg(3, "synthetic", text="a note")]}]}
+
+        def sync():
+            r = subprocess.run([shutil.which("opencode") or "opencode", "-e", self.CHILDREN_SYNC], capture_output=True,
+                               text=True, timeout=60, env={
+                                   **os.environ, "BUN_BE_BUN": "1", "URL": url, "LEAD": lead["id"],
+                                   "MOD": str(ROOT / "opencode-plugin" / "children-tui.ts"),
+                                   "SESSIONS": json.dumps(sessions)})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout.splitlines()[-1]), {"failed": []})
+        sync()
+        child = json.loads(self.ask(url, "api", "GET", "/api/session/ses_wb1331agent000000000001"))["data"]
+        self.assertEqual(child["parentID"], lead["id"])
+        self.assertEqual(child["location"], {"directory": str(self.project)})
+        self.assertEqual(child["permissions"], [{"action": "*", "resource": "*", "effect": "deny"}])
+        self.assertEqual(child["metadata"]["workbench"]["messages"], 2)
+        self.assertNotIn(str(worktree), json.dumps(child))
+        kids = json.loads(self.ask(url, "api", "GET", f"/api/session?parentID={lead['id']}"))["data"]
+        self.assertEqual([k["id"] for k in kids], [child["id"]])
+        shown = lambda: sorted(m["id"][-2:] for m in json.loads(self.ask(  # noqa: E731
+            url, "api", "GET", f"/api/session/{child['id']}/message"))["data"])
+        self.assertEqual(shown(), ["01", "03"])  # the user's and the synthetic, never the switch
+        sync()                                    # the same messages again: as it was, no second copy
+        self.assertEqual(shown(), ["01", "03"])
+        # a round of feedback in the same session: its copy is replaced by the longer one
+        sessions["sessions"][0]["messages"].append(msg(4, "user", text="Now the tests."))
+        sync()
+        self.assertEqual(shown(), ["01", "03", "04"])
+
+    def test_wb_accept_tells_an_opencode_drivers_write_in_the_worktree_from_the_build_it_ran_there(self):
+        # #1331's live acceptance: a real OpenCode driver's calls in a task's worktree are kept by
+        # the plugin (calls.ts, execute.before/after) as claude-calls/ rows, so `wb accept` tells
+        # what its `write` put there (its hand: committed with --include) from what a build its
+        # `shell` ran wrote (left out), as the mod's rows do for Claude. Without the rows both
+        # are the hand's; with the shell's alone, the write a moment after it reads as the build's
+        from workbench import chat, ocplugin
+        chat.set_on(False)  # the prompt reaches the chat part too (see the skill test below)
+        os.environ["HOME"] = str(self.root / "home")
+        (self.repo / ".gitignore").write_text("lib/\n")
+        (self.repo / "make.sh").write_text("mkdir -p lib && echo built > lib/built.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "build"], check=True)
+        self.start("t-hand", "ok", "--test", TEST_CMD)
+        wait_phase("t-hand", {"review"})
+        t = store.Task("t-hand")
+        target = t.worktree / "lib" / "a.py"
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = self.root / "requests.jsonl"
+        calls = [{"name": "shell", "arguments": {"command": "sh make.sh", "workdir": str(t.worktree)}},
+                 {"name": "write", "arguments": {"path": str(target), "content": "x = 1\n"}}]
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out),
+                                   json.dumps(calls)])
+        self.addCleanup(lambda: (server.kill(), server.wait()))
+        self.conf.write_text(json.dumps({
+            "plugins": [{"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb")}}],
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 131072, "output": 1024}}}}}}))
+        url = self.serve()
+        self.listed(url, ocplugin.PLUGIN_ID)
+        self.ask(url, "run", "-m", "cap/cap", "--auto", "--format", "json", "fix it by hand")
+        self.assertEqual(target.read_text(), "x = 1\n")
+        self.assertTrue((t.worktree / "lib" / "built.txt").is_file())
+        rows = [json.loads(f.read_text()) for f in sorted((context.rules_dir(t) / runner.CLAUDE_CALLS).glob("*.json"))]
+        self.assertEqual(sorted(r["tool"] for r in rows), ["shell", "write"], rows)
+        self.assertTrue(all(isinstance(r["end"], float) and not r.get("denied") for r in rows), rows)  # over
+        self.assertEqual(runner.hand_wrote(t), ["lib/a.py"])
+        self.assertEqual(runner.hand_left(t), ["lib/built.txt"])
+        said = run_wb("accept", "t-hand", "-m", "feat: by hand", "--merge", "--include")
+        self.assertIn("accepted t-hand", said)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/a.py", tree)
+        self.assertNotIn("lib/built.txt", tree)
 
     def test_the_plugin_loads_in_a_real_opencode_and_its_rpc_names_the_wb_its_options_give(self):
         from workbench import ocplugin

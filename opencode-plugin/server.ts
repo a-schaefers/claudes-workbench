@@ -22,6 +22,7 @@ import { deep, type DeepHost } from './deep.ts'
 import { registerCommands, type CommandHost } from './commands.ts'
 import { registerFlows } from './flows.ts'
 import { startPane, type PaneHost } from './pane.ts'
+import { startChildren } from './children.ts'
 
 export const ID = 'workbench'
 
@@ -66,6 +67,7 @@ const plugin: ServerPlugin = {
     const stopFlows = await registerFlows(ctx as unknown as CommandHost).catch(() => undefined)
     if (stopFlows) stops.push(stopFlows)
     stops.push(await startPane(ctx as ServerContext & PaneHost))  // the panel's data and /workbench (#1312)
+    stops.push(await startChildren(ctx))  // the agent sessions' messages, for the TUI's child sessions (#1331)
     return async () => { for (const stop of stops.reverse()) await stop().catch(() => {}) }
   },
 }
