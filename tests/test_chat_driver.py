@@ -1,5 +1,5 @@
 """The driver's state on the web app (#1355): chat.driver_state, the line the page keeps at the top of
-the chat (none, idle, working, waiting, in the story's words), from the listener's claim and the
+the chat (off, none, idle, working, waiting, in the story's words), from the listener's claim and the
 open waiting rows; and who changed a setting (settings.record, changes, changed, the state's
 `settings`). A temp WB_HOME, no server."""
 import contextlib
@@ -35,6 +35,19 @@ class DriverState(Base):
         self.assertEqual(got["next"], "Start OpenCode in a terminal and type in a session: it answers here.")
         self.assertNotIn("waiting", got)
 
+    def test_the_state_line_says_the_chat_is_off_and_how_to_turn_it_on(self):
+        # #1526 (2026-11-26): with the chat off (a service kept the server up), the page told the
+        # user to start their driver and run /workbench, which can't make it listen: only wb chat on
+        chat.set_on(False)
+        got = chat.driver_state(None, [])
+        self.assertEqual(got["state"], "off")
+        self.assertEqual(got["line"], "The web chat is off: no session listens here.")
+        self.assertEqual(got["next"], "Turn it on in a terminal: `wb chat on`.")
+        self.assertNotIn("/workbench", got["next"])
+        self.assertEqual(chat.snapshot()["driver"]["state"], "off")
+        chat.set_on(True)
+        self.assertEqual(chat.driver_state(None, [])["state"], "none")
+
     def test_a_listener_is_idle_or_working_where_it_runs_named_by_its_driver(self):
         got = chat.driver_state(CLAUDE, [])
         self.assertEqual((got["state"], got["driver"], got["where"]), ("idle", "claude-code", "~/project"))
@@ -44,27 +57,39 @@ class DriverState(Base):
         self.assertEqual(got["line"], "OpenCode is working in /srv/app.")
         self.assertNotIn("grant", got)
 
-    def test_waiting_beats_working_names_the_oldest_open_prompt_and_its_settling_clears_it(self):
-        first = chat.notice("Bash", "rm -rf runs/*")
-        plan = chat.notice("ExitPlanMode", "", kind="plan")
-        got = chat.driver_state({**CLAUDE, "busy": True})
+    def test_waiting_beats_working_names_the_claims_prompt_and_its_settling_clears_it(self):
+        # the host writes the oldest dialog up in its terminal as the claim's `waiting` (#1355)
+        perm = {"kind": "permission", "tool": "Bash", "since": 1.0, "what": "rm -rf runs/*"}
+        got = chat.driver_state({**CLAUDE, "busy": True, "waiting": perm}, [])
         self.assertEqual(got["state"], "waiting")
         self.assertEqual(got["line"], "Claude is waiting for you in the terminal: a permission for Bash.")
         self.assertEqual(got["next"], "Answer it in the terminal; a message sent now waits behind it.")
         self.assertEqual((got["waiting"]["kind"], got["waiting"]["what"]), ("permission", "rm -rf runs/*"))
         self.assertEqual(got["grant"], {"line": "To work from the chat, run Claude Code with permissions granted: "
                                                 "`claude --permission-mode auto`.", "command": "claude --permission-mode auto"})
-        chat.notice_done(first["id"])
-        got = chat.driver_state({**CLAUDE, "busy": True})
+        plan = {"kind": "plan", "tool": "ExitPlanMode", "since": 2.0}
+        got = chat.driver_state({**CLAUDE, "busy": True, "waiting": plan}, [])
         self.assertEqual(got["line"], "Claude is waiting for you in the terminal: a plan to approve.")
         self.assertNotIn("grant", got)  # a plan waits however the driver runs
-        chat.notice_done(plan["id"])
-        self.assertEqual(chat.driver_state({**CLAUDE, "busy": True})["state"], "working")
+        self.assertEqual(chat.driver_state({**CLAUDE, "busy": True}, [])["state"], "working")
 
-    def test_a_notice_past_ask_stale_is_no_wait(self):
-        row = chat.notice("Bash", "make")
-        with mock.patch.object(store, "now", return_value=row["ts"] + chat.ASK_STALE + 1):
-            self.assertEqual(chat.driver_state(CLAUDE)["state"], "idle")
+    def test_another_sessions_open_notice_never_reads_as_the_listener_waiting(self):
+        # #1481 (2026-11-26): with OpenCode listening, a Claude Code session's dialog (the mod posts
+        # from every delegating session) read as OpenCode waiting, with OpenCode's grant, and each
+        # unread message as behind a prompt; a dead session's open notice did so for an hour. The
+        # listener's own wait is its claim's: both hosts write it
+        me = os.getpid()
+        self.assertTrue(chat.hold("ses_abc123", me, cwd="/srv/proj")[0])
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "other"}):
+            run_wb("chat", "notice", "--tool=Bash", "--kind=permission", "--text=rm -rf build")
+        chat.notice("Bash", "make")                                     # unstamped, as an older mod's
+        got = chat.driver_state()
+        self.assertEqual((got["state"], got["line"]), ("idle", "OpenCode is listening in /srv/proj."))
+        self.assertNotIn("grant", got)
+        self.assertNotIn("waiting", got)
+        # its own dialog, as its claim says, still waits
+        chat.hold("ses_abc123", me, cwd="/srv/proj", waiting={"kind": "permission", "tool": "bash", "since": 1.0})
+        self.assertEqual(chat.driver_state()["grant"]["command"], "opencode --auto")
 
     def test_the_claims_own_wait_wins_and_only_a_permission_names_the_grant(self):
         for kind, what in (("question", "a question"), ("elicitation", "a form from github"),
@@ -123,7 +148,8 @@ class DriverState(Base):
         self.assertTrue(run_wb("chat", "log").endswith("No session is listening: messages wait.\n"))
         with mock.patch.object(chat, "listener", return_value={**CLAUDE, "busy": True}):
             self.assertTrue(run_wb("chat", "log").endswith(f"Claude is working in {chat._tilde(CLAUDE['cwd'])}.\n"))
-            chat.notice("Bash", "make deploy")
+        wait = {"kind": "permission", "tool": "Bash", "since": 1.0, "what": "make deploy"}
+        with mock.patch.object(chat, "listener", return_value={**CLAUDE, "busy": True, "waiting": wait}):
             self.assertTrue(run_wb("chat", "log").endswith(
                 "Claude is waiting for you in the terminal: a permission for Bash.\n"))
 

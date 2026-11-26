@@ -321,10 +321,11 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `dictate`: true while the computer has a listener (a speech recognizer in `wb audio`'s
   audio.json) for `POST /api/transcribe/<id>`: the page shows its mic only then.
 - `driver`: the driver's state, the line the page keeps at the top of the chat (#1355): `{state:
-  "none"|"idle"|"working"|"waiting", driver: "claude-code"|"opencode"|"any", who, where?, waiting?:
+  "off"|"none"|"idle"|"working"|"waiting", driver: "claude-code"|"opencode"|"any", who, where?, waiting?:
   {kind: "permission"|"question"|"plan"|"elicitation"|"consent", tool, since, what?}, line, next,
   grant?: {line, command}}`. Waiting (a prompt up in the terminal: the listener's own `waiting`
-  fact, else the oldest open notice) beats working beats idle; no session listening is `none`.
+  fact, never another session's notice) beats working beats idle; no session listening is `none`;
+  none while the chat is switched off (`wb chat off`) is `off`, and `next` says `wb chat on`.
   `line` and `next` are the sentences to show, in the story's words (workbench/story.py); `grant`,
   only for a permission, is the driver's way to run with permissions granted (`command` to copy).
   Nothing answers a prompt here: only the terminal does.
