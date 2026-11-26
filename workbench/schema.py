@@ -164,6 +164,8 @@ def load(path) -> dict:
         raise RuntimeError(f"{path}: {e.strerror}") from None
     except ValueError as e:
         raise RuntimeError(f"{path}: not JSON ({e})") from None
+    if isinstance(doc, dict) and isinstance(doc.get("from"), str):
+        doc.pop("from")  # `wb card copy --schema`'s record of the shipped blob (#1295): never the agent's
     if errs := valid(doc):
         raise RuntimeError(f"{path}: " + "; ".join(errs[:5]))
     return doc

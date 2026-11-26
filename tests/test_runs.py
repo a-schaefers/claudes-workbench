@@ -3,6 +3,7 @@ on the fake OpenCode (tests/fake_opencode.py)."""
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -461,6 +462,222 @@ class Flows(Base):
             runs.parse_params(AUDIT, [])
         with self.assertRaisesRegex(RuntimeError, "the flow takes areas"):
             runs.parse_params(AUDIT, ["x=1"])
+
+
+class Customized(Base):
+    """#1295: typed params, a files param and unless_exists, a flow's slash command, a dry run,
+    and the shipped cards and flows a user's copy shadows."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        env = mock.patch.dict(os.environ, {"WB_FLOWS": str(tmp / "flows"), "WB_ROLES": str(tmp / "roles")})
+        env.start()
+        self.addCleanup(env.stop)
+        for f in ("src/a.py", "src/b.py", "src/c.txt", "tests/a_test.py"):
+            (self.repo / f).parent.mkdir(exist_ok=True)
+            (self.repo / f).write_text(f + "\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm",
+                        "files"], check=True)
+        (self.repo / "src" / "d.py").write_text("uncommitted\n")  # never a files param's
+        self.base = runs.gitops.base_commit(self.repo, "HEAD")
+
+    TESTS = {"v": 1, "name": "tests", "params": {
+        "src": {"type": "files", "description": "what to test", "default": "src/*.py"},
+        "style": {"type": "string", "choices": ["unit", "prop"], "default": "unit"},
+        "note": {"type": "string", "optional": True}},
+        "stages": [{"id": "write", "kind": "code", "items": "{params.src}", "unless_exists": "tests/{item.stem}_test.py",
+                    "prompt": "Write {params.style} tests for {item.file} in tests/{item.stem}_test.py. {params.note}"},
+                   {"id": "claude", "final": True, "from": "write"}]}
+
+    def test_a_param_is_its_type_alone_or_an_object_with_choices_a_default_or_optional(self):
+        self.assertEqual(runs.validate(self.TESTS), [])
+        got = runs.parse_params(self.TESTS, [], self.repo, self.base)
+        self.assertEqual((got["style"], "note" in got), ("unit", False))  # the default; optional left absent
+        with self.assertRaisesRegex(RuntimeError, "one of unit, prop, not 'big'"):
+            runs.parse_params(self.TESTS, ["style=big"], self.repo, self.base)
+        bad = {**self.TESTS, "params": {"a": {"type": "int", "choices": ["x"]}, "b": {"type": "list", "default": "x"},
+                                        "c": {"type": "string", "colour": 1}, "d": "date"}}
+        said = "; ".join(runs.validate(bad))
+        for part in ("param a: choices is a list of strings for a string param, of whole numbers for an int",
+                     "param b: default is a list", "param c: unknown key 'colour'", "param d: a type of"):
+            self.assertIn(part, said)
+        with self.assertRaisesRegex(RuntimeError, "needs --param areas=<list>"):  # a bare type still reads
+            runs.parse_params(AUDIT, [])
+        # a default is its value as written: a json one's text stays text, never parsed
+        self.assertEqual(runs.parse_params({"params": {"j": {"type": "json", "default": "as is"}}}, []), {"j": "as is"})
+
+    def test_a_files_param_is_the_files_committed_at_the_base_each_an_item_with_its_parts(self):
+        got = runs.parse_params(self.TESTS, ["src=src/*"], self.repo, self.base)["src"]
+        self.assertEqual([f["file"] for f in got], ["src/a.py", "src/b.py", "src/c.txt"])  # d.py is uncommitted
+        self.assertEqual(got[0], {"file": "src/a.py", "name": "a.py", "stem": "a", "dir": "src"})
+        self.assertEqual(runs.file_item("Makefile"), {"file": "Makefile", "name": "Makefile", "stem": "Makefile", "dir": "."})
+        with self.assertRaisesRegex(RuntimeError, "matches no file committed"):
+            runs.parse_params(self.TESTS, ["src=nothing/*"], self.repo, self.base)
+        with mock.patch.object(runs, "FILES_MAX", 2), self.assertRaisesRegex(RuntimeError, "matches 3 files, over 2: narrow it"):
+            runs.parse_params(self.TESTS, ["src=src/*"], self.repo, self.base)
+
+    def test_unless_exists_skips_an_item_whose_path_is_at_the_base_as_not_run_and_counts_to_no_cap(self):
+        flow = json.loads(json.dumps(self.TESTS))
+        flow["stages"][0]["max_items"] = 1
+        params = runs.parse_params(flow, [], self.repo, self.base)
+        exists = runs.existing(flow, params, self.repo, self.base)
+        self.assertEqual(exists, {"write": ["tests/a_test.py"]})
+        run = runs.Run("tst")
+        store.write_json(run.dir / "run.json", {"flow": flow, "params": params, "exists": exists})
+        items = runs.state(run)["write"]
+        self.assertEqual([(i.input["file"], i.state, i.why) for i in items],
+                         [("src/a.py", "not_run", "exists at base: tests/a_test.py"), ("src/b.py", "pending", "")])
+        self.assertEqual(runs.estimate(flow, params, exists)[2], [])
+        # a place unless_exists can't fill, or a stage not fed by a files param, is refused by name
+        flow["stages"][0]["unless_exists"] = "tests/{item.base}_test.py"
+        self.assertIn("{item.base} isn't one of {item.file}, {item.name}, {item.stem}, {item.dir}", "; ".join(runs.validate(flow)))
+        flow["stages"][0].update(unless_exists="tests/{item.stem}_test.py", batch=2, flow="barrier")
+        self.assertIn("unless_exists checks one file per item: no batch", "; ".join(runs.validate(flow)))
+        self.assertIn("unless_exists goes on a stage whose items are a files param",
+                      "; ".join(runs.validate({**AUDIT, "stages": [{**AUDIT["stages"][0], "unless_exists": "x"}, *AUDIT["stages"][1:]]})))
+
+    def test_a_dry_run_says_each_stage_its_first_spec_and_the_estimate_and_writes_nothing(self):
+        plan = Path(self.tmp.name) / "tests.json"
+        plan.write_text(json.dumps(self.TESTS))
+        code, out, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run",
+                            "--args", "style=prop note='Keep them short.'")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  write: code on significant (GPU) · 2 item(s) from {params.src}, 1 skipped: exists at base", out)
+        self.assertIn("--- write's first item's spec ---\nWrite prop tests for src/b.py in tests/b_test.py. Keep them short.", out)
+        self.assertIn("estimate ", out)
+        self.assertFalse(runs.run_dir("dry").exists())
+        self.assertEqual(store.all_tasks(), [])
+        code, _, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run", "--param", "style=x")
+        self.assertEqual((code, err.strip()), (1, "wb: --param style: one of unit, prop, not 'x'"))
+
+    def test_the_slash_command_line_reads_as_its_fixture_says(self):
+        cases = json.loads((ROOT / "tests/fixtures/flow_args.json").read_text())["cases"]
+        for c in cases:
+            with self.subTest(args=c["args"]):
+                flow = {"name": "f", "params": c["params"]}
+                if "error" in c:
+                    with self.assertRaisesRegex(RuntimeError, re.escape(c["error"])):
+                        runs.parse_args(flow, c["args"])
+                else:
+                    self.assertEqual(runs.parse_args(flow, c["args"]), c["want"])
+
+    def test_a_command_is_one_word_never_wbs_a_hosts_nor_another_flows_and_a_repos_flow_gets_none(self):
+        mine = Path(os.environ["WB_FLOWS"])
+        mine.mkdir()
+        (mine / "tests.json").write_text(json.dumps({**self.TESTS, "command": "tests-for"}))
+        rows = {r["name"]: r for r in runs.flow_rows(self.repo)}
+        self.assertEqual(rows["tests"]["command"], "tests-for")
+        self.assertEqual(rows["tests"]["params"]["style"]["choices"], ["unit", "prop"])
+        for cmd, said in (("Tests", "one lowercase word"), ("workbench-x", "is Workbench's own"), ("deepmode", "is Workbench's own"),
+                          ("compact", "is a host's own"), ("tests-for", "is flow tests's already")):
+            with self.subTest(cmd=cmd):
+                self.assertIn(said, "; ".join(runs.validate({**self.TESTS, "name": "other", "command": cmd})))
+        repo_flows = self.repo / ".workbench" / "flows"
+        repo_flows.mkdir(parents=True)
+        (repo_flows / "theirs.json").write_text(json.dumps({**self.TESTS, "name": "theirs", "command": "theirs"}))
+        self.assertIsNone({r["name"]: r for r in runs.flow_rows(self.repo)}["theirs"]["command"])
+        code, out, _ = wb("run", "flows", "--repo", str(self.repo))
+        self.assertIn("tests (yours) /tests-for: ", out)
+
+    def test_a_shipped_card_or_flow_copied_is_yours_says_it_shadows_and_when_the_shipped_one_moved_and_reset_sets_it_aside(self):
+        code, out, err = wb("card", "copy", "find")
+        self.assertEqual(code, 0, err)
+        mine = Path(os.environ["WB_ROLES"]) / "find.md"
+        sha = subprocess.run(["git", "hash-object", str(cards.SHIPPED / "find.md")], capture_output=True, text=True).stdout.strip()
+        self.assertTrue(mine.read_text().startswith(f'---\nfrom: "{sha}"\n'))
+        self.assertEqual(cards.load("find").path, mine)  # it loads, `from` and all
+        self.assertIn("find (yours, shadows shipped): ", wb("card", "list")[1])
+        self.assertEqual(wb("card", "copy", "find")[0], 1)  # never over yours without --force
+        self.assertEqual(wb("flow", "copy", "audit")[0], 0)
+        path = Path(os.environ["WB_FLOWS"]) / "audit.json"
+        self.assertEqual(runs.load_flow("audit")["from"], cards.blob_sha((runs.SHIPPED / "audit.json").read_bytes()))
+        self.assertIn("audit (yours, shadows shipped): ", wb("run", "flows")[1])
+        doc = json.loads(path.read_text())
+        path.write_text(json.dumps({**doc, "from": "0" * 40}))  # as after wb update changed the shipped one
+        self.assertIn("audit (yours, shadows shipped; shipped changed since): ", wb("run", "flows")[1])
+        self.assertEqual(wb("card", "copy", "verdict", "--schema")[0], 0)
+        self.assertNotIn("from", cards.load_schema("verdict"))  # its record, never a keyword checked or sent
+        code, out, _ = wb("flow", "reset", "audit")
+        self.assertIn("yours is kept as", out)
+        self.assertFalse(path.exists())
+        self.assertTrue(path.with_name("audit.json.bak").exists())
+        self.assertIn("audit (shipped): ", wb("run", "flows")[1])
+        self.assertEqual(wb("flow", "reset", "audit")[0], 1)
+
+
+class ScheduledFlows(Base):
+    """#1295: `wb schedule add --flow` fires `wb run start` itself, no Claude on the unit's PATH."""
+
+    NIGHT = {"v": 1, "name": "night", "budget_usd": 2, "params": {"areas": {"type": "list", "default": []}},
+             "stages": [{"id": "find", "card": "find", "items": "{params.areas}"},
+                        {"id": "claude", "final": True, "from": "find"}]}
+
+    def setUp(self):
+        super().setUp()
+        from workbench import schedule
+        tmp = Path(self.tmp.name)
+        bin_ = tmp / "sched-bin"
+        bin_.mkdir()
+        (bin_ / "systemctl").write_text('#!/bin/sh\nexit 0\n')  # never the user's manager
+        (bin_ / "systemctl").chmod(0o755)
+        (tmp / "flows").mkdir()
+        (tmp / "flows" / "night.json").write_text(json.dumps(self.NIGHT))
+        env = mock.patch.dict(os.environ, {"WB_FLOWS": str(tmp / "flows"), "WB_ROLES": str(tmp / "roles"),
+                                           "XDG_CONFIG_HOME": str(tmp / "xdg"),
+                                           "PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}"})
+        env.start()
+        self.addCleanup(env.stop)
+        linux = mock.patch.object(schedule, "_macos", return_value=False)
+        linux.start()
+        self.addCleanup(linux.stop)
+
+    def tearDown(self):
+        for n in runs.all_runs():
+            runs._stop_driver(runs.Run(n))
+        super().tearDown()
+
+    def test_a_flow_fires_its_run_with_no_claude_and_a_second_that_day_gets_a_name_of_its_own(self):
+        from workbench import schedule
+        out = run_wb("schedule", "add", "nightly", "--flow", "night", "--repo", str(self.repo), "--at", "Sun 02:00")
+        self.assertIn("each fire: wb run start nightly-YYMMDD --flow night --overnight --budget-usd 2", out)
+        s = schedule.read("nightly")
+        self.assertEqual((s["flow"], s["budget_usd"], "file" in s, "max_turns" in s), ("night", 2, False, False))
+        self.assertIn("a run of flow night", (Path(os.environ["XDG_CONFIG_HOME"]) / "systemd/user/wb-schedule-nightly.service").read_text())
+        with mock.patch.object(schedule.shutil, "which", side_effect=lambda p, path=None: None if p == "claude" else "/x"):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(schedule.fire("nightly"), 0)
+            # its doctor line asks for no Claude
+            self.assertEqual([ok for ok, _ in schedule.doctor_lines()], [True])
+        day = time.strftime("%y%m%d")
+        row = schedule.runs("nightly")[-1]
+        self.assertEqual((row["outcome"], row["run"], row["flow"]), ("started", f"nightly-{day}", "night"))
+        spec = runs.Run(f"nightly-{day}").spec
+        self.assertEqual((spec["overnight"], spec["budget_usd"], "session" in spec, spec["cwd"]),
+                         (True, 2.0, False, str(self.repo.resolve())))
+        self.wait_ended(f"nightly-{day}")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(schedule.fire("nightly"), 0)
+        self.assertEqual(schedule.runs("nightly")[-1]["run"], f"nightly-{day}-2")
+        self.assertIn(f"started run nightly-{day}-2 · flow night", schedule.summary(schedule.runs("nightly")[-1]))
+
+    def wait_ended(self, name):
+        deadline = time.time() + 60
+        while time.time() < deadline and runs.Run(name).status.get("phase") in runs.OPEN:
+            time.sleep(0.3)
+
+    def test_a_flow_schedule_is_refused_a_long_name_a_param_it_lacks_and_no_budget(self):
+        from workbench import schedule
+        for argv, said in ((["long-name-for-a-flow", "--flow", "night"], "at most 14 characters"),
+                           (["n1", "--flow", "night", "--param", "colour=red"], "the flow takes areas"),
+                           (["n2", "--flow", "audit", "--param", "areas=a", "--param", "focus=f"], "flow audit has no budget_usd: --budget-usd"),
+                           (["n3", "--flow", "night", "--max-turns", "5"], "--max-turns goes with --file")):
+            with self.subTest(argv=argv):
+                code, _, err = wb("schedule", "add", *argv, "--repo", str(self.repo), "--at", "Sun 02:00")
+                self.assertEqual(code, 1)
+                self.assertIn(said, err)
+        self.assertEqual(schedule.names(), [])
 
 
 class Keywords(unittest.TestCase):

@@ -8,6 +8,10 @@ under a lock, and only when the day cap leaves an API role room, it runs Claude 
 (`claude -p`) on the backlog file, with wb commands and read-only tools alone, and writes one row
 per fire to schedules/<name>/runs.jsonl: the run history and its costs.
 
+A schedule of a flow (`--flow`, #1295) needs no Claude at night: each fire runs `wb run start
+<name>-YYMMDD --flow … --overnight --budget-usd N` itself, and the run's own driver, budget and
+final stage (Claude's, in the morning) do the rest; its row names the run.
+
 Not OpenCode's own automations: they run OpenCode sessions from its server, with no Claude spec
 or review, outside wb's runner and so outside the lane and the keyhole.
 """
@@ -31,6 +35,8 @@ from .runner import PKG_ROOT
 # a schedule's name, short enough that its batch, `<name>-YYYY-MM-DD` or a second fire's that day
 # `<name>-YYYY-MM-DD-2` (up to -99: batch_name), is a backlog name (store.NAME_RE)
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,33}\Z")
+# a flow schedule's (#1295) is shorter: its run, `<name>-YYMMDD[-NN]`, is a run name (runs.RUN_RE, 24)
+FLOW_NAME_MAX = 14
 SAME_DAY = 99         # fires on one date, each its own batch
 TURNS = 300           # claude -p's --max-turns for one fire, unless `wb schedule add --max-turns`
 FIRE_HOURS = 12       # a fire's Claude is stopped past this, whatever its turns
@@ -219,8 +225,8 @@ def _sd_quote(word: str, exec_line: bool = False) -> str:
 
 def systemd_units(name: str, s: dict) -> dict[str, str]:
     env = "".join(f"Environment={_sd_quote(f'{k}={v}')}\n" for k, v in s["env"].items())
-    service = (f"[Unit]\nDescription=workbench schedule {name}: Claude runs the backlog "
-               f"{s['file'].replace('%', '%%')}\n\n"
+    what = f"a run of flow {s['flow']}" if s.get("flow") else f"Claude runs the backlog {s['file']}"
+    service = (f"[Unit]\nDescription=workbench schedule {name}: {what.replace('%', '%%')}\n\n"
                "[Service]\nType=oneshot\n"
                f"WorkingDirectory={s['repo'].replace('%', '%%')}\n{env}"  # a path, never quoted
                f"ExecStart={' '.join(_sd_quote(w, exec_line=True) for w in fire_argv(name))}\n"
@@ -320,7 +326,32 @@ def linger_note() -> str | None:
 
 # --- The commands --------------------------------------------------------------------------------
 
-def add(name: str, file: str, repo: str, at: str, turns: int | None = None) -> list[str]:
+def _flow_check(name: str, flow_name: str, params: list[str], budget: float | None, top: Path) -> tuple[dict, list[str]]:
+    """A flow schedule's checks at add (#1295): the flow by name (the user's or a shipped one; a
+    repo's never), its params against the repo's HEAD, a budget. (its budget, the notes to print)."""
+    from . import gitops, runs
+    if len(name) > FLOW_NAME_MAX:
+        raise ScheduleError(f"a flow schedule's name is at most {FLOW_NAME_MAX} characters: its runs, "
+                            "<name>-YYMMDD[-N], are run names (at most 24)")
+    try:
+        flow = runs.load_flow(flow_name)
+        head = gitops.base_commit(top, "HEAD")
+        runs.parse_params(flow, params, top, head)
+    except RuntimeError as e:
+        raise ScheduleError(str(e)) from None
+    usd = budget if budget is not None else flow.get("budget_usd")
+    if usd is None:
+        raise ScheduleError(f"flow {flow_name} has no budget_usd: --budget-usd sets each run's dollars "
+                            "(0 for a GPU-only night)")
+    if usd < 0:
+        raise ScheduleError("--budget-usd is 0 or more")
+    notes = [f"note: stage {s['id']} is a checkpoint of Claude's: each run waits there until you open a session"
+             for s in runs.stages(flow) if s.get("claude")]
+    return {"flow": flow_name, "params": list(params), "budget_usd": usd}, notes
+
+
+def add(name: str, file: str | None, repo: str, at: str, turns: int | None = None, flow: str | None = None,
+        params: list[str] | None = None, budget_usd: float | None = None) -> list[str]:
     """`wb schedule add`: schedule.json and the unit. Returns the lines to print."""
     from . import gitops
     if not NAME_RE.match(name):
@@ -328,19 +359,26 @@ def add(name: str, file: str, repo: str, at: str, turns: int | None = None) -> l
                             "(its batch, <name>-YYYY-MM-DD[-N], is a backlog name)")
     if read(name) is not None:
         raise ScheduleError(f"schedule {name!r} exists: wb schedule rm {name} first")
-    path = Path(file).expanduser().resolve()
-    if not path.is_file():
-        raise ScheduleError(f"{file}: no such file (the backlog: what Claude is to run, as you'd tell it)")
-    if not path.read_text(encoding="utf-8").strip():
-        raise ScheduleError(f"{file} is empty")
+    if bool(file) == bool(flow):
+        raise ScheduleError("--file <backlog.md> or --flow <name>, one of them")
+    if not flow and (params or budget_usd is not None):
+        raise ScheduleError("--param and --budget-usd go with --flow")
+    path = None
+    if file:
+        path = Path(file).expanduser().resolve()
+        if not path.is_file():
+            raise ScheduleError(f"{file}: no such file (the backlog: what Claude is to run, as you'd tell it)")
+        if not path.read_text(encoding="utf-8").strip():
+            raise ScheduleError(f"{file} is empty")
     try:
         top = gitops.toplevel(Path(repo).expanduser().resolve())
     except gitops.GitError:
         raise ScheduleError(f"{repo} is not inside a git repository") from None
-    if turns is not None and turns < 1:
-        raise ScheduleError("--max-turns is at least 1")
-    s = {"name": name, "file": str(path), "repo": str(top), "at": parse_at(at),
-         "max_turns": turns or TURNS, "env": unit_env(), "created_at": store.now()}
+    if turns is not None and (turns < 1 or flow):
+        raise ScheduleError("--max-turns goes with --file (Claude's turns), and is at least 1")
+    fl, notes = _flow_check(name, flow, params or [], budget_usd, top) if flow else ({}, [])
+    s = {"name": name, **({"file": str(path)} if path else fl), "repo": str(top), "at": parse_at(at),
+         **({} if flow else {"max_turns": turns or TURNS}), "env": unit_env(), "created_at": store.now()}
     d = sched_dir(name)
     d.mkdir(parents=True, exist_ok=True)
     try:
@@ -349,17 +387,28 @@ def add(name: str, file: str, repo: str, at: str, turns: int | None = None) -> l
         shutil.rmtree(d, ignore_errors=True)
         raise
     store.write_json(d / "schedule.json", s)
-    out = [f"scheduled {name}: {s['at']['said']} · {top} · {path}",
-           f"each fire: claude -p on the backlog as batch {name}-YYYY-MM-DD (-2 for a second that day), "
-           f"wb commands and reading "
-           f"only, at most {s['max_turns']} turns; wb schedule list shows its runs"]
-    missing = [p for p in ("claude", "opencode") if not shutil.which(p, path=s["env"]["PATH"])]
+    if flow:
+        out = [f"scheduled {name}: {s['at']['said']} · {top} · flow {flow}",
+               f"each fire: wb run start {name}-YYMMDD --flow {flow} --overnight --budget-usd "
+               f"{s['budget_usd']:g} (-2 for a second that day), its own driver, no Claude; the run waits "
+               "at its final stage for you (wb run status; wb schedule list shows its runs)", *notes]
+    else:
+        out = [f"scheduled {name}: {s['at']['said']} · {top} · {path}",
+               f"each fire: claude -p on the backlog as batch {name}-YYYY-MM-DD (-2 for a second that day), "
+               f"wb commands and reading "
+               f"only, at most {s['max_turns']} turns; wb schedule list shows its runs"]
+    missing = [p for p in needs(s) if not shutil.which(p, path=s["env"]["PATH"])]
     if missing:
         out.append(f"note: {' and '.join(missing)} not on this PATH, which the unit runs with: "
                    "a fire fails until they are")
     if note := linger_note():
         out.append(f"note: {note}")
     return out
+
+
+def needs(s: dict) -> tuple[str, ...]:
+    """What a fire runs, which the unit's PATH must find: a flow's run needs no Claude (#1295)."""
+    return ("opencode",) if s.get("flow") else ("claude", "opencode")
 
 
 def remove(name: str) -> str:
@@ -379,6 +428,13 @@ def summary(row: dict) -> str:
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row.get("ts") or 0))
     if row.get("outcome") == "skipped":
         return f"{when} skipped: {row.get('why')}"
+    if row.get("run"):  # a flow's fire (#1295): its run, as it stands now
+        from . import runs as runs_
+        if row.get("outcome") != "started":
+            return f"{when} {row.get('outcome')}: run {row['run']}" + (f" ({row['why']})" if row.get("why") else "")
+        r = runs_.Run(row["run"])
+        live = runs_.status_line(row["run"]).split("\n")[0] if r.exists else f"run {row['run']} (gone)"
+        return f"{when} started {live}"
     phases: dict = {}
     for t in row.get("tasks") or []:
         phases[t.get("phase")] = phases.get(t.get("phase"), 0) + 1
@@ -402,14 +458,15 @@ def listing() -> list[str]:
     out = []
     for name in names():
         s = read(name) or {}
-        out.append(f"{name}: {(s.get('at') or {}).get('said')} · {s.get('repo')} · {s.get('file')}")
+        what = f"flow {s['flow']}" if s.get("flow") else s.get("file")
+        out.append(f"{name}: {(s.get('at') or {}).get('said')} · {s.get('repo')} · {what}")
         if (r := running(name)) is not None:
             since = r.get("started")
             out.append("  running" + (f" since {time.strftime('%H:%M', time.localtime(since))}" if since else "")
                        + (f", batch {r['batch']}" if r.get("batch") else ""))
         rows = runs(name)
         out.append(f"  last: {summary(rows[-1])}" if rows else "  never fired yet")
-    return out or ["no schedules (wb schedule add <name> --file <backlog.md> --repo DIR --at 'Sun 02:00')"]
+    return out or ["no schedules (wb schedule add <name> --file <backlog.md> | --flow <flow> --repo DIR --at 'Sun 02:00')"]
 
 
 def run_now(name: str) -> str:
@@ -479,6 +536,53 @@ def batch_name(name: str, started: float) -> str:
     raise ScheduleError(f"{name}: {SAME_DAY} fires on one date already")
 
 
+def run_name(name: str, started: float) -> str:
+    """A flow fire's run (#1295): `<name>-YYMMDD`, or `-2` … `-99` after it once a run had the
+    name (run names are never reused, runs.taken). Under the fire's lock, as batch_name."""
+    from . import runs as runs_
+    base = f"{name}-{time.strftime('%y%m%d', time.localtime(started))}"
+    for n in range(1, SAME_DAY + 1):
+        if not runs_.taken(r := base if n == 1 else f"{base}-{n}"):
+            return r
+    raise ScheduleError(f"{name}: {SAME_DAY} fires on one date already")
+
+
+def _fire_flow(name: str, s: dict, started: float) -> int:
+    """A flow's fire (#1295): `wb run start` itself, as the user would, with no Claude: the run's
+    own driver, budget and `--overnight` carry the night, and its final stage waits for Claude in
+    the morning (claimed by its directory, the repo: the run has no session)."""
+    from . import runs as runs_
+    last = next((r for r in reversed(runs(name)) if r.get("run")), None)
+    if last and (lr := runs_.Run(last["run"])).exists and lr.open() and runs_.driver_alive(lr):
+        _row(name, {"ts": started, "outcome": "skipped", "why": f"run {last['run']} is still going"})
+        print(f"{name}: skipped, run {last['run']} is still going")
+        return 0
+    if why := spend_skip():
+        _row(name, {"ts": started, "outcome": "skipped", "why": why})
+        print(f"{name}: skipped: {why}")
+        return 0
+    try:
+        run = run_name(name, started)
+    except ScheduleError as e:
+        _row(name, {"ts": started, "outcome": "skipped", "why": str(e).split(": ", 1)[-1]})
+        print(f"{e}: skipped")
+        return 0
+    argv = [sys.executable, "-X", "utf8", str(PKG_ROOT / "bin" / "wb"), "run", "start", run, "--flow", s["flow"],
+            "--repo", s["repo"], "--overnight", "--budget-usd", f"{float(s.get('budget_usd') or 0):g}"]
+    for kv in s.get("params") or ():
+        argv += ["--param", kv]
+    try:
+        p = subprocess.run(argv, cwd=s["repo"], env=_fire_env(name), capture_output=True, text=True, timeout=115)
+        ok, said = p.returncode == 0, (p.stdout if p.returncode == 0 else p.stderr or p.stdout).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        ok, said = False, str(e)
+    row = {"ts": started, "run": run, "flow": s["flow"], "outcome": "started" if ok else "error",
+           **({} if ok else {"why": said.removeprefix("wb: ")[:300]}), "end": store.now()}
+    _row(name, row)
+    print(f"{name}: {summary(row)}")
+    return 0 if ok else 1
+
+
 def _tasks_of(batch: str) -> tuple[list[dict], float | None]:
     """The batch's tasks and their phases, and the API dollars of the closed ones (savings.api_totals)."""
     from . import savings
@@ -506,6 +610,11 @@ def fire(name: str) -> int:
             _row(name, {"ts": started, "outcome": "skipped", "why": "the last fire is still running"})
             print(f"{name}: skipped, the last fire is still running")
             return 0
+        if s.get("flow"):
+            try:
+                return _fire_flow(name, s, started)
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
         try:
             batch = batch_name(name, started)
         except ScheduleError as e:
@@ -585,7 +694,7 @@ def doctor_lines() -> list[tuple[bool, str]]:
         rows = runs(name)
         last = summary(rows[-1]) if rows else "never fired yet"
         path = (s.get("env") or {}).get("PATH", "")
-        gaps = [f"{p} not on its PATH" for p in ("claude", "opencode") if not shutil.which(p, path=path)]
+        gaps = [f"{p} not on its PATH" for p in needs(s) if not shutil.which(p, path=path)]
         if not (PKG_ROOT / "bin" / "wb").exists():
             gaps.append(f"{PKG_ROOT / 'bin' / 'wb'} is gone")
         if not all(p.exists() for p in unit_files(name)):
@@ -600,7 +709,7 @@ def cmd(a) -> None:
     from .cli import die
     try:
         if a.action == "add":
-            print("\n".join(add(a.name, a.file, a.repo, a.at, a.max_turns)))
+            print("\n".join(add(a.name, a.file, a.repo, a.at, a.max_turns, a.flow, a.param, a.budget_usd)))
         elif a.action == "list":
             print("\n".join(listing()))
         elif a.action == "rm":

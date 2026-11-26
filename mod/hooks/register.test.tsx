@@ -3,6 +3,7 @@ import { absolutePath, agentOf, isAbort, linkOf, rolesRead, wbThrew, type WbRun,
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { modeline } from './modeline.js'
+import { flowCommands, flowDescription } from './flows.js'
 import type { WbTask } from '../types'
 
 // the no-break space the pane holds a unit whole with (`GPU 2+3`, `per M`, `61 tok/s`; #1048's review)
@@ -6531,4 +6532,37 @@ test('#1278: deepmode on typed alone runs wb deepmode on and starts no turn; wit
   expect((await $.command.run({ command: 'deepmode', args: '' })).text).toBe('Dynamic workflows (deepmode): On.')
   expect((await $.command.run({ command: 'deepmode', args: 'maybe' })).text).toContain('/deepmode on, /deepmode off')
   expect(ran.filter(a => a[0] === 'deepmode').slice(2)).toEqual([['deepmode', 'off'], ['deepmode']])
+})
+
+test('#1295: a flow with a command is a slash command of the session; running it queues the turn that starts it, the line as typed, and starts none itself', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  on('ui.toast', () => ({ value: undefined }))
+  const rows = [
+    { name: 'tests', where: 'yours', description: 'a test per file', command: 'tests-for', params: { src: { type: 'files' } }, mark: '' },
+    { name: 'audit', where: 'shipped', description: 'finders, then a verifier', command: null, params: {}, mark: '' },
+    { name: 'theirs', where: 'repo', description: 'the repo\'s', command: 'theirs', params: {}, mark: '' },
+  ]
+  const ran: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    ran.push(e.argv.slice(1))
+    const out = e.argv[1] === 'run' && e.argv[2] === 'flows' ? JSON.stringify(rows) : 'no open tasks'
+    return { value: { exitCode: 0, stdout: out, stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(10)
+  expect(ran.filter(a => a[0] === 'run')).toEqual([['run', 'flows', '--json']])
+  const cmds = flowCommands(JSON.stringify(rows))         // a repo's flow, or one with no command, is none
+  expect(cmds.map(c => [c.command, flowDescription(c), flowDescription(c, false)])).toEqual([['tests-for',
+    'workbench flow tests: a test per file (/tests-for <src>)', 'workbench flow tests: a test per file']])
+  const r = await $.command.run({ command: 'tests-for', args: "src/*.py it's" })
+  expect(r.text).toBe('Claude will run flow tests now.')
+  expect(asked).toEqual([])                                  // a command never starts a turn itself
+  await clock.advance(2000)
+  expect(asked).toHaveLength(1)
+  expect(asked[0].startsWith("[workbench] The user ran /tests-for src/*.py it's: flow tests as a slash command")).toBe(true)
+  expect(asked[0]).toContain("--flow tests --args 'src/*.py it'\\''s'")
+  expect(ran.filter(a => a[0] === 'run' && a[1] === 'start')).toEqual([])  // Claude starts it, by its skill
 })

@@ -273,6 +273,7 @@ PLUGIN_SHARED = ("mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/kernel.d
                  "mod/hooks/tasks.ts", "mod/hooks/modeline.ts",  # the Tasks view, one for both hosts (#1312)
                  "mod/hooks/keywords.ts",  # deepcode and deepmode typed, one for both hosts (#1278)
                  "mod/hooks/waiting.ts",  # the driver's wait for the page's state line, one for both hosts (#1355)
+                 "mod/hooks/flows.ts",  # a flow as a slash command, one for both hosts (#1295)
                  "mod/types/wire.d.ts")  # wb's shapes, its readers' types (#1323)
 KERNEL_CHECK = "python3 scripts/kernel.py check"
 MOD_TESTS = "claude plugin validate mod && claude plugin test mod"

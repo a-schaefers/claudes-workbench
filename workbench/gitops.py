@@ -499,6 +499,32 @@ def case_clash(repo: Path, commit: str, where: Path, name: str = "") -> str:
             "case-sensitive volume")
 
 
+def files_at(repo: Path, commit: str, pathspecs: list[str]) -> list[str]:
+    """The files committed at ``commit`` that ``pathspecs`` match, git's own pathspec rules
+    (`src/**/*.py`, `docs/`, `:!vendor`), sorted: a flow's `files` param (#1295). `ls-files` reads
+    an index, so one built from the commit alone, in a scratch file: never the user's index, and
+    their uncommitted files never count."""
+    with tempfile.TemporaryDirectory(prefix="wb-files-") as d:
+        env = {"GIT_INDEX_FILE": os.path.join(d, "index")}
+        _run(repo, ("read-tree", commit), env=env)
+        out = _run(repo, ("ls-files", "-z", "--", *pathspecs), env=env).stdout
+    return sorted(os.fsdecode(p) for p in out.split(b"\0") if p)
+
+
+def paths_at(repo: Path, commit: str) -> set[str]:
+    """Every path at ``commit``, its files and the directories that hold them: what a stage's
+    `unless_exists` checks, in one call rather than one per item."""
+    out: set[str] = set()
+    for p in _run(repo, ("ls-tree", "-r", "-z", "--name-only", commit)).stdout.split(b"\0"):
+        if p:
+            path = os.fsdecode(p)
+            out.add(path)
+            while "/" in path:
+                path = path.rsplit("/", 1)[0]
+                out.add(path)
+    return out
+
+
 def base_commit(repo: Path, base: str) -> str | None:
     """The commit ``base`` names (an annotated tag peeled), or None when it names none: a typo
     once read as a missing CLAUDE.md (the 2026-11-16 audit)."""

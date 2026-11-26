@@ -74,6 +74,7 @@ import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import { keywords, onlyToggles } from './keywords'
+import { FLOW_NOTE, flowCommands, flowDescription, flowHint, type FlowCommand } from './flows'
 import { sameWait, waitingFact } from './waiting'
 import type { Waiting } from './waiting'
 import type { Link } from './modeline'
@@ -1850,6 +1851,7 @@ async function sayRules($: any, delegating: boolean) {
 
 // The module's own memory: reset by a reload, which runs register and session.start again.
 const mem = {
+  flows: new Map<string, FlowCommand>(), // the flows' slash commands, registered at session.start (#1295)
   wake: true,
   root: '',
   startedAt: 0,
@@ -2264,6 +2266,22 @@ async function compactAtBoundary($: any, at: Omit<Parameters<typeof compactPlan>
 // pane's old Settings tab after /reload-plugins and stayed ROLES_CACHE_MS, for a command that takes 0.12 s
 // (#1142, 2026-11-23). A caller that keeps what it read keeps its last good value instead.
 export type WbRun = { ok: boolean; out: string; aborted?: boolean }
+// The flows with a `command` (#1295), each a slash command of this session: wb's list at the
+// session's start, so a flow saved later is there at the next start or reload. One that would
+// take a command another plugin or Claude Code has is refused by the engine, and left out.
+async function registerFlows($: any): Promise<void> {
+  const { ok, out } = await runWb($, ['run', 'flows', '--json'])
+  if (!ok) return
+  for (const c of flowCommands(out)) {
+    if (mem.flows.has(c.command)) continue
+    try {
+      const hint = flowHint(c)
+      await $.command.register({ name: c.command, description: flowDescription(c, false), ...(hint ? { argumentHint: hint } : {}) })
+      mem.flows.set(c.command, c)
+    } catch { /* taken: the engine's or another plugin's */ }
+  }
+}
+
 async function runWb($: any, args: string[], timeoutMs = 120_000): Promise<WbRun> {
   try {
     const r = await $.process.run([mem.wb, ...args], { timeoutMs })
@@ -3614,6 +3632,8 @@ export const register: Register = (on, options) => {
       name: HAND_BACK,
       description: 'Stop this session\'s agents and hand their tasks back to Claude to finish',
     })
+    // one wb call, not waited on, with a person there (a `claude -p` fire types no command)
+    if (e.isInteractive || e.surface != null) void registerFlows($).catch(() => {})
     // the file system ignores case when some component of the directory is there in its own
     // parent with its letters' case swapped, as store.folds_case: the whole path swapped read
     // /MNT/C/uSERS/… on WSL2, missing on the ext4 root, so drvfs read case-sensitive (#1217,
@@ -3801,6 +3821,15 @@ export const register: Register = (on, options) => {
     if (arg && arg !== 'on' && arg !== 'off') return { text: 'workbench: /deepmode on, /deepmode off, or /deepmode alone to see it' }
     const { ok, out } = await runWb($, ['deepmode', ...(arg ? [arg] : [])])
     return { text: ok ? out : `workbench: wb deepmode failed: ${out}` } // a change reaches Claude as sayRules' row
+  })
+
+  // A flow's own slash command (#1295): the turn that starts it, queued, as a command never starts
+  // one itself; any other command goes on
+  on('command.run', async ($, e, next) => {
+    const flow = mem.flows.get(e.command)
+    if (!flow) return next(e)
+    mem.queued.push(FLOW_NOTE(flow, e.args ?? ''))
+    return { text: `Claude will run flow ${flow.flow} now.` }
   })
 
   // This session's tasks only (`--repo`): another session keeps its own running.

@@ -25,7 +25,7 @@ SHIPPED = PKG_ROOT / "agent" / "roles"
 SCHEMAS = PKG_ROOT / "agent" / "schemas"
 BODY_MAX = 3000  # bytes of a card's body: it is in every prompt of its role (prefill time)
 TOOLS = ("read", "none", "code")
-KEYS = ("description", "tools", "schema", "steps", "skills", "ask", "role", "est")
+KEYS = ("description", "tools", "schema", "steps", "skills", "ask", "role", "est", "from")
 DROPPED = ("permissions", "permission", "model")  # a card's own: never the task's
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")
 
@@ -214,6 +214,119 @@ def load_schema(name: str) -> dict:
     if path is None:
         raise RuntimeError(f"no schema {name!r} ({schemas_dirs_said()})")
     return schema.load(path)
+
+
+# --- shipped ones shadowed (#1295): copy to customize, reset, and the drift said -----------------
+
+def blob_sha(data: bytes) -> str:
+    """git's blob id of ``data`` (`git hash-object`), with no git: a copy's `from`."""
+    import hashlib
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def shadow_mark(mine: Path, shipped: Path, recorded: str | None) -> str:
+    """How the user's ``mine`` stands to the shipped file of its name: "" when nothing is shipped
+    by it, else `shadows shipped`, and `shipped changed since` when the shipped file's blob is no
+    longer the one its copy recorded (``recorded``, its `from`); a copy by hand records none."""
+    if not shipped.is_file():
+        return ""
+    try:
+        now = blob_sha(shipped.read_bytes())
+    except OSError:
+        return "shadows shipped"
+    return "shadows shipped" + ("; shipped changed since" if recorded and recorded != now else "")
+
+
+def recorded_from(path: Path) -> str | None:
+    """A user's card's or schema's or flow's `from`, or None."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if path.suffix == ".json":
+        try:
+            v = json.loads(text).get("from")
+        except (ValueError, AttributeError):
+            return None
+    else:
+        v = parse(text)[0].get("from")
+    return v if isinstance(v, str) else None
+
+
+def copy_shipped(shipped: Path, dest: Path, force: bool = False) -> str:
+    """Copy a shipped card, schema or flow to the user's place to customize it, its `from` the
+    shipped blob's sha; the line to print. RuntimeError when there is none or a copy is there."""
+    if not shipped.is_file():
+        raise RuntimeError(f"nothing shipped is named {shipped.stem!r} ({shipped.parent})")
+    if dest.exists() and not force:
+        raise RuntimeError(f"{dest} is there already: yours (--force replaces it; reset puts the shipped one back)")
+    data = shipped.read_bytes()
+    sha = blob_sha(data)
+    if shipped.suffix == ".json":
+        doc = json.loads(data)
+        out = json.dumps({**doc, "from": sha}, indent=2, ensure_ascii=False) + "\n"
+    else:
+        text = data.decode("utf-8")
+        out = (f'---\nfrom: "{sha}"\n' + text[3:].lstrip("\n")) if text.startswith("---") \
+            else f'---\nfrom: "{sha}"\n---\n{text}'
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.tmp")
+    tmp.write_text(out, encoding="utf-8")
+    os.replace(tmp, dest)
+    return f"copied the shipped {shipped.stem} to {dest}: yours now, edit it there (from {sha[:12]})"
+
+
+def reset_shipped(shipped: Path, mine: Path) -> str:
+    """Put the shipped one back: the user's copy moved aside to <file>.bak, never deleted."""
+    if not mine.is_file():
+        raise RuntimeError(f"no {mine.stem} of yours ({mine.parent}): the shipped one is used already")
+    if not shipped.is_file():
+        raise RuntimeError(f"{mine} is your own, with nothing shipped by its name to go back to")
+    bak = mine.with_name(mine.name + ".bak")
+    os.replace(mine, bak)
+    return f"reset {mine.stem}: the shipped one is used again; yours is kept as {bak}"
+
+
+def rows() -> list[dict]:
+    """Every card: {name, where (yours|shipped), mark, description}, the user's shadowing."""
+    out = []
+    for name in names():
+        mine, shipped = roles_dir() / f"{name}.md", SHIPPED / f"{name}.md"
+        p = mine if mine.is_file() else shipped
+        try:
+            desc = str(parse(p.read_text(encoding="utf-8"))[0].get("description") or "")
+        except (OSError, UnicodeDecodeError):
+            desc = "(unreadable)"
+        out.append({"name": name, "where": "yours" if p == mine else "shipped",
+                    "mark": shadow_mark(mine, shipped, recorded_from(mine)) if p == mine else "",
+                    "description": desc})
+    return out
+
+
+def cmd_card(a) -> None:
+    """wb card list | copy | reset [--schema]."""
+    from .cli import die
+    schema_ = getattr(a, "schema", False)
+    shipped_dir, mine_dir, ext = (SCHEMAS, roles_dir() / "schemas", ".json") if schema_ else (SHIPPED, roles_dir(), ".md")
+    if a.card_cmd == "list":
+        if schema_:
+            for name in sorted({p.stem for d in (mine_dir, shipped_dir) if d.is_dir() for p in d.glob("*.json")}):
+                mine = mine_dir / f"{name}.json"
+                mark = shadow_mark(mine, shipped_dir / f"{name}.json", recorded_from(mine)) if mine.is_file() else ""
+                print(f"{name} ({'yours' if mine.is_file() else 'shipped'}{f', {mark}' if mark else ''})")
+            return
+        for r in rows():
+            print(f"{r['name']} ({r['where']}{', ' + r['mark'] if r['mark'] else ''}): {r['description']}")
+        return
+    if not NAME_RE.match(a.name or ""):
+        die(f"{a.name!r}: a {'schema' if schema_ else 'card'} name is lowercase letters, digits and hyphens")
+    try:
+        if a.card_cmd == "copy":
+            print(copy_shipped(shipped_dir / f"{a.name}{ext}", mine_dir / f"{a.name}{ext}", a.force))
+        else:
+            print(reset_shipped(shipped_dir / f"{a.name}{ext}", mine_dir / f"{a.name}{ext}"))
+    except (RuntimeError, OSError, ValueError) as e:
+        die(str(e))
 
 
 def handbook(card: dict, base: str) -> str:

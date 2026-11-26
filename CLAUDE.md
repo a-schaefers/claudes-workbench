@@ -95,9 +95,9 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   opt-in (`busy_api`); `resolve`, wb start's model.
   `driver.py`: the OpenCode driver (#1316): `wb driver`, the heartbeat's writer (`wb driver beat`), its
   notes; routes.json `driver`, its pin. `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
-- `runs.py`: deep workflows (#1278): `wb run`, `wb flow import`, flows (`agent/flows/`, `$WB_FLOWS`), the detached
+- `runs.py`: deep workflows (#1278): `wb run`, `wb flow`, flows (`agent/flows/`, `$WB_FLOWS`), the detached
   driver starting each item with `wb start` (its items' notices its own only while it lives), run notices, the keywords' reference (`keywords`, `tests/fixtures/
-  keywords.json`). `cards.py`: role cards (`agent/roles/`, `$WB_ROLES`). `schema.py`: a report task's
+  keywords.json`). `cards.py`: role cards (`agent/roles/`, `$WB_ROLES`; `wb card`). `schema.py`: a report task's
   object, checked outside the lane (ARCHITECTURE.md, *Deep workflows*).
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
@@ -108,7 +108,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   app's Stats, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
   inotify and pidfd waits. `chat.py` + `chat_static/` (its scripts built from `src/*.ts` by `scripts/web.py`), `webpush.py`: the web chat; `story.py`, every sentence it and the docs tell of the driver (`scripts/gen_story.py` copies them, #1355); `settings.py`,
   its admin rows and their wb calls (*The admin table (settings.py)*). `try/`:
-  `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
+  `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`; or a flow's run, no Claude).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
 - `skill/workbench/`: the `/workbench` procedure; `skill/agents/ask-workbench/`: other agents' skill for the chat's API, either driver (`ask_workbench.py`; `mcp_server.py`, the same over MCP, loopback only; `claude-workbench/`, its old path, forwards). `mod/`: the plugin (`hooks/register.tsx`, with

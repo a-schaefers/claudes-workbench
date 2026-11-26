@@ -225,3 +225,16 @@ export type ModelsJson = {
    * and a kind whose file doesn't parse is left out) */
   media?: Partial<Record<'image' | 'speech' | 'sfx' | 'music', MediaJson>>
 }
+
+/** One flow in `wb run flows --json` (runs.flow_rows, #1295): `where` yours, shipped or repo; `mark`
+ * a copy of yours that shadows a shipped one (`shadows shipped`, `; shipped changed since`), else '';
+ * `command` its slash command (the user's and shipped flows only, valid) or null; `params` each
+ * param as an object (runs.PARAM_KEYS). */
+export type FlowRow = {
+  name: string
+  where: 'yours' | 'shipped' | 'repo'
+  description: string
+  mark: string
+  command: string | null
+  params: Record<string, { type: string; description?: string; default?: unknown; choices?: (string | number)[]; optional?: boolean }>
+}
