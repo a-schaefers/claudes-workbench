@@ -17,6 +17,8 @@
     "rpc.ts",
     "wb.ts",
     "chat.ts",
-    "driver.ts"
+    "driver.ts",
+    "skill.ts",
+    "agent.ts"
   ]
 }

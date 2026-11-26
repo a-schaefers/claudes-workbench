@@ -11,6 +11,7 @@ import type { ServerContext, ServerPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
 import { chat } from './chat.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
+import { registerAgent } from './agent.ts'
 import { startDriver, type DriverHost } from './driver.ts'
 
 export const ID = 'workbench'
@@ -31,6 +32,8 @@ const plugin: ServerPlugin = {
     const stops: (() => Promise<void>)[] = []
     const stopChat = await chat(ctx) // the web chat: in-process turns and chat_reply (#1319)
     if (stopChat) stops.push(stopChat)
+    const agent = await registerAgent(ctx).catch(() => undefined) // no skill/ to read: no agent, the rest stands
+    if (agent) stops.push(async () => agent.stop())
     stops.push(await startDriver(ctx as ServerContext & DriverHost))  // the driver's heartbeat and RPC (#1316)
     return async () => { for (const stop of stops.reverse()) await stop().catch(() => {}) }
   },
