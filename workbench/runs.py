@@ -1219,6 +1219,29 @@ def _code_report(t: store.Task, n) -> str:
     return t.report(n).strip() or f"(round {n}'s report is empty)"
 
 
+def _base_of(run: Run, stage: dict, it: Item) -> str:
+    """An item's base: the run's, but for a report over one code item the reviewed round's tree
+    committed on it (gitops.review_commit), so its worktree holds the change it reads. At the
+    run's base, every review searched for the change and retyped it from the diff to run a test,
+    on the base (#1503, 2026-11-26). A compare's attempts share no tree: it stays at the base."""
+    base = run.spec["base"]
+    src = stage_by(run.flow, stage.get("from") or "") or {}
+    if is_code(stage) or stage.get("compare") or not is_code(src) or not isinstance(it.input, dict):
+        return base
+    t = store.Task(str(it.input.get("task") or ""))
+    if not it.input.get("task") or not t.exists:
+        return base
+    st = t.status
+    rnd = it.input.get("round") or st.get("round") or 1
+    tree = ((st.get("review_trees") or {}).get(str(rnd)) or {}).get("tree")
+    if not tree:
+        return base
+    try:
+        return gitops.review_commit(Path(run.spec["repo"]), t.name, rnd, tree, t.spec.get("base") or base) or base
+    except gitops.GitError:
+        return base
+
+
 def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     """Start item ``it`` as task <run>-<stage>-<n>: ("running"|"not_run"|"null"|"paused", why)."""
     spec = run.spec
@@ -1227,7 +1250,7 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     specs.mkdir(parents=True, exist_ok=True)
     path = specs / f"{stage['id']}-{n}.md"
     path.write_text(_spec_of(run, stage, it), encoding="utf-8")
-    argv = ["start", name, "--spec", str(path), "--repo", spec["repo"], "--base", spec["base"],
+    argv = ["start", name, "--spec", str(path), "--repo", spec["repo"], "--base", _base_of(run, stage, it),
             "--role", item_role(stage, it), "--queue", "--group", run.name, "--run", run.name,
             "--stage", stage["id"], "--item", it.key, "--checkin", "0"]
     if stage.get("card"):

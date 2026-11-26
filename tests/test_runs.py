@@ -1017,7 +1017,31 @@ class Runs(Base):
         for n in (1, 2, 3):
             run_wb("discard", f"bo-code-{n}")
 
-    def test_an_item_stuck_on_its_role_is_tried_again_from_the_base_on_the_next_escalate_role_before_claude_is_asked(self):
+    def test_a_review_item_starts_on_the_change_it_reviews_and_a_chooser_on_the_runs_base(self):
+        # #1503 (2026-11-26): every review started at the run's base, the change only a diff in
+        # its prompt, so reviewers searched for it and retyped it to run a test, on the base
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Pick the best attempt": {
+            "best": "a1", "ranking": ["a1", "a2", "a3"], "why": "a1"}})
+        run_wb("run", "start", "rb", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("rb", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        run = runs.Run("rb")
+        base = run.spec["base"]
+        git = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True, text=True)
+        reviews = runs.state(run)["review"]
+        self.assertEqual(len(reviews), 3)
+        for it in reviews:
+            code, rv = store.Task(it.input["task"]), store.Task(it.task)
+            tree = code.status["review_trees"][str(it.input["round"])]["tree"]
+            got = rv.spec["base"]
+            self.assertEqual((git("rev-parse", f"{got}^{{tree}}").stdout.strip(), git("rev-parse", f"{got}^").stdout.strip()),
+                             (tree, base), it.key)
+            self.assertEqual(git("show", f"{got}:answer.txt").stdout.strip(), "42")
+        (pick,) = [n for n in runs.run_tasks(run) if n.startswith("rb-choose-")]
+        self.assertEqual(store.Task(pick).spec["base"], base)  # its attempts share no tree
+        for n in (1, 2, 3):
+            run_wb("discard", f"rb-code-{n}")
+        self.assertEqual(git("for-each-ref", "refs/workbench/review/").stdout, "")  # gone with them
         # #1134's study: escalating attempts across roles; Claude checkpointed only when the last fails
         flow = {"v": 1, "name": "esc", "params": {}, "stages": [
             {"id": "code", "kind": "code", "role": "trivial", "escalate": ["significant"], "items": ["the answer"],

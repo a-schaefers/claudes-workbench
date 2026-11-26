@@ -1299,7 +1299,8 @@ Every review tree of the step is kept, not only the last (#1198): `review_diff(t
 n's to status `review_trees` (`{tree, left, keep}`, `gitops.review_snapshot`: `keep` the paths
 left out, `dir/` or a file, by top-level directory past `KEEP_MAX` 100) and pins it at
 `refs/workbench/review/<task>/<n>` (`gitops.REVIEW_REF`, `keep_review`) in the user's repo, so gc
-can't prune it; a ref to a tree, which `git log --all` skips. The refs go at `wb next` (a rewind
+can't prune it; a ref to a tree, which `git log --all` skips (a run's review item adds a commit of it beside it,
+`<n>-commit`: *Deep workflows*). The refs go at `wb next` (a rewind
 never crosses a step's commit) and at accept and discard (`cli._closed`, `_finish_record`;
 `gitops.drop_reviews`, one `update-ref --stdin`). `wb rewind <task> <n>` (`cli.cmd_rewind`)
 puts the files back with `gitops.restore_tree`: only what differs between the worktree's own
@@ -9677,8 +9678,12 @@ are) and has room (`_room`: `IN_FLIGHT` 6 items; an API stage's provider slots, 
 while a task of the user's waits for one, `cli._api_pending`; on the GPU one waiting item per stage). Each start
 is `wb start <run>-<stage>-<n> --spec specs/… --role R --queue --group <run> --run --stage --item --checkin 0`,
 a report's with `--report --card --schema --tools --ask-budget 0 --no-self-review --no-base-check --setup ''`
-(`runs._start`), a subprocess, so refusals are the user's: an exit 3 that is the day cap's own (`meter.RESETS`,
-"it resets at local midnight", anywhere in what wb start said) pauses the run, or under `--overnight` is tried
+(`runs._start`). Its `--base` is the run's, but for a report over one code item (no compare) the reviewed
+round's tree committed on it (`runs._base_of`, `gitops.review_commit`, pinned at `gitops.REVIEWED_REF`
+`refs/workbench/review/<code task>/<n>-commit`, gone with the code task's review refs), so a reviewer's worktree
+holds the change it reviews: at the base, reviewers retyped it from the diff to run a test, on the base (#1503);
+a chooser's stays at the base, each attempt only in its diff. Each start is a subprocess, so refusals are the
+user's: an exit 3 that is the day cap's own (`meter.RESETS`, "it resets at local midnight", anywhere in what wb start said) pauses the run, or under `--overnight` is tried
 again each tick (journal `retry`); any other exit 3 (no cap, no price, an unreadable routes.json, which say "day
 cap" too and never clear) is `not_run`; a start that timed out (124) once its task exists is the item's,
 running (a runner that never came is reaped, a stop from outside); else `null`. The journal row comes first, so a
