@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Answer } from '../consent.ts'
 import { NOT_SENT, SEND_VIA_TOOL } from '../gates.ts'
-import { NO_FORM_SENT, Upstream, githubTool, packageCaches, type UpstreamBefore } from '../upstream.ts'
+import { NO_FORM_SENT, PUSH_RECHECK_MS, Upstream, githubTool, packageCaches, type UpstreamBefore } from '../upstream.ts'
 
 // The upstream gate on OpenCode's path (#1296's parity row 14, 2026-11-26): a gh write, a git push
 // or a GitHub MCP write aimed at workbench upstream asks the user in the session's form, as the
@@ -141,5 +141,39 @@ test('the patch clone patches.json names, and OpenCode\'s package cache by its o
     expect(await t.up.refusal(t.shell(`cd ${cached} && git push`))).toBe('')          // its origin isn't upstream
     t.origins[cached] = UP
     expect(await t.up.refusal(t.shell(`cd ${cached} && git push`))).toBe(NOT_SENT)
+  } finally { t.done() }
+})
+
+test('upstream\'s maintainer\'s own driver is never asked to write to it, and a user who can\'t push is, gh asked again only after a while', async () => {
+  // 2026-11-26: the owner's own issue comments waited on his answer: "it never should halt our work"
+  const t = setup('no')
+  try {
+    const fix = join(t.root, 'upstream', 'fix')
+    let push = true, clock = 1_000
+    const ghs: string[] = []
+    const up = new Upstream({ ...(t.up as unknown as { d: ConstructorParameters<typeof Upstream>[0] }).d,
+      canPush: async slug => { ghs.push(slug); return push } }, () => clock)
+    expect(await up.refusal(t.shell(`cd ${fix} && git push -u origin HEAD`))).toBe('')
+    expect(await up.refusal(t.shell('gh issue comment 5 --repo a-schaefers/workbench --body x'))).toBe('')
+    expect(await up.refusal({ tool: 'github_add_issue_comment', sessionID: 'ses_1', id: 'c2',
+      input: { owner: 'a-schaefers', repo: 'workbench', body: 'x' } })).toBe('')
+    expect([t.asked, ghs]).toEqual([[], ['a-schaefers/workbench']])
+    // wb patch send goes through its tool, as before
+    expect(await up.refusal(t.shell('wb patch send fix --title t --body-file b.md'))).toBe(SEND_VIA_TOOL)
+    // one who can't push: asked; gh asked again only past PUSH_RECHECK_MS
+    push = false
+    const other = new Upstream({ ...(t.up as unknown as { d: ConstructorParameters<typeof Upstream>[0] }).d,
+      canPush: async slug => { ghs.push(slug); return push } }, () => clock)
+    ghs.length = 0
+    expect(await other.refusal(t.shell('git push', fix))).toBe(NOT_SENT)
+    expect(await other.refusal(t.shell('git push', fix))).toBe(NOT_SENT)
+    expect(ghs.length).toBe(1)
+    clock += PUSH_RECHECK_MS
+    expect(await other.refusal(t.shell('git push', fix))).toBe(NOT_SENT)
+    expect(ghs.length).toBe(2)
+    // gh failing is a no: asked
+    const failing = new Upstream({ ...(t.up as unknown as { d: ConstructorParameters<typeof Upstream>[0] }).d,
+      canPush: async () => { throw new Error('no gh') } })
+    expect(await failing.refusal(t.shell('git push', fix))).toBe(NOT_SENT)
   } finally { t.done() }
 })

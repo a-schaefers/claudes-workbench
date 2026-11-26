@@ -4310,7 +4310,8 @@ const GIT_LOG = '/test/git-log'  // what upstreamWorld's `git -C <dir> log` prin
 
 function upstreamWorld(on: any, files: Record<string, string>) {
   const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[],
-    toasts: [] as string[], chats: [] as string[][] }   // chats: wb chat's calls, the line for an away user
+    toasts: [] as string[], chats: [] as string[][],   // chats: wb chat's calls, the line for an away user
+    push: '' as string, ghs: [] as string[][] }        // what `gh api repos/<slug>` says of .permissions.push, and its calls
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
   const origins: Record<string, string> = {
     [SOURCE]: `https://github.com/${SLUG}.git`,
@@ -4331,6 +4332,10 @@ function upstreamWorld(on: any, files: Record<string, string>) {
       return { value: { exitCode: url ? 0 : 2, stdout: url ? `${url}\n` : '', stderr: url ? '' : 'error: No such remote' } }
     }
     if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
+    if (e.argv[0] === 'gh' && e.argv[1] === 'api') {
+      w.ghs.push(e.argv)
+      return { value: { exitCode: w.push ? 0 : 1, stdout: w.push ? `${w.push}\n` : '', stderr: w.push ? '' : 'gh: not logged in' } }
+    }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   on('tool.call', (_: any, e: any) => {
@@ -4440,6 +4445,46 @@ test('#1005: every command that would send to workbench upstream waits for the u
   w.cwd = '/home/u/project'
   expect(await bash(`gh pr create --repo ${SLUG} --fill`)).toContain('not sent')
   await clock.advance(1000)                                      // the poll the calls started ends here
+})
+
+test('upstream\'s maintainer\'s own Claude is never asked to write to it, even from the patch clone, but wb patch send still is', async ($, on) => {
+  // 2026-11-26: the owner's own Claude's gh issue comments from his clone (patches.json's source)
+  // each waited on his click: "it never should halt our work"
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  w.push = 'true'
+  await $.session.start({ cwd: SOURCE, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const bash = async (command: string) => ((await $.tool.call({ tool: 'Bash', command } as any)) as any).deny as string | undefined
+  for (const command of ['gh issue comment 5 --body x', 'gh issue reopen 5', 'git push', `gh pr create --repo ${SLUG} --fill`])
+    expect([command, await bash(command)]).toEqual([command, undefined])
+  expect(w.asked).toEqual([])
+  // gh asked once for the session, of the upstream
+  expect(w.ghs).toEqual([['gh', 'api', `repos/${SLUG}`, '--jq', '.permissions.push']])
+  const mcp = await $.tool.call({ tool: 'mcp__github__add_issue_comment', owner: 'a-schaefers', repo: 'workbench', body: 'x' } as any) as any
+  expect(mcp?.deny).toBeUndefined()
+  // wb patch send checks the dialog's yes itself (send-ok.json): still asked
+  files['/home/u/pr.md'] = 'body'
+  expect(await bash('wb patch send fix --title "t" --body-file /home/u/pr.md')).toContain('not sent')
+  expect(w.asked.length).toBe(1)
+  await clock.advance(1000)
+})
+
+test('a user who can\'t push to upstream, or whose gh can\'t say, is asked, and gh isn\'t asked again at each call', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  await $.session.start({ cwd: SOURCE, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const bash = async (command: string) => ((await $.tool.call({ tool: 'Bash', command } as any)) as any).deny as string | undefined
+  expect(await bash('gh issue comment 5 --body x')).toContain('not sent')     // gh not logged in
+  w.push = 'false'
+  expect(await bash('gh issue comment 5 --body x')).toContain('not sent')
+  expect([w.asked.length, w.ghs.length]).toEqual([2, 1])                       // the no kept (PUSH_RECHECK_MS)
+  await clock.advance(1000)
 })
 
 test('#1291: wb patch zip sends nothing, so the gate never asks about it, even in the patch clone', async ($, on) => {

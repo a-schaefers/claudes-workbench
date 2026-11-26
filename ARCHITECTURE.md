@@ -8253,7 +8253,11 @@ directory, git's `-C`; by real path too, a symlinked spelling), or runs in Claud
 checkout whose origin is upstream (a marketplace renamed), or when the line anywhere names the upstream's owner/repo
 (`export GH_REPO=<slug> && gh issue create` named it outside the outward command), unless that runs in a developer's own
 clone of upstream (`developerClone`: `git -C <dir> remote get-url origin`, 5 s, `originIs`; never a gated directory or
-inside the plugins directory), which is no user's Claude. The gated directories (`gateConf`): the patch clone,
+inside the plugins directory), which is no user's Claude, nor (but `wb patch send`, which checks its own yes) when
+the signed-in GitHub user can push to the upstream, its maintainer or a collaborator (`canPush`: `gh api
+repos/<slug> --jq .permissions.push`, gh's word only, 8 s; a yes kept for the session, a no or no answer
+`PUSH_RECHECK_MS` 10 minutes): the owner's own Claude's issue comments from his clone, patches.json's `source`, each
+waited on his click (2026-11-26: "it never should halt our work"). The gated directories (`gateConf`): the patch clone,
 `patches.json`'s `source`, else `WB_SOURCE`, else `~/.local/share/workbench/source`; `$WB_HOME/upstream/`; and Claude
 Code's own `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/` (and `CLAUDE_CODE_PLUGIN_CACHE_DIR`) `marketplaces/workbench` and
 `cache/workbench`: the marketplace install's clone has upstream as its origin, and was once exempted as a developer's
@@ -8791,7 +8795,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     refused with `SEND_VIA_TOOL`. An MCP tool whose namespace (its server's name) holds `github`
     (`githubTool`; no info: `<server>_<name>`), not `get_`/`list_`/`search_`, whose input names
     the upstream or a repository of its name (`githubAimsUpstream`), asks the same, unless the
-    session's directory is a developer's clone. The form (`Asker`, `consent.ts`'s): `The driver
+    session's directory is a developer's clone. Neither asks a user who can push to the upstream
+    (`UpstreamDeps.canPush`, consent.ts's `gh api repos/<slug> --jq .permissions.push`; `PUSH_RECHECK_MS`
+    after a no), the mod's `canPush`. The form (`Asker`, `consent.ts`'s): `The driver
     wants to send this to GitHub (<slug>), publicly: <the command>` (`shownCommand`: the whole
     line up to 600 characters, else the outward command then the line's start; an MCP call's
     input up to 4000, `shownInput`), `Send it` / `Don't send`; the yes lets that one call through,
@@ -11545,7 +11551,8 @@ doc needs its own `!/` line).
   the OpenCode plugin's (`gates.ts` `shellRefusal`, `guarded`, `localOnlyRefusal`; `consent.ts` `Gates`; `sendRefusal`'s
   `upstream.ts` `Upstream`, over the same `mod/hooks/shell.ts`): one rule, two hosts, each a test of its own (the mod's,
   `consent.test.ts`, `upstream.test.ts`). **The gated directories** (`shell.ts` `gatedWhere`) ↔ `patches.source_dir`
-  and Claude Code's plugin layout, read by `register.tsx`'s `gateConf` and `upstream.ts` alike.
+  and Claude Code's plugin layout, read by `register.tsx`'s `gateConf` and `upstream.ts` alike. **The maintainer's
+  exemption** (`canPush` ↔ `Upstream.maintainer`, `PUSH_RECHECK_MS` in both).
 - **A prompt's opening words** → `transcript` labels, `round_asks`, `lessons`, the fake OpenCode, the tests quoting them.
 - **Where a round's own prompt is** (`instructions.md` once `_start_fresh` makes prompt.md the handoff) → `store.round_prompt` (`current_task_prompt`, `round_asks`, `lessons`,
   `bench._step_prompt`).
