@@ -35,6 +35,14 @@ Run from a developer's clone, `wb update` checks Claude Code's git marketplace c
 one, and refuses the same way over its changes (saved first): `git am` takes them into your clone,
 and `claude plugin marketplace add <your clone>` makes it the marketplace, which is never re-cloned.
 
+OpenCode's own install (`opencode plugin add …`) can't keep a change either: OpenCode replaces it
+when it updates, and `wb patch` refuses there. Clone this repository and run `bin/wb setup
+--opencode` in the clone; the plugin then runs its `wb`, and you work on `local` there. The
+plugin's own code still loads from OpenCode's install while OpenCode's `plugins` entry names it
+(`wb doctor` says which copy loads): for a change to `opencode-plugin/`, remove that entry from
+OpenCode's config and run the clone's `bin/wb setup --opencode` again, which loads a copy of the
+clone's committed `opencode-plugin/` that `wb update` refreshes.
+
 A patch is a commit on branch `local`, with a scope trailer:
 
 ```sh
@@ -111,7 +119,8 @@ this form, so it can't say yes for you. With no OpenCode window open on the sess
 run`), nothing is asked and nothing is sent: run `wb patch send` in a terminal of your own. A `wb
 patch send` the driver types in its shell is turned to the tool, and wb itself refuses a send
 from inside OpenCode without the form's yes. The route, start and Settings changes that need
-your yes ask in the same form.
+your yes ask in the same form. The form is for those alone: an issue or a comment the driver files
+through gh goes on your yes in words, and while you are away on the web chat the form waits for you.
 
 **gh setup.** `wb patch send` sends through [gh](https://cli.github.com), GitHub's CLI. `wb
 doctor`, `wb patch upstream` and a refused send say its state and the next step: the install
@@ -119,7 +128,9 @@ line for your system (GitHub's own instructions), then `gh auth login --hostname
 --git-protocol ssh` (or `https`, then `gh auth setup-git`, which edits your global git config).
 A change to `.github/workflows/` over https needs `gh auth refresh -h github.com -s workflow`.
 Claude never handles your token: you run the login yourself (`! gh auth login …` in Claude
-Code). The GitHub plugin for Claude Code is optional and not needed for any of this.
+Code; in OpenCode, its terminal pane, ctrl+x t, or a terminal of your own, as OpenCode's `!` runs a
+command with no terminal to ask on). The GitHub plugin for Claude Code (or a GitHub MCP server in
+OpenCode) is optional and not needed for any of this.
 
 **No GitHub account?** You don't need one: `wb patch zip` writes your patches on `local` (or the
 commits you name) as a .zip in `~/Downloads` (else `$WB_HOME/patches/out/`): a `git format-patch`

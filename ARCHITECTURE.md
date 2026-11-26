@@ -8,7 +8,9 @@ updates it in the same commit.
 
 "The user" is the person running Claude Code; "Claude" is the Claude Code session driving the
 work; "the agent" is the model running in OpenCode on one task: on this machine's GPU, or an API
-model through a provider the user connected.
+model through a provider the user connected. On the OpenCode path (2.2) the user runs OpenCode
+alone and "the driver" (the model with the final say, picked in OpenCode's `/models`) stands where
+Claude stands here: *Workbench in OpenCode*.
 
 Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-this-way) ·
 [A task, start to finish](#a-task-start-to-finish) · [The runner, inside](#the-runner-inside) ·
@@ -17,6 +19,7 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 [Seeing what the agent does](#seeing-what-the-agent-does) · [Models](#models-found-loaded-chosen) ·
 [Bench](#bench-real-tasks-replayed) · [The skill library](#the-skill-library) · [Images](#images) · [Audio](#audio) · [Git, commits and projects](#git-commits-and-projects) ·
 [The web chat](#the-web-chat) · [Stopping everything](#stopping-everything) · [The mod, inside](#the-mod-inside) ·
+[Workbench in OpenCode](#workbench-in-opencode) · [The OpenCode plugin](#the-opencode-plugin) ·
 [Waiting without polling](#waiting-without-polling) · [Every `wb` command](#every-wb-command) ·
 [Files and formats](#files-and-formats) · [The tests](#the-tests) · [Couplings](#couplings-change-one-change-the-other)
 
@@ -5398,8 +5401,9 @@ spends the other's yes (#1363, *Both drivers on one machine*). Else exit 3:
 `in Claude Code a role changes only through the workbench mod's dialog, and the user approved none
 for this change, so nothing changed (is the mod loaded? wb doctor says). Or the user runs it in a
 terminal of their own: wb route …`; under an OpenCode driver `in OpenCode … only through the workbench plugin's
-dialog, … (the plugin's workbench_route tool asks them; is the plugin loaded?)` (`workbench_start` for an API
-start); in an agent's shell `in an agent's shell … only on the user's yes in the
+form, … (the plugin's workbench_route tool asks them; is the plugin loaded?). Or the user runs it in OpenCode's
+terminal pane (ctrl+x t) or a terminal of their own: …` (`workbench_start` for an API start; the pane is a real
+terminal whose wb has no `OPENCODE_SESSION_ID`, so the user's: `patches.PANE_OR_TERMINAL`, #1321's finding 17); in an agent's shell `in an agent's shell … only on the user's yes in the
 driver's dialog, … Ask the reviewer (ask_reviewer); or the user runs it in a terminal of their own: …`
 (`cli.gate_refusal`, by `store.caller_kind`). `by`: `dialog` (`pane` when the approval says so: the pane's own rows
 wrote it until #1283, #1023), `terminal` (outside a model), `web` (outside a model with
@@ -8274,6 +8278,83 @@ one shared types module).
   Bun goldens, #1328) are part of the required `check`; the first shard of `nightly.yml`'s `macos` runs `check` too (the same bundle bytes
   on macOS), and `opencode.yml` the Bun goldens on the newest OpenCode (`BUN_BE_BUN` is undocumented).
 
+## Workbench in OpenCode
+
+Two paths, one backend (#1296, 2.2). **Claude Code with Claude's Workbench**: the mod and the
+`/workbench` skill, exactly as before 2.2; Claude drives. **OpenCode alone**: `/workbench` in
+OpenCode's TUI, and the driver (the model with the final say: review, accept, the bar) is whatever
+the session runs on, picked in OpenCode's own `/models`, a GPU model, an API model or Claude through
+OpenCode's `claude-agent` provider. Everything below the driver is one copy: `wb`, the runner, the
+lanes, the keyhole, routes.json and the roles, the web app, results.jsonl, the skill library. The
+supported hosts are the two CLIs (the owner, locked 2026-11-25): OpenCode's TUI and Claude Code's;
+OpenCode Desktop, `opencode web` and IDE surfaces are neither built for nor tested, and whatever of
+the plugin works there is incidental. How the plugin is built: *The OpenCode plugin*; its rule is the
+host-shape decision (https://github.com/a-schaefers/workbench/issues/1296#issuecomment-7158435888):
+the same outcomes, OpenCode-native, wb the system of record, the kernel pure decisions only, and
+Claude Code's path unchanged by a byte (its tests unedited, SKILL.md its own copy).
+
+**Installing.** One `plugins` entry, either way (a second is a duplicate `wb doctor` names): `opencode plugin add
+'github:a-schaefers/workbench#main'` (`ocplugin.ADD`, OpenCode's Git install: the plugin with the wb
+it brings, in OpenCode's package cache, which OpenCode updates and replaces: `wb update` leaves it to
+OpenCode, `wb setup` and `wb patch` refuse there), or a clone's `bin/wb setup --opencode` (the `~/.local/bin/wb`
+link and the plugins entry, a copy of the clone's committed `opencode-plugin/` that `wb update`
+refreshes; never Claude Code's skill link, which OpenCode would list too). `wb doctor` names each
+install and the wb it runs; on the OpenCode path alone a missing Claude Code item is a `--` line, never BAD. Both
+drivers on one machine: *Both drivers on one machine*.
+
+**Each feature and its counterpart.** The same outcome on both, built from each host's own parts:
+
+| Claude Code (the mod, the skill) | OpenCode (the plugin) | Where |
+|---|---|---|
+| `/workbench [request]`: the skill, the mode on, the pane | `/workbench [request]`, a server command: the driver pin applied, the session switched to the Workbench agent, whose prompt is the procedure; the panel opens on that switch | `pane.ts`, `agent.ts`, *The driver* |
+| `/workbench-quit`, `/workbench-quit-and-hand-back-claude`, `/workbench-models`, `/workbench-update` | `/workbench-quit`, `/workbench-quit-and-hand-back` (switching to Build ends the mode and closes the panel), `/workbench-models`, `/workbench-update` | `commands.ts` |
+| SKILL.md and `reference/`, read through the skill link | the same files rendered for OpenCode when the plugin starts (`skill.ts`): the agent's prompt, the `workbench` skill and one `workbench-<name>` skill per reference file, Claude Code's lines replaced by OpenCode's facts | `skill.ts`, `agent.ts` |
+| `wb` recipes typed in Bash | typed tools in the `workbench` namespace (`workbench_start`, `_status`, `_diff`, `_feedback`, `_accept`, `_discard`, `_wait`), the shell for the rest | `tools.ts` |
+| The pane "Claude's Workbench": Tasks, the modeline, the splash and the apprentice, the `⚒ wb ·` status line, the minimized strip | the panel "Workbench" (beside the session at 108 columns or more, fullscreen narrower), the sidebar section, the footer item; one Tasks view (`mod/hooks/tasks.ts`) and one animation for both | `pane.tsx`, `pane-view.ts`, `spans.ts`, `splash.tsx` |
+| Wakes: a `[workbench] Task …` prompt, exactly once (`wb events`, `wb ack`) | `session.synthetic` from the server part's one `wb events`, the same text and ack; an agent's question steers into a running turn | `notices.ts`, *Notices on OpenCode* |
+| The context blocks, `KEEP_ON_COMPACT`, compaction at a task boundary | session instruction entries (the `context` hook as fallback), the `compaction` hook | `upkeep.ts` |
+| The consent dialog: an API role, an API `--model` start, a role's Settings row, `wb patch send` | a session form asked by the gated tool (`workbench_route`, `workbench_start`, `workbench_settings_set`, `workbench_patch_send`); the shell path to them denied on the permission hook; no TUI, no form: refused | `consent.ts`, `gates.ts` |
+| The coding gate (`wb coding`), routes.json and approval-file edits refused, `local_only` | the same rules on the permission hook and `execute.before` | `consent.ts` |
+| Whose task: `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, `claude-sessions/` | `OPENCODE_SESSION_ID` and the server's heartbeat (`drivers/`), task.json `driver` | *The OpenCode driver: whose task it is* |
+| The driver's own edits in `claude-calls/` | `execute.after` writes the same rows | `calls.ts` |
+| The driver is Claude Code (fixed) | `/models`, a standing pin (`wb route driver`, the web app's `driver` row), the once-only notes; a GPU driver held beside the agents | *The driver*, *A local driver on the GPU* |
+| The web chat: listener, turns, replies, the waiting line | the same over `session.prompt`/`synthetic` and `workbench_chat_reply` | `chat.ts`, *The web chat on OpenCode* |
+| The weekly model check, the update check, settings help turns, `wb optimize --if-due` | the same due rules in wb, toasted from the idle hook | `jobs.ts`, *Background jobs on OpenCode* |
+| `deepcode`, `deepmode` | the same keywords, the same `wb run` flows | `deep.ts`, *Deep workflows* |
+| `wb patch` and its procedure | the same commands; the procedure in OpenCode's facts (below) | *Local patches*, `skill.ts` |
+
+**What differs, and why.**
+- **The driver is the user's choice**, and wb can't make a weak model hold the bar, so it says so
+  once, never as a refusal (*The driver*'s notes: the driver is the agent's own model; an API driver
+  in a `local_only` repo, whose code reaches the API through the driver).
+- **A command that asks the user something** (sudo's password, gh's login): Claude Code's `!`
+  runs it in the user's terminal; OpenCode's `!` (shell mode, typed at the prompt's start) runs it
+  with no terminal (2.4.1's process-daemon: a pipe, stdin closed, a session of its own), so nothing
+  can ask. wb's hints and the rendered procedure name OpenCode's terminal pane (`terminal.toggle`,
+  ctrl+x t by default: a real terminal, its wb the user's, no `OPENCODE_SESSION_ID`) or a terminal
+  of the user's own instead (`patches.PANE_OR_TERMINAL`, `skill.ts`'s, #1321's finding 17). Seen
+  live on 2.4.1 (2026-11-26): `tty` under `!` says `not a tty`, in the pane `/dev/pts/<n>`, and
+  neither sets `OPENCODE_SESSION_ID` (a wb typed in either is the user's, `store.caller_kind`'s
+  `terminal`; only the driver's own shell tool sets it).
+- **Sends upstream**: the mod's dialog holds every outward command (a gh write, a `git push`, a
+  GitHub MCP tool's write) as well as `wb patch send`; of those, the plugin's forms ask for
+  `workbench_patch_send` alone (the kernel's `send` gate; its `outward` one has no OpenCode
+  counterpart), so the rendered procedure has the driver ask in words before an issue or a comment,
+  and away on the web chat the form waits for the user rather than refusing.
+- **A patch to the plugin**: OpenCode's Git install can't keep one (`wb patch` refuses there and
+  names the clone to make); with a clone's wb, the plugin's own code stays the Git install's while
+  OpenCode's `plugins` entry names it, so a patch under `opencode-plugin/` needs that entry swapped
+  for the clone's (*Local patches*; #1321, finding 7).
+- **Claude Code only**: `wb schedule`'s fires (Claude Code headless, `claude -p`), `ultracode` (a
+  Claude Code keyword), `/reload-plugins` (OpenCode reloads a plugin by itself), the marketplace
+  rescue (met on OpenCode only with Claude Code installed too), and the savings score's Claude fit:
+  no cost machinery is built for a non-Claude driver (#1318, closed by the owner); Stats shows what
+  OpenCode reports.
+- **Claude's own files**: an OpenCode driver reads `~/.claude/CLAUDE.md` when the user has no
+  OpenCode `AGENTS.md`, unless the user sets OpenCode's `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`:
+  OpenCode's behaviour in the user's own session (#1296 row 19), while agents never read it
+  (*What the agent knows*).
+
 ## The OpenCode plugin
 
 Workbench inside OpenCode (#1296, 2.2) is an OpenCode plugin, `opencode-plugin/`, beside `mod/`:
@@ -8611,7 +8692,21 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     §3's `wb start` block as `workbench_start`'s fields, §5's feedback, §6's accept and discard by
     their tools' fields, the route, settings and send lines through their tools and forms
     (patching.md's send too), every `wb chat reply` as `workbench_chat_reply` (`to` an id or
-    `user`), and the mod's "the dialog" (where the user approves a change) as "the form". `render(texts, where)` gives `{prompt, skill,
+    `user`), and the mod's "the dialog" (where the user approves a change) as "the form". The patch
+    procedure (patching.md, SKILL.md's *When workbench itself has a bug*) states OpenCode's facts,
+    not Claude Code's (#1321, finding 7): step 1 is the clone a patch lives in (OpenCode's own
+    install can't keep one, so `wb patch` refuses there and prints the `git clone` and `bin/wb setup
+    --opencode` that make one; the plugin's own code stays that install's while OpenCode's
+    `plugins` entry names it, so a patch under `opencode-plugin/` needs that entry swapped for the
+    clone's; `wb patch init` only for Claude Code's marketplace install on a machine with both);
+    the form asks for `workbench_patch_send` alone, so an issue, a comment or another send through
+    gh goes on the user's yes in words, and away on the web chat the form waits (nothing refuses
+    it); the GitHub plugin for Claude Code is a GitHub MCP server in OpenCode's `mcp`; the
+    marketplace rescue is met only with Claude Code installed too; and each `! <cmd>` (gh's login,
+    `setup-git`, the workflow scope, models.md's Ollama install) is typed `PANE_OR_TERMINAL`, in
+    OpenCode's terminal pane (ctrl+x t) or a terminal of their own, as OpenCode's `!` runs a
+    command with no terminal (`BANG`; 2.4.1's process-daemon: a pipe, stdin closed, #1321's finding
+    17, as `patches.PANE_OR_TERMINAL` says in wb's own hints). `render(texts, where)` gives `{prompt, skill,
     parts}`: the prompt is SKILL.md's body without its frontmatter, the `workbench` skill the same
     text with SKILL.md's description, each reference file a part `workbench-<name>` (`partId`).
     `readSkill(root)`: the files, or undefined without SKILL.md. `hostLineMatches` counts each
@@ -10201,8 +10296,11 @@ approve; outside it the user typing it is the yes. CONTRIBUTING.md is the contri
   this OS from `OS_RELEASE`, labelled official or community as GitHub's docs label it, `GH_DOCS`, `GH_RELEASES`; never
   snap; the distro's own apt `gh` warned off; `the user runs: ! ` before a sudo or pamac (polkit) line, `the user
   runs, as root:` before apk's, as Claude's Bash can't answer a password; from an OpenCode driver each `! ` line
-  is `…, in a terminal of their own: <cmd>` and `Claude` is `OpenCode's model` (`_user_runs`, `driver_name`: its `!`
-  had no terminal to prompt on in 2.3.2's source, #1321 finding 17); brew offered with no sudo), `logged-out`
+  is `…, in OpenCode's terminal pane (ctrl+x t) or a terminal of their own: <cmd>` (`PANE_OR_TERMINAL`) and `Claude`
+  is `OpenCode's model` (`_user_runs`, `driver_name`: its `!` runs a command with no terminal to prompt on, a pipe
+  with stdin closed under a daemon in a session of its own, read in 2.3.2's source and 2.4.1's (process-daemon
+  `service/pipe/unix.rs`, `client.rs`); its terminal pane, `terminal.toggle` on `<leader>t`, is a real terminal,
+  #1321 finding 17); brew offered with no sudo), `logged-out`
   (also a 401: `! gh auth login --hostname github.com --git-protocol <p>`, `_guess_protocol`: an insteadOf rule by its
   target, the `url.<base>` key (`GH_SSH`, `GH_HTTPS`: one rewriting `git@github.com:` to https forces https, and was once
   read as ssh by its value), else ssh with a key, else the remote's URL; https adds `! gh auth setup-git`, an edit to
@@ -10210,8 +10308,8 @@ approve; outside it the user typing it is the yes. CONTRIBUTING.md is the contri
   source; a `GH_TOKEN`/`GITHUB_TOKEN` overriding the stored login is said). `gh_line` prints it. Claude never handles a
   token: the login is the user's own `! gh auth login`.
 - **The send**: `_refuse_send`'s checks, then gh `ready`, then, under Claude Code (`CLAUDECODE=1`, which its Bash
-  sets), an OpenCode driver (`store.under_model`, #1309: the refusal names the workbench plugin's `workbench_patch_send` tool, and
-  the approval is the session's own `send-ok.<session>.json`, `store.approval_name`, #1363) or in an agent's shell (`WB_TASK`, #1310: the refusal sends it to its reviewer), the mod's approval (`_approved`): `send-ok.json`, written by the dialog's `Send it`, renamed away so one send
+  sets), an OpenCode driver (`store.under_model`, #1309: the refusal names the workbench plugin's `workbench_patch_send` tool and, for the
+  user, OpenCode's terminal pane or their own terminal, `PANE_OR_TERMINAL`; the approval is the session's own `send-ok.<session>.json`, `store.approval_name`, #1363) or in an agent's shell (`WB_TASK`, #1310: the refusal sends it to its reviewer), the mod's approval (`_approved`): `send-ok.json`, written by the dialog's `Send it`, renamed away so one send
   consumes it, matching or not, and taken only when fresh (`SEND_OK_SECS` 120) with this slug, title, absolute body
   path, body text and flags. Without the mod (not installed, disabled, its hooks failing to load) nothing asked the
   user, and Claude's Bash sent anyway; it refuses, naming the command for the user's own terminal. Then `gh repo fork
@@ -10847,6 +10945,11 @@ doc needs its own `!/` line).
   (`theme.hue.accent[400]`) → the colour #1312's modeline gives its row, the row the words fall into; **a mod file the
   plugin imports** (`../mod/hooks/…`) → the root `package.json`'s `files`, which OpenCode's Git install fetches and
   `ocplugin.shared_files` copies beside a clone's copy (#1333), with what that file imports in turn.
+- **Where the user types a command that asks them, on OpenCode** (#1321, finding 17): `patches.PANE_OR_TERMINAL`
+  (wb's hints, `_user_runs`, and the OpenCode refusals of `patches.send` and `cli.gate_refusal`) ↔
+  `opencode-plugin/skill.ts`'s `PANE_OR_TERMINAL` and `BANG` (the patch procedure's and models.md's `! <cmd>` lines),
+  word for word; a change of OpenCode's `!` (a terminal for its commands) or of the terminal pane's key → both, the
+  tests that quote them (`skill.test.ts`, the OpenCode cases in `tests.test_workbench`) and *Workbench in OpenCode*.
 - **The Tasks view on both hosts** (#1312): tasks.ts's `taskLines`, `capRow`, `focusOf`, `speechOf`, `frameOf`,
   `viewFacts` and `isEst` (moved there from register.tsx, which re-exports `viewFacts` and `isEst`) → the OpenCode
   panel's `pane-view.ts` and `pane.tsx`, so a change draws on both; their `who` (`Claude` by default, `WHO` in OpenCode)
