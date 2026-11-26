@@ -92,6 +92,31 @@ class Settings(Rows):
         self.assertEqual(by["api-trivial"]["value"], "deepseek/deepseek-flash")
         self.assertEqual(by["role-trivial"]["says"], "Trivial coding runs on this machine's GPU.")
 
+    def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
+        # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
+        home = Path(self.tmp.name) / "home"
+        tw.write_skill(home / ".config" / "opencode" / "skills" / "team", "team", "Use when T.")
+        tw.write_skill(home / ".claude" / "skills" / "mine", "mine", "Claude's.")
+        os.environ["HOME"] = str(home)
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        settings.drop()
+        rows = [r for r in settings.rows() if r["group"] == "setup"]
+        by = {r["key"]: r for r in rows}
+        self.assertEqual({r["kind"] for r in rows}, {"info"})
+        self.assertTrue(by["setup-instructions"]["text"].startswith("Instructions: the handbook "))
+        self.assertIn("team 0.", by["setup-skills"]["text"])
+        self.assertIn("and what Claude hands a task from the skill library (0)", by["setup-skills"]["text"])
+        self.assertEqual(by["setup-kept"]["text"],
+                         "Kept from agents: 1 skill denied by name (Claude's, ~/.agents', `workbench`).")
+        self.assertRegex(by["setup-size"]["text"], r"^About \d+\.\dK tokens, with OpenCode's own")
+        self.assertNotIn("setup-plugins", by)  # none: no row
+        with self.assertRaises(ValueError):
+            settings.apply("setup-skills", "x")
+        (home / ".config" / "opencode" / "skills" / "team" / "SKILL.md").unlink()
+        settings.drop()
+        by = {r["key"]: r for r in settings.rows() if r["group"] == "setup"}
+        self.assertEqual(by["setup-skills"]["text"], "Skills: what Claude hands a task from the skill library (0).")
+
     def test_the_driver_row_reads_claude_code_fixed_without_the_opencode_plugin_and_takes_any_id_with_it(self):
         # #1316: the OpenCode path's standing driver (routes.json `driver`, wb route driver),
         # each session's own /models by default; Claude Code's driver is Claude Code

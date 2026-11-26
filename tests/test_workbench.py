@@ -5978,6 +5978,169 @@ class RoundEnd(Base):
         self.assertEqual((st["phase"], st["last"]), ("review", "tests passed: Claude reviews next"))
 
 
+class RepoProfile(Base):
+    """commands.json `repos.<path>.test` and `skills` (#1295, P2): a repo's standing acceptance
+    command, run with every task's own, and the skills every task there is handed."""
+
+    def commands(self, entry: dict) -> None:
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): entry}}))
+
+    def refused(self, name: str, *extra) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start(name, "ok", *extra)
+        return err.getvalue()
+
+    def test_a_failing_repo_test_sends_the_task_back_for_a_fix_as_its_own_test_does(self):
+        # NO_HOOKS keeps a team's pre-commit lint from running, so it had to be restated in every
+        # --test; the repo's `test` is that gate, run like --test in the agent's lane (#1295 P2)
+        self.commands({"test": TEST_CMD})
+        out = self.start("t-rt", "fix")
+        self.assertIn(f"tests `{TEST_CMD}`", out)
+        st = wait_phase("t-rt", {"review"})
+        task = store.Task("t-rt")
+        self.assertEqual(task.spec["test_cmd"], TEST_CMD)
+        self.assertEqual((st["round"], st["auto_fixes"]), (2, 1))  # round 1 failed it, round 2 was automatic
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIn("acceptance tests fail", task.round_dir(2).joinpath("prompt.md").read_text())
+        self.assertIn(TEST_CMD, task.round_dir(1).joinpath("prompt.md").read_text())  # the agent is told
+
+    def test_a_tasks_own_test_is_added_after_the_repos_and_a_report_runs_neither(self):
+        self.commands({"test": "test -f README.md"})
+        self.start("t-both", "ok", "--test", TEST_CMD)
+        self.assertEqual(store.Task("t-both").spec["test_cmd"], f"test -f README.md && {TEST_CMD}")
+        wait_phase("t-both", {"review"})
+        grants = store.read_json(context.rules_dir(store.Task("t-both")) / "grants.json", {})
+        self.assertIn("test -f README.md", grants.get("allow") or [])  # granted, as --test is
+        self.start("t-same", "ok", "--test", "test -f README.md")      # one already in --test
+        self.assertEqual(store.Task("t-same").spec["test_cmd"], "test -f README.md")
+        self.start("t-report", "ok", "--report", "--schema", "findings")
+        self.assertFalse(store.Task("t-report").spec.get("test_cmd"))
+
+    def test_the_repos_test_is_kept_whole_beside_the_tasks(self):
+        self.assertEqual(context.with_repo_test("make lint", None), "make lint")
+        self.assertEqual(context.with_repo_test(None, "make test"), "make test")
+        self.assertEqual(context.with_repo_test("  ", "make test"), "make test")
+        self.assertEqual(context.with_repo_test("make lint", "  "), "make lint")
+        self.assertEqual(context.with_repo_test("make lint", "npm test | tee log"), "make lint && npm test | tee log")
+        self.assertEqual(context.with_repo_test("make lint", "make lint && pytest"), "make lint && pytest")
+        self.assertEqual(context.with_repo_test("make", "make test"), "make && make test")  # not its substring
+        # a part a shell would split otherwise: `a; b && c` ran a's failure past, and `x && a || b`
+        # passed with x failing
+        self.assertEqual(context.with_repo_test("ruff check .; mypy .", "pytest"), "(ruff check .; mypy .) && pytest")
+        self.assertEqual(context.with_repo_test("make lint", "pytest || pytest --lf"),
+                         "make lint && (pytest || pytest --lf)")
+        self.assertEqual(context.with_repo_test("npm ci\nnpm run lint", "npm test"), "(npm ci\nnpm run lint) && npm test")
+
+    def test_the_repos_skills_are_handed_to_every_task_there_and_a_missing_one_is_named(self):
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "house-style", "house-style", "Use when writing this repo's code.")
+        self.commands({"skills": ["house-style", "gone-skill"]})
+        out = self.start("t-sk", "ok")
+        self.assertIn('note: commands.json "repos" skills gone-skill: not in the library', out)
+        task = store.Task("t-sk")
+        self.assertEqual(task.status["skills"], ["house-style"])
+        wait_phase("t-sk", {"review"})
+        self.assertIn(str(lib / "house-style"), json.loads(
+            (context.rules_dir(task) / "opencode.json").read_text())["skills"])
+
+    def test_a_repos_test_or_skills_of_the_wrong_shape_is_refused(self):
+        for entry, said in (({"test": ["make", "lint"]}, '"test" is a command'), ({"test": " "}, '"test" is a command'),
+                            ({"skills": "house-style"}, '"skills" is a list of the skill library'),
+                            ({"skills": ["House Style"]}, '"skills" is a list of the skill library')):
+            self.commands(entry)
+            self.assertIn(said, self.refused("t-bad"))
+
+
+class AgentSetup(Base):
+    """What wb's agents get (#1295, P1): context.agent_setup, wb doctor's lines, fixed_prompt."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        os.environ["HOME"] = str(self.home)
+        for v in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG",
+                  "OPENCODE_CONFIG_CONTENT"):
+            os.environ.pop(v, None)
+        self.oc = self.home / ".config" / "opencode"
+        (self.oc / "plugins").mkdir(parents=True)
+
+    def config(self, **keys) -> None:
+        (self.oc / "opencode.json").write_text(json.dumps({**OPENCODE_CONFIG, **keys}))
+        os.environ["WB_OPENCODE_CONFIG"] = str(self.oc / "opencode.json")
+
+    def by(self, task=None) -> dict:
+        return {it["name"]: it for it in context.agent_setup(task)}
+
+    def test_each_source_is_listed_with_its_state_and_bytes(self):
+        (self.oc / "AGENTS.md").write_text("x" * 400)
+        write_skill(self.oc / "skills" / "oc-skill", "oc-skill", "Use when OC.")
+        write_skill(self.home / ".claude" / "skills" / "mine", "mine", "Claude's own.")
+        write_skill(self.home / ".agents" / "skills" / "cross", "cross", "Every tool's.")
+        (self.home / ".claude" / "CLAUDE.md").write_text("Claude's.\n")
+        (self.oc / "plugins" / "lint.js").write_text(
+            "export default { id: 'lint', async setup(ctx) { await ctx.tool.transform(e => "
+            "e.add({ name: 'lintcheck', description: 'd', input: {}, execute: async () => ({}) })) } }\n")
+        own = Path(self.tmp.name) / "own-opencode.json"
+        own.write_text("{}")
+        os.environ["OPENCODE_CONFIG"] = str(own)
+        self.config(instructions=["https://example.com/rules.md"], formatter={"prettier": {}},
+                    references={"docs": {"path": "~/.docs", "description": "the docs"}, "bare": "~/.bare"},
+                    mcp={"servers": {"github": {"type": "remote", "url": "https://x"}}})
+        got = self.by()
+        state = lambda n: (got[n]["state"], got[n]["prompt"])  # noqa: E731
+        self.assertEqual(state("~/.config/opencode/AGENTS.md"), ("reaches", True))
+        self.assertEqual(got["~/.config/opencode/AGENTS.md"]["bytes"], 400)
+        self.assertEqual(state("skill oc-skill"), ("reaches", True))
+        self.assertEqual(got["skill oc-skill"]["bytes"], context.SKILL_TAGS + 2 * len("oc-skill") + len("Use when OC."))
+        self.assertEqual((state("skill mine"), state("skill cross")), (("denied", False), ("denied", False)))
+        self.assertEqual(state("~/.claude/CLAUDE.md"), ("dropped", False))
+        self.assertEqual((got["plugin lint.js"]["state"], got["plugin lint.js"]["tools"]), ("reaches", ["lintcheck"]))
+        self.assertEqual((state("https://example.com/rules.md"), got["https://example.com/rules.md"]["bytes"]),
+                         (("reaches", True), None))       # fetched by OpenCode: no size until then
+        self.assertEqual((state("reference docs"), state("reference bare")), (("reaches", True), ("dropped", False)))
+        self.assertEqual(state("formatter (prettier)"), ("reaches", False))
+        self.assertEqual(state("MCP server github"), ("denied", False))
+        self.assertEqual(got[f"{own} (OPENCODE_CONFIG)"]["state"], "dropped")
+        self.assertEqual(state("the handbook"), ("reaches", True))
+        self.assertTrue(all(it["state"] in context.SETUP_STATES for it in got.values()))
+        lines = cli.setup_lines()
+        self.assertTrue(lines[0].startswith("agents get the handbook "), lines)
+        self.assertIn("skill oc-skill", lines[0])
+        self.assertIn("plugin lint.js (tools lintcheck)", lines[0])
+        self.assertEqual(lines[1], "kept from agents: 2 skills denied by name (Claude's, ~/.agents', "
+                                   f"`workbench`), ~/.claude/CLAUDE.md, {own} (OPENCODE_CONFIG), "
+                                   "reference bare, MCP server github")
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        self.assertIn("--  agents get the handbook", buf.getvalue())
+
+    def test_a_global_skill_or_agents_md_counts_in_the_fixed_prompt(self):
+        # #1295 P1: a 32K window was judged without what the user's global OpenCode setup adds
+        self.start("t-before", "ok")
+        before = dict(context.fixed_prompt(store.Task("t-before"))[1])
+        (self.oc / "AGENTS.md").write_text("y" * 4000)
+        write_skill(self.oc / "skills" / "big", "big", "Use when " + "z" * 1000)
+        self.start("t-after", "ok")
+        tokens, parts = context.fixed_prompt(store.Task("t-after"))
+        self.assertEqual(dict(parts)["~/.config/opencode/AGENTS.md"], 1000)
+        self.assertIn("skill big", dict(parts))
+        self.assertNotIn("~/.config/opencode/AGENTS.md", before)
+        self.assertEqual(tokens, sum(n for _, n in parts))
+
+    def test_a_handed_skill_reaches_and_the_library_is_one_line(self):
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "handed", "handed", "Use when H.")
+        write_skill(lib / "other", "other", "Use when O.")
+        self.assertEqual(self.by()["the skill library (2)"]["state"], "dropped")
+        self.start("t-h", "ok", "--skill", "handed")
+        got = self.by(store.Task("t-h"))
+        self.assertEqual(got["skill handed"]["state"], "reaches")
+        self.assertNotIn("skill other", got)
+
+
 class AutoFix(Base):
     """What a failing test run sends back to the agent, and what it leaves to Claude."""
 
@@ -11879,6 +12042,111 @@ class RealOpenCode(Base):
         for unseen in ("CANARY-SPAN", "CANARY-FENCED", "CANARY-CREDENTIAL", "CANARY-OUTSIDE",
                        "CANARY-CLAUDE-GLOBAL", "CANARY-CLAUDE-IMPORT", "CANARY-CLAUDE-RULE"):
             self.assertNotIn(unseen, text)
+
+    @home_outside_the_lane
+    def test_what_agent_setup_says_reaches_is_what_the_model_receives(self):
+        # #1295 P1 (2026-11-26): what a customizer's global OpenCode setup added (its AGENTS.md,
+        # instructions, skills, a plugin's tools) reached every agent unseen and uncounted. The
+        # inventory lists each source; every one it says reaches is in the request, nothing in
+        # the request is missing from it, and fixed_prompt is the request's size within 10%
+        from workbench import runner
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-setup-test-"))  # outside a temp root
+        self.addCleanup(shutil.rmtree, home, True)
+        os.environ["HOME"] = str(home)
+        for v in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+                  "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"):
+            os.environ.pop(v, None)
+        oc = home / ".config" / "opencode"
+        (oc / "plugins").mkdir(parents=True)
+        (oc / "AGENTS.md").write_text("CANARY-OC-AGENTS: OpenCode's global instructions.\n")
+        write_skill(oc / "skills" / "oc-skill", "oc-skill", "Use when CANARY-OC-SKILL.")
+        write_skill(home / ".claude" / "skills" / "claude-skill", "claude-skill", "Use when CANARY-CLAUDE-SKILL.")
+        write_skill(home / ".agents" / "skills" / "agents-skill", "agents-skill", "Use when CANARY-AGENTS-SKILL.")
+        write_skill(home / "more-skills" / "listed", "listed", "Use when CANARY-LISTED-SKILL.")
+        write_skill(home / ".team-skills" / "dotted", "dotted", "Use when CANARY-DOTTED-SKILL.")
+        (home / "notes").mkdir()   # outside the home's dotfiles: the lane doesn't read it
+        (home / "notes" / "extra.md").write_text("CANARY-OC-INSTRUCTION: a global instruction file.\n")
+        (home / ".notes").mkdir()
+        (home / ".notes" / "dot.md").write_text("CANARY-DOT-INSTRUCTION: one the lane reads.\n")
+        (home / "refs").mkdir()
+        (oc / "plugins" / "canary.js").write_text(  # OpenCode's V2 plugin shape: a default export
+            "export default { id: 'canary', async setup(ctx) {\n"
+            "  await ctx.tool.transform((editor) => {\n"
+            "    editor.add({ name: 'canarytool', description: 'CANARY-PLUGIN-TOOL says ok',\n"
+            "                 input: { type: 'object', properties: {} }, execute: async () => ({ content: 'ok' }) })\n"
+            "  })\n} }\n")
+        ver = subprocess.run(["opencode", "--version"], capture_output=True, text=True).stdout
+        new = tuple(int(n) for n in re.findall(r"\d+", ver)[:2]) >= (2, 4)  # references: 2.4's
+        config = {**OPENCODE_CONFIG, "instructions": [str(home / "notes" / "extra.md"), "~/.notes/*.md"],
+                  "skills": [str(home / "more-skills"), "~/.team-skills"],
+                  **({"references": {"docs": {"path": str(home / "refs"), "description": "CANARY-REFERENCE"},
+                                     "bare": str(home / "refs")}} if new else {})}
+        (oc / "opencode.json").write_text(json.dumps(config))
+        os.environ["WB_OPENCODE_CONFIG"] = str(oc / "opencode.json")  # wb reads what OpenCode reads
+        Path(os.environ["WB_AGENTS_MD"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(os.environ["WB_AGENTS_MD"]).write_text("CANARY-WB-AGENTS: the user's file for agents.\n")
+        (self.repo / "CLAUDE.md").write_text("CANARY-CLAUDE-MD: follow me\n")
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "rules"], check=True)
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "handed", "handed", "Use when CANARY-HANDED.")
+        write_skill(lib / "kept", "kept", "Use when CANARY-KEPT.")
+        self.start("t-setup", "ok", "--skill", "handed")
+        wait_phase("t-setup", {"review"})
+        task = store.Task("t-setup")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "setup-requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out)])
+        self.addCleanup(server.kill)
+        env = runner.opencode_env(task)
+        layer_path = Path(env["OPENCODE_CONFIG"])
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        items = context.agent_setup(task)
+        tokens, _ = context.fixed_prompt(task)
+        time.sleep(0.5)
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        cmd = lane.wrap(context.writable(task), ["opencode", "run", "--standalone", "-m", "cap/cap",
+                                                 "--format", "json", "--", prompt],
+                        context.readable(task), context.unix_paths(task))
+        subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        agent = max(reqs, key=lambda r: len(r.get("tools", [])))  # not the title request
+        text = json.dumps(agent["messages"])
+        tools = {t["function"]["name"] for t in agent["tools"]}
+        reach = {it["name"] for it in items if it["state"] == "reaches"}
+        canaries = {"CANARY-OC-AGENTS": "~/.config/opencode/AGENTS.md",
+                    "CANARY-OC-INSTRUCTION": "~/notes/extra.md", "CANARY-OC-SKILL": "skill oc-skill",
+                    "CANARY-LISTED-SKILL": "skill listed", "CANARY-WB-AGENTS": "~/.config/workbench/AGENTS.md",
+                    "CANARY-CLAUDE-MD": "CLAUDE.md", "CANARY-HANDED": "skill handed",
+                    "CANARY-CLAUDE-SKILL": "skill claude-skill", "CANARY-AGENTS-SKILL": "skill agents-skill",
+                    "CANARY-KEPT": "skill kept", "CANARY-DOT-INSTRUCTION": "~/.notes/dot.md",
+                    "CANARY-DOTTED-SKILL": "skill dotted", "CANARY-REFERENCE": "reference docs"}
+        for canary, name in canaries.items():  # in the request exactly when listed as reaching
+            self.assertEqual(canary in text, name in reach, (canary, name))
+        self.assertEqual(new, "reference docs" in reach)
+        unread = {"~/notes/extra.md": "dropped", "skill listed": "dropped"} if lane.held() else {}
+        self.assertEqual({it["name"]: it["state"] for it in items if it["state"] != "reaches"},
+                         {**unread, "skill claude-skill": "denied", "skill agents-skill": "denied",
+                          **({"reference bare": "dropped"} if new else {})})  # undescribed
+        plugins = [it for it in items if it["kind"] == "plugins" and it["state"] == "reaches"]
+        self.assertEqual([it.get("tools") for it in plugins], [["canarytool"]])
+        self.assertIn("canarytool", tools)
+        for it in items:  # each file it says reaches, in the request
+            if it["state"] == "reaches" and it["prompt"] and it["kind"] == "instructions" and it["path"]:
+                first = Path(it["path"]).read_text().strip().splitlines()[0]
+                self.assertIn(json.dumps(first)[1:-1], text, it["name"])
+        sent = (sum(len(m["content"]) if isinstance(m.get("content"), str) else len(json.dumps(m.get("content")))
+                    for m in agent["messages"]) + len(json.dumps(agent["tools"])))
+        self.assertLess(abs(tokens - sent / context.CHARS_PER_TOKEN), 0.1 * sent / context.CHARS_PER_TOKEN,
+                        (tokens, sent // context.CHARS_PER_TOKEN))
 
     def test_opencode_without_the_lane_reads_no_claude_md_of_the_users(self):
         # #1061 (2026-11-23): OpenCode 2.3 reads ~/.claude/CLAUDE.md itself as a global
