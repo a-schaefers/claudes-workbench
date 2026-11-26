@@ -373,6 +373,11 @@ class Base(unittest.TestCase):
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ.pop("CLAUDE_PID", None)
         os.environ.pop("CLAUDECODE", None)  # wb patch send asks for the mod's yes under it (#1005)
+        # nor OpenCode's shell (its driver's id, #1309), nor an agent's (#1310): run in an agent's
+        # shell (workbench delegating to itself), WB_TASK made every call an agent's, its gates
+        # asking for a yes
+        for k in runner.DRIVER_ENV + ("WB_TASK",):
+            os.environ.pop(k, None)
         # the state directory before WB_HOME names it: a thread the last test left running (its
         # chat server) wrote there in between, and mkdir found it made (seen on WSL, 2026-11-20)
         (tmp / "state").mkdir()
@@ -8639,6 +8644,53 @@ class Context(Base):
         self.assertIn("step 3 of t-ne committed", out)
         self.assertIn("feat: step three", log())
 
+    # what a `wb start` run from an OpenCode session's shell carries (OpenCode 2.4.1's shell
+    # tool, read and run on 2026-11-25), Claude Code's AI_AGENT, the server's passwords, and
+    # what other drivers put in process.env (the #1310 review: `opencode acp`'s and Desktop's
+    # OPENCODE_CLIENT, a --print-logs driver's OPENCODE_PRINT_LOGS)
+    DRIVER_SHELL = {"OPENCODE_SESSION_ID": "ses_driver1310", "OPENCODE": "1", "AGENT": "1",
+                    "AI_AGENT": "claude-code_2-1_agent", "OPENCODE_TERMINAL": "1", "WB_DRIVER": "opencode",
+                    "OPENCODE_CLIENT": "acp", "OPENCODE_PRINT_LOGS": "1",
+                    "OPENCODE_PASSWORD": "CANARY-1310-PW", "OPENCODE_SERVER_PASSWORD": "CANARY-1310-PW"}
+
+    def test_the_drivers_session_and_marks_reach_neither_the_agent_nor_its_tests(self):
+        # #1310 (2026-11-25): a `wb start` from an OpenCode driver's shell handed every agent the
+        # driver's OPENCODE_SESSION_ID and marks (env_kept keeps what isn't a credential); its own
+        # OpenCode sets them again for its own session, AI_AGENT only when unset
+        probe = ('test -z "$OPENCODE_SESSION_ID$OPENCODE$AGENT$AI_AGENT$OPENCODE_TERMINAL$WB_DRIVER'
+                 '$OPENCODE_PASSWORD$OPENCODE_SERVER_PASSWORD$OPENCODE_CLIENT$OPENCODE_PRINT_LOGS" && ' + TEST_CMD)
+        with mock.patch.dict(os.environ, self.DRIVER_SHELL):
+            self.start("t-drv", "ok", "--test", probe)
+            st = wait_phase("t-drv", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "review", (store.Task("t-drv").dir / "runner.log").read_text())
+        self.assertTrue(st["tests"]["ok"], st["tests"])                # the tests' environment too
+        run, = self.runs()
+        self.assertFalse(set(self.DRIVER_SHELL) & set(run["env_names"]), run["env_names"])
+        self.assertEqual(run["shell_marks"], {          # the agent's own shell: its own session
+            "OPENCODE_SESSION_ID": st["session"], "OPENCODE": "1", "AGENT": "1", "AI_AGENT": "opencode",
+            "OPENCODE_TERMINAL": "1", "WB_DRIVER": None, "WB_TASK": "t-drv"})
+        self.assertNotEqual(st["session"], "ses_driver1310")
+        # the passwords fall to SECRET_ENV by their names, whatever DRIVER_ENV says
+        self.assertTrue(all(runner.SECRET_ENV.search(k) for k in ("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD")))
+
+    def test_a_wb_call_from_an_agents_shell_is_the_agents_though_opencode_gave_it_a_driver_session(self):
+        # #1310: OpenCode's shell tool sets OPENCODE_SESSION_ID and OPENCODE=1 on the agent's own
+        # commands, and Claude Code's CLAUDECODE=1 reaches its agents: WB_TASK ranks first
+        agents = {"WB_TASK": "t-x", "OPENCODE_SESSION_ID": "ses_agent", "OPENCODE": "1", "AGENT": "1"}
+        for env, kind in ((agents, "agent"), ({**agents, "CLAUDECODE": "1"}, "agent"),
+                          ({"CLAUDECODE": "1"}, "claude"), ({"OPENCODE_SESSION_ID": "ses_d"}, "opencode"),
+                          ({}, "terminal")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertEqual(store.caller_kind(), kind)
+                self.assertEqual(store.under_model(), kind != "terminal")
+        api = runner.models.Model(id="acme/coder", provider="acme", name="coder", base_url="",
+                                  engine="api", label="coder", kind="api")
+        with mock.patch.dict(os.environ, agents):                     # wb start's API gate asks
+            with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+                cli.start_gate("t-x", api)
+            self.assertEqual(e.exception.code, 3)
+        cli.start_gate("t-x", api)                                    # a terminal's: no gate
+
 
 class StartChecks(Base):
     """What wb start and the first report say about the setup itself: an OpenCode outside the
@@ -12492,6 +12544,50 @@ class RealOpenCodeRun(Base):
         text = json.dumps(agent["messages"])
         self.assertIn("Write the answer to answer.txt", text)
         self.assertIn("Now say done.", text)
+
+    def test_a_task_started_from_an_opencode_drivers_shell_gives_its_agent_its_own_session_only(self):
+        # #1310 (2026-11-25, OpenCode 2.4.1): `wb start` run by a driver's shell tool carries the
+        # driver's OPENCODE_SESSION_ID, OPENCODE, AGENT and AI_AGENT; agent_env drops them, and the
+        # agent's own OpenCode sets them again in its shells, for its own session: so a wb call
+        # from there is told by WB_TASK, never by them (store.caller_kind)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            dport = sock.getsockname()[1]
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["drv"] = {**cfg["provider"]["cap"], "options": {
+            "baseURL": f"http://127.0.0.1:{dport}/v1", "apiKey": "x"}, "models": {"drv": {
+                "name": "driver", "tool_call": True, "limit": {"context": 32768, "output": 1024}}}}
+        conf.write_text(json.dumps(cfg))
+        probe = 'test -z "$OPENCODE_SESSION_ID$OPENCODE$AGENT$AI_AGENT$OPENCODE_TERMINAL" && ' + TEST_CMD
+        start = shlex.join([sys.executable, str(ROOT / "bin" / "wb"), "start", "t-drv", "--spec", str(self.spec),
+                            "--repo", str(self.repo), "--model", "cap", "--trial", "--test", probe])
+        drequests = Path(self.tmp.name) / "driver-requests.jsonl"
+        driver = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(dport),
+                                   str(drequests), json.dumps([{"name": "shell", "arguments": {
+                                       "command": start, "workdir": str(self.repo)}}])])
+        self.addCleanup(driver.kill)
+        marks = "printenv OPENCODE_SESSION_ID AI_AGENT WB_TASK; echo driver=${WB_DRIVER-none}"
+        self.serve([{"name": "shell", "arguments": {"command": marks}}, WRITE_42])
+        ran = subprocess.run(["opencode", "run", "--standalone", "-m", "drv/drv", "--auto", "--format", "json",
+                              "start the task"], cwd=self.repo, env={**os.environ, "PWD": str(self.repo)},
+                             capture_output=True, text=True, timeout=180)
+        ids = {json.loads(l).get("sessionID") for l in ran.stdout.splitlines() if l.startswith("{")} - {None}
+        self.assertEqual(len(ids), 1, ran.stdout + ran.stderr)          # the driver's session
+        said = json.dumps([json.loads(l) for l in drequests.read_text().splitlines()])
+        self.assertIn("started t-drv", said, said[-2000:])              # its shell ran wb start
+        st = wait_phase("t-drv", {"review", "stuck", "failed"}, timeout=180)
+        task = store.Task("t-drv")
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        self.assertTrue(st["tests"]["ok"], st["tests"])                  # nor its tests' environment
+        reqs = [json.loads(l) for l in self.requests.read_text().splitlines()]
+        last = max(reqs, key=lambda r: len(r.get("messages", [])))
+        shell = next(json.dumps(m["content"]) for m in last["messages"] if m.get("role") == "tool")
+        self.assertIn(st["session"], shell)                              # the agent's own session
+        self.assertNotIn(ids.pop(), shell)                               # never the driver's
+        self.assertIn("opencode\\nt-drv\\ndriver=none", shell)
+        with mock.patch.dict(os.environ, {"WB_TASK": "t-drv", "OPENCODE_SESSION_ID": st["session"], "OPENCODE": "1"}):
+            self.assertEqual(store.caller_kind(), "agent")
 
     def test_neither_the_users_default_agent_nor_their_own_wb_code_lifts_a_deny_in_any_round(self):
         # #1290 (2026-11-24, OpenCode 2.3.2): with no --agent, `opencode run` took the agent from
@@ -25921,6 +26017,42 @@ class LocalPatches(Base):
         self.assertFalse(ok.exists())                           # one yes, one send
         self.assertEqual(self.g(self.fork, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
 
+    def test_from_an_opencode_driver_patch_send_sends_only_what_the_plugins_dialog_approved(self):
+        # #1309 (#1296 row 11): only CLAUDECODE was gated, so an OpenCode driver's shell ran the
+        # fork, push and pull request with no one asked
+        wt, body = self.prepared()
+        self.to_fork()
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        ok = store.home() / "send-ok.json"
+        out = self.send(body)
+        self.assertIn("in OpenCode wb patch send goes only through the workbench plugin's dialog", out)
+        self.assertIn(f'outside OpenCode: wb patch send fix-thing --title "Fix it" --body-file {body}', out)
+        self.assertEqual(self.gh_argv(), [])
+        self.assertFalse(self.sent())
+        store.write_json(ok, {"slug": "fix-thing", "title": "Fix it", "body_file": str(body),
+                              "body": body.read_text(), "draft": False, "anyway": False, "at": time.time()})
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", self.send(body))
+        self.assertFalse(ok.exists())                           # one yes, one send
+
+    def test_from_an_agents_shell_patch_send_sends_only_what_the_dialog_approved_without_claude_code(self):
+        # #1310 (2026-11-25, its review): on a task started from a terminal the agent has no
+        # CLAUDECODE, and its shell's OPENCODE_SESSION_ID is its own, which #1309 left ungated
+        # under WB_TASK: an unlaned agent's shell ran the fork, push and pull request unasked
+        wt, body = self.prepared()
+        self.to_fork()
+        os.environ.update(WB_TASK="t-agent", OPENCODE_SESSION_ID="ses_agent", OPENCODE="1")
+        ok = store.home() / "send-ok.json"
+        out = self.send(body)
+        self.assertIn("in an agent's shell wb patch send goes only on the user's yes in the driver's dialog", out)
+        self.assertIn(f'ask_reviewer); or the user runs it in a terminal of their own: wb patch send fix-thing '
+                      f'--title "Fix it" --body-file {body}', out)
+        self.assertEqual(self.gh_argv(), [])
+        self.assertFalse(self.sent())
+        store.write_json(ok, {"slug": "fix-thing", "title": "Fix it", "body_file": str(body),
+                              "body": body.read_text(), "draft": False, "anyway": False, "at": time.time()})
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", self.send(body))
+        self.assertFalse(ok.exists())                           # one yes, one send
+
     def test_an_insteadof_rule_forcing_https_is_not_taken_for_ssh(self):
         # #1005, 2026-11-22 (the review): the rule's value names git@github.com:, its target is
         # https; the user, with no ssh key, was told to log gh in over ssh
@@ -38393,6 +38525,34 @@ class Routes(Base):
         self.assertEqual(self.doc()["roles"]["trivial"]["by"], "dialog")
         self.assertEqual(self.route("trivial", "gpu")[0], 3)      # the next change asks again
 
+    def test_an_agents_wb_route_needs_the_dialogs_yes_though_its_shell_has_no_claude_code(self):
+        # #1310 (2026-11-25): on a task started from a terminal or an OpenCode session the agent
+        # has no CLAUDECODE, and its shell's OPENCODE_SESSION_ID is its own: WB_TASK, ranked first
+        # (store.caller_kind), makes its call a model's, never the user's at a terminal
+        with mock.patch.dict(os.environ, {"WB_TASK": "t-x", "OPENCODE_SESSION_ID": "ses_agent", "OPENCODE": "1"}):
+            code, out, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+            pinned = self.route("significant", "--gpu", "qwen")[0]              # no yes needed: by the agent
+        self.assertEqual((code, out), (3, ""), err)
+        self.assertIn("in an agent's shell a role changes only on the user's yes in the driver's dialog", err)
+        self.assertIn("ask_reviewer", err)
+        self.assertEqual(pinned, 0)
+        self.assertEqual(self.doc()["roles"]["significant"]["gpu_by"], "agent")   # #1309's claude/opencode/terminal kin
+        self.assertEqual(self.doc()["roles"]["trivial"]["via"], "gpu")       # the API change never applied
+        self.assertIn("set by an agent", self.route()[1])
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)  # the user's
+
+    def test_an_agents_api_model_start_records_the_dialogs_yes_its_gate_asked_for(self):
+        # #1310 (2026-11-25): the gate asks the dialog in an agent's shell (cli.start_gate), so the
+        # start says it was approved there, as under Claude Code; a terminal's start says only asked
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)  # a day cap
+        asked = []
+        for env, said in (({"WB_TASK": "t-x", "OPENCODE_SESSION_ID": "ses_agent"}, "asked for, approved in the dialog"),
+                          ({}, "asked for")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                m, _, _, routed = routes.resolve("trivial", "trivial", "deepseek/deepseek-flash", gate=asked.append)
+                self.assertEqual((m.id, routed["via"], routed["said"]), ("deepseek/deepseek-flash", "api", said))
+        self.assertEqual(len(asked), 2)                    # the gate itself decides who it asks
+
     def test_a_gpu_model_pin_needs_no_dialog_and_survives_the_flips(self):
         os.environ["CLAUDECODE"] = "1"
         asked = self.dry("significant", "--gpu", "qwen")
@@ -39201,6 +39361,504 @@ class Routes(Base):
         self.route("cap", "5")
         self.assertTrue(self.path.is_symlink())
         self.assertEqual(json.loads(target.read_text())["day_usd"], 5)
+
+
+class OpenCodeDriver(Base):
+    """The OpenCode driver's identity (#1309, 2.2): OPENCODE_SESSION_ID, which the workbench
+    plugin's tools set on their wb child and OpenCode sets in every shell, WB_TASK ranked first;
+    one heartbeat per OpenCode server (drivers/opencode-<machine_tag>-<pid>.json); task.json's
+    `session` and `driver`, its server's pid among them; whose
+    task it is, for both drivers; and the gates, which took an OpenCode driver for the user at a
+    terminal before (#1296, row 10)."""
+    catalog = ApiHarness.catalog
+
+    def setUp(self):
+        super().setUp()
+        self.catalog(ROUTES_CATALOG, ROUTES_AUTH)
+        self.path = Path(os.environ["WB_ROUTES"])
+        self.ok = store.home() / "route-ok.json"
+        self.here = str(self.repo)
+        self.db = str(Path(self.tmp.name) / "opencode.db")   # the user's OpenCode store
+
+    def route(self, *argv):
+        """(exit code, stdout, stderr) of wb route ARGV."""
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                cli.main(["route", *argv])
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def wb(self, *argv):
+        """(exit code, stdout, stderr) of wb ARGV."""
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                cli.main(list(argv))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def beat(self, *sessions, ago=0.0, pid=None, **kw):
+        """The heartbeat the plugin's server part in server ``pid`` (default: this process, a server
+        that runs) writes: these sessions, every one in its store (`store`, default the user's;
+        None: a beat that names none)."""
+        pid = pid or os.getpid()
+        kw.setdefault("store", self.db)
+        if kw["store"] is None:
+            kw.pop("store")
+        store.write_json(store.beat_path(pid), {
+            "tool": "opencode", "pid": pid, "ts": time.time() - ago, **kw,
+            "sessions": {s: {"model": "deepseek/deepseek-flash", "variant": "fast", "dir": self.here}
+                         for s in sessions}})
+
+    def task(self, name, phase="running", **spec):
+        """A task as wb start writes it, never run."""
+        t = store.Task(name)
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), "repo": self.here,
+                                               "cwd": self.here, **spec})
+        t.set_status(phase=phase, round=1)
+        return t
+
+    def server(self, pid=None):
+        """task.json `driver` as wb start records it for a session of server ``pid`` (default:
+        this process)."""
+        from workbench import models
+        pid = pid or os.getpid()
+        return {"tool": "opencode", "machine": store.machine(), "pid": pid, "start": models._started(pid),
+                "store": self.db, "seen": time.time() - 60}
+
+    def opencode_task(self, name, session, server=None, **kw):
+        return self.task(name, session=session, driver=self.server(server), **kw)
+
+    def mine(self, kind, *ids):
+        return sorted(t.name for t in cli._scope(store.all_tasks(), self.here, list(ids), kind)[0])
+
+    def test_an_opencode_drivers_api_role_change_is_refused_without_the_dialogs_yes_and_applies_on_it(self):
+        # #1296 row 10: an OpenCode driver's `wb route … --api` was taken for the user at a
+        # terminal, no dialog asked, and the role recorded `by: terminal`
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        self.assertTrue(store.under_model())
+        code, out, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn("in OpenCode a role changes only through the workbench plugin's dialog, and the user "
+                      "approved none for this change, so nothing changed (is the plugin loaded?). Or the user "
+                      "runs it in a terminal of their own: wb route trivial deepseek/deepseek-flash --day-usd 5",
+                      err)
+        self.assertFalse(self.path.exists())
+        os.environ["OPENCODE_SESSION_ID"] = "not an id!"           # a malformed id is still gated
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 3)
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        code, out, err = self.route("--dry-run", "--json", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        asked = json.loads(out)
+        self.assertEqual((asked["change"], asked["gate"]), (DEEPSEEK_LINE, True))
+        store.write_json(self.ok, {**asked["approval"], "at": time.time()})
+        code, out, _ = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual((code, out), (0, f"changed: {DEEPSEEK_LINE}\n"))
+        self.assertFalse(self.ok.exists())                        # one yes, one change
+        self.assertEqual(json.loads(self.path.read_text())["roles"]["trivial"]["by"], "dialog")
+        self.assertEqual(self.route("trivial", "gpu")[0], 3)      # the next asks again
+        self.assertEqual(self.route("significant", "--gpu", "qwen")[0], 0)  # a GPU pin needs no yes
+        self.assertEqual(json.loads(self.path.read_text())["roles"]["significant"]["gpu_by"], "opencode")
+        self.assertIn("opencode", routes.BY)
+        self.assertIn("significant  GPU ollama/qwen3.8-27b (pinned) · set by the driver", self.route()[1])
+
+    def test_the_web_apps_click_is_the_users_even_from_a_server_an_opencode_driver_started(self):
+        # main's web Settings (#1279) met #1309 at the merge: a server started from an OpenCode
+        # driver's tool or shell kept its session id, so the user's click was gated as the driver's
+        from workbench import chat, settings
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        self.assertIn("OPENCODE_SESSION_ID", chat.CLAUDE_VARS)    # chat.start scrubs it too
+        env = settings.child_env()
+        self.assertNotIn("OPENCODE_SESSION_ID", env)
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        self.assertEqual(json.loads(self.path.read_text())["roles"]["trivial"]["by"], "web")
+        os.environ["WB_ACTOR"] = "web"                            # the driver setting it: no yes
+        self.assertEqual(self.route("trivial", "gpu")[0], 3)
+        with mock.patch.dict(os.environ, {"WB_TASK": "t-agent"}):  # nor an agent's (#1310)
+            self.assertEqual(self.route("trivial", "gpu")[0], 3)
+        self.assertEqual(json.loads(self.path.read_text())["roles"]["trivial"]["via"], "api")
+        self.assertEqual(self.route("significant", "--gpu", "qwen")[0], 0)
+        self.assertEqual(json.loads(self.path.read_text())["roles"]["significant"]["gpu_by"], "opencode")
+        os.environ.pop("WB_ACTOR")
+        with mock.patch.object(settings, "rows", return_value=[]), \
+                mock.patch.object(settings, "apply", return_value={"ok": True, "said": "coding: ask"}):
+            self.assertEqual(self.wb("settings", "set", "coding", "ask")[0], 0)  # wb settings set's row
+        self.assertEqual(store.read_jsonl(chat.changes_path())[0][-1]["by"], "opencode")
+
+    def test_under_claude_code_the_gates_and_records_are_as_before_whatever_opencode_sets_beside_it(self):
+        # #1309's must-hold: CLAUDECODE=1 behaves exactly as before 2.2, ranked over OpenCode's id
+        os.environ.update(CLAUDECODE="1", OPENCODE_SESSION_ID="ses_x")
+        self.assertEqual((store.caller_kind(), store.opencode_session()), ("claude", ""))
+        code, _, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(code, 3)
+        self.assertIn("in Claude Code a role changes only through the workbench mod's dialog, and the user "
+                      "approved none for this change, so nothing changed (is the mod loaded? wb doctor says).", err)
+        self.assertEqual(self.route("significant", "--gpu", "qwen")[0], 0)
+        self.assertEqual(json.loads(self.path.read_text())["roles"]["significant"]["gpu_by"], "claude")
+        self.assertIn("· set by Claude", self.route()[1])
+        os.environ.pop("OPENCODE_SESSION_ID")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-1"
+        self.assertEqual(cli._caller(argparse.Namespace())[1:], (["sess-1"], "claude"))
+
+    def test_an_agents_call_is_never_the_drivers_though_opencode_sets_its_session_id(self):
+        # #1310: OpenCode re-sets OPENCODE_SESSION_ID in the agent's own shells, so WB_TASK outranks it
+        # and its call is an agent's, gated as a model's (#1310's review, 2026-11-25: read as the
+        # terminal's, an unlaned agent's `wb route … --api` went through as the user's own)
+        os.environ.update(WB_TASK="t-agent", OPENCODE_SESSION_ID="ses_agent")
+        self.assertTrue(store.under_model())
+        self.assertEqual((store.opencode_session(), store.caller_kind()), ("", "agent"))
+        self.assertEqual(cli._caller(argparse.Namespace()), (None, None, None))
+        os.environ.pop("WB_TASK")
+        self.assertEqual((store.opencode_session(), store.caller_kind()), ("ses_agent", "opencode"))
+        self.assertEqual(cli._caller(argparse.Namespace()), (os.getcwd(), ["ses_agent"], "opencode"))
+
+    def test_an_api_model_start_from_an_opencode_driver_waits_for_the_dialogs_yes(self):
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        m = runner.models.resolve("acme/coder-flash")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as out, redirect_stderr(err):
+            cli.start_gate("t-api", m)
+        self.assertEqual(out.exception.code, 3)
+        self.assertIn("in OpenCode an API model starts only through the workbench plugin's dialog", err.getvalue())
+        store.write_json(self.ok, {"start": {"task": "t-api", "model": "acme/coder-flash"},
+                                   "change": cli.start_line("t-api", m), "at": time.time()})
+        cli.start_gate("t-api", m)                                # the yes: passes, used once
+        self.assertFalse(self.ok.exists())
+        cli.start_gate("t-gpu", runner.models.resolve("mimo"))    # a GPU model: no gate
+
+    def test_a_task_an_opencode_session_starts_records_that_session_and_the_driver_and_no_pid(self):
+        self.beat("ses_a")
+        os.environ["OPENCODE_SESSION_ID"] = "ses_a"
+        self.start("t-oc", "ok")
+        wait_phase("t-oc", {"review"})
+        spec = store.Task("t-oc").spec
+        self.assertAlmostEqual(spec["driver"].pop("seen"), time.time(), delta=60)  # wb's own server: now
+        self.assertEqual((spec["session"], spec["driver"]), ("ses_a", {   # its server's pid, read by wb
+            **{k: v for k, v in self.server().items() if k != "seen"},
+            "model": "deepseek/deepseek-flash", "variant": "fast"}))
+        self.assertFalse({"claude_pid", "claude_start", "claude_machine"} & set(spec))
+        self.assertEqual(store.driver_of(spec), "opencode")
+        code, out, _ = self.wb("status")
+        self.assertIn("t-oc", out)
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"               # another session of the service
+        self.assertIn("open elsewhere (other sessions'): t-oc", self.wb("status")[1])
+        os.environ.pop("OPENCODE_SESSION_ID")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-1"           # a Claude Code session's start:
+        self.start("t-cc", "ok")                                  # no `driver`, as before 2.2
+        wait_phase("t-cc", {"review"})
+        spec = store.Task("t-cc").spec
+        self.assertEqual((spec["session"], "driver" in spec, store.driver_of(spec)), ("sess-1", False, "claude"))
+        self.assertIn("open elsewhere (other sessions'): t-oc", self.wb("status")[1])
+
+    def test_the_heartbeat_says_whether_a_session_is_live_gone_or_unknown(self):
+        d = self.server()
+        self.assertEqual(store.driver_state("ses_a"), "unknown")     # no store recorded
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")  # its server runs, no beat: no plugin to say
+        self.beat("ses_a")
+        self.assertEqual((store.driver_state("ses_a", d), store.driver_state("ses_b", d)), ("live", "gone"))
+        self.assertEqual(store.driver_state("ses_b"), "unknown")     # no store of its own: none says gone
+        self.assertEqual(store.driver_state("ses_b", dict(d, seen=time.time() + 60)), "unknown")  # seen after the listing
+        self.assertEqual(store.driver_state("ses_b", dict(d, store=self.db + "-2")), "unknown")    # another store's beat
+        self.assertEqual(store.driver_state("ses_a", dict(d, machine="machine-b")), "unknown")  # #922
+        self.beat("ses_a", machine="machine-b")                       # another machine's beat: not this one's
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")
+        self.beat("ses_a", ago=store.HEARTBEAT_FRESH + 5)              # stale, its server still running:
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")   # asleep or stalled, not gone
+        self.beat(ago=store.HEARTBEAT_FRESH + 5)                       # nor a stale beat without it
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")
+        self.beat(store=None)                                          # nor one that names no store
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")
+        self.beat()                                                    # a fresh one of its store without it: deleted
+        self.assertEqual(store.driver_state("ses_a", d), "gone")
+        dead = subprocess.Popen(["true"]); dead.wait()
+        old = dict(d, pid=dead.pid, start=None)
+        for f in (store.home() / "drivers").iterdir():
+            f.unlink()
+        self.assertEqual(store.driver_state("ses_a", old), "unknown")  # its server exited: the session outlives it
+        self.beat("ses_a", pid=dead.pid)                               # its beat left behind: removed, says nothing
+        self.assertEqual(store.driver_state("ses_a", old), "unknown")
+        self.assertFalse(store.beat_path(dead.pid).exists())
+        self.beat("ses_a")                                             # the service restarted, the session
+        self.assertEqual(store.driver_state("ses_a", old), "live")    # listed by the new server
+        tag = f"{(int(store.machine_tag(), 16) + 1) % 2 ** 32:08x}"
+        for name, bad in ((f"opencode-{tag}-{os.getpid()}.json", None),  # another machine's file
+                          (None, {"tool": "claude", "pid": os.getpid(), "ts": time.time(), "sessions": {}}),
+                          (None, {"tool": "opencode", "pid": os.getpid(), "ts": "now", "sessions": {}}),
+                          (None, {"tool": "opencode", "pid": os.getpid(), "ts": time.time(), "sessions": []}),
+                          (None, {"tool": "opencode", "pid": dead.pid, "ts": time.time(), "sessions": {}}),
+                          (None, [])):
+            with self.subTest(name=name, bad=bad):
+                for f in (store.home() / "drivers").iterdir():
+                    f.unlink()
+                store.write_json(store.home() / "drivers" / name if name else store.beat_path(os.getpid()),
+                                 {**(bad if bad is not None else {"tool": "opencode", "pid": os.getpid(),
+                                                                  "ts": time.time(), "sessions": {}}),
+                                  "store": self.db} if not isinstance(bad, list) else bad)
+                self.assertEqual(store.driver_state("ses_a", d), "unknown")
+
+    def test_a_service_restart_whose_new_beat_lacks_a_session_never_hands_its_task_to_another(self):
+        # the #1309 third review (2026-11-25): a recorded server that exited read as gone, though
+        # an OpenCode session outlives its server; after a service restart (an update, `opencode
+        # service stop`, a reboot) the new server's beat listed only ses_b, and ses_b claimed t1,
+        # waited on its notice and adopted it. Gone needs a fresh beat of the task's store
+        old = subprocess.Popen(["sleep", "60"]); self.addCleanup(old.wait); self.addCleanup(old.kill)
+        new = subprocess.Popen(["sleep", "60"]); self.addCleanup(new.wait); self.addCleanup(new.kill)
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.wait); self.addCleanup(b.kill)
+        self.beat("ses_a", "ses_b", pid=old.pid)
+        self.opencode_task("t1", "ses_a", server=old.pid, phase="review")
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "t1", "kind": "review",
+                                                            "round": 1, "text": "t1 is ready"})
+        old.kill(); old.wait()                                         # the service stops
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        for how in ({"store": None}, {"store": self.db + "-other"}):   # its new beat names no store, or another
+            with self.subTest(**how):
+                self.beat("ses_b", pid=new.pid, **how)
+                self.assertEqual(self.mine("opencode", "ses_b"), [])
+                self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)   # t1's notice stays A's
+                code, _, err = self.wb("adopt", "t1")
+                self.assertEqual(code, 1)
+                self.assertIn("t1 belongs to an OpenCode session (ses_a) not known to be gone", err)
+                code, _, err = self.wb("adopt", "t1", "--session", "sess-2", "--pid", str(b.pid))  # the mod's
+                self.assertEqual(code, 1)
+        self.assertEqual(store.Task("t1").spec["session"], "ses_a")
+        self.beat("ses_a", "ses_b", pid=new.pid)                       # the store's every session: A's too
+        self.assertEqual(store.driver_state("ses_a", store.Task("t1").spec["driver"]), "live")
+        self.assertEqual(self.mine("opencode", "ses_b"), [])
+
+    def test_another_servers_beat_never_makes_a_live_sessions_task_gone(self):
+        # the #1309 review (2026-11-25): one drivers/opencode.json for every server, and any other
+        # OpenCode server (a --standalone TUI, wb's own --standalone helpers, which load the global
+        # plugin too) beat its own pid and none of the service's sessions over it: session A's task
+        # read as gone, and B in the same directory took it, its notice and `wb adopt`
+        helper = subprocess.Popen(["sleep", "60"]); self.addCleanup(helper.wait); self.addCleanup(helper.kill)
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.wait); self.addCleanup(b.kill)
+        self.beat("ses_a")                                            # A's server: this process
+        self.opencode_task("t1", "ses_a", phase="review")
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "t1", "kind": "review",
+                                                            "round": 1, "text": "t1 is ready"})
+        self.beat(pid=helper.pid, store=self.db + "-task")            # a helper's: another store, none of A's
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        for when in ("helper running", "helper exited"):
+            with self.subTest(when=when):
+                self.assertEqual(self.mine("opencode", "ses_b"), [])
+                self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)   # t1's notice stays A's
+                code, _, err = self.wb("adopt", "t1")
+                self.assertEqual(code, 1)
+                self.assertIn("t1 belongs to an OpenCode session (ses_a) not known to be gone", err)
+                code, _, err = self.wb("adopt", "t1", "--session", "sess-2", "--pid", str(b.pid))  # the mod's
+                self.assertEqual(code, 1)
+                self.assertEqual(self.mine("opencode", "ses_a"), ["t1"])
+            helper.kill(); helper.wait()                              # its pid dead, its beat left behind
+        self.assertEqual(store.Task("t1").spec["session"], "ses_a")
+
+    def test_a_stale_beat_of_a_server_still_running_never_hands_its_task_to_another_session(self):
+        # the #1309 re-review (2026-11-25): a stale beat read as gone, so after a laptop's sleep, a
+        # stopped or busy service or a stalled timer, another session in the directory claimed the
+        # task, its bare `wb wait` took the notice (the owner never woken, #696's kind), and both
+        # adopts handed it over. A running server's stale beat says nothing of its sessions
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.wait); self.addCleanup(b.kill)
+        self.beat("ses_a", ago=store.HEARTBEAT_FRESH + 5)              # A's server: this process, asleep
+        self.opencode_task("t1", "ses_a", phase="review")
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "t1", "kind": "review",
+                                                            "round": 1, "text": "t1 is ready"})
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        self.assertEqual(self.mine("opencode", "ses_b"), [])
+        self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)       # t1's notice stays A's
+        code, _, err = self.wb("adopt", "t1")
+        self.assertEqual(code, 1)
+        self.assertIn("t1 belongs to an OpenCode session (ses_a) not known to be gone", err)
+        code, _, err = self.wb("adopt", "t1", "--session", "sess-2", "--pid", str(b.pid))  # the mod's
+        self.assertEqual(code, 1)
+        self.assertIn("t1 belongs to an OpenCode session (ses_a) not known to be gone", err)
+        self.assertEqual(store.Task("t1").spec["session"], "ses_a")
+        self.beat("ses_a")                                             # A wakes: its notice is its own
+        os.environ["OPENCODE_SESSION_ID"] = "ses_a"
+        self.assertEqual(self.wb("wait", "--timeout", "1")[1], "[review] t1\nt1 is ready\n")
+
+    def test_an_opencode_session_claims_a_gone_sessions_task_nearby_but_never_a_claude_codes(self):
+        dead = subprocess.Popen(["true"]); dead.wait()
+        self.opencode_task("t-gone", "ses_old")
+        self.opencode_task("t-live", "ses_b")
+        self.opencode_task("t-far", "ses_old2", repo=str(Path(self.tmp.name) / "other"),
+                           cwd=str(Path(self.tmp.name) / "other"))
+        self.task("t-claude", session="sess-1", claude_pid=dead.pid)  # its Claude Code is gone
+        self.task("t-hand")                                          # by hand: by directory
+        self.assertEqual(self.mine("opencode", "ses_a"), ["t-hand"])  # no heartbeat: none is gone
+        self.beat("ses_a", "ses_b")
+        self.assertEqual(self.mine("opencode", "ses_a"), ["t-gone", "t-hand"])
+        self.assertEqual(self.mine("opencode", "ses_b"), ["t-gone", "t-hand", "t-live"])
+        self.assertEqual(self.mine("claude", "sess-2"), ["t-claude", "t-hand"])  # as before 2.2
+        self.assertEqual(self.mine(None, "sess-2"), ["t-claude", "t-hand"])      # the mod's: Claude's
+        spec = dict(store.Task("t-gone").spec, driver={"tool": "opencode", "machine": "machine-b"})
+        store.write_json(store.Task("t-gone").dir / "task.json", spec)
+        self.assertEqual(self.mine("opencode", "ses_a"), ["t-hand"])  # another machine's: not gone
+
+    def test_a_bare_wait_in_an_opencode_session_takes_only_its_own_tasks_notices(self):
+        # the notices go to the session that owns the task: a wait in another took it (#696's kind)
+        self.beat("ses_a", "ses_b")
+        self.opencode_task("t-a", "ses_a", phase="review")
+        self.opencode_task("t-b", "ses_b", phase="review")
+        now = store.now()
+        for i, name in enumerate(("t-a", "t-b")):
+            store.append_jsonl(store.home() / "notify.jsonl", {"ts": now + i, "task": name, "kind": "review",
+                                                                "round": 1, "text": f"{name} is ready"})
+        os.environ["OPENCODE_SESSION_ID"] = "ses_a"
+        self.assertEqual(self.wb("wait", "--timeout", "1")[1], "[review] t-a\nt-a is ready\n")
+        self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)  # t-b's is ses_b's
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        self.assertEqual(self.wb("wait", "--timeout", "1")[1], "[review] t-b\nt-b is ready\n")
+
+    def test_wb_adopt_from_an_opencode_session_takes_a_gone_owners_task_and_refuses_a_live_ones(self):
+        self.opencode_task("t-x", "ses_old")
+        claude = subprocess.Popen(["sleep", "60"]); self.addCleanup(claude.wait); self.addCleanup(claude.kill)
+        from workbench import models
+        self.task("t-c", session="sess-1", claude_pid=claude.pid, claude_start=models._started(claude.pid),
+                  claude_machine=store.machine())
+        os.environ["OPENCODE_SESSION_ID"] = "ses_new"
+        self.beat("ses_old", "ses_new")
+        code, _, err = self.wb("adopt", "t-x")
+        self.assertEqual(code, 1)
+        self.assertIn("t-x belongs to an OpenCode session (ses_old) not known to be gone", err)
+        self.beat("ses_new")                                       # ses_old closed
+        self.assertEqual(self.wb("adopt", "t-x"), (0, "adopted t-x\n", ""))
+        spec = store.Task("t-x").spec
+        self.assertEqual((spec["session"], spec["driver"]["model"]), ("ses_new", "deepseek/deepseek-flash"))
+        self.assertEqual(self.wb("adopt", "t-x")[1], "t-x is this session's already\n")
+        self.assertEqual(self.mine("opencode", "ses_new"), ["t-x"])
+        code, _, err = self.wb("adopt", "t-c")                     # a live Claude Code's: refused
+        self.assertEqual(code, 1)
+        self.assertIn("t-c belongs to a live Claude Code session", err)
+        claude.kill(); claude.wait()
+        self.assertEqual(self.wb("adopt", "t-c", "--session", "ses_new")[0], 0)  # across drivers, asked
+        spec = store.Task("t-c").spec
+        self.assertEqual((spec["session"], spec["driver"]["tool"]), ("ses_new", "opencode"))
+        self.assertFalse({"claude_pid", "claude_start", "claude_machine"} & set(spec))
+
+    def test_the_claude_code_mods_adopt_of_an_opencode_task_waits_until_its_session_is_gone(self):
+        self.opencode_task("t-x", "ses_old")
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.wait); self.addCleanup(b.kill)
+        self.beat("ses_old")
+        code, _, err = self.wb("adopt", "t-x", "--session", "sess-2", "--pid", str(b.pid))
+        self.assertEqual(code, 1)
+        self.assertIn("belongs to an OpenCode session (ses_old) not known to be gone", err)
+        self.beat()                                               # its server's fresh beat: ses_old deleted
+        self.assertEqual(self.wb("adopt", "t-x", "--session", "sess-2", "--pid", str(b.pid))[0], 0)
+        spec = store.Task("t-x").spec
+        self.assertEqual((spec["session"], spec["claude_pid"], "driver" in spec), ("sess-2", b.pid, False))
+        self.assertEqual(self.wb("adopt", "t-x", "--pid", str(b.pid))[0], 2)  # its ids, as before 2.2
+
+    def test_adopting_a_claude_task_with_no_pid_from_opencode_says_it_is_not_known_gone(self):
+        # the #1309 review: the refusal read "a live Claude Code session (pid None)"
+        self.task("t-np", session="sess-1")
+        os.environ["OPENCODE_SESSION_ID"] = "ses_new"
+        code, _, err = self.wb("adopt", "t-np")
+        self.assertEqual(code, 1)
+        self.assertIn("t-np belongs to a Claude Code session not known to be gone (no pid recorded)", err)
+
+    def test_a_scheduled_fire_a_bench_run_and_wb_optimize_each_drop_an_opencode_drivers_session_id(self):
+        # their tasks are no session's: with the id kept, a bench replay or a night's task started
+        # under it was the driver session's, and its notices woke that session (#1309)
+        from workbench import bench, models, optimize, schedule
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        self.assertNotIn("OPENCODE_SESSION_ID", schedule._fire_env("night"))
+        envs = []
+
+        def detach(argv, **kw):
+            envs.append(kw["env"])
+            return types.SimpleNamespace(pid=os.getpid())
+        with mock.patch.object(cli, "detach", detach), \
+                mock.patch.object(models, "holders", return_value={}), \
+                mock.patch.object(optimize, "candidates", return_value=[object()]), \
+                mock.patch.object(optimize, "estimate", return_value=60), \
+                mock.patch.object(bench, "driver", return_value={}), \
+                mock.patch.object(bench, "cases", return_value={"c": {}}), \
+                mock.patch.object(models, "discover", return_value={}), \
+                mock.patch.object(models, "resolve", return_value=types.SimpleNamespace(id="m")):
+            optimize.start()
+            bench.start(["m"], [], [], "", 1)
+        self.assertEqual(len(envs), 2)
+        for env in envs:
+            self.assertNotIn("OPENCODE_SESSION_ID", env)
+            self.assertIn("WB_HOME", env)                         # the rest of the caller's kept
+
+    def test_a_given_session_is_an_opencode_drivers_under_opencode_and_claude_codes_otherwise(self):
+        # _caller's kind with --session, --repo or --all-sessions: the plugin's tools pass the
+        # session's ids as the mod does, and an OpenCode one taken for Claude Code's claimed a gone
+        # Claude Code session's task nearby and never a gone OpenCode session's (#1309)
+        dead = subprocess.Popen(["true"]); dead.wait()
+        self.beat("ses_b")
+        self.opencode_task("t-oc", "ses_old")                     # its session deleted
+        self.task("t-cc", session="sess-old", claude_pid=dead.pid)  # its Claude Code gone
+        ns = argparse.Namespace
+        for env, kind in (({"OPENCODE_SESSION_ID": "ses_b"}, "opencode"), ({}, "claude"),
+                          ({"CLAUDECODE": "1", "OPENCODE_SESSION_ID": "ses_b"}, "claude")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                for a in (ns(session=["ses_b"]), ns(repo=self.here), ns(all_sessions=True),
+                          ns(session=["ses_b"], repo=self.here)):
+                    self.assertEqual(cli._caller(a)[2], kind, a)
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        out = self.wb("status", "--session", "ses_b", "--repo", self.here)[1]
+        self.assertIn("t-oc", out)
+        self.assertIn("open elsewhere (other sessions'): t-cc", out)
+        os.environ.pop("OPENCODE_SESSION_ID")                     # the mod's own: Claude Code's
+        out = self.wb("status", "--session", "sess-2", "--repo", self.here)[1]
+        self.assertIn("open elsewhere (other sessions'): t-oc", out)
+
+    def test_a_task_started_while_its_servers_beat_is_stale_records_that_server(self):
+        # the #1309 re-review: driver_record took a server only from a fresh beat, so a task started
+        # while the service was busy recorded none and read unknown for good, never adoptable
+        server = subprocess.Popen(["sleep", "60"]); self.addCleanup(server.wait); self.addCleanup(server.kill)
+        self.beat("ses_a", pid=server.pid, ago=store.HEARTBEAT_FRESH + 5)
+        d = store.driver_record("ses_a")
+        self.assertEqual((d["pid"], d["store"], d["model"]), (server.pid, self.db, "deepseek/deepseek-flash"))
+        self.assertLess(d["seen"], time.time() - store.HEARTBEAT_FRESH)  # the beat's listing, not now
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")       # stale: says nothing yet
+        self.beat(pid=server.pid)                                         # the service catches up: deleted
+        self.assertEqual(store.driver_state("ses_a", d), "gone")
+
+    def test_a_task_recorded_with_no_server_takes_it_from_a_later_beat_and_can_then_be_gone(self):
+        # the #1309 re-review: with no beat at wb start (no plugin yet), a task recorded no store and
+        # read unknown for good; the first scope check that sees its session listed fills it in
+        server = subprocess.Popen(["sleep", "60"]); self.addCleanup(server.wait); self.addCleanup(server.kill)
+        os.environ["OPENCODE_SESSION_ID"] = "ses_a"
+        self.task("t-late", session="ses_a", driver=store.driver_record("ses_a"))
+        self.assertEqual(store.Task("t-late").spec["driver"], {"tool": "opencode", "machine": store.machine()})
+        self.mine("opencode", "ses_b")
+        self.assertNotIn("store", store.Task("t-late").spec["driver"])   # no beat yet: nothing to fill
+        self.beat("ses_a", pid=server.pid, ago=5)
+        self.assertEqual(self.mine("opencode", "ses_a"), ["t-late"])
+        d = store.Task("t-late").spec["driver"]
+        self.assertEqual((d["pid"], d["store"], d["variant"]), (server.pid, self.db, "fast"))
+        with store.locked(runner.lock_file("t-late", "cmd")):              # a command at work: not waited for
+            store.write_json(store.Task("t-late").dir / "task.json",
+                             dict(store.Task("t-late").spec, driver={"tool": "opencode"}))
+            self.assertEqual(self.mine("opencode", "ses_b"), [])
+            self.assertEqual(store.Task("t-late").spec["driver"], {"tool": "opencode"})
+        self.mine("opencode", "ses_b")
+        self.assertEqual(store.Task("t-late").spec["driver"]["store"], self.db)
+        self.beat("ses_b", pid=server.pid)                                 # ses_a deleted
+        self.assertEqual(self.mine("opencode", "ses_b"), ["t-late"])
+
+    def test_an_opencode_drivers_backlog_task_keeps_the_machine_awake_while_its_service_lives(self):
+        # #1105's waiter, keyed on the heartbeat's service pid: an OpenCode task has no claude_pid
+        service = subprocess.Popen(["sleep", "30"]); self.addCleanup(service.wait); self.addCleanup(service.kill)
+        task = self.opencode_task("t-night", "ses_a", server=service.pid, phase="review", backlog="night")
+        held = []
+        awake = lambda: (mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"),  # noqa: E731
+                         mock.patch.object(cli, "keep_awake", lambda pid, why: held.append(pid) or True))
+        a, k = awake()
+        with a, k:
+            self.assertIsNone(runner.awake_for_review(task))      # no heartbeat: nothing to wait on
+            self.beat("ses_a", pid=service.pid)
+            waiter = runner.awake_for_review(task)
+        self.addCleanup(waiter.wait)
+        self.assertEqual(held, [waiter.pid])
+        service.kill(); service.wait()
+        self.assertEqual(waiter.wait(timeout=20), 0)              # let go once the service exits
 
 
 class _ApiTask:

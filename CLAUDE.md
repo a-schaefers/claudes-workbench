@@ -177,11 +177,16 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 `~/.local/share/workbench/source`), `WB_ROUTES` (the roles; `wb start`'s local-only check reads it), `WB_AGENTS_MD`
 (the user's file for agents; the tests' own) (relative or `~` allowed: a new
 one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; `WB_ACTOR` (the chat server's wb
-children only: `web` stamps a role change `by: "web"`); the agent's `WB_TASK`, `WB_RUN`,
+children only: `web` stamps a role change `by: "web"`); the agent's `WB_TASK` (ranked first: a call with it
+is the agent's, `store.caller_kind`, #1310), `WB_RUN`,
 `WB_USER_PYTHONPATH`; a scheduled fire's `WB_SCHEDULE` (its Claude's `wb accept --merge` refused); `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
-`CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), OpenCode's `OPENCODE_SESSION_ID` (an OpenCode
+driver's, under `WB_TASK` never: `store.opencode_session`, gated as `CLAUDECODE` is: `store.under_model`), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,
-`route-ok.json`; `wb start --model` on an API model the same, `cli.start_gate`). Tests only: `WB_OPENCODE_BIN`,
+`route-ok.json`; `wb start --model` on an API model the same, `cli.start_gate`; an agent's call too:
+`store.under_model`). A driver's `OPENCODE_SESSION_ID`, `OPENCODE`, `AGENT`, `AI_AGENT`, `OPENCODE_TERMINAL`,
+`WB_DRIVER`, `OPENCODE_CLIENT` and `OPENCODE_PRINT_LOGS` never reach an agent (`runner.DRIVER_ENV`); Desktop's
+`OPENCODE_EXPERIMENTAL_ICON_DISCOVERY`/`_FILEWATCHER` do (2.4.1 reads neither). Tests only: `WB_OPENCODE_BIN`,
 `WB_FAKE_MODELS`, `WB_FAKE_GPU_GB`, `WB_FAKE_CATALOG` (the fake's OpenCode catalog), `WB_FAKE_API`
 (an API model's state in the fake: `nokey`, `auth`, `quota`, `ratelimit`, `down`), `WB_TEST_SHARD`,
 `WB_TEST_HANG_SECS`.
@@ -206,6 +211,9 @@ sends and `wb route` changes the API side only on the mod's dialog's yes: `send-
 ## OpenCode quirks this code relies on
 Checked against OpenCode 2.3 and 2.4.1 by the real-OpenCode tests (`tests/capture_llm.py`; which covers
 what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the agent knows*).
+- Its shell tool sets `AGENT`, `OPENCODE`, `OPENCODE_SESSION_ID` (the session's own), `OPENCODE_TERMINAL` and
+  `AI_AGENT` (only when unset) on every command, an agent's too (2.4.1): an agent's `wb` call is told by
+  `WB_TASK` (`store.caller_kind`), and a driver's marks stay out of agents (`runner.DRIVER_ENV`).
 - The project comes from `$PWD`, not the cwd. The prompt goes after `--` (one starting with `-`
   is read as a flag).
 - An API model's limits, cost and variants come from the catalog (model.list);

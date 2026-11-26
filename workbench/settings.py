@@ -15,10 +15,11 @@ mod turns it into a [workbench] turn where Claude offers to help (#1279's addend
 
 Reads: `wb route --json` and `wb models --json` as children (the JSON the pane read), the small
 files in-process through their own modules; kept ROWS_CACHE_S. Writes: the pane's wb command, as a
-child of child_env() (no CLAUDECODE, CLAUDE_PID or CLAUDE_CODE_SESSION_ID, WB_ACTOR=web), one at a
+child of child_env() (no CLAUDECODE, CLAUDE_PID, CLAUDE_CODE_SESSION_ID or OPENCODE_SESSION_ID, WB_ACTOR=web), one at a
 time, then the cache is dropped. The user's click on the web app is the yes, as a command they
 type at their terminal is: the child isn't Claude, so `wb route` doesn't gate it, and no approval
-file is written. It stamps a role change `by: "web"` (WB_ACTOR; CLAUDECODE wins over it).
+file is written. It stamps a role change `by: "web"` (WB_ACTOR; CLAUDECODE, or an OpenCode driver's
+session id, wins over it).
 
 Claude writes through the same apply() (#1287, `wb settings set`, on the user's clear ask and yes
 in the conversation: the owner, 2026-11-24, "We trust Claude"), with by="claude": its child keeps

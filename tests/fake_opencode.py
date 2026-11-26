@@ -93,7 +93,10 @@ unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
 FAKE_RUNS rows also say the run's `-m` (`model`, #1059) and what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
 `shell`, and `env_names`: every variable's name, never a value) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
-XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset); with FAKE_CONNECT (a
+XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset), that command given what
+OpenCode 2.4.1's shell tool sets on every command (AGENT, OPENCODE, AI_AGENT when unset, the run's
+own OPENCODE_SESSION_ID, OPENCODE_TERMINAL, TERM), and `shell_marks`: the values it then has of
+those, WB_DRIVER and WB_TASK (null for one unset, #1310); with FAKE_CONNECT (a
 port) the run connects to it on 127.0.0.1 first, its row's `connect` "ok" or the errno (13: the
 lane refused it, #1197); and `files`: each `run -f/--file` it attached, `{name, bytes}`, read as
 OpenCode's client reads it (one it can't open is "File not found", exit 1; a directory or one over
@@ -588,13 +591,22 @@ if os.environ.get("OPENCODE_DB") and args and args[0] == "run" and "--session" n
         fh.write(json.dumps({"id": session, "title": title}) + "\n")
 if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs continued a session
     import subprocess
-    try:  # a command the agent runs, as OpenCode runs it: `$SHELL -c`
-        sees = subprocess.run([os.environ.get("SHELL") or "sh", "-c",
-                               'printf "%s|%s|%s|%s" "${XDG_DATA_HOME:--}" "${XDG_STATE_HOME:--}" '
-                               '"${OPENCODE_DB:--}" "${SHELL:--}"'],
-                              capture_output=True, text=True, timeout=30).stdout
+    # a command the agent runs, as OpenCode runs it: `$SHELL -c`, with what 2.4.1's shell tool
+    # sets on every command (core/src/tool/plugin/shell.ts, core/src/shell.ts): the run's own
+    # session, AI_AGENT only when unset (#1310)
+    marks = {"AGENT": "1", "OPENCODE": "1", "AI_AGENT": os.environ.get("AI_AGENT") or "opencode",
+             "OPENCODE_SESSION_ID": session, "OPENCODE_TERMINAL": "1", "TERM": "xterm-256color"}
+    marked = ("OPENCODE_SESSION_ID", "OPENCODE", "AGENT", "AI_AGENT", "OPENCODE_TERMINAL", "WB_DRIVER",
+              "WB_TASK")
+    try:
+        sees, *seen = subprocess.run(
+            [os.environ.get("SHELL") or "sh", "-c",
+             'printf "%s|%s|%s|%s" "${XDG_DATA_HOME:--}" "${XDG_STATE_HOME:--}" '
+             '"${OPENCODE_DB:--}" "${SHELL:--}"' + "".join(f'; printf "\\n%s" "${{{k}-}}"' for k in marked)],
+            capture_output=True, text=True, timeout=30, env={**os.environ, **marks}).stdout.split("\n")
+        shell_marks = {k: v or None for k, v in zip(marked, seen)}
     except (OSError, subprocess.TimeoutExpired):
-        sees = None
+        sees = shell_marks = None
     connect = None
     if os.environ.get("FAKE_CONNECT"):  # a TCP connect the agent makes in its round (#1197)
         import socket
@@ -617,7 +629,7 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "content": os.environ.get("OPENCODE_CONFIG_CONTENT"),
                              "env_names": sorted(os.environ),  # names only, never a value (#1189)
                              "files": attached,
-                             "shell_sees": sees}) + "\n")
+                             "shell_sees": sees, "shell_marks": shell_marks}) + "\n")
 if args and args[0] == "run" and "--agent" in args:  # OpenCode 2.3.2's: built in, or the config's
     known = {"build", "general", "explore", "compaction", "title", "summary"}
     for doc in config_docs():

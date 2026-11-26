@@ -1439,8 +1439,9 @@ def wait_up(port: int, pid: int | None, limit: float = START_WAIT) -> bool:
 
 # Claude Code's variables, which make a wb command Claude's (the mod's dialogs gate it). The server
 # runs commands for the user's clicks, so one started from a Claude session (`wb chat url`, the
-# mod's ensure) must never carry them: it would run wb as Claude (#1281).
-CLAUDE_VARS = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID")
+# mod's ensure) must never carry them: it would run wb as Claude (#1281). An OpenCode driver's
+# session id the same: from its tool or shell, the user's clicks were the driver's, gated (#1309).
+CLAUDE_VARS = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID", "OPENCODE_SESSION_ID")
 
 
 def start(port: int) -> int:
