@@ -1901,7 +1901,9 @@ def cmd_start(a):
     # `test` runs before the task's own --test, in the agent's lane, as one acceptance command
     # (granted, base-checked, sent back to auto-fix as --test is); a report task runs none
     standing = context.repo_conf(repo, sub)
-    if not report and (test := context.with_repo_test(standing.get("test"), a.test)) != a.test:
+    # from its key's directory, as a standing setup (#1490)
+    if not report and (test := context.with_repo_test(standing.get("test"), a.test,
+                                                      context.repo_test_at(repo, sub))) != a.test:
         a.test = test
         _lane_fits(repo, a.test, off="*" in (a.allow_path or []))  # a snap there too (#1271)
     if listed := standing.get("skills"):
@@ -2549,7 +2551,7 @@ def cmd_next(a):
     dropped = _stale_notes(task)
     if a.test is not None and not spec.get("report"):  # the repo's standing one first (#1295 P2)
         a.test = context.with_repo_test(context.repo_conf(spec["repo"], spec.get("subdir")).get("test"),
-                                        a.test)
+                                        a.test, context.repo_test_at(spec["repo"], spec.get("subdir")))
     if a.allow or a.test:
         exact, tools = context.test_allowances(a.test)
         context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)

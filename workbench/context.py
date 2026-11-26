@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -684,30 +685,43 @@ def allow_always(key: str, items: list[str]) -> None:
         conf[key] = have + [x for x in items if x not in have]
 
 
-def with_repo_test(standing: str | None, test: str | None) -> str | None:
+def with_repo_test(standing: str | None, test: str | None, at: str = "") -> str | None:
     """The acceptance command a task runs: commands.json `repos.<path>.test`, the repo's standing
     one (a team's lint and format, which NO_HOOKS keeps from running as a pre-commit hook), then
     the task's own --test, both to pass (#1295, P2). One whose every simple command --test already
     runs isn't run twice (`make` before `make test` is); a part a shell would split otherwise
     (`;`, a newline, `||`, a lone `&`) goes in parentheses, and one with a `#` ends in a newline
     inside them: `lint  # note && pytest` commented the task's own test out and passed untested
-    (#1475, 2026-11-26)."""
+    (#1475, 2026-11-26). A standing one of more than one command is a subshell, so its own `cd`
+    never moves the task's test. ``at`` (repo_test_at): its key's directory from the task's
+    package, where it runs, the task's own still in the package, as a standing setup does: a root
+    entry's ./scripts/lint.sh ran in the package and failed every package task's base check and
+    rounds (#1490, 2026-11-26); run from elsewhere, the same text in --test is no repeat."""
     standing = (standing or "").strip()
     if not standing:
         return test
     if not (test or "").strip():
-        return standing
-    if all(c in _simple_commands(test) for c in _simple_commands(standing)):  # --test runs it already
+        return f"(cd {shlex.quote(at)} && {_shell_part(standing)})" if at else standing
+    if not at and all(c in _simple_commands(test) for c in _simple_commands(standing)):  # --test runs it already
         return test
-    return f"{_shell_part(standing)} && {_shell_part(test.strip())}"
+    part = _shell_part(standing, len(_simple_commands(standing)) > 1)
+    return f"{f'(cd {shlex.quote(at)} && {part})' if at else part} && {_shell_part(test.strip())}"
 
 
-def _shell_part(c: str) -> str:
-    """``c`` as one part of an `a && b` line: in parentheses when a shell would split it; one with
-    a `#` ends in a newline before the `)`, which a comment ate (#1475)."""
+def _shell_part(c: str, sub: bool = False) -> str:
+    """``c`` as one part of an `a && b` line: in parentheses when a shell would split it, or
+    ``sub``; one with a `#` ends in a newline before the `)`, which a comment ate (#1475)."""
     if "#" in c:
         return f"({c}\n)"
-    return f"({c})" if re.search(r"[;\n]|\|\||(?<!&)&(?!&)", c) else c
+    return f"({c})" if sub or re.search(r"[;\n]|\|\||(?<!&)&(?!&)", c) else c
+
+
+def repo_test_at(repo: str | Path, sub: str | None) -> str:
+    """with_repo_test's ``at``: repo_conf's key directory (repo_conf_dir) from the task's package
+    ``sub``, '' when they are the same (#1490)."""
+    sub = (sub or "").strip("/")
+    home = repo_conf_dir(repo, sub)
+    return "" if home == sub else os.path.relpath(home or ".", sub or ".")
 
 
 def commands_conf() -> dict:
