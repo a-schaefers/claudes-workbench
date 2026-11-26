@@ -6042,27 +6042,30 @@ class AutoFix(Base):
         # #779 (the second 2026-11-21 audit): every timeout skipped auto-fix and said to raise
         # --test-timeout, even when the base check had run the whole suite in a second: the
         # change's infinite loop cost a full-length run and a wake auto-fix could have handled
-        self.start("t-hang", "ok", "--auto-fix", "1", "--test-timeout", "4", "--test",
-                   "if grep -qx 42 answer.txt 2>/dev/null; then sleep 30; fi")
-        st = wait_phase("t-hang", {"review", "stuck", "failed"}, timeout=90)
+        # The limit leaves the base check room on a loaded CI runner: at 4 s, a base check of a
+        # grep that took 1.0 s there (past HANG_SHARE of it) read as slow, failing this on two
+        # branches (2026-11-26, #1454 and #1461)
+        self.start("t-hang", "ok", "--auto-fix", "1", "--test-timeout", "12", "--test",
+                   "if grep -qx 42 answer.txt 2>/dev/null; then sleep 60; fi")
+        st = wait_phase("t-hang", {"review", "stuck", "failed"}, timeout=120)
         self.assertEqual((st["phase"], st["round"], st["auto_fixes"]), ("review", 2, 1))
         base = st["base_check"]
         self.assertTrue(base["ok"])
-        self.assertLess(base["secs"], 1)
+        self.assertLessEqual(base["secs"], runner.HANG_SHARE * 12)
         prompt = store.Task("t-hang").round_dir(2).joinpath("prompt.md").read_text()
-        self.assertTrue(prompt.startswith("The acceptance tests fail. They now run past 4s, where "
+        self.assertTrue(prompt.startswith("The acceptance tests fail. They now run past 12s, where "
                                           f"they finished in {base['secs']:g}s on the base: look "
                                           "for a loop that never ends"), prompt[:300])
         self.assertIn("the bug is in this change", prompt)
         # a base check that failed, or another command than the one checked, says nothing of speed
         task = store.Task("t-hang")
-        self.assertEqual(runner.hang(task, 4), {"base": base["secs"], "limit": 4})
-        task.set_status(base_check={**base, "secs": 2.0})          # half the limit: maybe slow
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertEqual(runner.hang(task, 12), {"base": base["secs"], "limit": 12})
+        task.set_status(base_check={**base, "secs": 6.0})          # half the limit: maybe slow
+        self.assertIsNone(runner.hang(task, 12))
         task.set_status(base_check={**base, "ok": False, "exit": 1})
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertIsNone(runner.hang(task, 12))
         task.set_status(base_check={**base, "cmd": "make check"})
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertIsNone(runner.hang(task, 12))
 
     @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_tests_the_lane_refused_a_device_are_not_sent_back_as_the_agents_bug(self):
