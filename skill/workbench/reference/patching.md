@@ -54,7 +54,9 @@ and runs only the tests it added. It drops nothing.
 - `upstream fails this patch's tests (…): keep it`: upstream still lacks it. Offer to resolve the
   conflict by hand (below) or, after a closed pull request, ask the user what they want.
 - `… tests didn't all run here (…), so wb patch check can't tell …`: a test was skipped here (no
-  Landlock, say), placed in no class, or the mod's tests need claude. A skip is not a pass: never
+  Landlock, say), placed in no class, its runner missing (claude for the mod's, opencode or bun
+  for the OpenCode plugin's), or none (only `mod/`, `opencode-plugin/` and `kernel/` have one).
+  A skip is not a pass: never
   offer the drop on it. Run them where they can run (`wb doctor` says what is missing), or
   compare by hand as below.
 - `… has no test of its own …` or `… tests don't apply to upstream any more: compare by hand`:
@@ -87,12 +89,18 @@ dialog: tell them there what it would send; it waits until they are back at the 
    sending` when it lacks one.
    `wb patch upstream <commit> --name <slug>`: branch `pr/<slug>` from fresh upstream, in its own
    worktree under `$WB_HOME/upstream/`, the commit cherry-picked. On a conflict, resolve it there,
-   then `git cherry-pick --continue`. It prints the tests, the body file
-   (`$WB_HOME/upstream/<slug>.md`, a copy of `.github/pull_request_template.md`), the one `wb patch
-   send` line and gh's state, and runs none of them.
-3. In that worktree, the tests it printed, on Python 3.11 too, each skip named (a skip is not a
-   pass). Fill every section of the body file honestly (what you ran, what you didn't). Keep it
-   outside the worktree, where it is: a file left there is a change `wb patch send` refuses.
+   then `git cherry-pick --continue`. It runs the patch's own tests there and writes each command
+   and its last line into the body file (`$WB_HOME/upstream/<slug>.md`, a copy of
+   `.github/pull_request_template.md`) as `Tests run by wb: …`, stamps the `pr/` commit with a
+   `Workbench-Driver:` trailer, and prints the suites to run, the template's sections still
+   unfilled, `no Scope trailer: decide first` when it has none, the one `wb patch send` line and
+   gh's state.
+   Its tests can take minutes (the mod's, the kernel's): run it in the background or with a
+   10-minute timeout, never Bash's 2-minute default.
+3. In that worktree, the suites it printed (each directory's: the mod's, the OpenCode plugin's,
+   the kernel's), on Python 3.11 too, each skip named (a skip is not a pass). Fill every section
+   of the body file honestly (what you ran, what you didn't), keeping wb's lines. Keep it outside
+   the worktree, where it is: a file left there is a change `wb patch send` refuses.
 4. Show the user the title and the whole body, word for word, and offer to redact what they may
    not want public: local paths, hostnames, project names, usernames. Then run the printed
    `wb patch send <slug> --title "…" --body-file <f>` (`--draft` if they want one); the mod's dialog

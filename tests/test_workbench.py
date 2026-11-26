@@ -378,6 +378,10 @@ class Base(unittest.TestCase):
         # asking for a yes
         for k in runner.DRIVER_ENV + ("WB_TASK",):
             os.environ.pop(k, None)
+        # nor the user's GitHub token: git was kept off github.com, gh not, so a gh the tests ran
+        # acted as the user (#1321, finding 22; LocalPatches moves gh's own login away too)
+        for k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST"):
+            os.environ.pop(k, None)
         # the state directory before WB_HOME names it: a thread the last test left running (its
         # chat server) wrote there in between, and mkdir found it made (seen on WSL, 2026-11-20)
         (tmp / "state").mkdir()
@@ -24222,10 +24226,11 @@ class DynamicWorkflows(Base):
     """Dynamic workflows (#1041): off by default, `wb workflows on|off` keeps the choice in
     workflows.json beside coding.json, which the mod reads for its dynamic-workflows block."""
     def test_off_by_default_and_wb_workflows_keeps_the_choice_where_the_mod_reads_it(self):
-        self.assertEqual(run_wb("workflows"), "Dynamic workflows: Off (default). Claude runs one task "
-                                              "at a time.\n")
+        # #1278 named it deepmode: the label says both names, and wb workflows stays wb deepmode's
+        self.assertEqual(run_wb("workflows"), "Dynamic workflows (deepmode): Off (default). Claude runs one "
+                                              "task at a time; deepcode asks for a deep workflow once.\n")
         self.assertFalse((store.home() / "workflows.json").exists())
-        self.assertIn("Dynamic workflows: On. Claude may split a request into tasks that run at once",
+        self.assertIn("Dynamic workflows (deepmode): On. substantive requests run as deep workflows (wb run)",
                       run_wb("workflows", "on"))
         self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "on")
         self.assertEqual(cli.workflows_mode(), "on")
@@ -24243,14 +24248,15 @@ class DynamicWorkflows(Base):
             run_wb("workflows", "maybe")
         self.assertFalse((store.home() / "workflows.json").exists())
 
-    def test_the_skill_says_one_task_at_a_time_when_off_and_how_to_fan_out_when_on(self):
+    def test_the_skill_says_one_task_at_a_time_when_off_and_a_deep_workflow_when_on(self):
         skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
         setting = skill.split("- **Dynamic workflows**")[1].split("\n- **")[0]
         self.assertIn("off (the default), run **one task at a time**", setting)
         self.assertIn("only on\n  their yes", setting)
-        fan = skill.split("- **Fan-out**")[1].split("\n- **")[0]
-        for said in ("(spec, size, role, acceptance command)", "one\n  name prefix",
-                     "say the plan in one line", "accept logic first, then tests, then UI or docs"):
+        # #1278's plan §6: *Deep workflows* replaces the fan-out of tasks Claude started at once
+        fan = " ".join(skill.split("- **Fan-out**")[1].split("\n- **")[0].split())
+        for said in ("is a deep workflow: one `wb run start`, never several tasks you start at once yourself",
+                     "*Deep workflows*", "accept logic first, then tests, then UI or docs"):
             self.assertIn(said, fan)
 
     def wb(self, *argv):
@@ -24264,14 +24270,14 @@ class DynamicWorkflows(Base):
         return code, out.getvalue(), err.getvalue()
 
     def test_a_fan_out_passes_one_group(self):
-        # #1048: the skill and the mod's rule say to pass the shared prefix as --group on each
-        # start, and the tasks so started carry the one group the pane draws under one header
-        skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
-        fan = " ".join(skill.split("- **Fan-out**")[1].split("\n- **")[0].split())  # any wrap
-        self.assertIn("pass `--group <prefix>` (`--group auth`) on each `wb start`", fan)
+        # #1048: tasks started with one --group carry the group the pane draws under one header;
+        # since #1278 a run's driver passes it (runs._start: --group <run>), and the mod's rule
+        # sends a fan-out to wb run, its wake a background wb wait (the review of #1278)
         mod = (Path(__file__).parent.parent / "mod/hooks/register.tsx").read_text()
-        rule = mod.split("const WORKFLOWS_RULE = ")[1].split("\nconst ")[0]
-        self.assertIn("pass it as `--group <prefix>` on each `wb start`", rule)
+        rule = " ".join(mod.split("const WORKFLOWS_RULE = ")[1].split("\nconst ")[0].split())
+        self.assertIn("start it once with `wb run start`", rule)
+        self.assertIn("`wb wait <run>` in the background", rule)
+        self.assertIn('"--group", run.name', (Path(__file__).parent.parent / "workbench/runs.py").read_text())
         with mock.patch.object(cli, "spawn_runner", lambda task: 0):
             for name in ("auth-logic", "auth-tests", "auth-docs"):
                 run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
@@ -25669,6 +25675,9 @@ class LocalPatches(Base):
                           FAKE_GH_FORK=str(self.fork), FAKE_GH_API=str(tmp / "gh-api.json"))
         for k in ("FAKE_GH_FAIL", "FAKE_GH_PR_STATE", "FAKE_GH_PR_MERGE"):
             os.environ.pop(k, None)
+        # and gh's stored login, should a real gh run in place of the fake (#1321, finding 22): its
+        # config directory is the test's own (not in Base: a lane hides GH_CONFIG_DIR, SECRET_VARS)
+        os.environ["GH_CONFIG_DIR"] = str(tmp / "gh-config")
         self.gh_auth()
         # every github.com URL leads nowhere unless a test maps it (the longest insteadOf wins):
         # a wrong push URL fails here, never reaching GitHub
@@ -26082,18 +26091,37 @@ class LocalPatches(Base):
         self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "fix-thing"))
         self.assertIn("lowercase letters", self.wb("patch", "upstream", fix, "--name", "Fix_It"))
 
-    def test_patch_upstream_names_the_kernels_check_for_a_patch_that_touches_kernel(self):
+    def test_patch_upstream_names_each_touched_directorys_suite_and_the_plugins_for_the_shared_core(self):
         # #1356: python3 -m unittest holds the committed bundle offline, but only kernel.py check
-        # rebuilds it from kernel/src and runs the props, so a kernel patch's next step names it
+        # rebuilds it from kernel/src and runs the props, so a kernel patch's next step names it.
+        # #1328: only the mod's commands were named, so a patch to the OpenCode plugin, or to the
+        # mod's core it imports, went out with the plugin's tests unnamed
         self.as_clone()
-        (self.copy / "kernel/src").mkdir(parents=True)
-        fix = self.commit(self.copy, "kernel/src/Kernel.purs", "module Kernel where\n", "a kernel fix")
-        out = self.wb("patch", "upstream", fix, "--name", "kernel-fix")
-        wt = store.home() / "upstream/kernel-fix"
-        self.assertIn(f"cd {wt} && python3 -m unittest && python3 scripts/kernel.py check\n", out)
-        other = self.commit(self.copy, "mine.txt", "mine\n", "not the kernel")
-        self.assertIn(f"cd {store.home() / 'upstream/plain'} && python3 -m unittest\n",
-                      self.wb("patch", "upstream", other, "--name", "plain"))
+        kernel, mod, plugin = patches.KERNEL_CHECK, patches.MOD_TESTS, patches.PLUGIN_TESTS
+        cases = [("kernel/src/Kernel.purs", [kernel, mod, plugin]), ("mod/hooks/tasks.ts", [mod]),
+                 ("mod/hooks/core.ts", [mod, plugin]), ("mod/hooks/golden/index.ts", [mod, plugin]),
+                 ("opencode-plugin/server.ts", [plugin]), ("package.json", [plugin]), ("mine.txt", [])]
+        for i, (path, want) in enumerate(cases):
+            with self.subTest(path):
+                (self.copy / path).parent.mkdir(parents=True, exist_ok=True)
+                fix = self.commit(self.copy, path, f"{i}\n", f"a fix to {path}")
+                out = self.wb("patch", "upstream", fix, "--name", f"fix-{i}")
+                wt = store.home() / f"upstream/fix-{i}"
+                self.assertIn(f"cd {wt} && " + " && ".join(["python3 -m unittest", *want]) + "\n", out)
+
+    def test_the_plugins_shared_core_is_everything_opencode_plugin_imports_from_mod(self):
+        # #1328: a change to what the plugin imports from mod/ is the plugin's too (SUITES); a new
+        # import outside PLUGIN_SHARED would leave its tests unnamed for such a patch
+        imports = set()
+        for f in (ROOT / "opencode-plugin").rglob("*.ts"):
+            for spec in re.findall(r"""(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]""", f.read_text()):
+                rel = os.path.relpath((f.parent / spec).resolve(), ROOT)
+                if rel.startswith("mod/"):
+                    imports.add(rel)
+        self.assertTrue(imports)                                # the goldens and the core, today
+        for rel in imports:
+            self.assertTrue(rel.startswith(patches.PLUGIN_SHARED), rel)
+            self.assertIn(patches.PLUGIN_TESTS, patches.suites([rel]))
 
     def test_patch_upstream_off_github_prints_no_url_for_gh_and_flags_a_personal_patch(self):
         # #1005 (2026-11-22): `gh repo fork <the origin's URL>` was printed for an origin off
@@ -26603,6 +26631,33 @@ class LocalPatches(Base):
         with mock.patch.object(patches, "OS_RELEASE", (str(Path(self.tmp.name) / "os-release"),)):
             (Path(self.tmp.name) / "os-release").write_text('NAME="Alpine Linux"\nID=alpine\n')
             self.assertEqual(patches._os_release()["ID"], "alpine")
+
+    def test_from_an_opencode_driver_a_prompting_step_goes_to_a_terminal_and_names_opencodes_model(self):
+        # #1321 (findings 17, 27): the hints said `! cmd` and "Claude", Claude Code's; OpenCode's `!`
+        # had no terminal for sudo's password or gh's login, and no Claude drove it
+        real = shutil.which
+        with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"), \
+                mock.patch.object(patches, "_os_release", lambda: {"ID": "arch"}), \
+                mock.patch.object(patches.platform, "system", lambda: "Linux"), \
+                mock.patch.object(patches.hardware, "system", lambda: "linux"), \
+                mock.patch.object(patches.shutil, "which", lambda n: None if n != "git" else real(n)):
+            missing = patches.gh_state()["hint"]
+        self.assertIn("OpenCode's model asks first, then the user runs, in a terminal of their own: sudo pacman "
+                      "-S github-cli", missing)
+        self.gh_auth(hosts=False)
+        https = mock.patch.object(patches, "_guess_protocol", lambda root=None: "https")
+        https.start(); self.addCleanup(https.stop)
+        with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"):
+            login = patches.gh_state()["hint"]
+            crash = patches.driver_name()
+        self.assertIn("the user runs, in a terminal of their own: gh auth login --hostname github.com "
+                      "--git-protocol https (a browser or one-time code; OpenCode's model never handles the token)",
+                      login)
+        self.assertIn("then, in a terminal of their own: gh auth setup-git, so git pushes", login)
+        self.assertNotIn("! ", missing + login)
+        self.assertEqual(crash, "OpenCode's model")
+        self.assertIn("the user runs: ! gh auth login", patches.gh_state()["hint"])  # Claude Code's, as it was
+        self.assertEqual(patches.driver_name(), "Claude")
 
     def test_doctor_says_the_install_its_local_patches_and_gh(self):
         # #1005: which install runs (a marketplace clone re-clones away a patch), the patches it
@@ -27139,6 +27194,157 @@ class LocalPatches(Base):
                 with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
                     cli.main(["patch", "check", bad])
                 self.assertEqual(e.exception.code, 1)
+
+    def test_patch_check_runs_each_test_by_its_directorys_runner_and_names_one_with_none(self):
+        # #1328 (#1321's finding 18): every *.test.ts ran as the mod's suite, so a patch to the
+        # OpenCode plugin read "upstream already passes" with its own test never run
+        self.as_clone()
+        bindir = Path(self.tmp.name) / "fakebin"
+        (bindir / "opencode").write_text(f'#!/bin/sh\necho "opencode BUN_BE_BUN=$BUN_BE_BUN $*" >> '
+                                         f'{shlex.quote(str(self.calls))}\n')
+        (bindir / "opencode").chmod(0o755)
+        (self.origin / "scripts").mkdir()                     # upstream's kernel.py: it records its call
+        self.upstream_commits("scripts/kernel.py", f"import sys\nopen({str(self.calls)!r}, 'a').write("
+                              "'kernel.py ' + ' '.join(sys.argv[1:]) + '\\n')\n", "the kernel's script")
+        self.g(self.copy, "reset", "-q", "--hard", "origin/main")
+        for d in ("opencode-plugin/test", "kernel/test", "web"):
+            (self.copy / d).mkdir(parents=True)
+        plugin = self.commit(self.copy, "opencode-plugin/test/x.test.ts", "test('x', () => {})\n", "a plugin fix")
+        kernel = self.commit(self.copy, "kernel/test/Props.purs", "module Props where\n", "a kernel prop")
+        stray = self.commit(self.copy, "web/x.test.ts", "test('x', () => {})\n", "a web fix")
+        real_which = shutil.which
+        for sha, subject, ran in ((plugin, "a plugin fix", "opencode BUN_BE_BUN=1 test opencode-plugin/test"),
+                                  (kernel, "a kernel prop", "kernel.py props")):
+            with self.subTest(subject):
+                self.calls.unlink(missing_ok=True)
+                self.assertIn(f"upstream already passes this patch's tests ({subject})", self.check(sha))
+                self.assertEqual(self.calls.read_text().splitlines(), [ran])       # never claude's suite
+        gone = lambda n, *a, **k: None if n in ("opencode", "bun") else real_which(n, *a, **k)  # noqa
+        with mock.patch.object(patches.shutil, "which", gone):
+            self.assertEqual(self.check(plugin), "a plugin fix's tests didn't all run here (neither opencode nor bun "
+                                                 "is on PATH for the OpenCode plugin's tests), so wb patch check "
+                                                 "can't tell: run them where they can (a skip is not a pass)\n")
+            # the #1329 review (2026-11-25): kernel.py props refuses with neither (exit 1), which
+            # read as upstream failing the patch
+            self.calls.unlink(missing_ok=True)
+            self.assertEqual(self.check(kernel), "a kernel prop's tests didn't all run here (neither bun nor opencode "
+                                                 "is on PATH for the kernel's props), so wb patch check can't tell: "
+                                                 "run them where they can (a skip is not a pass)\n")
+            self.assertFalse(self.calls.exists())
+        self.assertEqual(self.check(stray), "a web fix's tests didn't all run here (no runner for web/x.test.ts "
+                                            "(only mod/, opencode-plugin/ and kernel/ have one)), so wb patch "
+                                            "check can't tell: run them where they can (a skip is not a pass)\n")
+
+    TEMPLATE = ("<!-- Fill every section. -->\n\n## What and why\n\n<!-- what -->\n\nCloses #\n\n## Tests run\n\n"
+                "<!-- each command -->\n\n## Docs\n\n- [ ] grepped\n")
+
+    def on_github(self):
+        """calc()'s clone with its origin on GitHub (mapped to the stand-in), and upstream's
+        template; returns the patch."""
+        fix = self.calc()
+        (self.origin / ".github").mkdir(exist_ok=True)
+        self.commit(self.origin, ".github/pull_request_template.md", self.TEMPLATE, "the template")
+        self.g(self.copy, "remote", "set-url", "origin", self.URL)
+        self.g(self.copy, "config", f"url.{self.origin}.insteadOf", self.URL)
+        return fix
+
+    def test_patch_upstream_runs_the_patchs_own_tests_and_writes_what_they_printed_into_the_body(self):
+        # #1329 (#1321's finding 20): a weak driver's patch went upstream with no Scope trailer, a
+        # near-empty body and no test run, none of it said
+        fix = self.on_github()
+        out = self.wb("patch", "upstream", fix, "--name", "add")
+        line = "Tests run by wb: `python3 -m unittest tests.test_calc.Calc.test_add_adds` → OK"
+        self.assertIn(f"\n{line}\n", out)
+        self.assertIn("\nno Scope trailer: decide first whether it is for everybody (Scope: everybody)", out)
+        self.assertIn("\nnext (wb ran only the patch's own tests, above):\n", out)
+        body = patches.body_path("add")
+        self.assertIn(f"## Tests run\n\n{line}\n\n<!-- each command -->\n", body.read_text())
+        self.assertIn(f"  fill in {body} (a copy of .github/pull_request_template.md; unfilled: What and why, "
+                      "Tests run, Docs)\n", out)
+        # the template with wb's line in it is still the template as it came; filled, it goes,
+        # what's left unfilled said, never refused
+        send = ["patch", "send", "add", "--title", "add adds", "--body-file", str(body)]
+        self.assertIn("is the template as it came", self.wb(*send))
+        body.write_text(body.read_text().replace("Closes #", "It adds. Closes #1"))
+        self.gh_auth(login="a-schaefers")                       # the owner's own: pushed to origin
+        out = self.wb(*send)
+        self.assertIn("note: the body leaves Tests run, Docs unfilled\n", out)
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/", out)
+        self.assertIn(line, body.read_text())                   # the body sent carries the evidence
+        # a test that fails on the branch says so, and a patch with no test says it ran none
+        self.g(self.copy, "switch", "-q", "local")
+        bad = self.commit(self.copy, "tests/test_wrong.py", "import unittest\n\n\nclass Wrong(unittest.TestCase):\n"
+                          "    def test_two_and_two(self):\n        open('left.txt', 'w').close()\n"
+                          "        self.assertEqual(2 + 2, 5)\n", "a wrong test\n\nScope: everybody")
+        out = self.wb("patch", "upstream", bad, "--name", "bad")
+        self.assertIn("Tests run by wb: `python3 -m unittest tests.test_wrong.Wrong.test_two_and_two` → "
+                      "FAILED (failures=1) (fail)\n", out)
+        self.assertEqual(self.g(store.home() / "upstream/bad", "status", "--porcelain"), "")  # what it left, gone
+        self.assertNotIn("no Scope trailer", out)
+        plain = self.commit(self.copy, "mine.txt", "mine\n", "no test\n\nScope: everybody")
+        out = self.wb("patch", "upstream", plain, "--name", "plain")
+        self.assertIn("Tests run by wb: not run (the patch has no test of its own)\n", out)
+        self.assertIn("\nnext (none of this has run):\n", out)
+        self.assertIn("Tests run by wb: not run (the patch has no test of its own)\n",
+                      patches.body_path("plain").read_text())
+        clash = self.commit(self.copy, "calc.py", "def add(a, b):\n    return b + a\n", "commuted\n\nScope: me")
+        self.assertIn("Tests run by wb: not run (the patch conflicted on upstream: run its tests once it's "
+                      "resolved)\n", self.wb("patch", "upstream", clash, "--name", "clash"))
+
+    def test_patch_upstream_records_the_prepared_patch_and_its_body_before_its_tests_run(self):
+        # the #1329 review (2026-11-25): the tests can take minutes, and a run killed in them
+        # (Claude's Bash stops at 2) left pr/<slug>, which a rerun refuses, with no prepared row
+        # for wb update to drop the local patch by and no body file to send
+        fix = self.on_github()
+        with mock.patch.object(patches, "evidence", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            cli.main(["patch", "upstream", fix, "--name", "add"])
+        noted = store.read_json(store.home() / "patches.json")
+        self.assertEqual(list(noted["prepared"]), ["add"])
+        self.assertEqual(patches.body_path("add").read_text(), self.TEMPLATE)
+        self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "add"))
+
+    def test_patch_upstream_stamps_the_pr_commit_with_its_driver_and_keeps_what_wb_update_matches(self):
+        # #1329 (#1321's finding 21): upstream couldn't tell which driver prepared a patch
+        self.as_clone()
+        self.commit(self.copy, "mine.txt", "mine\n", "fix the thing\n\nScope: everybody")
+        self.g(self.copy, "commit", "-q", "--amend", "--no-edit", "--author=A <a@a>",
+               "--date=2020-01-01T00:00:00+0000")                # an author and a date the amend must keep
+        fix = self.g(self.copy, "rev-parse", "HEAD")
+        sid = "0b5e7c1e-0000-4000-8000-000000000001"
+        log = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects/-repo" / f"{sid}.jsonl"
+        log.parent.mkdir(parents=True)
+        rows = [{"type": "assistant", "message": {"model": "test-model-a"}},
+                {"type": "assistant", "message": {"model": "test-model-b"}},
+                {"type": "assistant", "message": {"model": "<synthetic>"}}, {"type": "user"}]
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows) + "{not json\n")
+        with mock.patch.dict(os.environ, CLAUDECODE="1", CLAUDE_CODE_SESSION_ID=sid):
+            out = self.wb("patch", "upstream", fix, "--name", "fix-thing")
+        wt = store.home() / "upstream/fix-thing"
+        self.assertIn("Workbench-Driver: claude-code test-model-b (a trailer on pr/fix-thing's commit, not "
+                      "the local one)\n", out)
+        trailer = "--format=%(trailers:key=Workbench-Driver,valueonly)"
+        self.assertEqual(self.g(wt, "log", "-1", trailer), "claude-code test-model-b")
+        self.assertEqual(self.g(self.copy, "log", "-1", trailer, fix), "")           # the local one untouched
+        self.assertIn("Scope: everybody", self.g(wt, "log", "-1", "--format=%B"))
+        for fmt in ("%an %ae %at", "%s"):
+            self.assertEqual(self.g(wt, "log", "-1", f"--format={fmt}"),
+                             self.g(self.copy, "log", "-1", f"--format={fmt}", fix))
+
+        def patch_id(d, rev):
+            diff = subprocess.run(["git", "-C", str(d), "show", rev], capture_output=True, check=True).stdout
+            return subprocess.run(["git", "patch-id", "--stable"], input=diff, capture_output=True,
+                                  check=True).stdout.split()[0]
+        self.assertEqual(patch_id(wt, "HEAD"), patch_id(self.copy, fix))
+        # merged upstream as it was sent, wb update's match still finds it landed
+        self.g(self.origin, "fetch", "-q", str(self.copy), "pr/fix-thing")
+        self.g(self.origin, "merge", "-q", "--ff-only", "FETCH_HEAD")
+        self.g(self.copy, "fetch", "-q", "origin")
+        self.assertTrue(patches._landed_pr(self.copy, "fix-thing", "origin/main"))
+        # an OpenCode driver with no heartbeat names only its tool; a terminal, itself
+        with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"):
+            self.assertEqual(patches.driver_line(), "opencode")
+        self.assertEqual(patches.driver_line(), "terminal")
 
     def test_patch_upstream_of_a_commit_with_no_test_asks_for_one(self):
         self.as_clone()
@@ -31241,21 +31447,21 @@ class WebChat(Base):
         lim = self.chat.RateLimit(2)
         self.assertEqual([lim.hit("a", 0), lim.hit("a", 10), lim.hit("a", 20), lim.hit("a", 61)], [0, 0, 40, 0])
 
-    def test_ask_claude_hands_a_request_over_and_exits_0_with_the_reply(self):
+    def test_ask_workbench_hands_a_request_over_and_exits_0_with_the_reply(self):
         # the portable skill's client, standard library only, against this server and a listener
         # played here: it takes the agent's message, replies to it, and ends its turn
-        script = Path(__file__).resolve().parent.parent / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        script = Path(__file__).resolve().parent.parent / "skill/agents/ask-workbench/scripts/ask_workbench.py"
         tok = self._agent()
-        env = {**os.environ, "CLAUDE_WB_URL": f"http://localhost:{self.port}", "CLAUDE_WB_TOKEN": tok}
+        env = {**os.environ, "WORKBENCH_URL": f"http://localhost:{self.port}", "WORKBENCH_TOKEN": tok}
         attach = Path(self.tmp.name) / "notes.txt"
         attach.write_text("the parser's edge cases")
         run = lambda *a, e=env: subprocess.run([sys.executable, "-I", str(script), *a], env=e,
                                                 capture_output=True, text=True, timeout=60)
         r = run("fix it")
         self.assertEqual(r.returncode, 2, r.stderr)                        # nobody listening
-        self.assertIn("Claude isn't listening", r.stderr)
+        self.assertIn("no driver is listening", r.stderr)
         self.assertEqual(self.chat.thread(), [])                          # health first: nothing sent
-        self.assertEqual(run("fix it", e={**env, "CLAUDE_WB_TOKEN": "wba-nope"}).returncode, 3)
+        self.assertEqual(run("fix it", e={**env, "WORKBENCH_TOKEN": "wba-nope"}).returncode, 3)
         self._listening()
         stop = threading.Event()
 
@@ -31276,15 +31482,140 @@ class WebChat(Base):
             t.join()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), "Done: fix the parser in ~/src/app (notes.txt).")
-        self.assertIn("[done: follow up with ask_claude.py --after ", r.stderr)
+        self.assertIn("[done: follow up with ask_workbench.py --after ", r.stderr)
 
-    def test_ask_claude_asks_a_wait_the_server_cut_again_and_names_after_only_at_the_deadline(self):
+    def _opencode_listening(self, sid="ses_oc1", model="deepinfra/flash-x"):
+        """An OpenCode session listening, as OpenCode's plugin claims: its server's heartbeat lists
+        the session (and its model), and the claim names the session, with no `parent` (no Claude
+        Code)."""
+        from workbench import models
+        me = os.getpid()
+        store.write_json(store.beat_path(me), {"tool": "opencode", "pid": me, "ts": time.time(),
+                                               "sessions": {sid: {"model": model}}})
+        store.write_json(self.chat.chat_dir() / "listener.json",
+                         {"session": sid, "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
+
+    def _claude_listening(self):
+        """A Claude Code session listening, as the mod claims: `parent`, its Claude Code's pid."""
+        from workbench import models
+        me = os.getpid()
+        store.write_json(self.chat.chat_dir() / "listener.json",
+                         {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me),
+                          "parent": me})
+
+    def test_the_agents_client_hands_work_to_either_driver_follows_up_and_says_which_answered(self):
+        # #1366: another agent hands work over the chat to whichever driver listens, Claude Code's
+        # or OpenCode's, and the skill said "Claude" either way: the health check, each reply and
+        # the client name the driver (OpenCode with its session's model), and a follow-up and a
+        # later report work the same on both
+        script = ROOT / "skill/agents/ask-workbench/scripts/ask_workbench.py"
+        tok = self._agent()
+        env = {**os.environ, "WORKBENCH_URL": f"http://localhost:{self.port}", "WORKBENCH_TOKEN": tok}
+        run = lambda *a: subprocess.run([sys.executable, "-I", str(script), *a], env=env,  # noqa: E731
+                                        capture_output=True, text=True, timeout=60)
+        for driver, session, shell, said in (
+                ("claude", "s1", {"CLAUDECODE": "1", "CLAUDE_PID": str(os.getpid())}, "Claude Code"),
+                ("opencode", "ses_oc1", {"OPENCODE_SESSION_ID": "ses_oc1"}, "OpenCode (deepinfra/flash-x)")):
+            with self.subTest(driver=driver):
+                (self._claude_listening if driver == "claude" else self._opencode_listening)()
+                health = self.call("/api/health", token=tok)[1]
+                self.assertEqual(health["driver"]["tool"], driver)
+                stop = threading.Event()
+
+                def lead():  # the driver: takes each message, reports with a plain reply, ends its turn
+                    while not stop.is_set():
+                        for m in self.chat.pending():
+                            self.chat.ack(m["id"], session)
+                            self.chat.reply(f"Done: {m['text']}.")
+                            self.chat.turn_ended([m["id"]], session)
+                        time.sleep(0.05)
+                with mock.patch.dict(os.environ, shell):
+                    t = threading.Thread(target=lead)
+                    t.start()
+                    try:
+                        first = run(f"fix the parser on {driver}", "--timeout", "30")
+                        again = run("and a changelog line", "--timeout", "30")   # the follow-up
+                    finally:
+                        stop.set()
+                        t.join()
+                    for r, text in ((first, f"fix the parser on {driver}"), (again, "and a changelog line")):
+                        self.assertEqual(r.returncode, 0, r.stderr)
+                        self.assertEqual(r.stdout.strip(), f"Done: {text}.")
+                        self.assertIn(f"[answered by {said}]", r.stderr)
+                    last = re.search(r"\[reply ([^\]]+)\]", again.stderr).group(1)
+                    mid = next(m["id"] for m in self.chat.thread() if m["text"] == "and a changelog line")
+                    self.chat.reply("Later: the agents' branch is in review.", [mid])   # a later report
+                self.chat.turn_ended([], session)                         # that turn took no message
+                later = run("--after", last, "--timeout", "30")
+                self.assertEqual((later.returncode, later.stdout.strip()),
+                                 (0, "Later: the agents' branch is in review."), later.stderr)
+                self.assertIn(f"[answered by {said}]", later.stderr)
+
+    def test_a_report_reaches_the_agent_only_from_the_driver_that_listens_with_both_open(self):
+        # #1363's matrix, #1366: with Claude Code and OpenCode both open on one machine, the one
+        # not listening threaded its plain report onto the listener's in-flight message, sent to
+        # the agent alone and pushed to no phone (#1129's kind): an OpenCode caller has no
+        # CLAUDE_PID, and an OpenCode claim no `parent`, so "unknown" read as the listener
+        tok = self._agent()
+        claude = {"CLAUDECODE": "1", "CLAUDE_PID": str(os.getpid())}
+
+        def asked(text, session):
+            mid = self.call("/api/send", {"text": text}, token=tok)[1]["message"]["id"]
+            self.chat.ack(mid, session)
+            return mid
+
+        def report(shell, text):
+            with mock.patch.dict(os.environ, shell):
+                r = self.chat.reply(text)
+            return r.get("re", []), r.get("to", ["user"]), r.get("driver")
+        self._opencode_listening()                                       # OpenCode listens
+        mid = asked("refactor the parser", "ses_oc1")
+        self.assertEqual(report(claude, "Claude Code's own report."), ([], ["user"], {"tool": "claude"}))
+        self.assertEqual(report({"OPENCODE_SESSION_ID": "ses_oc2"}, "another OpenCode session's"),
+                         ([], ["user"], {"tool": "opencode"}))
+        self.assertEqual(report({"OPENCODE_SESSION_ID": "ses_oc1"}, "On it."),
+                         ([mid], ["my-agent"], {"tool": "opencode", "model": "deepinfra/flash-x"}))
+        self.assertEqual(self.chat.thread()[-1]["turn_by"], "ses_oc1")
+        self.chat.turn_ended([mid], "ses_oc1")
+        self._claude_listening()                                         # then Claude Code listens
+        mid2 = asked("and the docs", "s1")
+        self.assertEqual(report({"OPENCODE_SESSION_ID": "ses_oc1"}, "OpenCode's own report."),
+                         ([], ["user"], {"tool": "opencode", "model": "deepinfra/flash-x"}))
+        self.assertEqual(report(claude, "On it."), ([mid2], ["my-agent"], {"tool": "claude"}))
+        listening = self.call("/api/state", token=tok)[1]["listener"]
+        self.assertEqual((listening["session"], listening["driver"]), ("s1", {"tool": "claude"}))
+
+    def test_an_opencode_listeners_own_report_reaches_the_agent_with_no_heartbeat_to_name_it(self):
+        # the #1366 review, 2026-11-25: an OpenCode claim without `driver`, which no fresh heartbeat
+        # listed (none written, one past 120 s, a session newer than its last beat), read as Claude
+        # Code's, and the listening session's own report went to the user alone: the agent's wait
+        # sat to its timeout. The caller's session matching the claim's is the listener all the same
+        from workbench import models
+        tok = self._agent()
+        me = os.getpid()
+        claim = {"session": "ses_oc1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)}
+        store.write_json(self.chat.chat_dir() / "listener.json", claim)
+        self.assertFalse(list(store.heartbeats()))
+        mid = self.call("/api/send", {"text": "refactor the parser"}, token=tok)[1]["message"]["id"]
+        self.chat.ack(mid, "ses_oc1")
+
+        def report(shell, text):
+            with mock.patch.dict(os.environ, shell):
+                r = self.chat.reply(text)
+            return r.get("re", []), r.get("to", ["user"])
+        self.assertEqual(report({"OPENCODE_SESSION_ID": "ses_oc2"}, "another OpenCode session's"), ([], ["user"]))
+        self.assertEqual(report({"OPENCODE_SESSION_ID": "ses_oc1"}, "On it."), ([mid], ["my-agent"]))
+        store.write_json(self.chat.chat_dir() / "listener.json", {**claim, "driver": "opencode"})
+        self.assertEqual(report({"CLAUDECODE": "1", "CLAUDE_PID": str(me)}, "Claude Code's own report."),
+                         ([], ["user"]))      # a claim that says its driver keeps Claude Code out too
+
+    def test_ask_workbench_asks_a_wait_the_server_cut_again_and_names_after_only_at_the_deadline(self):
         # #1107: the server re-execs itself on a code change (a `wb update`), and a proxy in front
         # answers 502 meanwhile; the client ended at once, exit 1, with a bare error and no
         # `--after` id, so an agent could send its request again and pay for the work twice
         import importlib.util
-        script = Path(__file__).resolve().parent.parent / "skill/agents/claude-workbench/scripts/ask_claude.py"
-        spec = importlib.util.spec_from_file_location("ask_claude_1107", script)
+        script = Path(__file__).resolve().parent.parent / "skill/agents/ask-workbench/scripts/ask_workbench.py"
+        spec = importlib.util.spec_from_file_location("ask_workbench_1107", script)
         ac = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(ac)
         hits, answers = [], []
@@ -31310,7 +31641,7 @@ class WebChat(Base):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{srv.server_address[1]}", "CLAUDE_WB_TOKEN": "wba-x"}
+        env = {"WORKBENCH_URL": f"http://127.0.0.1:{srv.server_address[1]}", "WORKBENCH_TOKEN": "wba-x"}
         with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05):
             answers[:] = ["drop", "502", "reply"]
             out, err = io.StringIO(), io.StringIO()
@@ -31324,22 +31655,22 @@ class WebChat(Base):
                 rc = ac.follow("m1", "done", time.monotonic() + 1)
         self.assertEqual(rc, 1)
         self.assertGreater(len(hits), 1)
-        self.assertIn("ask_claude.py --after m1 waits on", err.getvalue())
+        self.assertIn("ask_workbench.py --after m1 waits on", err.getvalue())
 
-    def test_ask_claude_gives_up_on_a_chat_that_stays_unreachable_long_before_its_deadline(self):
+    def test_ask_workbench_gives_up_on_a_chat_that_stays_unreachable_long_before_its_deadline(self):
         # the #1107 review: retrying a cut wait to the deadline (an hour by default) also covered a
         # chat gone for good (`wb chat off`, the machine asleep, the tailnet down): the agent sat an
         # hour where it got exit 1 at once before; past OUTAGE_MOST in a row it is exit 2 and --after
         import importlib.util
-        script = Path(__file__).resolve().parent.parent / "skill/agents/claude-workbench/scripts/ask_claude.py"
-        spec = importlib.util.spec_from_file_location("ask_claude_1107b", script)
+        script = Path(__file__).resolve().parent.parent / "skill/agents/ask-workbench/scripts/ask_workbench.py"
+        spec = importlib.util.spec_from_file_location("ask_workbench_1107b", script)
         ac = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(ac)
         srv = socket.socket()
         srv.bind(("127.0.0.1", 0))
         port = srv.getsockname()[1]
         srv.close()                                      # nothing listens there: refused, every time
-        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{port}", "CLAUDE_WB_TOKEN": "wba-x"}
+        env = {"WORKBENCH_URL": f"http://127.0.0.1:{port}", "WORKBENCH_TOKEN": "wba-x"}
         err = io.StringIO()
         began = time.monotonic()
         with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05), \
@@ -31349,7 +31680,7 @@ class WebChat(Base):
         self.assertEqual(rc, 2, err.getvalue())
         self.assertLess(time.monotonic() - began, 10)
         self.assertIn("the chat is unreachable", err.getvalue())
-        self.assertIn("ask_claude.py --after m1 waits on later", err.getvalue())
+        self.assertIn("ask_workbench.py --after m1 waits on later", err.getvalue())
 
     def test_the_chats_task_strip_leaves_out_a_task_wb_stop_all_parked(self):
         # #1097: open_tasks listed every task not accepted or discarded, so a review the quit
@@ -31726,7 +32057,8 @@ class WebChat(Base):
         self.assertEqual(self.call(f"/api/wait?after={oid}&timeout=0", token=tok)[0], 404)
         self.assertEqual(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[0], 200)
         self.assertEqual(self.call(f"/api/wait?after={oid}&timeout=0", token=user)[0], 200)
-        self.assertEqual(self.call("/api/health", token=tok)[1], {"api": 1, "listening": True})
+        self.assertEqual(self.call("/api/health", token=tok)[1], {"api": 1, "listening": True,
+                                                                   "driver": {"tool": "claude"}})
 
     def test_an_agents_message_cant_carry_about(self):
         # what a message answers (a pair of screenshots, a take) is the user's to say
@@ -31790,7 +32122,7 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/v1/answer", {"id": "x", "answer": "allow"}, token=user)[0], 404)  # gone (#1350)
 
     def test_every_error_answer_is_one_shape_with_a_code_for_each_kind_of_refusal(self):
-        # #1138: "error" stays the plain line the page and ask_claude.py show; "code" is what a
+        # #1138: "error" stays the plain line the page and ask_workbench.py show; "code" is what a
         # client branches on: a bad token, a revoked one, an agent from another machine, a rate
         # limit, not found and an expired message each its own
         tok = self._agent()
@@ -31878,14 +32210,14 @@ class WebChat(Base):
         self.assertEqual(len({g[1]["message"]["id"] for g in got}), 1)          # four racers, one send
         self.assertEqual([m["text"] for m in self.chat.thread()].count("race"), 1)
 
-    def test_ask_claude_sends_again_after_a_cut_with_one_key_and_exits_2_on_an_expired_message(self):
+    def test_ask_workbench_sends_again_after_a_cut_with_one_key_and_exits_2_on_an_expired_message(self):
         # #1138: a send cut by the chat restarting ended the client with exit 1, and its rerun
         # asked Claude twice; one Idempotency-Key and cid for every try makes the retry safe. A
         # send cut for good exited 1 naming nothing (the review): exit 2 with its key, and the
         # rerun with --key sends the same body, its files' upload ids included
         import importlib.util
-        script = ROOT / "skill/agents/claude-workbench/scripts/ask_claude.py"
-        spec = importlib.util.spec_from_file_location("ask_claude_1138", script)
+        script = ROOT / "skill/agents/ask-workbench/scripts/ask_workbench.py"
+        spec = importlib.util.spec_from_file_location("ask_workbench_1138", script)
         ac = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(ac)
         posts, answers, puts, bodies = [], [], [], []
@@ -31926,7 +32258,7 @@ class WebChat(Base):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{srv.server_address[1]}", "CLAUDE_WB_TOKEN": "wba-x"}
+        env = {"WORKBENCH_URL": f"http://127.0.0.1:{srv.server_address[1]}", "WORKBENCH_TOKEN": "wba-x"}
         with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05):
             answers[:] = ["drop", "502", "ok"]
             self.assertEqual(ac.send("refactor the parser", [], "k-1138")["message"]["id"], "m1")
@@ -31990,9 +32322,9 @@ while True:
 
 
 class AgentMcp(Base):
-    """The agents' MCP server (#1138): skill/agents/claude-workbench/scripts/mcp_server.py, run as
+    """The agents' MCP server (#1138): skill/agents/ask-workbench/scripts/mcp_server.py, run as
     an MCP client runs it, on stdio, against this test's chat server; no network."""
-    SCRIPT = ROOT / "skill/agents/claude-workbench/scripts/mcp_server.py"
+    SCRIPT = ROOT / "skill/agents/ask-workbench/scripts/mcp_server.py"
 
     def setUp(self):
         super().setUp()
@@ -32024,11 +32356,12 @@ class AgentMcp(Base):
         store.write_json(self.chat.chat_dir() / "listener.json",
                          {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
 
-    def _server(self, url=None, token="wba-x"):
-        """The MCP server as a client starts it; rpc(method, params) -> the reply's message."""
-        env = {"PATH": os.environ.get("PATH", ""), "CLAUDE_WB_URL": url or f"http://localhost:{self.port}",
-               "CLAUDE_WB_TOKEN": token}
-        proc = subprocess.Popen([sys.executable, "-I", str(self.SCRIPT)], env=env, text=True,
+    def _server(self, url=None, token="wba-x", script=None, names=("WORKBENCH_URL", "WORKBENCH_TOKEN")):
+        """The MCP server as a client starts it (``script``, else SCRIPT; its variables ``names``);
+        rpc(method, params) -> the reply's message."""
+        env = {"PATH": os.environ.get("PATH", ""), names[0]: url or f"http://localhost:{self.port}",
+               names[1]: token}
+        proc = subprocess.Popen([sys.executable, "-I", str(script or self.SCRIPT)], env=env, text=True,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(lambda: (proc.kill(), proc.wait(), proc.stdout.close(), proc.stderr.close()))
         waiting, lines, ids, lock = {}, queue.Queue(), iter(range(1, 10 ** 6)), threading.Lock()
@@ -32057,31 +32390,77 @@ class AgentMcp(Base):
         rpc.tool, rpc.lines = tool, lines
         return rpc
 
-    def test_the_mcp_server_initializes_and_lists_ask_claude_get_reply_and_list_requests(self):
+    def test_the_mcp_server_initializes_and_lists_ask_workbench_get_reply_and_list_requests(self):
         rpc = self._server()
         init = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                   "clientInfo": {"name": "test", "version": "0"}})["result"]
-        self.assertEqual((init["protocolVersion"], init["serverInfo"]["name"]), ("2025-06-18", "claude-workbench"))
+        self.assertEqual((init["protocolVersion"], init["serverInfo"]["name"]), ("2025-06-18", "ask-workbench"))
         self.assertIn("tools", init["capabilities"])
         rpc("notifications/initialized", notify=True)                    # no reply to a notification
         tools = {t["name"]: t for t in rpc("tools/list")["result"]["tools"]}
-        self.assertEqual(set(tools), {"ask_claude", "get_reply", "list_requests"})
-        self.assertEqual(tools["ask_claude"]["inputSchema"]["required"], ["text"])
+        self.assertEqual(set(tools), {"ask_workbench", "get_reply", "list_requests"})
+        self.assertEqual(tools["ask_workbench"]["inputSchema"]["required"], ["text"])
         self.assertEqual(tools["get_reply"]["inputSchema"]["required"], ["id"])
         self.assertEqual(rpc("ping")["result"], {})
         self.assertTrue(rpc.lines.empty())                               # the notification had none
         self.assertEqual(rpc("tools/call", {"name": "nope"})["error"]["code"], -32602)
         self.assertEqual(rpc("resources/list")["error"]["code"], -32601)
 
-    def test_the_mcp_server_asks_claude_and_gets_the_reply_end_to_end_once_per_key(self):
-        # #1138: ask_claude returns the request's id at once; get_reply says "still working", then
+    def test_the_mcp_server_says_which_driver_listens_and_which_answered(self):
+        # #1366: the tools said "Claude" whichever driver listened; an OpenCode session listening
+        # is named with its model, from the send to the reply its own session wrote
+        from workbench import models
+        tok = self._agent()
+        me = os.getpid()
+        store.write_json(store.beat_path(me), {"tool": "opencode", "pid": me, "ts": time.time(),
+                                               "sessions": {"ses_oc1": {"model": "deepinfra/flash-x"}}})
+        store.write_json(self.chat.chat_dir() / "listener.json",
+                         {"session": "ses_oc1", "pid": me, "start": models._started(me)})
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        r = rpc.tool("ask_workbench", text="add a --json flag")
+        rid = r["structuredContent"]["id"]
+        self.assertIn(f"request {rid}: sent (OpenCode (deepinfra/flash-x) is listening)", r["content"][0]["text"])
+        self.chat.ack(rid, "ses_oc1")
+        with mock.patch.dict(os.environ, {"OPENCODE_SESSION_ID": "ses_oc1"}):
+            self.chat.reply("Done: branch json-flag.")
+        self.chat.turn_ended([rid], "ses_oc1")
+        r = rpc.tool("get_reply", id=rid, wait=0)
+        self.assertEqual((r["structuredContent"]["status"], r["structuredContent"]["driver"]),
+                         ("done", "OpenCode (deepinfra/flash-x)"), r)
+        self.assertIn(f"request {rid}: done, answered by OpenCode (deepinfra/flash-x)", r["content"][0]["text"])
+        listed = rpc.tool("list_requests")
+        self.assertIn("OpenCode (deepinfra/flash-x) is listening.", listed["content"][0]["text"])
+
+    def test_the_skills_path_before_2_2_still_runs_the_client_and_the_mcp_server(self):
+        # #1366: the skill moved to skill/agents/ask-workbench (its name said Claude only); an
+        # install pointed at claude-workbench, with the old variables and the old tool name,
+        # still works
+        old = ROOT / "skill/agents/claude-workbench/scripts"
+        tok = self._agent()
+        env = {"PATH": os.environ.get("PATH", ""), "CLAUDE_WB_URL": f"http://localhost:{self.port}",
+               "CLAUDE_WB_TOKEN": tok}
+        r = subprocess.run([sys.executable, "-I", str(old / "ask_claude.py"), "fix it"], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2, r.stderr)                       # nobody listening: as ever
+        self.assertIn("no driver is listening", r.stderr)
+        rpc = self._server(token=tok, script=old / "mcp_server.py", names=("CLAUDE_WB_URL", "CLAUDE_WB_TOKEN"))
+        init = rpc("initialize", {"protocolVersion": "2025-06-18"})["result"]
+        self.assertEqual(init["serverInfo"]["name"], "ask-workbench")
+        self._listening()
+        r = rpc.tool("ask_claude", text="add a --json flag")             # the tool's old name
+        self.assertFalse(r["isError"], r)
+        self.assertEqual([m["text"] for m in self.chat.thread()], ["add a --json flag"])
+
+    def test_the_mcp_server_asks_the_driver_and_gets_the_reply_end_to_end_once_per_key(self):
+        # #1138: ask_workbench returns the request's id at once; get_reply says "still working", then
         # "waiting on the user" while a dialog of Claude Code's is open, then the reply once done
         tok = self._agent()
         rpc = self._server(token=tok)
         rpc("initialize", {"protocolVersion": "2025-06-18"})
-        r = rpc.tool("ask_claude", text="fix it")
+        r = rpc.tool("ask_workbench", text="fix it")
         self.assertTrue(r["isError"])                                    # nobody listening: nothing sent
-        self.assertIn("Claude isn't listening", r["content"][0]["text"])
+        self.assertIn("no driver is listening", r["content"][0]["text"])
         self.assertEqual(self.chat.thread(), [])
         self._listening()
         keys, handler = [], self.srv.RequestHandlerClass
@@ -32093,17 +32472,17 @@ class AgentMcp(Base):
         mock.patch.object(handler, "do_POST", seen).start()
         self.addCleanup(mock.patch.stopall)
         began = time.monotonic()
-        r = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="retry-1")
+        r = rpc.tool("ask_workbench", text="In ~/src/app: add a --json flag.", key="retry-1")
         self.assertLess(time.monotonic() - began, 10)
         self.assertFalse(r["isError"], r)
         rid = r["structuredContent"]["id"]
         self.assertIn(f"request {rid}: sent", r["content"][0]["text"])
-        again = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="retry-1")
+        again = rpc.tool("ask_workbench", text="In ~/src/app: add a --json flag.", key="retry-1")
         self.assertEqual(again["structuredContent"]["id"], rid)          # a retry under its key lands once
         self.assertEqual([m["id"] for m in self.chat.thread()], [rid])
         self.assertEqual(self.chat.thread()[0]["cid"], "retry-1")
         self.assertEqual(keys, ["retry-1", "retry-1"])
-        self.assertIn("key is 1 to 64", rpc.tool("ask_claude", text="x", key="a b")["content"][0]["text"])
+        self.assertIn("key is 1 to 64", rpc.tool("ask_workbench", text="x", key="a b")["content"][0]["text"])
         r = rpc.tool("get_reply", id=rid, wait=0)
         self.assertEqual(r["structuredContent"]["status"], "still working")
         self.chat.ack(rid, "s1")
@@ -32131,7 +32510,7 @@ class AgentMcp(Base):
         self.assertTrue(listed["listening"])
         self.assertEqual([(q["id"], q["status"]) for q in listed["requests"]], [(rid, "2 replies")])
         # a later request Claude answers on its own: the first is still done, the second has its reply
-        r2 = rpc.tool("ask_claude", text="and a changelog line")["structuredContent"]["id"]
+        r2 = rpc.tool("ask_workbench", text="and a changelog line")["structuredContent"]["id"]
         self.chat.ack(r2, "s1")
         self.chat.reply("Adding it.", [r2])
         self.assertEqual(rpc.tool("get_reply", id=rid, wait=0)["structuredContent"]["status"], "done")
@@ -32166,14 +32545,14 @@ class AgentMcp(Base):
                 return real(h)
             mock.patch.object(handler, name, seen).start()
         self.addCleanup(mock.patch.stopall)
-        first = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="k-1")
+        first = rpc.tool("ask_workbench", text="In ~/src/app: add a --json flag.", key="k-1")
         self.assertFalse(first["isError"], first)
         self.assertFalse(first["structuredContent"]["replayed"])
-        again = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="k-1")
+        again = rpc.tool("ask_workbench", text="In ~/src/app: add a --json flag.", key="k-1")
         rid = first["structuredContent"]["id"]
         self.assertEqual((again["structuredContent"]["id"], again["structuredContent"]["replayed"]), (rid, True))
         self.assertIn("not sent again", again["content"][0]["text"])
-        other = rpc.tool("ask_claude", text="something else", key="k-1")
+        other = rpc.tool("ask_workbench", text="something else", key="k-1")
         self.assertTrue(other["isError"])
         self.assertIn("key k-1 went with another request", other["content"][0]["text"])
         self.assertEqual([m["id"] for m in self.chat.thread()], [rid])     # one send in all
@@ -32193,7 +32572,7 @@ class AgentMcp(Base):
         for may in (self.chat.agent_may, lambda m, p: True):
             with mock.patch.object(handler, "_versioned", lambda h: None), \
                     mock.patch.object(self.chat, "agent_may", may):
-                r = rpc.tool("ask_claude", text="hello")
+                r = rpc.tool("ask_workbench", text="hello")
             self.assertTrue(r["isError"])
             self.assertIn("no /api/v1/", r["content"][0]["text"])
         self.assertEqual(len(self.chat.thread()), 1)                       # nothing sent
@@ -32215,9 +32594,9 @@ class AgentMcp(Base):
             return held(h)
         mock.patch.object(handler, "_wait", counted).start()
         self.addCleanup(mock.patch.stopall)
-        earlier = rpc.tool("ask_claude", text="a request from before")["structuredContent"]["id"]
+        earlier = rpc.tool("ask_workbench", text="a request from before")["structuredContent"]["id"]
         time.sleep(0.01)
-        first = rpc.tool("ask_claude", text="add a --json flag")["structuredContent"]["id"]
+        first = rpc.tool("ask_workbench", text="add a --json flag")["structuredContent"]["id"]
         user = self.chat.send("and the docs please", "user")["id"]
         for i in (user, first):
             self.chat.ack(i, "s1")
@@ -32227,7 +32606,7 @@ class AgentMcp(Base):
         # an earlier request's reply, its turn ended, says nothing of `first`... nor of a request
         # sent after it, not taken yet: still working, held for a new reply, not polled
         time.sleep(0.01)
-        second = rpc.tool("ask_claude", text="and a changelog line")["structuredContent"]["id"]
+        second = rpc.tool("ask_workbench", text="and a changelog line")["structuredContent"]["id"]
         self.chat.reply("About the earlier one: done.", [earlier])
         self.chat.turn_ended([earlier], "s1")
         del waits[:]
@@ -32260,8 +32639,8 @@ class AgentMcp(Base):
             port = sock.getsockname()[1]
         tmp = Path(self.tmp.name)
         out = tmp / "requests-1138.jsonl"
-        calls = [{"name": "claude-workbench_ask_claude", "arguments": {"text": "CANARY-MCP: add a --json flag"}},
-                 {"name": "claude-workbench_list_requests", "arguments": {}}]
+        calls = [{"name": "ask-workbench_ask_workbench", "arguments": {"text": "CANARY-MCP: add a --json flag"}},
+                 {"name": "ask-workbench_list_requests", "arguments": {}}]
         llm = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out),
                                 json.dumps(calls)])
         self.addCleanup(lambda: (llm.kill(), llm.wait()))
@@ -32272,9 +32651,9 @@ class AgentMcp(Base):
                                  "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
                                  "models": {"cap": {"name": "capture", "tool_call": True,
                                                     "limit": {"context": 32768, "output": 1024}}}}},
-            "mcp": {"servers": {"claude-workbench": {
+            "mcp": {"servers": {"ask-workbench": {
                 "type": "local", "command": [sys.executable, str(self.SCRIPT)], "codemode": False,
-                "environment": {"CLAUDE_WB_URL": f"http://localhost:{self.port}", "CLAUDE_WB_TOKEN": tok}}}}}))
+                "environment": {"WORKBENCH_URL": f"http://localhost:{self.port}", "WORKBENCH_TOKEN": tok}}}}}))
         proj = tmp / "proj-1138"
         proj.mkdir()
         # OpenCode in homes of the test's own: never the user's config, database or CLAUDE.md
@@ -32304,7 +32683,7 @@ class AgentMcp(Base):
         self.assertEqual([(m["from"], m["text"]) for m in sent], [("my-agent", "CANARY-MCP: add a --json flag")],
                          r.stdout[-2000:] + r.stderr[-2000:])
         seen = json.dumps([json.loads(line).get("messages") for line in out.read_text().splitlines()])
-        self.assertIn(f"request {sent[0]['id']}: sent (Claude is listening)", seen)   # ask_claude's result
+        self.assertIn(f"request {sent[0]['id']}: sent (Claude Code is listening)", seen)   # ask_workbench's result
         self.assertIn(f"{sent[0]['id']}  ", seen)                                     # list_requests' row
 
     def test_the_mcp_server_refuses_a_chat_url_that_isnt_this_machines_and_sends_nothing(self):
@@ -32334,7 +32713,7 @@ class AgentMcp(Base):
         if mine and not mine.startswith("127."):
             self.assertTrue(m.this_machine(f"http://{mine}:1337"), mine)   # the real check, a real own IP
         rpc = self._server(url="http://192.0.2.1:1337")                  # TEST-NET-1: never reached
-        for name, args in (("ask_claude", {"text": "x"}), ("get_reply", {"id": "m1"}), ("list_requests", {})):
+        for name, args in (("ask_workbench", {"text": "x"}), ("get_reply", {"id": "m1"}), ("list_requests", {})):
             r = rpc.tool(name, **args)
             self.assertTrue(r["isError"])
             self.assertIn("must be this machine's chat", r["content"][0]["text"])
@@ -33098,7 +33477,7 @@ class Top(Base):
         drm = Path(self.tmp.name, "empty")
         drm.mkdir()
         snap = self.top(drm).tick()
-        self.assertEqual(sorted(snap), ["every", "gpus", "queue", "rack", "running", "ts"])
+        self.assertEqual(sorted(snap), ["every", "gpus", "queue", "rack", "running", "runs", "ts"])
         (r,) = snap["running"]
         self.assertEqual({k: r[k] for k in ("task", "model", "label", "phase", "round", "tok_s",
                                              "tok_s_from", "read_tok_s", "context_used",
@@ -33334,7 +33713,7 @@ class Top(Base):
                 time.sleep(0.05)
             self.assertTrue(wait_gone(int((bindir / "pid").read_text()), 10), "nvidia-smi outlived wb top")
         first = json.loads(out.read_text().splitlines()[0])
-        self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "ts"])
+        self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "runs", "ts"])
 
     def test_ctrl_z_gives_the_terminal_back_and_fg_takes_it_again_so_one_q_quits(self):
         # #607: stopped with the alternate screen up and the cursor hidden, and after `fg` the

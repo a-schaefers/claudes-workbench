@@ -92,6 +92,11 @@ export const HOST_LINES: readonly Rule[] = [
   line(', and a run of yours that is headless (`claude -p`, nobody at the terminal).', '.'),
   line("Claude Code's dialogs in that turn", "OpenCode's prompts in that turn"),
   line('(a plan under ~/.claude, another repo)', '(a plan file of yours, another repo)'),
+  // deep workflows (#1278): `ultracode` is Claude Code's keyword, and its run waits in the background
+  line("`ultracode` is Claude's own", "`ultracode` is Claude Code's"),
+  // a Claude Code Workflow beside a flow: OpenCode's driver has no Workflow tool
+  { from: /With `ultracode` and `deepcode` in one prompt,[\s\S]*?never redoes it\.\n/, to: '', files: SKILL },
+  line('run in the background (Bash `run_in_background`)', "run in the background (the shell tool's `background: true`)"),
   // wakes: until the plugin delivers `[workbench]` notices (#1313) the driver waits with `wb wait`,
   // never for a wake that won't come (the #1335 review, 2026-11-25); #1313 rewrites this line
   line("**Don't poll.** With the workbench mod loaded the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck, failed) — end your turn and wait for it; an agent's question can't wait, so it reaches you mid-turn too: answer it then. Without the mod, run `wb wait <name>` with Bash `run_in_background: true` and act on its notification. If the context says wakes are off (the plugin's wake setting), none will come: tell the user it runs, and wait only if they ask.",
@@ -115,6 +120,11 @@ export const HOST_LINES: readonly Rule[] = [
   line("and each run spends Claude's turns", 'and each run starts Claude Code headless (`claude -p`), so it needs Claude Code and spends its turns', ['reference/driving.md']),
   { from: /\n## Headless: a scheduled run\n[\s\S]*?(?=\n## )/, to: '', files: ['reference/driving.md'] },
 
+  // the suites wb patch runs: the mod's are Claude Code's mod/ tests, never this plugin's
+  line("(claude for the mod's,", "(claude for the Claude Code mod's,", ['reference/patching.md']),
+  line("(the mod's, the kernel's)", "(the Claude Code mod's, the kernel's)", ['reference/patching.md']),
+  line("(each directory's: the mod's,", "(each directory's: the Claude Code mod's,", ['reference/patching.md']),
+
   // reference/models.md
   line("with Claude Code's `!` prefix", "with OpenCode's `!` prefix", ['reference/models.md']),
   line('Claude sets it up on request;', 'You set it up on request;', ['reference/models.md']),
@@ -132,12 +142,12 @@ export const HOST_LINES: readonly Rule[] = [
   { from: /`\/workbench-quit-and-hand-back-claude`/g, to: '`/workbench-quit-and-hand-back`', files: SKILL },
   { from: /Bash\s+`run_in_background: true`/g, to: "the shell tool's `background: true`", files: '*' },
   { from: /`run_in_background: true`/g, to: '`background: true`', files: '*' },
-  { from: /Bash's\s+(?:2|two)\s+minutes/g, to: "the shell tool's 2-minute timeout", files: '*' },
+  { from: /Bash's\s+(?:2|two)(?:\s+minutes|-minute\s+default)/g, to: "the shell tool's 2-minute timeout", files: '*' },
   { from: /\bBash call\b/g, to: 'shell call', files: '*' },
   { from: /\byour Bash\b/g, to: 'your shell', files: '*' },
   // the mod is Claude Code's; this plugin is OpenCode's (never `mod/`, nor the mod's own tests)
   { from: /\b(the|The|workbench) mod\b(?!\/|'s tests)/g, to: '$1 plugin', files: '*' },
-  { from: /\bmod's(?! tests)/g, to: "plugin's", files: '*' },
+  { from: /(?<!Claude Code )\bmod's(?! tests)/g, to: "plugin's", files: '*' },
   // the reference parts are skills of their own on OpenCode ("read" one becomes "load": `loads`)
   { from: /`reference\/(\w+)\.md`\s+beside\s+this\s+file/g, to: 'the `workbench-$1` skill', files: '*' },
   { from: /`reference\/(\w+)\.md`/g, to: 'the `workbench-$1` skill', files: '*' },

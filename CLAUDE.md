@@ -90,6 +90,10 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   one-shot approval (`approved`); `use`, the Agents switch (`effective_via`); `busy`, the busy-GPU
   opt-in (`busy_api`); `resolve`, wb start's model.
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
+- `runs.py`: deep workflows (#1278): `wb run`, `wb flow import`, flows (`agent/flows/`, `$WB_FLOWS`), the detached
+  driver starting each item with `wb start` (its items' notices its own only while it lives), run notices, the keywords' reference (`keywords`, `tests/fixtures/
+  keywords.json`). `cards.py`: role cards (`agent/roles/`, `$WB_ROLES`). `schema.py`: a report task's
+  object, checked outside the lane (ARCHITECTURE.md, *Deep workflows*).
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
 - `spend.py`, `savings.py`: a task's cost to Claude, and against writing it (the score GPU-only; API dollars apart, `api_totals`). `meter.py`: an API
@@ -102,7 +106,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
-- `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API (`ask_claude.py`; `mcp_server.py`, the same over MCP, loopback only). `mod/`: the plugin (`hooks/register.tsx`, with
+- `skill/workbench/`: the `/workbench` procedure; `skill/agents/ask-workbench/`: other agents' skill for the chat's API, either driver (`ask_workbench.py`; `mcp_server.py`, the same over MCP, loopback only; `claude-workbench/`, its old path, forwards). `mod/`: the plugin (`hooks/register.tsx`, with
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `kernel/`: the PureScript kernel (`BOUNDARY.md`, its contract), built by `scripts/kernel.py` (its toolchain
   fetched by hash into `~/.cache/workbench/kernel`) into the committed `mod/hooks/kernel.js`, imported only by
@@ -180,7 +184,7 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`,
 `WB_OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`, `WB_SOURCE` (`wb patch init`'s clone, else
 `~/.local/share/workbench/source`), `WB_ROUTES` (the roles; `wb start`'s local-only check reads it), `WB_AGENTS_MD`
-(the user's file for agents; the tests' own) (relative or `~` allowed: a new
+(the user's file for agents; the tests' own), `WB_FLOWS`, `WB_ROLES` (the user's flows and role cards) (relative or `~` allowed: a new
 one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; `WB_ACTOR` (the chat server's wb
 children only: `web` stamps a role change `by: "web"`); the agent's `WB_TASK` (ranked first: a call with it
 is the agent's, `store.caller_kind`, #1310), `WB_RUN`,

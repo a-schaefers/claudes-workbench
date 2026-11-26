@@ -33,13 +33,16 @@ test('every host line still matches the Claude Code text it rewrites: a reworded
 
 test("OpenCode's copy has no run_in_background, no $CLAUDE_CODE_SESSION_ID, and Claude only in Claude Code", () => {
   expect(offenders(/run_in_background/)).toEqual([])
-  expect(offenders(/CLAUDE_CODE_SESSION_ID|CLAUDE_CONFIG_DIR|\$ARGUMENTS/)).toEqual([])
+  expect(offenders(/CLAUDE_CODE_SESSION_ID|CLAUDE_CONFIG_DIR/)).toEqual([])
+  // the skill's own arguments are Claude Code's; a command file's `$ARGUMENTS` (deep.md's flow
+  // import) is both hosts' word
+  expect(offenders(/\$ARGUMENTS/).filter((l) => l.startsWith('prompt:'))).toEqual([])
   // "Claude Code" may wrap at a line end ("a restart of Claude\nCode"): test the whole text
   const claude = Object.entries(OPENCODE).flatMap(([name, text]) =>
     [...text.matchAll(/Claude(?!\s+Code)/g)].map((m) => `${name}: …${text.slice(Math.max(0, (m.index ?? 0) - 40), (m.index ?? 0) + 20)}…`))
   expect(claude).toEqual([])
   // nor Claude Code's tools, plan mode, the mod, its hand-back or the reference files' paths
-  expect(offenders(/AskUserQuestion|ExitPlanMode|plan mode|\bBash call|your Bash|Bash's|hand-back-claude|reference\/\w+\.md|beside this file/)).toEqual([])
+  expect(offenders(/AskUserQuestion|ExitPlanMode|plan mode|your own Workflow|\bBash call|your Bash|Bash's|hand-back-claude|reference\/\w+\.md|beside this file/)).toEqual([])
   expect(offenders(/\b(the|The|workbench) mod\b(?!\/|'s tests)/)).toEqual([])
 })
 
