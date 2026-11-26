@@ -8740,11 +8740,12 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     Workbench's panel opens in a TUI (`ctx.storage.memory("splash")`'s `played`, which a plugin
     reload keeps; `replaySplash(host)` arms it again, for the mode's end as the mod's `splashed`
     atom) unless `<home>/splash.json` says off, then the page. `mountSplash(host, home, page?,
-    target?)`: one `ui.slot` claim, `append` to `session.panel`, shown for the panel named `PANEL`
+    target?, watch?)`: one `ui.slot` claim, `append` to `session.panel`, shown for the panel named `PANEL`
     (`workbench`, the name `pane.tsx`'s `ui.panel.open` uses): the page after the splash, the Tasks
     page's when `mountPane` passes it (with its `target(rows, cols)`, given the panel's size, where
     its apprentice and modeline are, so the words fall into the modeline's row), else the
-    apprentice resting at the panel's bottom left.
+    apprentice resting at the panel's bottom left; `watch`, the panel's input as it changes while
+    it shows (null once it closes), for `pane.tsx`'s keyboard hand-back.
     Tokens become `ctx.theme`'s colours: `accent` the theme's accent hue at step 400
     (`theme.hue.accent[400]`, the step of its feedback colours; the primary action's background
     is `transparent` in OpenCode's own theme, seen live), the rest `text.feedback.<kind>.base` and
@@ -8805,6 +8806,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     the web app's link for the modeline, asked as the panel draws (the page's opening, each of the
     splash's layouts) at most once a `LINK_MS`, and again `LINK_MS` after each answer while the
     panel shows (a panel opened with the web app down said so until it was reopened, #1518).
+    `PromptFocus`: `want(on)` at an open, `due(focused)` true the once the panel has the keyboard
+    after an open that wanted the prompt to keep it (#1509); `FOCUS_PROMPT`, `pane.focus.left`.
     `Landing`: whether the panel opens as the TUI comes to a session, `see(sessionID, agent)` true
     once an arrival when the agent is `workbench` (undefined: not known yet, asked again);
     `settle()` once an agent selection on screen decided it (#1517).
@@ -8832,7 +8835,13 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     2 s only while the page is drawn (closing the panel stops it, #1332); one loop, a press starts
     it again at once and drops an answer to an earlier one, so a transcript still on its way never
     covers the diff asked for after it (the live check, 2026-11-26). Escape closes the panel while
-    it has the keyboard. The followed task is tasks.ts's `focusOf`, as the mod's: the one pressed, else the
+    it has the keyboard. OpenCode's panel host takes the keyboard as it draws a panel (as for its
+    `/diff`): an open the user pressed for keeps it there, but an open at the mode's start (the
+    agent's selection, an arrival) hands it back to the prompt once the panel has it, by
+    dispatching OpenCode's own `pane.focus.left` (`FOCUS_PROMPT`, `PromptFocus`; through
+    `mountSplash`'s `watch`, the splash's time too): what was typed after `/workbench` went nowhere
+    until Esc (#1509). While the panel has it beside the session, its top row says the way back
+    (`<keys> focus prompt · esc close`, the keys `keymap.shortcuts` gives, as OpenCode's diff panel). The followed task is tasks.ts's `focusOf`, as the mod's: the one pressed, else the
     one followed while it runs, else the newest that runs, then the newest queued, then the one
     waiting for its reviewer that moved last.
   - `children.ts`, `children-tui.ts` (#1331, the host-shape decision's "imported child sessions at

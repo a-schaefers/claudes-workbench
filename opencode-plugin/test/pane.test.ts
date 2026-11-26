@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { AGENT, capOf, COMMAND, diffLines, LINK_MS, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
   WorkbenchPane, type Files, type PaneTask } from '../pane.ts'
-import { CHANGE, driverRow, footer, Landing, LinkPoll, mine, MODELS, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target,
+import { CHANGE, driverRow, FOCUS_PROMPT, footer, Landing, LinkPoll, mine, MODELS, modelineOf, panelRows, Poll, PromptFocus, runOf, scoped, separator, sidebar, target,
   type Here } from '../pane-view.ts'
 import { ROWS } from '../../mod/hooks/apprentice.ts'
 import { kernel } from '../../mod/hooks/core.ts'
@@ -252,6 +252,20 @@ test('a session already on Workbench opens the panel as the TUI comes to it, onc
   expect(settled.see('ses_c', undefined)).toBe(false)
   settled.settle()                                     // the agent selected on screen before its info came
   expect(settled.see('ses_c', AGENT)).toBe(false)
+})
+
+test('after the mode\'s start opens the panel, the keyboard goes back to the prompt once, through OpenCode\'s own command (#1509)', () => {
+  // OpenCode's panel host focuses a panel as it draws it, so what was typed after /workbench went
+  // nowhere until Esc (2026-11-26); a press that opens it (the palette, the footer) keeps that
+  expect(FOCUS_PROMPT).toBe('pane.focus.left')
+  const f = new PromptFocus()
+  expect(f.due(true)).toBe(false)                       // an open the user pressed for: the panel keeps it
+  f.want(true)
+  expect(f.due(false)).toBe(false)                      // drawn, not focused yet
+  expect([f.due(true), f.due(true)]).toEqual([true, false])  // focused: handed back, once
+  f.want(true)
+  f.want(false)                                        // closed before it took the keyboard
+  expect(f.due(true)).toBe(false)
 })
 
 const task = (name: string, phase: string, more: Partial<PaneTask> = {}): PaneTask => ({

@@ -68,6 +68,25 @@ export class LinkPoll {
   stop() { this.stopped = true; if (this.timer !== undefined) this.timers.clear(this.timer) }
 }
 
+/** OpenCode's own command that gives the keyboard back to the prompt beside a panel
+ * (session-frame.tsx; `<leader>left` by default), the one its diff panel shows. */
+export const FOCUS_PROMPT = 'pane.focus.left'
+
+/** Where the keyboard goes when the panel opens: OpenCode's panel host takes it, as for its own
+ * /diff, which suits an open the user asked for (the palette, the footer, the sidebar), but after
+ * /workbench or the agent picker what was typed next went nowhere until Esc (#1509, 2026-11-26).
+ * `want(true)` at such an open; `due(focused)` once the panel is drawn: true the once it has
+ * taken the keyboard, to hand it back (FOCUS_PROMPT). */
+export class PromptFocus {
+  private wanted = false
+  want(on: boolean) { this.wanted = on }
+  due(focused: boolean): boolean {
+    if (!this.wanted || !focused) return false
+    this.wanted = false
+    return true
+  }
+}
+
 /** Whether the panel opens as the TUI comes to a session (#1517): once for each arrival, when
  * the session's agent is Workbench, as on `opencode -s` of a Workbench session or a new TUI on
  * one, where OpenCode publishes no agent selection (the agent is already it) and the panel, the
