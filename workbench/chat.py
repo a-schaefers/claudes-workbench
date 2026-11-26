@@ -380,6 +380,14 @@ def set_reach(to: str, port: int = PORT) -> dict:
 def https_served(port: int) -> bool | None:
     """Whether `tailscale serve` puts https in front of the chat's ``port`` here: True, False, or
     None when it can't be told (no CLI, an answer it can't read)."""
+    site = served_site(port)
+    return None if site is None else bool(site)
+
+
+def served_site(port: int) -> str | None:
+    """The `tailscale serve` site ("<name>:<https port>") proxying to the chat's ``port`` here, ""
+    for none, None when it can't be told. Reach `local` leaves it serving the tailnet, and wb said
+    "this machine only" (#1512, 2026-11-26): its callers name it and the command that stops it."""
     cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin" and os.path.isfile(TAILSCALE_APP)
                                         else None)
     if not cli:
@@ -392,12 +400,12 @@ def https_served(port: int) -> bool | None:
     if not isinstance(doc, dict):
         return None
     targets = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    for site in (doc.get("Web") or {}).values():
+    for name, site in (doc.get("Web") or {}).items():
         for h in ((site or {}).get("Handlers") or {}).values() if isinstance(site, dict) else ():
             proxy = str((h or {}).get("Proxy") or "") if isinstance(h, dict) else ""
             if any(proxy.rstrip("/").endswith(t) for t in targets):
-                return True
-    return False
+                return str(name)
+    return ""
 
 
 _tailnet = {"at": float("-inf"), "name": ""}

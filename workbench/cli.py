@@ -7550,6 +7550,20 @@ def reach_hint() -> str:
         return ""
 
 
+def still_served(port: int) -> tuple[str, str] | None:
+    """`tailscale serve`'s https in front of the web app on ``port``, as (its URL, the command that
+    stops it), else None: reach `local` drops only the bind, and wb said "this machine only" while
+    every tailnet device still opened the app (#1512, 2026-11-26)."""
+    site = chat.served_site(port)
+    if not site:
+        return None
+    name, _, https = site.rpartition(":")
+    if not name or not https.isdigit():
+        name, https = site, "443"
+    return (f"https://{name}/" if https == "443" else f"https://{name}:{https}/",
+            f"tailscale serve --https={https} off")
+
+
 def chat_reach(to: str | None, port: int) -> None:
     """`wb chat reach [local|tailnet]` (#1355): who opens the web app. No value: which it is. A
     change writes chat.json's `bind` (chat.set_reach), which the running server rebinds to within
@@ -7560,8 +7574,10 @@ def chat_reach(to: str | None, port: int) -> None:
             now = chat.reach()
         except chat.ConfigError as e:
             die(str(e))
-        print(f"web app reach: {now}" + {"local": " (this machine only)", "tailnet": " (this machine and your tailnet)",
-                                          "custom": " (chat.json's own bind)"}[now])
+        still = still_served(port) if now == "local" else None
+        print(f"web app reach: {now}" + (f", but tailnet https via tailscale serve ({still[0]})" if still else
+                                          {"local": " (this machine only)", "tailnet": " (this machine and your tailnet)",
+                                           "custom": " (chat.json's own bind)"}[now]))
         return
     try:
         got = chat.set_reach(to, port)
@@ -7570,8 +7586,12 @@ def chat_reach(to: str | None, port: int) -> None:
     except chat.ConfigError as e:
         die(str(e))
     if to == "local":
-        print("web app reach: local (this machine only)" + ("" if got["from"] == "local" else
-              f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"))
+        drops = "" if got["from"] == "local" else f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"
+        if (still := still_served(port)):  # settings.REACH_LOCAL_HELP's cue: `still serves`
+            print(f"web app reach: local{drops}, but `tailscale serve` still serves it to your tailnet at {still[0]}: "
+                  f"`{still[1]}` stops that")
+        else:
+            print(f"web app reach: local (this machine only){drops}")
         return
     ts = got["ts"]
     name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts["ip"]

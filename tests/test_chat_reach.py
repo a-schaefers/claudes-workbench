@@ -73,7 +73,8 @@ class Reach(Base):
 
     def test_tailnet_binds_the_tailnet_too_keeps_the_users_other_keys_and_says_the_name_to_open(self):
         self.conf.write_text(json.dumps({"hosts": ["laptop"]}))
-        self.assertEqual(run_wb("chat", "reach"), "web app reach: local (this machine only)\n")
+        with self.without_tailscale():  # nor a real one's serve (#1512)
+            self.assertEqual(run_wb("chat", "reach"), "web app reach: local (this machine only)\n")
         with self.with_tailscale():
             out = run_wb("chat", "reach", "tailnet", "--port", "1400")
             self.assertEqual(json.loads(self.conf.read_text()), {"hosts": ["laptop"], "bind": ["127.0.0.1", "tailscale"]})
@@ -130,9 +131,29 @@ class Reach(Base):
                     for s in servers:
                         s.server_close()
 
+    def test_local_with_tailscale_serve_still_in_front_names_the_https_and_the_command_that_stops_it_1512(self):
+        # #1512 (2026-11-26): `local` drops only the bind, and wb said "this machine only" while the
+        # `tailscale serve` it had advised still served the app to every tailnet device
+        self.conf.write_text(json.dumps({"bind": chat.TAILNET_BIND}))
+        with self.with_tailscale(FAKE_TS_SERVE="1400"):
+            out = run_wb("chat", "reach", "local", "--port", "1400")
+            now = run_wb("chat", "reach", "--port", "1400")
+        self.assertEqual(out, f"web app reach: local; the server drops the tailnet within {chat.REPLAN_EVERY} s, but "
+                              f"`tailscale serve` still serves it to your tailnet at https://{NAME}/: "
+                              "`tailscale serve --https=443 off` stops that\n")
+        self.assertEqual(now, f"web app reach: local, but tailnet https via tailscale serve (https://{NAME}/)\n")
+        self.assertEqual(json.loads(self.conf.read_text()), {})                 # the bind still dropped
+        [row] = self.changes()
+        self.assertEqual((row["from"], row["to"]), ("tailnet", "local"))
+        self.assertEqual(row["help"], settings.REACH_LOCAL_HELP.format(said=out.strip()))
+        self.assertIn("run it only on their yes", row["help"])
+        with self.with_tailscale():                                              # serve stopped: here alone
+            self.assertEqual(run_wb("chat", "reach", "--port", "1400"), "web app reach: local (this machine only)\n")
+
     def test_local_drops_the_bind_and_a_bind_of_the_users_own_reads_custom(self):
         self.conf.write_text(json.dumps({"bind": ["127.0.0.1", "tailscale"], "hosts": ["laptop"]}))
-        out = run_wb("chat", "reach", "local")
+        with self.without_tailscale():  # nor a real one's serve (#1512)
+            out = run_wb("chat", "reach", "local")
         self.assertEqual(out, f"web app reach: local (this machine only); the server drops the tailnet within "
                               f"{chat.REPLAN_EVERY} s\n")
         self.assertEqual(json.loads(self.conf.read_text()), {"hosts": ["laptop"]})
