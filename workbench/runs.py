@@ -1215,6 +1215,15 @@ def attempt_label(key: str) -> str:
     return "a" + key.rsplit("#a", 1)[1] if "#a" in key else key
 
 
+def _task_diff(t: store.Task) -> str:
+    """A code item's change since its base as wb accept --include commits it: the gitignored files
+    the coder wrote too (runner.ignored_to_commit), as the review notice and wb diff show them. The
+    reviewer's {diff} and the chooser's {diffs} left a lib/util.py out, judged on part of the change
+    (#1547, 2026-11-26)."""
+    from . import runner
+    return gitops.diff(t.worktree, t.spec["base"], force=runner.ignored_to_commit(t))
+
+
 def _diffs_of(run: Run, stage: dict, it: Item) -> str:
     """{diffs}: each attempt's change at the item, labelled a1..aN with its task and tests, the
     green ones alone when two or more are (said), each cut to its share of CUTS["diff"]. best-of
@@ -1226,7 +1235,7 @@ def _diffs_of(run: Run, stage: dict, it: Item) -> str:
     parts = []
     for lab, t, ok in rows:
         try:
-            d = gitops.diff(t.worktree, t.spec["base"]) if t.worktree.is_dir() else ""
+            d = _task_diff(t) if t.worktree.is_dir() else ""
         except (gitops.GitError, KeyError) as e:
             d = f"(no diff: {e})"
         d = d if len(d) <= share else d[:share] + f"\n[… {len(d) - share:,} characters cut]"
@@ -1284,7 +1293,7 @@ def _spec_of(run: Run, stage: dict, it: Item) -> str:
         t = store.Task(it.input["task"])
         if "{diff}" in prompt:
             try:
-                diff = gitops.diff(t.worktree, t.spec["base"]) if t.exists and t.worktree.is_dir() else ""
+                diff = _task_diff(t) if t.exists and t.worktree.is_dir() else ""
             except (gitops.GitError, KeyError) as e:
                 diff = f"(no diff: {e})"
             diff = f"```diff\n{diff}\n```" if diff else "(no changes)"

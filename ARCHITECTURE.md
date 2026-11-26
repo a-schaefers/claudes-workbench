@@ -9841,7 +9841,9 @@ an object of `runs.PARAM_KEYS` `{type, description, default, choices, optional}`
 `max_items` (`MAX_ITEMS` 200 distinct items, the rest `not_run`, named; a refix's reviews of one change, `1`,
 `1~r1`, …, count once, and an item started is never cut: #1484), `claude`, `final`, and `prompt` (the item's spec, by
 default `{item}`; `runs.render` only substitutes, an object as fenced JSON, each place cut at `runs.CUTS`, said).
-Over a code stage (`runs.CODE_PLACES`) a report's prompt may carry `{diff}` and `{report}`: the reviewed round's
+Over a code stage (`runs.CODE_PLACES`) a report's prompt may carry `{diff}` and `{report}`: the change since the
+task's base with the ignored files `--include` commits (`runs._task_diff`, `runner.ignored_to_commit`; `{diffs}`'s
+too: both left a coder's `lib/util.py` out, #1547), and the reviewed round's
 report (`store.Task.report`: the coder's summary and test line, `runs._code_report`), so a review after a refix
 reads the coder's "done, or declined with why" (the shipped build, fix and best-of reviews carry it; #1134's
 study found reasoned declines asked again until `max` ran out). **A batch** (`batch` N): each member is

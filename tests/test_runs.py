@@ -1244,6 +1244,34 @@ class Runs(Base):
         for n in (1, 2, 3):
             run_wb("discard", f"bo-code-{n}")
 
+    def ignore_lib(self):
+        (self.repo / ".gitignore").write_text("lib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore lib"], check=True)
+
+    def test_a_reviewer_and_a_chooser_read_the_gitignored_files_the_coder_wrote_which_accept_commits(self):
+        # #1547 (2026-11-26): {diff} and {diffs} were git's own view, so a coder's lib/util.py under
+        # a .gitignore's lib/ was in neither while wb accept --include commits it: the reviewer and
+        # the chooser judged part of the change
+        self.ignore_lib()
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({f"{r}-code-{n}": "shellwrite"
+                                                          for r, n in (("bxi", 1), ("boi", 1), ("boi", 2), ("boi", 3))})
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Review this": {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"},
+            "Pick the best attempt": {"best": "a1", "ranking": ["a1", "a2", "a3"], "why": "a1"}})
+        for name, flow in (("bxi", "build"), ("boi", "best-of")):
+            run_wb("run", "start", name, "--flow", flow, "--param", "request=Write 42 to answer.txt via main.py",
+                   "--repo", str(self.repo))
+        for name in ("bxi", "boi"):
+            self.assertEqual(self.wait_run(name, ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        review = store.Task("bxi-review-1").round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn("+++ b/lib/util.py", review.split("The change:")[1])
+        (pick,) = [n for n in runs.run_tasks(runs.Run("boi")) if n.startswith("boi-choose-")]
+        chooser = store.Task(pick).round_dir(1).joinpath("prompt.md").read_text()
+        self.assertEqual(chooser.count("+++ b/lib/util.py"), 3, chooser)
+        for n in ("bxi-code-1", "boi-code-1", "boi-code-2", "boi-code-3"):
+            run_wb("discard", n)
+
     def test_a_best_of_attempt_discarded_as_another_was_accepted_is_not_scored_as_the_models_rejected_work(self):
         # #1473 (the #1373 audit, 2026-11-26): wb run close wants every attempt accepted or
         # discarded, and each losing attempt's row was a judged discard with credit 0, so every
