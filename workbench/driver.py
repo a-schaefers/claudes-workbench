@@ -33,6 +33,10 @@ CLAUDE_CODE = "Claude Code (fixed)"
 MODEL_MAX = 256      # an OpenCode id longer than this isn't one the plugin should hand in
 SKILL = Path(__file__).resolve().parent.parent / "skill" / "workbench" / "SKILL.md"
 BYTES_PER_TOKEN = 4  # a rough guess, as the procedure's size is said: about, never exactly
+# What a Workbench session's every request carries beside SKILL.md: OpenCode's own prompt and
+# tools and the agent's additions (skill.ts). Measured on OpenCode 2.4.1 with a 32K Ollama model:
+# the first request 27,822 input tokens, SKILL.md 16,860 (#1487, 2026-11-26).
+DRIVER_BASE_TOKENS = 11_000
 
 
 def _num(v) -> bool:
@@ -157,6 +161,22 @@ def _window(m) -> int | None:
     return int(n) if _num(n) and n > 0 else None
 
 
+def _input_window(m) -> int:
+    """The input window OpenCode compacts against (core/src/session/compaction.ts inputWindow,
+    opencode-plugin/upkeep.ts's twin): `limit.input` and `limit.context`, the smaller of two."""
+    limit = ((m.config or {}).get("limit") or {}) if m is not None else {}
+    c, i = (int(v) if _num(v) and v > 0 else 0 for v in (limit.get("context"), limit.get("input")))
+    return min(i, c) if i and c else i or c
+
+
+def auto_ceiling(window: int) -> int:
+    """OpenCode's automatic compaction point for an input window (upkeep.ts `autoCeiling`, its
+    calculateCeiling with no `buffer`): 15% kept free, at least 16K when the window holds 32,000."""
+    if window <= 0:
+        return 0
+    return window - max(window * 15 // 100, 16_000 if window >= 32_000 else 0)
+
+
 def agents_models(doc: dict | None = None) -> dict[str, list[str]]:
     """The models the agents run on now, each with its roles: a role on API its API model, on
     the GPU its pin, else the router's pick for its size (router.choose, as wb start's). Empty
@@ -224,7 +244,17 @@ def notes(mid: str, m, kind: str, where: str | None) -> list[dict]:
                 f"the driver {mid} isn't a GPU model wb finds here, so this conversation, the code "
                 f"in it included, goes to {who}; a GPU driver in /models keeps it on this machine")})
     window, skill = _window(m), skill_tokens()
-    if window and skill and skill >= context.FIXED_SHARE * window:
+    # #1487 (2026-11-26): a 32K or 40K local driver never answered in Workbench mode on OpenCode:
+    # the procedure and OpenCode's own prompt are over its compaction point, so every request
+    # compacts again; said plainly, as the old note's "reviews more at once" hid it
+    fixed, ceiling = skill + DRIVER_BASE_TOKENS, auto_ceiling(_input_window(m))
+    if skill and ceiling and fixed >= ceiling:
+        out.append({"key": f"fit:{mid}", "text": (
+            f"the driver {mid}'s window can't hold the Workbench procedure: OpenCode compacts at "
+            f"about {round(ceiling / 1000)}K tokens, and the procedure with OpenCode's own prompt "
+            f"takes about {round(fixed / 1000)}K of every request, so every request will compact "
+            "and none will answer; pick a model with a 64K window or more in /models")})
+    elif window and skill and skill >= context.FIXED_SHARE * window:
         out.append({"key": f"small:{mid}", "text": (
             f"the driver {mid} has a {window // 1024}K window, and the /workbench procedure alone "
             f"takes about {round(skill / 1000)}K tokens of it before any diff: a driver with a "

@@ -2844,7 +2844,7 @@ async function deliver($: any, now: number) {
 // A run's own notices (#1278's S9: run_checkpoint, run_done, run_paused, run_stopped, run_failed;
 // rows with `run` and no `task`, runs.Run.notify): the one wake a run gives, to the session it is
 // `mine` to as a task's is (run.json: the session that ran `wb run start`, else by directory: a
-// scheduled run's is the session near its repo in the morning, however old its notice: a run has no
+// scheduled run's is the session near its repo in the morning, its notice due twelve hours: a run has no
 // rewake, core.ts runNoticesDue, #1491), once (`wb ack --run`, the
 // compare-and-set `wb wait <run>` shares), and only while still true, the run in the phase it
 // was raised in (core.ts runNoticePlan). Its text is the wake whole: it opens `[workbench] Run

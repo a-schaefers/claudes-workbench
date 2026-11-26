@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import * as core from '../../mod/hooks/core.ts'
+import { ChatLane, lane } from '../chat.ts'
 import { autoCeiling, AWAY_NOTE, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openRuns, openTasks, promptTokens, routesSaid, Upkeep,
   TASKS_NOTE, upkeep, WAKE_OFF_NOTE, WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
 import { CLAUDE_CODE } from '../../mod/hooks/story.ts'
@@ -229,6 +230,31 @@ test('a prompt the user typed is them back at the terminal: that turn gets no we
   await stop!()
 })
 
+// #1492 (2026-11-26): `back` asked whether a TUI showed the session, but the TUI shows a new
+// session only after its first prompt, so a user back from the phone typing in a new session got
+// the away block telling the driver to answer on the phone
+test('a prompt typed in a new session no TUI has shown yet, with the chat lane up, gets no web-chat block', async () => {
+  const w = world({ [`${HOME}/chat/away.json`]: JSON.stringify({ at: 999 }) }, { 'chat away': 'away' })
+  const { host, calls } = entriesHost()
+  const hooks = new Map<string, (e: unknown) => unknown>()
+  ;(host.session as { hook: unknown }).hook = async (name: string, cb: (e: unknown) => unknown) => {
+    hooks.set(name, cb)
+    return { dispose: async () => {} }
+  }
+  ;(host.session as { get: unknown }).get = async () => ({ data: { agent: 'workbench', location: { directory: '/r' } } })
+  ;(host as { options: unknown }).options = { env: { WB_HOME: HOME } }
+  // the lane chat() always makes on this server, which no TUI has told of ses_new
+  lane(() => new ChatLane({ run: async () => ({ ok: true, out: '' }), read: () => undefined, size: () => -1, now: () => 1, pid: 1, home: HOME }))
+  try {
+    const stop = await upkeep(host, core, w.io)
+    await hooks.get('prompt')!({ sessionID: 'ses_new', prompt: { text: 'carry on' } })
+    expect(calls.filter(c => c.startsWith('put ')).map(c => c.slice(0, c.indexOf(':')))).toEqual(['put workbench-mode'])
+    await stop!()
+  } finally {
+    delete (globalThis as Record<string, unknown>).__workbenchChatLane
+  }
+})
+
 test("the workbench-wake block says wakes are off while the plugin's wake option is off, in the mode or with a task open", async () => {
   const w = world({}, { status: 't1  running' })
   const { host, calls } = entriesHost()
@@ -355,6 +381,20 @@ test("a session's open tasks are those wb start recorded for it, active or waiti
   w.files[`${HOME}/tasks/e/status.json`] = JSON.stringify({ phase: RUNNING })
   w.files[`${HOME}/tasks/e/task.json`] = JSON.stringify({ name: 'e', session: 's1', bench: true })
   expect(openTasks(core, w.io, HOME, 's1').map(t => t.name)).toEqual(['a', 'b'])
+})
+
+test('a task that records no session is the open task of a session near it by directory, never one elsewhere or in ~ (#1493)', () => {
+  // a `wb start` typed in a terminal, or a scheduled flow's: notices.ts wakes the session in its
+  // repo for it, and the session's context names it (wb status as the session, in its directory)
+  const w = world({})
+  task(w.files, 'mine', RUNNING)
+  w.files[`${HOME}/tasks/t9/status.json`] = JSON.stringify({ phase: WAITING })
+  w.files[`${HOME}/tasks/t9/task.json`] = JSON.stringify({ name: 't9', cwd: '/src/app', repo: '/src/app' })
+  const at = (dir: string) => openTasks(core, w.io, HOME, 's1', { dir, home: '/home/u', fold: false }).map(t => t.name)
+  expect(at('/src/app/web')).toEqual(['mine', 't9'])
+  expect(at('/src/other')).toEqual(['mine'])
+  expect(at('/home/u')).toEqual(['mine'])
+  expect(openTasks(core, w.io, HOME, 's1').map(t => t.name)).toEqual(['mine'])
 })
 
 test('the setup takes the kernel from the membrane and registers the prompt, context and compaction hooks', async () => {

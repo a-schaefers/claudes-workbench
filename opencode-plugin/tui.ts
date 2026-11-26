@@ -11,6 +11,7 @@ import { Workbench, type Status } from './rpc.ts'
 import { consentTui } from './consent-tui.ts'
 import { noticesTui } from './notices-tui.ts'
 import { childrenTui } from './children-tui.ts'
+import { chatTui, type ChatTui } from './chat.ts'
 
 // where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
 // install of the whole repository does (#1311's review, 2026-11-25)
@@ -71,6 +72,10 @@ const plugin: TuiPlugin = {
     const stopConsent = consentTui(ctx) // the consent gates' forms (#1314)
     const stopNotices = noticesTui(ctx) // the notices' toasts and desktop notifications (#1313)
     const stopChildren = childrenTui(ctx) // the agents' sessions as the lead's child sessions (#1331)
+    // the session on screen, said to the server part: only its prompts move the web chat (#1492);
+    // it polls and says it again after a failed RPC, so a cold service's first refusal (#1488) is
+    // only a late first say
+    const stopShown = chatTui(ctx as unknown as ChatTui)
     let stopped = false
     let stopPane: (() => void) | undefined
     // the rest once the server part answers, never awaited here (#1488): OpenCode's TUI activates
@@ -79,7 +84,7 @@ const plugin: TuiPlugin = {
     const ready = askStatus(() => ctx.client.rpc(Workbench).status({}) as Promise<Status>, () => stopped)
       .then(st => (st && !stopped ? mount(ctx, st, () => stopped) : undefined))
       .then(stop => { if (stopped) stop?.(); else stopPane = stop })
-    const stop = () => { stopped = true; stopPane?.(); stopConsent?.(); stopNotices(); stopChildren() }
+    const stop = () => { stopped = true; stopPane?.(); stopConsent?.(); stopNotices(); stopChildren(); stopShown() }
     return Object.assign(stop, { ready })
   },
 }

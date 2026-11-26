@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
-  AGENT_NOTE, AWAY_QUESTION, BACK_AFTER_MS, ChatLane, NOTICE_AFTER_MS, REPLY_ID, RETRY_MS, SOURCE, WEB_NOTE, chat,
-  chatPrompt, inboxId, replyTool,
+  AGENT_NOTE, AWAY_QUESTION, BACK_AFTER_MS, ChatLane, NOTICE_AFTER_MS, REPLY_ID, RETRY_MS, SHOWN_AGAIN_MS, SOURCE, WEB_NOTE,
+  WorkbenchChat, chat, chatPrompt, chatTui, inboxId, replyTool,
 } from '../chat.ts'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +51,9 @@ function world(files: Record<string, string> = {}) {
     prompt: async input => { prompts.push(input); return {} },
     hook: async () => ({}),
   }
+  // the sessions a TUI shows (#1492): a prompt in any other is a script's `opencode run`
+  lane.shown('ses_root')
+  lane.shown('ses_two')
   const mine = () => { files['listener.json'] = JSON.stringify({ session: lane.listening, tool: 'opencode', pid: 4242 }) }
   return {
     lane, calls, prompts, answers, files, sessions, mine,
@@ -101,6 +104,50 @@ test('a prompt typed in a root session takes the chat; a child\'s, a marked one 
   expect(w.said()).toEqual(['chat url --json', 'chat back', 'chat listener ses_root --pid 4242'])
   expect(w.calls.at(-1)?.session).toBe('ses_root')
   expect([w.lane.listening, w.lane.holding]).toEqual(['ses_root', true])
+})
+
+test('a prompt in a session no TUI shows, a script\'s opencode run, neither takes the chat nor says the user is back (#1492)', async () => {
+  // since 2.4 `opencode run` goes through the background service, its prompt unmarked as a typed
+  // one: it ran `wb chat back` and took the listener, and the phone's messages went into it (2026-11-26)
+  const w = world()
+  w.sessions.ses_run = { id: 'ses_run' }
+  w.lane.shownWaitMs = 20
+  await w.lane.typed({ sessionID: 'ses_root', prompt: { text: 'go' } })
+  w.calls.length = 0
+  await w.lane.typed({ sessionID: 'ses_run', prompt: { text: 'summarize the last commit' } })
+  expect(w.said()).toEqual([])
+  expect(w.lane.listening).toBe('ses_root')
+  // the TUI moves to a new session after its first prompt: once it says it shows it, it is the user's
+  w.lane.shownWaitMs = 5_000
+  w.sessions.ses_new = { id: 'ses_new' }
+  const typing = w.lane.typed({ sessionID: 'ses_new', prompt: { text: 'hi' } })
+  await new Promise(r => setTimeout(() => r(undefined), 10))
+  expect(w.said()).toEqual([])
+  w.lane.shown('ses_new')
+  await typing
+  expect(w.said()).toEqual(['chat back', 'chat listener ses_new --pid 4242'])
+  expect(w.lane.listening).toBe('ses_new')
+})
+
+test('the TUI says the session on its screen once and again a while after, and nothing at home (#1492)', async () => {
+  let route: { type: string; sessionID?: string } = { type: 'home' }
+  const said: unknown[] = []
+  let clock = 0
+  const ctx = {
+    ui: { router: { current: () => route } },
+    client: { rpc: (d: typeof WorkbenchChat) => {
+      expect(d.id).toBe('workbench-chat')
+      return { shown: async (input: { sessionID: string }) => { said.push(input.sessionID) } }
+    } },
+  }
+  const stop = chatTui(ctx, () => clock)
+  route = { type: 'session', sessionID: 'ses_a' }
+  await new Promise(r => setTimeout(() => r(undefined), 1_100))
+  expect(said).toEqual(['ses_a'])
+  clock += SHOWN_AGAIN_MS
+  await new Promise(r => setTimeout(() => r(undefined), 600))
+  expect(said).toEqual(['ses_a', 'ses_a'])
+  stop()
 })
 
 test('a waiting message is claimed, prompted in as a steer, and acked once OpenCode delivers it', async () => {

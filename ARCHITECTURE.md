@@ -1175,11 +1175,10 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   `-2` … `-99` once `runs.taken` has one, hence `FLOW_NAME_MAX` 14 for its 24), no `claude -p`: on the
   OpenCode-only path every fire of a backlog failed for want of claude. The run's own driver, budget and
   `--overnight` carry the night, its final stage (and any `claude` checkpoint, said at add) waits for a
-  session, which claims it by directory (the run has no session; its cwd is the repo): in Claude Code its
-  notice wakes the next session there however old it is, and both hosts' context names the run with no task
-  open (#1491: the notice aged out past the hour, a run having no rewake, and the run's `wb status` lines,
-  after `no open tasks`, were dropped). OpenCode's plugin wakes only the session that ran `wb run start`, so
-  there the morning's session hears of it from its `workbench` entry. A fire while the last
+  session, which claims it by directory (the run has no session; its cwd is the repo), its notice due twelve
+  hours, not a task's one, so on either host the session opened there in the morning is told (#1491, #1493:
+  the notice aged out past the hour, a run having no rewake), and both hosts' context names the run with no
+  task open (#1491: the run's `wb status` lines, after `no open tasks`, were dropped). A fire while the last
   fire's run still has a live driver is a `skipped` row. Its row names the run, and `wb schedule list` shows it
   as it stands (`runs.status_line`); `wb doctor` asks its unit's PATH for opencode alone (`schedule.needs`).
   wb's own timers still, not OpenCode's automations, for the reason above. A repo's flow is never scheduled.
@@ -3896,10 +3895,14 @@ Under Claude Code the driver is Claude Code, fixed (`driver.CLAUDE_CODE`, "Claud
 and nothing here changes that path.
 
 - **Recorded.** The plugin's server part (`opencode-plugin/driver.ts`, `startDriver`) keeps, per
-  session, the model of its last `primary` request (OpenCode's `model.request` hook; a `title`,
+  session, in one Map per server process (`driverLane`, on `globalThis` as the chat's lane: OpenCode
+  sets the plugin up once per location and runs a session's hook only in its own, and a Map and a
+  beat per setup each wrote the one beat file with one location's `used`, so another repository's
+  local driver read as idle, #1502), the model of its last `primary` request (OpenCode's `model.request` hook; a `title`,
   `compaction` or `generate` request may use a small model and is never the driver) and of a
   `session.model.selected` event (a `/models` pick, before its first request). Every `BEAT_MS` 30
-  s (the first after `FIRST_BEAT_MS` 1 s) it lists its store's sessions (`session.list`, every page:
+  s (the first after `FIRST_BEAT_MS` 1 s; one beat a process, started by the first setup with
+  `session.list` and stopped by the last cleanup) it lists its store's sessions (`session.list`, every page:
   `listAll`), each with that model or, before any request, its selection, its directory and
   `used` (the last primary request, epoch seconds), and pipes the listing to `wb driver beat`
   (`driver.write_beat`): wb checks it (the `pid` must be a process the call runs under,
@@ -3942,7 +3945,7 @@ and nothing here changes that path.
   `dir` kept, its `used` only for the same model; the live check, 2026-11-26)
   (`label`: `provider/id#variant`, or `not known yet …` before its first request), `kind` (`gpu`:
   `discover()` finds it; `api`: OpenCode's catalog lists it, `models.lookup`, cached first;
-  `unknown`), its `window` (`limit.context`), the pin, and three notes (and `pin:<pin>:<why>`, `the driver
+  `unknown`), its `window` (`limit.context`), the pin, and four notes (and `pin:<pin>:<why>`, `the driver
   pin <pin> wasn't applied: <why>; wb route driver session takes it off`, while `pin_why`, cached, says
   one, the panel's toast at /workbench, #1530), each never a refusal (wb
   can't make a weak model hold the bar) and said once per key with `--once` (`driver.once`,
@@ -3954,8 +3957,14 @@ and nothing here changes that path.
   - `local:<id>:<place>`: an API (or unknown) driver in a `local_only` repo
     (`privacy.local_only_place`): local_only keeps API models off the agents only, so the code
     reaches the API through the driver.
-  - `small:<id>`: the `/workbench` procedure (`skill/workbench/SKILL.md`, about a token per
-    `BYTES_PER_TOKEN` 4 bytes) takes `context.FIXED_SHARE` 40% of the window or more.
+  - `fit:<id>`: the procedure and what OpenCode sends beside it (`DRIVER_BASE_TOKENS` 11,000: its
+    own prompt and tools and the agent's additions, measured: a 32K model's first Workbench request
+    was 27,822 input tokens) reach OpenCode's compaction point (`driver.auto_ceiling`, upkeep.ts
+    `autoCeiling`'s twin, of the input window: `limit.input` and `limit.context`, the smaller), so
+    every request compacts again and none answers: it says so and asks for a 64K model or more in
+    /models (a 32K or 40K local driver looped until Esc, #1487).
+  - `small:<id>`: otherwise, the `/workbench` procedure (`skill/workbench/SKILL.md`, about a token
+    per `BYTES_PER_TOKEN` 4 bytes) takes `context.FIXED_SHARE` 40% of the window or more.
 - **The pane** (`pane.tsx`, `pane-view.ts`'s `driverRow`): the panel's first row, `driver:
   <provider/id#variant> (GPU|API)`, ` · pin <id>` when the pin names another model, and ` · change`:
   the row's press dispatches the TUI's `model.list` (`MODELS`, OpenCode's own `/models`), as the
@@ -8486,7 +8495,8 @@ one shared types module).
   session its own id's tasks, never a live session's nor another driver's by directory, nothing in
   `~` or `/` by directory but where `wb start` ran, `/x/ab` never inside `/x/a`, that `awayNow`
   holds for six hours, then while one of the session's tasks is open, that `noticesDue` picks only
-  a task's own rows within the hour, in order, its questions and one newest notice, `noticed` never
+  a task's own rows within the hour (a run's, twelve hours: a 270-minute-old run notice in its phase is
+  due and wakes, #1493), in order, its questions and one newest notice, `noticed` never
   behind a notice, that `noticePlan` delivers a notice at most once while it is true (acked: skipped,
   untoasted; only a true one of this session's with wakes on wakes or steers; none mid-turn but a
   question steered), that `rewakePlan` is due only for a candidate, never busy, too soon, past
@@ -8671,8 +8681,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     `model.request` hook, the `session.model.selected` subscription, the RPC contract
     `WorkbenchDriver` (`id: "workbench-driver"`: `driver` `{sessionID, model?, once?}` → `wb driver
     --session <id> --json [--model <ref>] [--once]`'s object, `model` only when `parseRef` reads it;
-    `pin` `{sessionID}` → `{applied, model?, why?}`) and
-    the beat timer, and returns the cleanup; `beatOnce`, `beatOf`, `listAll`, `storePath`,
+    `pin` `{sessionID}` → `{applied, model?, why?}`) per setup, and the beat timer and `used` once
+    per process (`driverLane(run, pid, used)`: `used` is the Map only the first setup's), and
+    returns the cleanup; `beatOnce`, `beatOf`, `listAll`, `storePath`,
     `parseRef` (OpenCode's `Model.Ref.parse`, as `routes.driver_ref`), `variantOf`, `applyPin`; `wbRunner` runs
     wb (`findWb`, `wbEnv`) with stdin, killed after `WB_TIMEOUT_MS` 30 s.
   - `consent.ts` (#1314): what Claude Code's mod gates, gated in OpenCode, for every model the
@@ -8834,12 +8845,14 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     `GET_WB`, `ocplugin.GET_WB` word for word); nothing when all is well (a healthy install is
     seen in the TUI's `/plugins`, or `opencode plugin list`), nothing when the server part
     never answers (an older server, with no Workbench RPC). A no-op under `WB_TASK`. First it starts the consent forms' part (`consentTui(ctx)`),
-    subscribes to the notices' toasts (`noticesTui`, *Notices on OpenCode*) and starts the child
-    sessions' import (`childrenTui`, below) and returns their cleanup, with `mountPane`'s removal
-    once it has mounted; once `status` answers it imports `pane.tsx` (never at load: OpenTUI and
-    Solid are only the TUI's) and mounts it (the panel through `mountSplash`, the sidebar section,
-    the footer item, the palette entry); a TUI that can't load the views goes without them, said
-    nowhere. The cleanup's `ready`: that step's promise, for the tests.
+    subscribes to the notices' toasts (`noticesTui`, *Notices on OpenCode*), starts the child
+    sessions' import (`childrenTui`, below) and says the session on screen to the chat (`chatTui`,
+    chat.ts: only a shown session's prompts move the web chat, #1492; it polls, so a refused first
+    say is only late), and returns their cleanup, with `mountPane`'s removal once it has mounted;
+    once `status` answers it imports `pane.tsx` (never at load: OpenTUI and Solid are only the
+    TUI's) and mounts it (the panel through `mountSplash`, the sidebar section, the footer item, the
+    palette entry); a TUI that can't load the views goes without them, said nowhere. The cleanup's
+    `ready`: that step's promise, for the tests.
   - `spans.ts` (#1333, slice 4c of #1296; pure, no OpenTUI or Solid, so Bun tests it bare): the
     cells the mod's `splash.ts` and `apprentice.ts` compute for Claude Code's Raster as rows of
     spans, one span a run of one fg and bg (`spans(cells, cols)`, `cellsOf` back, `words` for a
@@ -9113,7 +9126,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       closed; `openListed`: with no task open the run lines alone, #1491), read again when their names
       or phases change.
       `refresh` reads those facts (`openTasks`: `tasks/*/status.json` active or waiting, `task.json`
-      `session` the session's, no bench replay; `notes.md`, `coding.json`, `workflows.json`) at a
+      `session` the session's, or none and near the session's directory by the kernel's `owns`, as
+      notices.ts wakes it for them, #1493; no bench replay; `notes.md`, `coding.json`, `workflows.json`) at a
       prompt (waited for at most `REFRESH_WAIT_MS` 3 s, `within`), a switch of agent (the event, which
       names a session switched to the Workbench agent before any hook has, or
       the `context` hook seeing a new one) and each idle look; `sync` lists the session's entries
@@ -9122,7 +9136,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       mod's once-per-conversation `web-chat` block, the entry follows away: a prompt the user typed
       (chat.ts's `typedByUser`) is them back, so that prompt's refresh skips the away check
       (`refresh(…, back)`: chat.ts's `wb chat back` for it runs beside this part's `prompt` hook, not
-      before) and the entry goes before that turn ("… no longer applies").
+      before) and the entry goes before that turn ("… no longer applies"). Never gated on a TUI
+      showing the session, as the chat's `wb chat back` and listener are: the TUI shows a new session
+      only after its first prompt, which then got the false away block (#1492); a script's `opencode
+      run` skipping it only spares its own turn the block, and writes nothing.
       A server without the entries API gets the same blocks appended to the session's own
       requests' system prompt by the `context` hook, as `<context key="…">` text (the fallback).
     - **What a compaction keeps**: the `compaction` hook adds `KEEP_ON_COMPACT` (the mod's words,
@@ -9471,9 +9488,15 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   domains (an older one, a test's ctx) gets none of it.
 - **Whose.** A task is delivered to the root of its `session` (a subagent that ran `wb start`
   reports to its driver) when its `driver.tool` is `opencode` and this server's store holds the
-  session (`session.get`), judged by `owns`; another server's, Claude Code's or no session's task
-  is left alone, unacked and untoasted (its own host, or `wb wait`, delivers it). Adoption by
-  directory stays `wb adopt`'s.
+  session (`session.get`), judged by `owns`; another server's or Claude Code's task is left alone,
+  unacked and untoasted (its own host, or `wb wait`, delivers it), and a recorded session gone stays
+  `wb adopt`'s to move. A task (or run) that records no session (a scheduled flow's run, a `wb
+  start` typed in a terminal) goes by directory (`nearest`, #1493: it went to none, so its done or
+  checkpoint wake never came): the root session the user last typed in here, else those whose
+  executions started here, newest first, the first whose directory (`session.get`'s `location`,
+  realpathed) the kernel's `owns` finds near its `cwd` or `repo` (a session in `~` or `/` claims
+  none; one with neither key goes to none); `wb ack`'s compare-and-set keeps it to one session, or
+  one host. A session new here (its first execution, a new typed one) has notify.jsonl read again.
 - **Delivery** (each due notice's `noticePlan`, `busy` the session's execution under way): `wake`:
   `wb ack <task> <ts>` (exit 3: another server or `wb wait` took it; any other failure: tried again
   at the next look), then `session.synthetic` `{sessionID, id: noticeId(task, kind, ts), text,
@@ -9497,8 +9520,10 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   stays the once-only guarantee.
 - **A run's own notices** (#1278's S9, `deliverRuns`, `parseRunLines`: rows with `run` and no `task`):
   delivered to the session here that ran `wb run start` (run.json `session` with `session_kind`
-  `opencode`, judged as a task's), by core.ts's `runNoticesDue` (each run's newest however old, #1491) and
-  `runNoticePlan` (still true while the run is in the row's `phase`), `wb ack <run> <ts> --run`, then a queued synthetic, `noticeId("run:<run>",
+  `opencode`, judged as a task's; a run with no session, a scheduled flow's, by its `cwd` and `repo`
+  as a sessionless task's), by core.ts's `runNoticesDue` (each run's newest within twelve hours, not
+  an hour: a flow done overnight is told in the morning, #1491, #1493) and `runNoticePlan` (still true while
+  the run is in the row's `phase`), `wb ack <run> <ts> --run`, then a queued synthetic, `noticeId("run:<run>",
   kind, ts)`, its text the row's whole, the toast `run <run> <RUN_HEADLINE>`; refused, `wb ack <run> <prev>
   --run --if <ts>` and the next look tries again (no net for a run). *Deep workflows* has the row.
 - **The net** (`rewake`, the kernel's `rewakePlan`): a task of a session here waiting on its driver
@@ -9540,7 +9565,7 @@ is written before the fetch, so a killed check lost the week's (the 2026-11-26 r
   (`cli.scout_offer_due`, the mod's `scoutIfDue` rule moved into wb; scout.json `offered_at`).
 - `wb settings offers --if-due --json` once settings-changes.jsonl grew, as the session the web chat
   listens to here (chat/listener.json's, this server's pid), else the root session the user last
-  typed in here (the `prompt` hook, unmarked), never while another listener's live claim stands
+  typed in here (the `prompt` hook, unmarked, in a session a TUI shows: `whenShownHere`, #1492), never while another listener's live claim stands
   (Claude Code's mod or another server says them) and not before a session is there (the rows wait):
   each offer toasted and, wakes on, a queued synthetic turn (`[workbench] The user changed …\n<help>\n
   Offer to help with it, and install or change nothing without their yes.`, its id `noticeId(
@@ -9566,8 +9591,17 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   listens (`activate`), so wb's own `--standalone` servers, which remove the plugin anyway
   (`models.plugin_off`), never start or claim the chat. The last cleanup drops the claim.
 - **Who listens.** A prompt the user typed (the `prompt` hook: a root session, unmarked metadata,
-  not `[web chat] ` or `[agent `; automations, `/goal` and our own deliveries carry metadata) makes
-  that session the listener: `wb chat url --json` (on or off, every `CHECK_MS` 60 s, which brings
+  not `[web chat] ` or `[agent `; automations, `/goal` and our own deliveries carry metadata) in a
+  session a TUI shows makes that session the listener. A script's `opencode run` is unmarked too and,
+  since 2.4, goes through the same background service: it took the listener and ran `wb chat back`,
+  and the phone's messages went into its one-shot session (#1492). So the TUI part says the session
+  its route shows (`chatTui`, tui.ts: `ui.router.current()` looked at every `SHOWN_POLL_MS` 0.5 s,
+  said when it changes and again every `SHOWN_AGAIN_MS` 30 s, so a restarted service learns it) over
+  the `workbench-chat` RPC (`WorkbenchChat`, `shown {sessionID}` → `ChatLane.shown`), and a prompt
+  waits up to `SHOWN_WAIT_MS` 30 s for its session to be shown (`whenShown`: the TUI moves to a new
+  session only after its first prompt); one never shown moves nothing. notices.ts's offer target
+  (`prompted`) asks the same (`whenShownHere`; true with no chat lane); upkeep.ts's `back` never
+  does (upkeep.ts, above: a new session's first prompt is shown only after it). The listener: `wb chat url --json` (on or off, every `CHECK_MS` 60 s, which brings
   the server up as the mod's link does), `wb chat back`, and `wb chat listener <session> --pid
   <server pid>` (`chat.hold`: refused while another live claim stands, a Claude Code session's or
   another server's; the same server moves it between its sessions). `busy` follows the session's
@@ -9870,9 +9904,10 @@ text}`, no `task`: `phase` (`runs.NOTICE_PHASE`) is the run's phase it was raise
 only while the run is in it (a pause since resumed, a checkpoint since fed, is acknowledged unsaid). Both hosts
 deliver them (#1278's S9) as a task's, to the session the run is `mine` to (run.json's `session` and
 `session_kind`, else by directory: a scheduled run's is the session near its repo; the kernel's `owns`), once,
-while still true, however old (a run has no rewake, so the hour a task's notice is due within left a run done
-overnight unsaid, #1491): core.ts's `runNoticesDue` (the kernel's `noticesDue` over the run rows, keyed by run:
-each run's newest, `noticed`) and
+while still true: core.ts's `runNoticesDue` (the kernel's `noticesDue` over the run rows, keyed by run, `runs`:
+each run's newest due twelve hours, `oldestRunWakeMs`, not a task's hour, as a run has no rewake and the hour
+left a flow done overnight unsaid, #1491, #1493; not forever, so a run left unacknowledged isn't toasted at
+every load) and
 `runNoticePlan` (`noticePlan`, its kind the raised-in phase), the mod's `deliverRuns` (register.tsx) and the
 plugin's `NoticeLane.deliverRuns` (notices.ts), held through a busy turn, the text the wake whole, a toast
 `workbench: run <run> <RUN_HEADLINE>`. The claim is `wb ack <run> <ts> --run` (`Run.claim_ack`, the
@@ -11779,7 +11814,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **The web chat on OpenCode** (#1319): an OpenCode listener.json (`tool: "opencode"`, `chat.hold`) → `chat.listener`
   (`_server_listens`, `store.beat_of`), the mod's `claimStands` (its pid and `start`, which it judges as any claim's), `chat.ts`'s
   `poll` (`claim()`); `chat.ts`'s `chatPrompt`, `attachedLines`, `agentOf` ↔ the mod's; `inboxId` ↔ OpenCode's
-  `schema/src/identifier.ts`; `SOURCE` ↔ `typedByUser`; `chat.owed` ↔ the mod's `owedAtTurnEnd` rules (`re`, own rows, `auto`, an
+  `schema/src/identifier.ts`; `SOURCE` ↔ `typedByUser`; `chatTui` (tui.ts) ↔ `WorkbenchChat`'s `shown` ↔ `ChatLane.whenShown`; `chat.owed` ↔ the mod's `owedAtTurnEnd` rules (`re`, own rows, `auto`, an
   agent's `to`); a row's `opencode_session` (`cli._chat_writer`) → `chat.owed`, `chat.caller_listens`; `wb chat` output the plugin
   parses (`url --json`'s `state`, `notice`'s id, `away`'s `away`, `claim`'s ` expired: `) → `chat.ts`.
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
