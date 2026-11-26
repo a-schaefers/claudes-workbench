@@ -1437,7 +1437,9 @@ export function routesSummary(doc: Row): string {
   return (use ? `Agents ${use}, over each role's own: ` : '') + roles.join('; ') + busy
 }
 
-// A document wb would read (routes.normalize's checks, in short): else it can't be read
+// A document wb would read (routes.normalize's checks, in short): else it can't be read. The
+// OpenCode path's top-level `driver` (#1316) is left unread on purpose: normalize reads any value
+// that isn't an OpenCode id as no pin, never as an unreadable file, so neither does this
 function routesValid(doc: unknown): doc is Row {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
   const d = doc as Row

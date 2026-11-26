@@ -189,3 +189,28 @@ test('the driver RPC answers wb driver --json for the session, --once when asked
   await stop()
   expect(BEAT_MS).toBe(30_000)  // store.HEARTBEAT_FRESH (120 s) is four beats: keep them apart
 })
+
+test('the driver RPC hands wb the TUI\'s selection, which no beat has before the next prompt, and only a model ref', async () => {
+  // the live check of #1316's pane (2026-11-26): a /models pick is the session's only at its next
+  // prompt, so the row (and /workbench's notes) said the model it replaced, or none in a new session
+  const handlers: Record<string, (input: unknown) => Promise<unknown>> = {}
+  const host: DriverHost = {
+    options: {},
+    rpc: { register: async (_def, h) => { Object.assign(handlers, h); return { dispose: async () => {} } } },
+  }
+  const wb = fakeWb({ 'driver --session': JSON.stringify({ tool: 'opencode', label: 'p/new#high', notes: [] }) })
+  const stop = await startDriver(host, wb.run, 7)
+  await handlers.driver!({ sessionID: 'ses_1', model: 'p/new#high', once: true })
+  expect(wb.calls.at(-1)!.args).toEqual(['driver', '--session', 'ses_1', '--json', '--model', 'p/new#high', '--once'])
+  for (const model of ['', 'not a ref', 7]) {
+    await handlers.driver!({ sessionID: 'ses_1', model })
+    expect(wb.calls.at(-1)!.args).toEqual(['driver', '--session', 'ses_1', '--json'])
+  }
+  await stop()
+})
+
+test('OpenCode\'s `default` variant is the model\'s own: a beat names none', () => {
+  const beat = beatOf(1, undefined, 0, [{ id: 's1', model: { providerID: 'p', id: 'm', variant: 'default' } },
+    { id: 's2', model: { providerID: 'p', id: 'm', variant: 'high' } }], new Map())
+  expect(beat.sessions).toEqual({ s1: { model: 'p/m' }, s2: { model: 'p/m', variant: 'high' } })
+})

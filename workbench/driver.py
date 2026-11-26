@@ -88,6 +88,22 @@ def session_row(session: str) -> dict:
     return dict(row) if isinstance(row, dict) else {}
 
 
+def selected(row: dict, text: str) -> dict:
+    """``row`` (a beat's) with the model the session runs on next, ``text`` (`provider/id#variant`):
+    the TUI's own selection (`wb driver --model`), which OpenCode commits to the session only at
+    its next prompt, so a /models pick and a new session's model reach no beat before then (seen
+    live, 2026-11-26). The row's `dir` is kept, and its `used` only while it names that model."""
+    parsed = routes.driver_ref(text)
+    if parsed is None or len(text) > MODEL_MAX:
+        raise ValueError(f"{text!r} isn't an OpenCode model id")
+    provider, mid, variant = parsed
+    model = f"{provider}/{mid}"
+    out = {k: row[k] for k in ("dir",) if k in row}
+    if row.get("model") == model and "used" in row:
+        out["used"] = row["used"]
+    return {**out, "model": model, **({"variant": variant} if variant else {})}
+
+
 def ref(row: dict) -> str:
     """A row's driver in OpenCode's string form, `provider/id#variant`; "" for none."""
     m = row.get("model") or ""
