@@ -364,6 +364,20 @@ def linger_note() -> str | None:
     return None
 
 
+# WSL stops a distro about 15 s after its last terminal closes (.wslconfig's instanceIdleTimeout,
+# 15000 ms by default), and its user manager's timers and services with it: a 02:00 fire ran the
+# next morning, and the web app was down overnight, with nothing saying why (#1511, 2026-11-26)
+WSL_IDLE = ("WSL stops this distro about 15 s after its last terminal closes, its timers and the web "
+            "app's service with it (a missed fire runs when it next starts): instanceIdleTimeout=-1 "
+            "under [general] in %UserProfile%\\.wslconfig keeps it running")
+
+
+def wsl_idle_note() -> str | None:
+    """WSL_IDLE on WSL, else None: wb schedule add's, wb setup's service line's, wb doctor's."""
+    from . import hardware
+    return WSL_IDLE if hardware.system() == "wsl" else None
+
+
 # --- The commands --------------------------------------------------------------------------------
 
 def _flow_check(name: str, flow_name: str, params: list[str], budget: float | None, top: Path) -> tuple[dict, list[str]]:
@@ -442,6 +456,8 @@ def add(name: str, file: str | None, repo: str, at: str, turns: int | None = Non
         out.append(f"note: {' and '.join(missing)} not on this PATH, which the unit runs with: "
                    "a fire fails until they are")
     if note := linger_note():
+        out.append(f"note: {note}")
+    if note := wsl_idle_note():
         out.append(f"note: {note}")
     return out
 

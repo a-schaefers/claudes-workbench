@@ -7966,6 +7966,8 @@ def cmd_setup(a):
                   f"without it, #1200). {path_advice()}")
     if not a.no_service and (said := install_service(a.force)):
         print(said)
+        if said.startswith("ok") and (note := schedule.wsl_idle_note()):  # a WSL unit stops with the distro (#1511)
+            print(f"--  {note}")
     try:  # a minute or two, said up front; a task started meanwhile goes first
         for line in optimize.start(if_due=True):
             print(f"--  {line}")
@@ -8858,6 +8860,8 @@ def cmd_doctor(a):
     for why in logout_stops():
         if chat.is_on() or "wb-chat" not in why or "runners" in why:
             print(f"--  {why}")
+    if (chat.is_on() or schedule.names()) and (note := schedule.wsl_idle_note()):  # #1511
+        print(f"--  {note}")
     good, said = chat_line()
     if good is None:
         print(f"--  {said}")

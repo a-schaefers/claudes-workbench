@@ -23017,6 +23017,17 @@ class ScheduledRuns(Base):
         self.assertFalse(ok)
         self.assertIn("its unit is gone", said)
 
+    def test_on_wsl_add_says_the_distro_stops_once_no_terminal_is_open_and_how_to_keep_it_running(self):
+        # #1511: WSL stops the distro about 15 s after the last terminal closes, its timers with it,
+        # and add said only linger, which is needed there but not enough
+        from workbench import hardware
+        with mock.patch.object(hardware, "system", return_value="wsl"):
+            out = self.add("night")
+        self.assertIn("note: WSL stops this distro about 15 s after its last terminal closes", out)
+        self.assertIn(r"instanceIdleTimeout=-1 under [general] in %UserProfile%\.wslconfig", out)
+        with mock.patch.object(hardware, "system", return_value="linux"):
+            self.assertNotIn("WSL stops", self.add("day"))
+
     def test_a_schedule_added_from_opencodes_install_fires_its_newest_generation_and_doctor_says_when_none_is_left(self):
         # #1497: the unit named the adding generation's bin/wb, which ran its old code after
         # OpenCode updated, then exited 2 once OpenCode collected it, with no row and doctor ok
