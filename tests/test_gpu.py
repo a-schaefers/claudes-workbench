@@ -949,6 +949,97 @@ class Budget(unittest.TestCase):
                           cli.gpu_line())
 
 
+class DriverLease(Base):
+    """A local driver on the GPU (#1317): the model a live OpenCode session drives with, on this
+    machine's GPU, is held like a running task's: kept loaded, and counted when a task's model
+    would load beside it. Before, every round unloaded it, and the driver's next turn reloaded it
+    and evicted the agent's."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["FAKE_RUNS"] = str(Path(self.tmp.name) / "runs.jsonl")
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {BIG: {"weights_gb": 20}, SMALL: {"weights_gb": 9}}))
+
+    def drive(self, model=BIG, used_ago=0.0):
+        """This process's OpenCode server beats a session that drove on ``model``."""
+        now = time.time()
+        store.write_json(store.beat_path(os.getpid()), {
+            "tool": "opencode", "pid": os.getpid(), "ts": now, "sessions": {
+                "ses_d": {"model": model, "dir": str(self.repo), "used": now - used_ago}}})
+
+    def test_a_driver_model_too_big_to_share_with_holds_the_task_queued_until_it_goes(self):
+        os.environ["WB_FAKE_GPU_GB"] = "24"           # 25 GB + 11 GB: not at once
+        self.drive()
+        self.assertIn(BIG, models.keep_loaded())      # never unloaded by a round's free_gpu
+        small = models.discover()[SMALL]
+        self.assertEqual(list(models.driver_holders(small).values()),
+                         [{"model": BIG, "driver": True, "task": f"the driver's {BIG} (25 GB)"}])
+        out = self.start("t-small", "ok", "--model", SMALL, "--test", TEST_CMD)
+        self.assertIn(f"note: the GPU is busy with the driver's {BIG} (25 GB); this task waits as queued", out)
+        deadline = time.time() + 30
+        while store.Task("t-small").status.get("last") != f"waiting for the GPU (held by the driver's {BIG} (25 GB))":
+            self.assertLess(time.time(), deadline, store.Task("t-small").status)
+            time.sleep(0.1)
+        self.assertFalse(models.holders().get(f"{models.DRIVER_HOLDER}{BIG}"))  # never in gpu.json
+        self.assertEqual(store.Task("t-small").status["phase"], "queued")
+        self.drive(used_ago=store.DRIVER_HOLD + 60)    # the session stopped driving: it goes
+        self.assertNotIn(BIG, models.keep_loaded())
+        wait_phase("t-small", {"review"})
+
+    def test_a_task_that_waits_on_a_drivers_model_is_told_the_way_out_and_its_own_session_that_it_waits_on_itself(self):
+        # the review of #1317 (2026-11-25): the wait ends only when Ollama lets the model go or the
+        # session idles DRIVER_HOLD, and a driver polling its own task keeps both fresh
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        self.drive()
+        held = models.driver_holders(models.discover()[SMALL])
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "WB_TASK", "OPENCODE_SESSION_ID")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            other = cli._driver_way_out(held)
+            os.environ["OPENCODE_SESSION_ID"] = "ses_d"
+            own = cli._driver_way_out(held)
+        self.assertIn(f"; the driver's model leaves only once Ollama unloads it or its session is idle "
+                      f"{store.DRIVER_HOLD // 60} min: a smaller model for either side", other)
+        self.assertIn(f"; this session's own {BIG} leaves only once", own)
+        self.assertIn("so it waits on this session", own)
+        self.assertEqual(cli._driver_way_out({}), "")
+
+    def test_a_job_that_takes_the_gpu_to_itself_unloads_a_drivers_model_as_before(self):
+        # the review of #1317 (2026-11-25): wb image, wb audio, --unload-for-tests and wb optimize
+        # free the GPU with no model (free_gpu's ``of`` None), and no exclusive lease waits for a
+        # driver; kept loaded, a generation ran beside the driver's 20 GB and spilled
+        self.drive()
+        big = models.discover()[BIG]
+        self.assertIn(BIG, models.keep_loaded())                  # a coding round keeps it
+        self.assertNotIn(BIG, models.keep_loaded(drivers=False))
+        self.assertTrue(models.freed(big))                        # media.settle waits for it to go
+        asked, real = [], models.keep_loaded
+        with mock.patch.object(models, "keep_loaded", lambda drivers=True: asked.append(drivers) or real(drivers)), \
+                mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "discover", lambda *a, **k: {}):
+            models.free_gpu(say=lambda m: None)                    # the GPU to itself
+            models.free_gpu(keep={BIG}, say=lambda m: None, of=big)  # a task's load
+        self.assertEqual(asked, [False, True])
+
+    def test_a_driver_model_that_fits_beside_the_tasks_runs_with_it_and_others_hold_nothing(self):
+        os.environ["WB_FAKE_GPU_GB"] = "48"           # both fit
+        self.drive()
+        out = self.start("t-small", "ok", "--model", SMALL, "--test", TEST_CMD)
+        self.assertNotIn("the GPU is busy", out)
+        wait_phase("t-small", {"review"})
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        small, big = models.discover()[SMALL], models.discover()[BIG]
+        self.assertEqual(models.driver_holders(big), {})     # its own model: the two share it
+        self.drive(model="deepseek/deepseek-flash")           # an API driver holds no GPU
+        self.assertEqual(models.driver_holders(small), {})
+        self.drive(used_ago=store.DRIVER_HOLD + 60)
+        self.assertEqual(models.driver_holders(small), {})
+        store.write_json(store.beat_path(os.getpid()), {      # a stale beat says nothing
+            "tool": "opencode", "pid": os.getpid(), "ts": time.time() - store.HEARTBEAT_FRESH - 5,
+            "sessions": {"ses_d": {"model": BIG, "used": time.time()}}})
+        self.assertEqual((models.driver_holders(small), store.driver_models()), ({}, set()))
+
+
 class SharedLease(Base):
     """#393: gpu.lock and gpu.json were per account ($WB_HOME), so two accounts' tasks on one
     system Ollama never saw each other's holds and unloaded each other's models mid-round."""

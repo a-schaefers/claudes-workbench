@@ -92,7 +92,8 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   in routes.json, the change line `wb route` prints and the mod's dialog shows, and the dialog's
   one-shot approval (`approved`); `use`, the Agents switch (`effective_via`); `busy`, the busy-GPU
   opt-in (`busy_api`); `resolve`, wb start's model.
-  `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
+  `driver.py`: the OpenCode driver (#1316): `wb driver`, the heartbeat's writer (`wb driver beat`), its
+  notes; routes.json `driver`, its pin. `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `runs.py`: deep workflows (#1278): `wb run`, `wb flow import`, flows (`agent/flows/`, `$WB_FLOWS`), the detached
   driver starting each item with `wb start` (its items' notices its own only while it lives), run notices, the keywords' reference (`keywords`, `tests/fixtures/
   keywords.json`). `cards.py`: role cards (`agent/roles/`, `$WB_ROLES`). `schema.py`: a report task's

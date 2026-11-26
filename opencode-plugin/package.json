@@ -16,6 +16,7 @@
     "tui.ts",
     "rpc.ts",
     "wb.ts",
-    "chat.ts"
+    "chat.ts",
+    "driver.ts"
   ]
 }

@@ -27,9 +27,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
-from . import (__version__, ask_mcp, audio, bench, cards, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, ocplugin, optimize, patches, progress, results, router, routes, runs, savings, scan,
-               skills, stats, store, transcript, tuning, verify, webpush)
+from . import (__version__, ask_mcp, audio, bench, cards, chat, context, driver, gitops, hardware, images, lane,
+               lessons, media, models, ocplugin, optimize, patches, progress, results, router, routes, runs,
+               savings, scan, skills, stats, store, transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from . import keyhole
@@ -911,9 +911,27 @@ def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
 
 def _gpu_wait(m: models.Model, me: str | None = None) -> tuple[dict, bool]:
     """The GPU's other holders, and whether ``m`` would have to wait for them (queued) rather
-    than run beside them. A remote model waits for the other tasks on its server (#116)."""
-    held = _gpu_holders(me, m)
+    than run beside them. A remote model waits for the other tasks on its server (#116). A live
+    OpenCode driver's model resident on this GPU is one too (models.driver_holders, #1317): the
+    note names it and its GB, and the lease waits for it as for a task."""
+    held = {**_gpu_holders(me, m), **models.driver_holders(m)}
     return held, bool(held) and not models.admits(m, held)
+
+
+def _driver_way_out(held: dict) -> str:
+    """What a wait on a live driver's model needs said (#1317, the review of 2026-11-25): it ends
+    only when Ollama lets the model go (its keep-alive) or the session has been idle
+    store.DRIVER_HOLD, and the driver's own session, polling its task, keeps both fresh. ""
+    when no driver holds the GPU."""
+    drv = sorted(h["model"] for h in held.values() if h.get("driver"))
+    if not drv:
+        return ""
+    sid = store.opencode_session()
+    own = sorted(set(drv) & store.driver_models(sid)) if sid else []
+    who = f"this session's own {', '.join(own)}" if own else "the driver's model"
+    return (f"; {who} leaves only once Ollama unloads it or its session is idle "
+            f"{store.DRIVER_HOLD // 60} min{', so it waits on this session' if own else ''}: "
+            "a smaller model for either side, an API role or an API driver runs it sooner")
 
 
 def _preempt_bench(m: models.Model, me: str | None = None) -> str:
@@ -923,7 +941,7 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
     held, waits = _gpu_wait(m, me)
     # never another machine's: _stop_runner refuses it, and wb start, feedback, next and resume
     # died with "runs on <host>" before their --queue check (#895)
-    names = sorted({h["task"] for h in held.values() if h.get("task")
+    names = sorted({h["task"] for h in held.values() if h.get("task") and not h.get("driver")
                     and store.Task(h["task"]).spec.get("bench")
                     and not store.elsewhere(store.Task(h["task"]).status)}) if waits else []
     for name in names:
@@ -1012,7 +1030,7 @@ def _gpu_note(task: store.Task) -> str:
         _say(_preempt_bench(m, task.name))
     held, waits = _gpu_wait(m, task.name) if m else ({}, False)
     return (f"note: the GPU is busy with {', '.join(sorted({h['task'] for h in held.values()}))}; "
-            f"{task.name} waits as queued until it's free") if waits else ""
+            f"{task.name} waits as queued until it's free{_driver_way_out(held)}") if waits else ""
 
 
 # --- commands -----------------------------------------------------------------------------------
@@ -2133,7 +2151,8 @@ def cmd_start(a):
         if slots_full:
             print(f"note: {_slot_note(m, a.name)}")
     elif waits:  # where it runs beside others or loads first is the runner's to do (#1322)
-        print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free")
+        print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free"
+              + _driver_way_out(held))
     if state["available"] and not api and (others := models.box_others(m)):  # another machine's task on the same box (#812)
         print(f"note: {urlparse(m.root).hostname} has {', '.join(others)} loaded, which no task here "
               f"runs: the runner loads {m.name} once it has gone {models.BOX_QUIET} s without a "
@@ -4180,6 +4199,8 @@ def _route_show(as_json: bool) -> None:
         print(f"day cap {routes.money(doc['day_usd'])}")
     elif routes.any_api(doc):
         print("no day cap yet: wb route cap <usd> sets one")
+    if pin := doc.get("driver"):  # the OpenCode path's standing default (#1316)
+        print(f"driver {pin} ({routes.DRIVER_APPLIED})")
 
 
 # a provider's key as the pane says it (#1023): only a stored one runs (the keyhole holds it)
@@ -4317,6 +4338,8 @@ def cmd_route(a):
             print(json.dumps({"change": "", "gate": False}) if a.json else "")
             return
         return _route_show(a.json)
+    if what == "driver":
+        return _route_driver(a)
     if what in routes.ROLES and target == "fallback":
         return _route_fallback(a)
     if a.more:
@@ -4358,7 +4381,7 @@ def cmd_route(a):
                 die(f"two API models: {target} and --api {a.api}")
             api, via = target, "api"
     else:
-        die(f"no role {what!r}: the roles are {', '.join(routes.ROLES)} (or all, cap or busy)")
+        die(f"no role {what!r}: the roles are {', '.join(routes.ROLES)} (or all, cap, busy or driver)")
     if api is not None:
         api = _route_api(api, role).id
     if gpu is not None:
@@ -4409,6 +4432,38 @@ def _route_fallback(a) -> None:
     def changed(doc) -> routes.Change:
         try:
             return routes.change(doc, role, fallback=fb, who=_who)
+        except routes.RoutesError as e:
+            die(str(e), 3)
+
+    _route_apply(a, argv, changed)
+
+
+def _route_driver(a) -> None:
+    """`wb route driver [<id>|session]` (#1316): the driver's standing default, which the
+    OpenCode plugin's /workbench applies to its session; alone, the pin as it is. A GPU model's
+    pin needs no yes; an API model's (anything discover() doesn't find, failing closed) takes the
+    dialog's from a model's call, as a role's API change does (routes.driver_change)."""
+    if a.more or a.gpu or a.api or a.thinking or a.thinking_review or a.order is not None \
+            or a.day_usd is not None:
+        die("wb route driver <provider/model>[#variant]|session: one choice, in a wb route of its own")
+    if a.target is None:
+        try:
+            pin = routes.read().get("driver")
+        except routes.RoutesError as e:
+            die(routes.unreadable(e), 3)
+        print(json.dumps({"driver": pin or routes.DRIVER_SESSION}) if a.json else
+              f"driver: {pin} ({routes.DRIVER_APPLIED})" if pin else
+              "driver: each OpenCode session's own (/models), no pin")
+        return
+    pin = a.target
+    if pin != routes.DRIVER_SESSION and routes.driver_ref(pin) is None:
+        die(f"{pin!r} isn't an OpenCode model id: provider/model, #variant allowed (opencode models "
+            f"lists them), or {routes.DRIVER_SESSION}", 3)
+    argv = ["route", "driver", pin]
+
+    def changed(doc) -> routes.Change:
+        try:  # the GPU side as a role's is told (models.gpu_side: no catalog asked)
+            return routes.driver_change(doc, pin, models.gpu_side, _who)
         except routes.RoutesError as e:
             die(str(e), 3)
 
@@ -4512,6 +4567,64 @@ def _route_apply(a, argv: list[str], changed) -> None:
     except _Unchanged:
         return
     print(f"changed: {ch.line}")
+
+
+def _driver_text(d: dict) -> list[str]:
+    """`wb driver`'s lines for one session's driver (driver.info)."""
+    side = {"gpu": "GPU", "api": "API", "unknown": "not a model wb finds"}.get(d.get("kind"), "")
+    out = [f"driver: {d['label']}" + (f" ({side})" if side and d.get("model") else "")
+           + (f" · session {d['session']}" if d.get("session") else "")]
+    return out + [f"note: {n['text']}" for n in d.get("notes") or []]
+
+
+def cmd_driver(a):
+    """The driver, the model with the final say (#1316): which one an OpenCode session runs on,
+    routes.json's standing pin, and the notes wb says of it once (--once); `beat`, the OpenCode
+    plugin's heartbeat. Under Claude Code: Claude Code, fixed."""
+    if a.action == "beat":
+        if a.session or a.once or a.json:
+            die("wb driver beat takes the plugin's heartbeat on stdin, and no flag")
+        try:
+            doc = json.loads(sys.stdin.read() or "null")
+        except ValueError:
+            die("wb driver beat reads the plugin's heartbeat, a JSON object, on stdin")
+        try:
+            driver.write_beat(doc)
+        except ValueError as e:
+            die(f"no heartbeat written: {e}")
+        return
+    if a.session is not None and not store.SESSION_RE.fullmatch(a.session):
+        die(f"{a.session!r} isn't an OpenCode session id")
+    sid = a.session or store.opencode_session()
+    if not sid and store.caller_kind() == "claude":
+        d = driver.claude_info()
+        print(json.dumps(d) if a.json else f"driver: {d['label']}")
+        return
+    if sid:
+        # the caller's own session runs wb in its directory (a tool's wb child, its shell);
+        # --session (the plugin's RPC) from the server's: the beat's `dir` then
+        d = driver.info(sid, where=None if a.session else os.getcwd())
+        if a.once:
+            d["notes"] = driver.once(d["notes"])
+        print(json.dumps(d) if a.json else "\n".join(_driver_text(d)))
+        return
+    try:
+        pin = routes.read().get("driver") or routes.DRIVER_SESSION
+    except routes.RoutesError:
+        pin = routes.DRIVER_SESSION
+    found = [driver.info(s, row=row) for s, row in driver.live()]
+    for d in found if a.once else ():
+        d["notes"] = driver.once(d["notes"])
+    if a.json:
+        print(json.dumps({"drivers": found, "pin": pin}))
+        return
+    for d in found:
+        print("\n".join(_driver_text(d)))
+    if not found:
+        print(f"no OpenCode session has driven here in the last {store.DRIVER_HOLD // 60} min "
+              "(the plugin's heartbeat lists none)")
+    print(f"pin: {pin} ({routes.DRIVER_APPLIED})" if pin != routes.DRIVER_SESSION else
+          "pin: none (each session's own /models; wb route driver <id> sets one)")
 
 
 def cmd_coding(a):
@@ -8890,6 +9003,8 @@ def cmd_doctor(a):
             print(f"--  {said}")
         else:
             line(good, said)
+    for said in driver.doctor_lines():  # a live driver on the agents' own model (#1316): informs
+        print(f"--  {said}")
     if kind == "opencode":  # no clone: git's error was said (#1311's third review)
         print(f"ok  install: OpenCode's, at {PKG_ROOT}: {ocplugin.updated_by()}")
     else:
@@ -9364,15 +9479,16 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=runs.cmd_flow_import)
     s = sub.add_parser("route", help="the roles: which model each kind of work goes to (show, or "
                        "change one on the user's yes)")
-    s.add_argument("what", nargs="?", metavar="role|all|cap|busy",
+    s.add_argument("what", nargs="?", metavar="role|all|cap|busy|driver",
                    help="significant, trivial, writing; all (the Agents switch); cap (the day cap); busy "
-                   "(when the GPU is busy)")
+                   "(when the GPU is busy); driver (the OpenCode path's standing driver, #1316)")
     s.add_argument("target", nargs="?", metavar="gpu|api|both|wait|fallback|<provider/model>|<usd>",
                    help="a role: gpu or api flips its selector, an API model's exact id sets it and goes to "
                    "API, fallback <provider/model>|gpu|none sets where its tasks go when its API model's "
                    "provider is down or out of credit (#1196); all: gpu, api or both (each role as set); cap: "
                    "the day cap in dollars; busy: wait (the default) or api (a role with an API model starts "
-                   "on it while the GPU is busy)")
+                   "on it while the GPU is busy); driver: an OpenCode model id (#variant allowed) the "
+                   "plugin's /workbench switches its session to, or session (no pin, the default)")
     s.add_argument("more", nargs="*", metavar="<role> <choice>",
                    help="more roles in the same change, one dialog (#1024): wb route trivial <id> "
                    "significant <id> --day-usd 5")
@@ -9395,6 +9511,16 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--start", nargs=argparse.REMAINDER, metavar="ARGS",
                    help="with --dry-run: the dialog line for wb start ARGS on an API --model (the mod's)")
     s.set_defaults(f=cmd_route)
+    s = sub.add_parser("driver", help="the driver, the model with the final say: which one an "
+                       "OpenCode session runs on, its pin and notes (beat: the OpenCode plugin's heartbeat)")
+    s.add_argument("action", nargs="?", choices=["beat"], help="beat: write the OpenCode plugin's "
+                   "heartbeat, its JSON on stdin (the plugin's server part, every 30 s)")
+    s.add_argument("--session", metavar="ID", help="this OpenCode session's driver (default: the "
+                   "caller's, OPENCODE_SESSION_ID; none: every session that drove lately)")
+    s.add_argument("--once", action="store_true", help="only the notes not said before, then "
+                   "recorded as said (the plugin's /workbench)")
+    s.add_argument("--json", action="store_true", help="as JSON (the plugin's RPC)")
+    s.set_defaults(f=cmd_driver)
     s = sub.add_parser("experiment", help="the experiments (changes measured before they are "
                        "supported): list them, or turn one on or off for the tasks started from now")
     s.add_argument("name", nargs="?")
