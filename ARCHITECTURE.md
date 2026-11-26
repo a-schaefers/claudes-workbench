@@ -8659,8 +8659,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     procedure's everyday wb commands as typed tools in the `workbench` namespace, `codemode: false`
     (direct tools), each one wb command run as the calling session (`runner`: the options' wb,
     `OPENCODE_SESSION_ID` the session's, consent's dropped marks, stdin fed, killed on the call's
-    signal or its limit) in the session's directory (`sessionDirs`: `session.get`'s location and
-    subpath, read once), its fields the flags by name (`SPECS`), its answer wb's report:
+    signal or its limit) in the session's directory (`sessionDirs`: `session.get`'s `location.directory`
+    alone, read once; `dirOfSession`, consent.ts's and calls.ts's too: its `subpath` is that directory
+    relative to the project, never joined to it, #1485), its fields the flags by name (`SPECS`), its answer wb's report:
     `workbench_status {task?, all?, all_sessions?}`, `workbench_diff {task, stat?, all?, paths?}`,
     `workbench_feedback {task, text, fresh?, keep_context?, spec_gap?, image?}` (the text on stdin,
     `--message -`), `workbench_accept {task, message?, merge?, merge_as?, include?, take_claude_md?,

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  NAMESPACE, SPECS, START_INPUT, WAIT_MAX_MIN, WAIT_MIN, procedureTools, runner, sessionDirs, startCall, tools,
+  dirOfSession, NAMESPACE, SPECS, START_INPUT, WAIT_MAX_MIN, WAIT_MIN, procedureTools, runner, sessionDirs, startCall, tools,
   type Ran, type RunOpts,
 } from '../tools.ts'
 import { NAMESPACE_DESCRIPTION } from '../wb.ts'
@@ -113,14 +113,18 @@ test("the runner runs the options' wb as the session, without Claude Code's or a
   }
 })
 
-test("a session's directory is its location with its subpath, read once; the plugin's without one", async () => {
+// #1485 (2026-11-26): OpenCode's location.directory already is the subdirectory, its subpath that
+// directory relative to the project; joining them sent every typed tool to <repo>/pkg/pkg (ENOENT)
+test("a session's directory is its location's directory alone, never joined with its subpath, read once; the plugin's without one", async () => {
   let asked = 0
   const dir = sessionDirs({
     location: { directory: '/plugin' },
-    session: { get: async ({ sessionID }) => { asked++; return sessionID === 'a' ? { location: { directory: '/r' }, subpath: 'pkg' } : {} } },
+    session: { get: async ({ sessionID }) => { asked++; return sessionID === 'a' ? { location: { directory: '/r/pkg' }, subpath: 'pkg' } : {} } },
   })
   expect([await dir('a'), await dir('a'), await dir('b')]).toEqual(['/r/pkg', '/r/pkg', '/plugin'])
   expect(asked).toBe(2)
+  expect(dirOfSession({ location: { directory: '/r/pkg/web' }, subpath: 'pkg/web' } as never)).toBe('/r/pkg/web')
+  expect(dirOfSession({})).toBe(undefined)
 })
 
 test("setup registers the six in the workbench namespace, direct tools, under the namespace's one description, and nothing without a tool domain", async () => {

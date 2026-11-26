@@ -39,7 +39,7 @@ import {
   localOnlyPatchRefusal, localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, wordPath, type Classify, type Coding, type Env, type Places,
 } from './gates.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv } from './wb.ts'
-import { START_INPUT, startCall } from './tools.ts'
+import { dirOfSession, START_INPUT, startCall } from './tools.ts'
 import { simpleWords } from './words.ts'
 // the words the forms' answers leave, beside the refusals' (gates.ts): still exported from here
 export { NO_FORM, NOT_SENT, SEND_ASK }
@@ -625,8 +625,7 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
     if (known) return known
     let got = c.location?.directory ?? process.cwd()
     try {
-      const s = await sessions.get({ sessionID })
-      if (s.location?.directory) got = s.subpath ? join(s.location.directory, s.subpath) : s.location.directory
+      got = dirOfSession(await sessions.get({ sessionID })) ?? got
     } catch { /* the plugin's location */ }
     dirs.set(sessionID, got)
     return got

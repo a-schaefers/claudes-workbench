@@ -15,7 +15,6 @@
 //
 // Nothing runs at import (server.ts's rule): setup registers them (`procedureTools`).
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
 import type { ServerContext } from './host.d.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv, type Options } from './wb.ts'
 
@@ -270,7 +269,14 @@ export interface ToolsContext {
   }
 }
 
-// A session's directory, as consent.ts reads it: its location, with its subpath
+// A session's directory: session.get's `location.directory`, already the whole directory. Its
+// `subpath` is that directory relative to the project's (OpenCode sets it so), so joining the two
+// doubled a subdirectory (<repo>/pkg/web/pkg/web) and every typed tool failed ENOENT in a session
+// opened below the repo's root (#1485, 2026-11-26). consent.ts and calls.ts read it here too.
+export const dirOfSession = (s: { location?: { directory?: string } } | undefined): string | undefined =>
+  s?.location?.directory || undefined
+
+// A session's directory, read once; the plugin's location without one
 export function sessionDirs(c: Pick<ToolsContext, 'location' | 'session'>): (session: string) => Promise<string> {
   const known = new Map<string, string>()
   return async sessionID => {
@@ -278,8 +284,7 @@ export function sessionDirs(c: Pick<ToolsContext, 'location' | 'session'>): (ses
     if (had) return had
     let got = c.location?.directory ?? process.cwd()
     try {
-      const s = await c.session?.get({ sessionID })
-      if (s?.location?.directory) got = s.subpath ? join(s.location.directory, s.subpath) : s.location.directory
+      got = dirOfSession(await c.session?.get({ sessionID })) ?? got
     } catch { /* the plugin's location */ }
     known.set(sessionID, got)
     return got

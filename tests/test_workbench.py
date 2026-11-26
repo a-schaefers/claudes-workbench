@@ -35633,6 +35633,32 @@ console.log(JSON.stringify({ failed }))
         sync()
         self.assertEqual(shown(), ["01", "03", "04"])
 
+    def test_a_session_opened_in_a_repo_subdirectory_runs_the_plugins_tools_there_and_never_below_it(self):
+        # #1485 (2026-11-26): a real OpenCode's session in <repo>/pkg/web says subpath "pkg/web" and
+        # location.directory "<repo>/pkg/web" already; the plugin joined the two, and every typed
+        # workbench_* tool ran wb from <repo>/pkg/web/pkg/web (ENOENT). Its session.get answer, as
+        # the tools' sessionDirs reads it, is the subdirectory itself
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        sub = self.project / "pkg" / "web"
+        sub.mkdir(parents=True)
+        url = self.serve()
+        end = time.monotonic() + 60
+        while True:                               # once the server answers
+            out = self.ask(url, "api", "POST", "/api/session", "-d", json.dumps({"location": {"directory": str(sub)}}))
+            if out.startswith("{") or time.monotonic() > end:
+                break
+            time.sleep(0.5)
+        made = json.loads(out)["data"]
+        self.assertEqual((made.get("subpath"), made["location"]["directory"]), ("pkg/web", str(sub)), made)
+        got = json.loads(self.ask(url, "api", "GET", f"/api/session/{made['id']}"))["data"]
+        script = ("const { sessionDirs } = await import(process.env.MOD)\n"
+                  "console.log(await sessionDirs({ session: { get: async () => JSON.parse(process.env.GOT) } })('s'))")
+        r = subprocess.run([shutil.which("opencode") or "opencode", "-e", script], capture_output=True, text=True,
+                           timeout=60, env={**os.environ, "BUN_BE_BUN": "1", "GOT": json.dumps(got),
+                                            "MOD": str(ROOT / "opencode-plugin" / "tools.ts")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[-1], str(sub))
+
     def test_wb_accept_tells_an_opencode_drivers_write_in_the_worktree_from_the_build_it_ran_there(self):
         # #1331's live acceptance: a real OpenCode driver's calls in a task's worktree are kept by
         # the plugin (calls.ts, execute.before/after) as claude-calls/ rows, so `wb accept` tells
