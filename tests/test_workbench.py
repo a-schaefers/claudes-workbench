@@ -46312,10 +46312,10 @@ class ApiSpendKeyhole(_KeyholeTest):
         self.post(kh)                                           # a running total in every chunk
         self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
 
-    def cut(self, kh, path="/chat/completions", read=120):
-        """A streamed request that OpenCode drops after ``read`` bytes of the answer, as wb's
-        _stop does mid-stream; its body's length back."""
-        body = json.dumps({"model": kh.model.name, "stream": True}).encode()
+    def cut(self, kh, path="/chat/completions", read=120, extra=None):
+        """A streamed request (``extra`` more of its body) that OpenCode drops after ``read`` bytes
+        of the answer, as wb's _stop does mid-stream; its body's length back."""
+        body = json.dumps({"model": kh.model.name, "stream": True, **(extra or {})}).encode()
         conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
         conn.request("POST", urllib.parse.urlsplit(kh.base).path + path, body=body,
                      headers={"Authorization": f"Bearer {kh.token}", "Content-Type": "application/json"})
@@ -46363,6 +46363,36 @@ class ApiSpendKeyhole(_KeyholeTest):
         mt.on_usage({"prompt_tokens": 1_000_000, "completion_tokens": 0, "cost": 0.01, "cut": True})
         row = store.read_jsonl(meter.ledger_path())[0][-1]
         self.assertEqual((row["usd"], row["source"], row["cut"]), (3.0, "keyhole", True))
+
+    def test_a_cut_request_carrying_an_image_books_its_input_as_the_room_counts_it_not_its_base64(self):
+        # #1474 (the #1373 audit, 2026-11-26): a cut's input was the body's bytes / 4, so one 3 MiB
+        # image's base64 booked 1M input tokens, $3.15 at $3/M, on the day cap at every wb stop,
+        # steer --now or think nudge; the room counts each image at IMAGE_TOKENS (body_tokens)
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.config = {"cost": [{"input": 3, "output": 15}]}
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        uri = "data:image/png;base64," + "iVBO" * (3 << 18)     # 3 MiB of base64
+        bodies = {"/chat/completions": {"messages": [{"role": "user", "content": [
+                      {"type": "image_url", "image_url": {"url": uri}}]}]},
+                  "/responses": {"input": [{"role": "user", "content": [
+                      {"type": "input_image", "image_url": uri}]}]}}
+        for path, extra in bodies.items():
+            with self.subTest(path):
+                usage = []
+                kh = self.keyhole(m, on_usage=lambda u: (mt.on_usage(u), usage.append(u)))
+                self.up.chunks, self.up.gap = 60, 0.1            # usage only at the end
+                size = self.cut(kh, path, extra=extra)
+                (u,) = self.booked(usage)
+                body = {"model": kh.model.name, "stream": True, **extra}
+                self.assertTrue(u["cut"])
+                self.assertLessEqual(u["prompt_tokens"], meter.body_tokens(body, size) + 1)
+                self.assertLess(u["prompt_tokens"], size / 40)  # nowhere near bytes / 4
+                row = store.read_jsonl(meter.ledger_path())[0][-1]
+                self.assertEqual((row["kind"], row["cut"]), ("step", True))
+                self.assertLess(row["usd"], 0.06)               # not $3.15
 
     def test_an_anthropic_response_cut_keeps_message_starts_input_and_adds_what_streamed(self):
         # #1276: message_start's usage was all a cut Anthropic response booked, its output 1

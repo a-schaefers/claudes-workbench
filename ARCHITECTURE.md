@@ -825,7 +825,9 @@ stop itself), and Chat Completions and the Responses API put their usage only at
 so a cut response booked $0 by both views (no `step_finish`, an export `info.cost` of 0) for a
 request the provider bills. Now when the keyhole's write to OpenCode (or its read from the
 provider) fails before the end marker, it books an estimate (`keyhole._cut_usage`): the input at
-least the request body's length / 4 (as the room reckons it; Anthropic's `message_start` input and
+least the room's own count of the request (`keyhole.body_tokens`, which `meter` re-exports: its body's
+length / 4, each image at `IMAGE_TOKENS` in place of its base64; at the raw length one 3 MiB image
+booked 1M tokens, $3.15 at $3/M, on every cut, #1474; Anthropic's `message_start` input and
 cache kept where it came), the output at least what streamed (the characters under each event's
 `delta` / 4, at least one token per such event; a body that isn't SSE, its bytes / 4), marked
 `cut`, which `Meter.on_usage` books as a `step` row with `cut: true` at the meter's prices (a
@@ -962,7 +964,8 @@ OpenCode 2.3.2 doesn't retry that 400 (`provider.invalid-request`, exit 1 at onc
 keyhole, both protocols: `ApiSpendKeyhole`'s real-OpenCode check); were the 400 retried after all, the next tick (5 s)
 stops it from the ledger. **The room** (`Meter.room(body, size)`, the keyhole's `room` hook before
 each request): the cap less today less the request at its worst (its body's length / 4 at the
-dearest tier's input price, each image at `meter.IMAGE_TOKENS` in place of its base64, `meter.body_tokens`:
+dearest tier's input price, each image at `meter.IMAGE_TOKENS` in place of its base64, `meter.body_tokens`
+(the keyhole's, `keyhole.body_tokens`, re-exported, as a cut's estimate counts the same, #1474):
 `images_in` finds a `data:image/` URI or a `data` string beside an `image/` media type, OpenAI's, Anthropic's
 and Google's shapes; at bytes / 4 a 10 MiB image was 3.5M tokens, $10.49 at $3/M, past a $10 cap, #1199's review; its `max_tokens`, `max_completion_tokens` or `max_output_tokens`, Gemini's
 `generationConfig.maxOutputTokens` or Converse's `inferenceConfig.maxTokens` (`meter.max_output`, #1192),

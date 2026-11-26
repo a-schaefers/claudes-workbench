@@ -1111,20 +1111,21 @@ def _handler(kh: Keyhole):
         # one request's answer (lift): its usage so far, its end marker seen, what streamed
         flight = False  # sent on and not yet answered in full or with an error: in kh._flying
         settled = False  # booked by kh.close(): nothing more of it is booked (#1349)
-        used, ended, sse, size = None, False, False, 0
+        used, ended, sse, tokens = None, False, False, 0
         said = deltas = streamed = 0
         started = queued = False
 
         def log_message(self, *args):  # nothing about a request reaches runner.log
             pass
 
-        def lift(self, size: int) -> bool:
-            """A request about to go out, ``size`` its body's length: in flight (kh._flying)
-            until land(); False once the keyhole is closed (it isn't sent)."""
+        def lift(self, tokens: int) -> bool:
+            """A request about to go out, ``tokens`` its input as the room reckons it (a cut's
+            estimate): in flight (kh._flying) until land(); False once the keyhole is closed (it
+            isn't sent)."""
             with kh._lock:
                 if kh.closed:
                     return False
-                self.used, self.ended, self.sse, self.size = {}, False, False, size
+                self.used, self.ended, self.sse, self.tokens = {}, False, False, tokens
                 self.said = self.deltas = self.streamed = 0
                 self.started = self.queued = False
                 self.flight = True
@@ -1149,7 +1150,7 @@ def _handler(kh: Keyhole):
                 if self.flight and not self.ended and not (self.queued and not self.started):
                     out = (max(self.deltas, -(-self.said // 4)) if self.sse
                            else -(-self.streamed // 4))
-                    self.used = _cut_usage(self.used, -(-self.size // 4), out)
+                    self.used = _cut_usage(self.used, self.tokens, out)
                     self.ended = True  # its cut booked: never a second
                 self.settled = closing
                 used, self.used = self.used, {}
@@ -1354,6 +1355,9 @@ def _handler(kh: Keyhole):
             deadline = time.monotonic() + kh.hold
             backoff = BACKOFF[0]
             first = True
+            # a cut's input as the room counts it, each image at IMAGE_TOKENS: at the body's
+            # bytes / 4 one 3 MiB image booked 1M tokens, $3.15 at $3/M, on a cut (#1474, 2026-11-26)
+            tokens = int(-(-body_tokens(body, size or len(raw)) // 1))
             while True:
                 if not first and body is not None and (why := kh.refusal(body, size)):
                     return self.send_json(400, f"workbench: {_printable(why)}")  # as do_POST's
@@ -1365,7 +1369,7 @@ def _handler(kh: Keyhole):
                     kh.held("rate_limited", 429, cool)
                     if not self.nap(min(cool, left)):
                         return self.drop()
-                if not self.lift(size or len(raw)):  # closed: the runner is going (#1349)
+                if not self.lift(tokens):  # closed: the runner is going (#1349)
                     return self.drop()
                 conn = kh.connection()
                 try:
@@ -1689,6 +1693,46 @@ def _said(obj, under: bool = False) -> int:
     return 0
 
 
+# An image in a request (#1199's review): OpenCode sends each `run -f` image, and the read tool's,
+# as base64, a data: URI (OpenAI's image_url, an OpenAI-compatible server's) or a `data` field
+# beside its image media type (Anthropic's source, Google's inlineData). At its bytes / 4 one
+# 10 MiB image read as 3.5M tokens, $10.49 at $3/M input: past a $10 cap every request carrying
+# it was refused, and wb start, counting no image, had let the task start (#1118's failure
+# again). A provider counts an image by its pixels after its own downscale, a few thousand
+# tokens (Anthropic's about 1,600, OpenAI's tiles about 1,100, a Qwen-VL's up to 16,384): the
+# room and runner.first_tokens count each at that worst, its base64 left out.
+IMAGE_TOKENS = 16_384
+MEDIA_KEYS = ("media_type", "mimeType", "mime_type", "mediaType")
+
+
+def images_in(body) -> tuple[int, int]:
+    """A request body's images: how many, and the characters of their base64 (each a data: URI,
+    or a `data` string beside an image/ media type), which the room leaves out of its bytes / 4."""
+    n = chars = 0
+    todo = [body]
+    while todo:
+        x = todo.pop()
+        if isinstance(x, dict):
+            data = x.get("data")
+            if isinstance(data, str) and any(isinstance(x.get(k), str) and x[k].startswith("image/")
+                                             for k in MEDIA_KEYS):
+                n, chars = n + 1, chars + len(data)
+            else:
+                todo.extend(x.values())
+        elif isinstance(x, list):
+            todo.extend(x)
+        elif isinstance(x, str) and x.startswith("data:image/") and ";base64," in x[:128]:
+            n, chars = n + 1, chars + len(x)
+    return n, chars
+
+
+def body_tokens(body, size: int) -> float:
+    """A request's input as the room reckons it: its bytes / 4, each image at IMAGE_TOKENS in
+    place of its base64 (images_in)."""
+    n, chars = images_in(body) if isinstance(body, (dict, list)) else (0, 0)
+    return max(size - chars, 0) / 4 + n * IMAGE_TOKENS
+
+
 def _count(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
 
@@ -1696,10 +1740,11 @@ def _count(v) -> bool:
 def _cut_usage(used: dict, inp: int, out: int) -> dict:
     """A response cut short (OpenCode stopped mid-stream, the provider gone) as the usage it is
     billed at least (#1276): what its stream said, its input at least ``inp`` (the body's length
-    / 4, as the meter's room reckons a request) and its output at least ``out`` (what was
-    streamed: its deltas' characters / 4), marked `cut`. Anthropic's message_start gives the
-    input (and its cache); Chat Completions and the Responses API give nothing before their end,
-    so the estimate is in Chat Completions' names, which the meter reads for any protocol."""
+    / 4, each image at IMAGE_TOKENS: body_tokens, as the meter's room reckons a request) and its
+    output at least ``out`` (what was streamed: its deltas' characters / 4), marked `cut`.
+    Anthropic's message_start gives the input (and its cache); Chat Completions and the Responses
+    API give nothing before their end, so the estimate is in Chat Completions' names, which the
+    meter reads for any protocol."""
     u = dict(used or {})
     chat = not u or "prompt_tokens" in u or "completion_tokens" in u
     i, o = ("prompt_tokens", "completion_tokens") if chat else ("input_tokens", "output_tokens")
