@@ -35575,6 +35575,48 @@ class RealOpenCodePlugin(Base):
         self.assertEqual(left, [])
 
 
+    def test_deepcode_typed_brings_wbs_rule_to_the_model_and_a_deepmode_line_sets_it(self):
+        # #1278 on OpenCode (opencode-plugin/deep.ts): the prompt hook keeps the notes by the
+        # message's id and the context hook adds them while that message is the newest user one,
+        # which only a real server shows works (the ids it hands the two hooks match; #1325)
+        from workbench import chat, ocplugin, runs
+        chat.set_on(False)  # the prompt reaches the chat part too (see the tests above)
+        os.environ["HOME"] = str(self.root / "home")
+        state = self.root / "wb-state"
+        state.mkdir()
+        with mock.patch.dict(os.environ, {"WB_HOME": str(state)}):
+            chat.set_on(False)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = self.root / "requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out)])
+        self.addCleanup(lambda: (server.kill(), server.wait()))
+        self.conf.write_text(json.dumps({
+            "plugins": [{"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(state)}}}],
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 131072, "output": 1024}}}}}}))
+        url = self.serve(WB_HOME="")
+        self.listed(url, ocplugin.PLUGIN_ID)
+
+        def system(words):  # the system text of the requests with tools (not the title's) for that prompt
+            reqs = [json.loads(line) for line in out.read_text().splitlines()]
+            return ["".join(json.dumps(m["content"]) for m in r["messages"] if m["role"] == "system") for r in reqs
+                    if r.get("tools") and words in json.dumps([m for m in r["messages"] if m["role"] == "user"][-1:])]
+        self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepcode audit the parser")
+        said = system("deepcode audit the parser")
+        self.assertTrue(said, out.read_text())
+        self.assertIn(json.dumps(runs.DEEPCODE_RULE)[1:-1], said[0])
+        self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepmode on")
+        self.assertEqual(json.loads((state / "workflows.json").read_text())["mode"], "on")
+        toggled = system("deepmode on")
+        self.assertTrue(toggled, out.read_text())
+        self.assertIn("line set it (wb ran `wb deepmode on`): Dynamic workflows (deepmode): On.", toggled[0])
+        self.assertNotIn(json.dumps(runs.DEEPCODE_RULE)[1:-1], toggled[0])  # the last prompt's notes are done
+
+
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCodeSkillFiles(Base):
     """A handed skill's supporting files: what OpenCode tells the agent when it loads the skill."""

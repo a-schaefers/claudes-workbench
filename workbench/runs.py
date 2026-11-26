@@ -72,8 +72,10 @@ ARCHIVE = ".archive"   # runs/.archive/<run>: closed runs wb gc moved there (nam
 
 
 # --- the keywords (#1278): Workbench's own words, never Claude's `ultracode` --------------------
-# The hosts (the Claude Code mod, the OpenCode plugin) detect them in what the user typed; this is
-# the reference the kernel's Keywords (#1325, #1356) and tests/fixtures/keywords.json hold to.
+# The hosts detect them in what the user wrote, both through one module, mod/hooks/keywords.ts (the
+# Claude Code mod's, which the OpenCode plugin imports): this is its reference, and
+# tests/fixtures/keywords.json holds both to it. Reading a prompt is parsing text, which stays out
+# of the kernel (kernel/BOUNDARY.md, #1325).
 FENCE = re.compile(r"```.*?(?:```|\Z)|`[^`\n]*`", re.S)
 DEEPCODE = re.compile(r"(?<![\w-])deepcode(?![\w-])", re.I)
 DEEPMODE_LINE = re.compile(r"^\s*deepmode\s+(on|off)\s*[.!]?\s*$", re.I | re.M)

@@ -6302,7 +6302,8 @@ row is the web app's (#1283; the pane's until then, #1023).
 **The keywords** (#1278; `mod/hooks/keywords.ts`, both hosts' one copy, held to `tests/fixtures/keywords.json`
 as `runs.keywords` is; text, so never the kernel's: kernel/BOUNDARY.md): `deepcode`, a whole word outside
 backticks and fences, and a line of its own `deepmode on|off` (the last wins; `onlyToggles`: nothing else in
-the text). Only the user's own words: in the terminal (the mod's `prompt.submit`, `byUser` and none of `[web
+the text), read as Python reads it (`\w` Unicode, `\s` as `str.isspace`, a line ending at `\n` alone: a seeded
+run of the two agreed on 300,000 texts, #1325). Only the user's own words: in the terminal (the mod's `prompt.submit`, `byUser` and none of `[web
 chat]`, `[agent `, `[workbench]` nor a slash command) or the user's web message (never an agent's), never
 Claude's `ultracode`. `deepcode` adds `wb deepmode --rule` (`runs.DEEPCODE_RULE`, read once a load;
 `DEEPCODE_FALLBACK` from a wb without it) to that prompt: the hidden `context` entry in the terminal, the text
@@ -6312,7 +6313,8 @@ line (no turn; `sayRules`' row tells Claude); else the rest goes on. `/deepmode 
 `DEEPMODE`, the one command not named `workbench-*`: the user's word) sets or shows it. In OpenCode
 (`opencode-plugin/deep.ts`, its prompt hook registered before upkeep's so that a toggle is in workflows.json
 when upkeep reads it): the session `prompt` hook reads a typed prompt (no metadata) or the chat's delivery of
-the user's (`chat.SOURCE`, `[web chat]`), runs wb as the session, and the `context` hook adds the rule, or the
+the user's (`chat.SOURCE`, `[web chat]`), never a subagent's (a session with a `parentID`: OpenCode's
+subagent prompt comes unmarked too, #1325), runs wb as the session, and the `context` hook adds the rule, or the
 toggle's `TOGGLED` line, as system parts to that prompt's requests (while it is the newest user message, by
 the requests' message ids; to the next prompt without them); `/deepmode` is a server command (`command.transform`),
 said with a `synthetic` message that starts no turn.
@@ -7980,7 +7982,13 @@ words, `KEEP_ON_COMPACT` among them, and `firstTask`, a parse, stay in the host)
 stays out (rendering). The gate classifier `gateOf`, which every Bash and Monitor gate in
 `register.tsx` reads (`delegates`, `runs`, `upstreamAim`, `sendQuestion`, `routeCalls`,
 `writesTo`), its hand copies deleted (#1325, after #1364); and the coding gate's rules,
-`codingGate` and `editTools` (`codingRefusal`, `callRows`).
+`codingGate` and `editTools` (`codingRefusal`, `callRows`). What #1325 planned and the entry test
+and the rulings leave out (2026-11-26): the keywords (reading a prompt is parsing: `mod/hooks/keywords.ts`,
+one TypeScript module both hosts import, *Deep workflows*); the weekly check's offer (scout timing is wb's,
+`cli.scout_offer_due`, which `wb scout --if-due` runs for the OpenCode plugin; the mod's `scoutIfDue` checks
+the same two times in scout.json on its quiet polls, a coupling); the web chat's asks (#1350 to #1352 removed
+most; what is left matches each host's own delivery); and the chat API's shapes (types, not decisions: #1323's
+one shared types module).
 
 - **The membrane**: `mod/hooks/core.ts`, the one importer of `./kernel.js` (with its generated
   `kernel.d.ts`), exports `kernel` (every export by name, untyped, for the goldens: only tests,
@@ -8686,6 +8694,11 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   names its session, store and directory; the RPC answers),
   `opencode-plugin/test/chat.test.ts` (the web chat's lane against a fake wb and session
   API, *The web chat on OpenCode*; wb's side in `tests/test_chat_opencode.py`),
+  `opencode-plugin/test/deep.test.ts` (#1278: every `tests/fixtures/keywords.json` case on the shared
+  module; the rule and the toggle's line on that prompt's requests alone; no other plugin's prompt, agent's
+  or subagent's read, #1325; `/deepmode`) and `RealOpenCodePlugin`'s
+  `test_deepcode_typed_brings_wbs_rule_to_the_model_and_a_deepmode_line_sets_it` (a real server's request
+  carries the rule, the toggle set and said, by the ids its two hooks see),
   `opencode-plugin/test/notices.test.ts` (the notices' lane and the jobs against an in-memory state
   dir, a fake wb and session API, and the TUI's toasts: *Notices on OpenCode*), `RealOpenCodePlugin`'s
   `test_a_review_notice_reaches_its_session_once_and_a_resend_under_its_id_adds_nothing` and
