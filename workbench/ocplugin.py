@@ -215,17 +215,43 @@ def copy_info(d: Path) -> dict | None:
     return note if isinstance(note, dict) else None
 
 
+def shared_files(root: Path | None = None, rev: str = "HEAD") -> list[tuple[str, str]]:
+    """(path, blob) at the clone's ``rev`` of each Claude Code mod file the plugin imports from beside
+    it (`../mod/hooks/…`: spans.ts's splash.ts and apprentice.ts, #1333), as HEAD's root
+    package.json `files` name them under mod/ (the Git install's list), there; a copy carries them."""
+    root = root or PKG_ROOT
+    try:
+        files = json.loads(gitops.git(root, "show", f"{rev}:package.json")).get("files")
+        names = [f for f in files if isinstance(f, str) and f.startswith("mod/")] if isinstance(files, list) else []
+        if not names:
+            return []
+        out = gitops.git_bytes(root, "ls-tree", "-z", rev, "--", *names)
+    except (gitops.GitError, OSError, ValueError):
+        return []
+    rows = [r.partition(b"\t") for r in out.split(b"\0") if r]
+    return sorted((name.decode("utf-8", "surrogateescape"), meta.split()[2].decode())
+                  for meta, _, name in rows if meta.split()[1:2] == [b"blob"])
+
+
 def head_tree(root: Path | None = None) -> tuple[str, str] | None:
-    """(the commit, opencode-plugin/'s tree) at the clone's HEAD; None off git, or without it."""
+    """(the commit, the copy's key) at the clone's HEAD: opencode-plugin/'s tree, or with the mod
+    files it imports (shared_files) a hash of that tree and their blobs, so a change to one of them
+    alone makes a new copy too; None off git, or without opencode-plugin/."""
     try:
         out = gitops.git(root or PKG_ROOT, "rev-parse", "HEAD", "HEAD:opencode-plugin").split()
     except (gitops.GitError, OSError):
         return None
-    return (out[0], out[1]) if len(out) == 2 else None
+    if len(out) != 2:
+        return None
+    if shared := shared_files(root, out[0]):
+        joined = out[1] + "".join(f"\0{path}\0{blob}" for path, blob in shared)
+        return out[0], hashlib.sha1(joined.encode()).hexdigest()
+    return out[0], out[1]
 
 
 def make_copy(root: Path | None = None) -> tuple[Path, str] | None:
-    """opencode-plugin/ as committed at the clone's HEAD (its tests left out), copied once per tree
+    """opencode-plugin/ as committed at the clone's HEAD (its tests left out), with the mod files it
+    imports beside it (shared_files, at <tree>/mod/…), copied once per key (head_tree's)
     to copies_dir()/<tree>/opencode-plugin: (that directory, the commit it was copied at). What wb
     setup --opencode's entry loads: OpenCode watches a configured local plugin and reloads it on
     every change (core/src/config/plugin/source.ts), so an entry on the clone's live
@@ -241,7 +267,7 @@ def make_copy(root: Path | None = None) -> tuple[Path, str] | None:
     final.parent.mkdir(parents=True, exist_ok=True)
     tmp = final.parent / f".tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     try:
-        for row in gitops.git_bytes(root, "ls-tree", "-r", "-z", tree).split(b"\0"):
+        for row in gitops.git_bytes(root, "ls-tree", "-r", "-z", f"{commit}:opencode-plugin").split(b"\0"):
             meta, _, name = row.partition(b"\t")
             mode, kind, sha = (meta.split() + [b"", b"", b""])[:3]
             rel = name.decode("utf-8", "surrogateescape")
@@ -251,6 +277,11 @@ def make_copy(root: Path | None = None) -> tuple[Path, str] | None:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(gitops.git_bytes(root, "cat-file", "blob", sha.decode()))
             out.chmod(0o755 if mode == b"100755" else 0o644)
+        for rel, blob in shared_files(root, commit):  # beside it, where its `../mod/hooks/…` imports look
+            out = tmp / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(gitops.git_bytes(root, "cat-file", "blob", blob))
+            out.chmod(0o644)
         (tmp / COPY_NOTE).write_text(json.dumps({"commit": commit, "tree": tree, "clone": str(root.resolve())}))
         try:
             os.rename(tmp, final)
