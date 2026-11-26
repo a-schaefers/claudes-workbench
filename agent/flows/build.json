@@ -7,7 +7,7 @@
     {"id": "code", "card": "build", "items": ["the request"],
      "prompt": "{params.request}\n\n{context}"},
     {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 2},
-     "prompt": "Review this change against what it was asked to do.\n\nAsked:\n{params.request}\n\nThe change:\n{diff}"},
+     "prompt": "Review this change against what it was asked to do.\n\nAsked:\n{params.request}\n\nThe coder's report:\n{report}\n\nThe change:\n{diff}"},
     {"id": "claude", "final": true, "from": "review"}
   ]
 }

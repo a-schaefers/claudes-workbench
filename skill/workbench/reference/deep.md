@@ -16,10 +16,11 @@ json|file|runs}`; `runs` is an earlier run's final results), `budget_usd`, `budg
 - Its inputs: `items` (a list, or `"{params.<a list param>}"`), or `from` an earlier stage,
   `split` a key of each earlier output that holds a list (one item per entry).
 - `prompt`: the item's spec. Placeholders only substitute: `{item}`, `{item.<key>}`,
-  `{params.<key>}`, `{context}`, `{diff}` (the code stage's change, over a code stage only),
-  `{run}`, `{stage}`, `{base}`; `{{`, `}}` are braces. An object goes in as fenced JSON.
+  `{params.<key>}`, `{context}`, `{diff}` (the code stage's change) and `{report}` (its coder's
+  round report: answers to a refix), both over a code stage only, `{run}`, `{stage}`, `{base}`; `{{`, `}}` are braces. An object goes in as fenced JSON.
 - `flow`: `pipeline` (the default: an item starts once its input is in) or `barrier` (once all
-  are); `batch` N (barrier only: N inputs as one list item); `attempts` N (the same item N times).
+  are); `batch` N (barrier only: N inputs as one list item, each with its key as `id`; the
+  answers must be one per id, a missing one named `unjudged`); `attempts` N (the same item N times).
 - `keep`: `{"path": "verdict", "in": ["confirmed"]}`: the rest are filtered, kept in the report.
 - `refix`: on a report over a code stage, `{"path": "must_fix", "max": 1|2}`: a non-empty list
   goes back to the coder as `wb feedback`, then the change is reviewed again.
