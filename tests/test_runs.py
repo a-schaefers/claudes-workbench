@@ -1098,6 +1098,39 @@ class Runs(Base):
                          [{"key": "find:3", "why": "past the stage's max_items (2)"},
                           {"key": "judge:1", "why": "skipped (wb run amend --skip)"}])
 
+    def test_a_refixs_reviews_count_once_to_max_items_and_a_started_review_is_never_cut(self):
+        # #1484 (2026-11-26): counted by index, item 1's superseded review and its refix's next
+        # one pushed review 2, already running, past max_items 2: not_run, its result dropped
+        flow = {"v": 1, "name": "rcap", "stages": [
+            {"id": "code", "kind": "code", "items": ["a", "b"]},
+            {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 2},
+             "max_items": 2, "prompt": "{diff}"},
+            {"id": "claude", "final": True, "from": "review"}]}
+        with mock.patch.object(runs, "spawn", return_value=0):  # no driver: the state alone
+            run_wb("run", "start", "rcap", "--plan", self.plan(flow), "--repo", str(self.repo))
+        run = runs.Run("rcap")
+        for k in ("1", "2"):
+            run.log(kind="item", stage="code", key=k, n=int(k), task=f"rcap-code-{k}")
+            run.log(kind="output", stage="code", key=k, state="done", task=f"rcap-code-{k}")
+            run.log(kind="item", stage="review", key=k, n=int(k), task=f"rcap-review-{k}")
+            t = store.Task(f"rcap-review-{k}")
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": t.name, "run": "rcap", "stage": "review", "item": k})
+            store.write_json(t.dir / "status.json", {"phase": "running"})
+        run.log(kind="refix", stage="review", src="1", task="rcap-code-1", count=1, round=1)
+        run.log(kind="output", stage="review", key="1", state="superseded", why="refix 1 sent to rcap-code-1",
+                task="rcap-review-1")
+        self.assertEqual([(i.key, i.state) for i in runs.state(run)["review"]],
+                         [("1", "superseded"), ("1~r1", "waiting"), ("2", "running")])
+        spec = run.spec  # past the cap, an item not yet started is still cut, named
+        run.log(kind="item", stage="code", key="3", n=3, task="rcap-code-3")
+        spec["flow"]["stages"][0]["items"] = ["a", "b", "c"]
+        spec["flow"]["stages"][1]["max_items"] = 1
+        store.write_json(run.dir / "run.json", spec)
+        run.log(kind="output", stage="code", key="3", state="done", task="rcap-code-3")
+        self.assertEqual([(i.key, i.state, i.why) for i in runs.state(run)["review"]][2:],
+                         [("2", "running", ""), ("3", "not_run", "past the stage's max_items (1)")])
+
     def test_a_name_is_a_run_or_a_task_never_both(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
         run_wb("run", "start", "nm", "--plan", self.plan({**AUDIT, "name": "nm"}), "--param", "areas=a",

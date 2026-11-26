@@ -972,9 +972,14 @@ def state(run: Run) -> dict:
         esc = (s.get("escalate") or []) if is_code(s) else []
         there = set((spec.get("exists") or {}).get(sid) or ()) if s.get("unless_exists") else set()
         items = []
-        idx, passed = -1, 0  # passed: the items unless_exists skipped, which count to no cap
+        # the cap counts distinct items: a refix's reviews of one change (`1`, `1~r1`, …) are one,
+        # as an escalation's `#eN` is, and unless_exists's skips are none. Counted by index, a large
+        # fix run's refixes pushed a review already running past the cap, its result dropped (#1484,
+        # 2026-11-26)
+        idx, counted = -1, set()
         while (idx := idx + 1) < len(inputs):
             key, v, src = inputs[idx]
+            one = re.sub(r"~r\d+", "", key)
             it = Item(sid, key, v, src=src, members=groups.get(key))
             row = started.get((sid, key))
             if row:
@@ -986,18 +991,19 @@ def state(run: Run) -> dict:
                     it.output = (store.read_json(run.output_file(sid, it.n), {}) or {}).get("result")
             elif hit in there:
                 it.state, it.why = "not_run", f"exists at base: {hit}"
-                passed += 1
             elif sid in skipped:
                 it.state, it.why = "not_run", "skipped (wb run amend --skip)"
             elif s.get("compare") and len(it.members or ()) < 2:
                 it.state, it.why = "not_run", (f"{len(it.members or ())} of its attempts reached review: "
                                                "nothing to compare (wb run report names the rest)")
-            elif idx - passed >= cap and "#e" not in key:
-                it.state, it.why = "not_run", f"past the stage's max_items ({cap})"
+            elif not row and "#e" not in key and one not in counted and len(counted) >= cap:
+                it.state, it.why = "not_run", f"past the stage's max_items ({cap})"  # never one started
             elif v is WAITING:
                 it.state, it.input = "waiting", None
             elif it.task:
                 it.state, it.why, it.output = _live(s, it)
+            if "#e" not in key and hit not in there:
+                counted.add(one)
             items.append(it)
             # stuck, failed, or its review's asks left past refix's max: the next role tries it
             # from the base (#1134's study: escalating attempts across roles)
