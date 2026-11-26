@@ -3675,7 +3675,8 @@ A run's notices (#1278, *Deep workflows*) are rows `{ts, run, kind, text}` in th
 keeps them, `_rotate_notices` moves one once its run's `acked` passes it or the run is closed. An
 open run's item (task.json `run`, `runs.item_open`: the run open and its driver alive) notifies its
 driver instead (`runs/<run>/notify.jsonl`, with its `noticed` mark, which the driver's ack covers), except
-`question` and `checkin` (`store.RUN_GLOBAL`), which only Claude can answer.
+`checkin` (`store.RUN_GLOBAL`), the user's own request. A `question` goes to the driver too, which refuses its ask
+at that pass (`runs.RUN_REFUSED`): to Claude it was a wake whose answer came too late (#1506).
 
 Notices go to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts, task, kind, text, round?, id?, cause?,
 guard?, tasks?}`; `guard` `agents` on a `spend` stop for the Agents switch, #1213). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
@@ -9658,7 +9659,7 @@ pass woke the driver itself, 20 passes a second while an item ran): it takes its
 (`runs.item_open`), notifies `runs/<run>/notify.jsonl` with its `noticed` mark, `store.Task.notify`, and the
 driver claims each ack up to it, so neither the mod's wake nor its idle net wakes Claude for one; with the driver
 dead an item's notice is Claude's, a task's as any), refuses an item's open ask at once (`runs.RUN_REFUSED`,
-`ask_mcp.answer_once`, as the bench's `REFUSED`: nobody is told of it, and a finder's ask for a path held the GPU its
+`ask_mcp.answer_once`, as the bench's `REFUSED`: its `question` notice is the driver's, never Claude's, and a finder's ask for a path held the GPU its
 20-minute `ask_timeout` in the real GPU audit, 2026-11-26), reaps dead runners, resumes an item stopped from outside
 its step whose cause passes or is the user's to lift (`_held`, `runs._outside`: `cli._interrupted`, a restart, a
 killed runner, a shutdown's signal, an update, or `cli.stopped_outside` in `runs.held_infra`: the day cap in a

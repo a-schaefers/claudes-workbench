@@ -1489,17 +1489,20 @@ class Wiring(Base):
             store.write_json(t.dir / "status.json", status)
         return t
 
-    def test_an_open_runs_item_wakes_its_driver_but_its_question_still_wakes_claude(self):
+    def test_an_open_runs_item_wakes_its_driver_with_its_question_too_and_only_a_checkin_wakes_claude(self):
+        # #1506: the driver refuses an item's ask at its next pass, so a question that woke Claude
+        # cost a turn on an answer that lost the race or found the ask closed
         run = self.open_run()
         t = self.item("wr-find-1")
         t.notify("review", "the report")
         t.notify("question", "which file?", id="q1")
-        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["question"])
-        (routed,) = store.read_jsonl(runs.run_dir("wr") / "notify.jsonl")[0]
-        self.assertEqual(routed["kind"], "review")
+        t.notify("checkin", "how is it going?")
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["checkin"])
+        routed = store.read_jsonl(runs.run_dir("wr") / "notify.jsonl")[0]
+        self.assertEqual([r["kind"] for r in routed], ["review", "question"])
         runs.Run("wr").set_status(phase="review")
         t.notify("review", "again")  # the run no longer open: Claude's again
-        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["question", "review"])
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["checkin", "review"])
         self.assertTrue(run.exists)
 
     def test_a_routed_notice_leaves_its_noticed_mark_and_the_driver_acknowledges_it(self):
