@@ -12,6 +12,7 @@ import { Workbench, type Status } from './rpc.ts'
 import { calls } from './calls.ts'
 import { chat } from './chat.ts'
 import { consent } from './consent.ts'
+import { tools } from './tools.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
 import { registerAgent } from './agent.ts'
 import { startDriver, type DriverHost } from './driver.ts'
@@ -45,6 +46,8 @@ const plugin: ServerPlugin = {
     // the consent gates before the calls: their execute.before refusal comes before a call's row (#1314)
     const stopConsent = await consent(ctx)
     if (stopConsent) stops.push(stopConsent)
+    const stopTools = await tools(ctx).catch(() => undefined) // the procedure's typed wb tools (#1335)
+    if (stopTools) stops.push(stopTools)
     const stopCalls = await calls(ctx) // the driver's calls in claude-calls/ (#1331)
     if (stopCalls) stops.push(stopCalls)
     const stopNotices = await notices(ctx) // the notices and the background jobs (#1313, #1334)

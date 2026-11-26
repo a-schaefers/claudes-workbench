@@ -167,6 +167,25 @@ test('the route tool refuses on a no, and fails closed with no TUI, writing no a
   }
 })
 
+test('the typed start (#1335) asks on an API model with its typed argv, writes the approval, then starts with the spec on stdin', async () => {
+  const home = scratch()
+  try {
+    const calls: string[][] = []
+    const inputs: (string | undefined)[] = []
+    const d = deps(home, 'yes', GATED, calls)
+    const run = d.run
+    const start = tools({ ...d, run: async (args, opts) => { inputs.push(opts.input); return run(args, opts) } }).find(t => t.name === 'start')!
+    expect(await start.execute({ name: 't', spec: 'Do x.\n', role: 'trivial', test: '-x', model: 'deepseek/x' }, { sessionID: 'ses_a' }))
+      .toEqual({ content: 'ran start' })
+    const argv = ['t', '--spec', '-', '--role=trivial', '--test=-x', '--model=deepseek/x']
+    expect(calls).toEqual([['ses_a', 'route', '--dry-run', '--json', '--start', ...argv], ['ses_a', 'start', ...argv]])
+    expect(inputs).toEqual([undefined, 'Do x.\n'])                   // the dry run reads no stdin (wb's rule)
+    expect(existsSync(join(home, 'route-ok.ses_a.json'))).toBe(true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('the send tool shows the title and body, and writes what wb patch send checks on the yes', async () => {
   const home = scratch()
   try {

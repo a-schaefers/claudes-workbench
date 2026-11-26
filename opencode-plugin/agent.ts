@@ -13,8 +13,11 @@
 // agent's list offers them (skill/instructions.ts), and the Workbench agent loads one by the id
 // its prompt names.
 //
-// The agent's permissions are OpenCode's default and the question tool, as Build's; the gates
-// (#1314) add theirs here. The mode (#1315) is this agent itself: upkeep.ts reads a session's.
+// The agent's permissions are OpenCode's default and the question tool, as Build's. The gates
+// (#1314) add no rule here: they decide on OpenCode's permission hook (consent.ts, `permission.hook`
+// "evaluate"), which every call's permission passes, whatever agent's rules let it. The procedure's
+// typed wb tools (tools.ts) need no rule either. The mode (#1315) is this agent itself: upkeep.ts
+// reads a session's.
 import type { AgentEditor, Registration, ServerContext, SessionContextHook, SkillEditor } from './host.d.ts'
 import { SKILL_ID, readSkill, render, type Rendered, type Where } from './skill.ts'
 import { OWN, findWb, wbEnv, type Options } from './wb.ts'
@@ -42,6 +45,7 @@ export function where(root: string, options: Options, base = process.env): Where
     wb: found.found ? found.wb : join(root, 'bin', 'wb'),
     onPath: found.from === 'PATH',
     docs: !!statSync(join(root, 'ARCHITECTURE.md'), { throwIfNoEntry: false })?.isFile(),
+    wakes: options?.wake !== 'off',  // notices.ts's own reading of the option
   }
 }
 
