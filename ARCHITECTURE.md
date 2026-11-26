@@ -3898,7 +3898,7 @@ and nothing here changes that path.
   `dir` kept, its `used` only for the same model; the live check, 2026-11-26)
   (`label`: `provider/id#variant`, or `not known yet …` before its first request), `kind` (`gpu`:
   `discover()` finds it; `api`: OpenCode's catalog lists it, `models.lookup`, cached first;
-  `unknown`), its `window` (`limit.context`), the pin, and three notes, each never a refusal (wb
+  `unknown`), its `window` (`limit.context`), the pin, and four notes, each never a refusal (wb
   can't make a weak model hold the bar) and said once per key with `--once` (`driver.once`,
   `drivers/said.json`, the newest `SAID_KEEP` 400 kept):
   - `own:<id>`: the driver is the agents' own model (`driver.agents_models`: each role's API model,
@@ -3908,8 +3908,14 @@ and nothing here changes that path.
   - `local:<id>:<place>`: an API (or unknown) driver in a `local_only` repo
     (`privacy.local_only_place`): local_only keeps API models off the agents only, so the code
     reaches the API through the driver.
-  - `small:<id>`: the `/workbench` procedure (`skill/workbench/SKILL.md`, about a token per
-    `BYTES_PER_TOKEN` 4 bytes) takes `context.FIXED_SHARE` 40% of the window or more.
+  - `fit:<id>`: the procedure and what OpenCode sends beside it (`DRIVER_BASE_TOKENS` 11,000: its
+    own prompt and tools and the agent's additions, measured: a 32K model's first Workbench request
+    was 27,822 input tokens) reach OpenCode's compaction point (`driver.auto_ceiling`, upkeep.ts
+    `autoCeiling`'s twin, of the input window: `limit.input` and `limit.context`, the smaller), so
+    every request compacts again and none answers: it says so and asks for a 64K model or more in
+    /models (a 32K or 40K local driver looped until Esc, #1487).
+  - `small:<id>`: otherwise, the `/workbench` procedure (`skill/workbench/SKILL.md`, about a token
+    per `BYTES_PER_TOKEN` 4 bytes) takes `context.FIXED_SHARE` 40% of the window or more.
 - **The pane** (`pane.tsx`, `pane-view.ts`'s `driverRow`): the panel's first row, `driver:
   <provider/id#variant> (GPU|API)`, ` · pin <id>` when the pin names another model, and ` · change`:
   the row's press dispatches the TUI's `model.list` (`MODELS`, OpenCode's own `/models`), as the

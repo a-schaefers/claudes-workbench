@@ -42206,14 +42206,32 @@ class OpenCodeDriver(Base):
         # wb doctor says the first note every time
         self.assertEqual(len(driver.doctor_lines()), 1)
         self.assertIn("(session ses_1) is also the agents' model (trivial)", driver.doctor_lines()[0])
-        # a small window: the procedure alone takes much of it
+        # a small window: the procedure with OpenCode's own prompt is over its compaction point
         small = driver.notes("p/m", mock.Mock(config={"limit": {"context": 32768}}), "unknown", None)
-        self.assertEqual([n["key"] for n in small], ["small:p/m"])
-        self.assertIn("has a 32K window", small[0]["text"])
+        self.assertEqual([n["key"] for n in small], ["fit:p/m"])
         self.assertEqual(driver.notes("p/m", mock.Mock(config={"limit": {"context": 262144}}), "unknown", None), [])
         # Claude Code's driver: Claude Code, fixed
         os.environ["CLAUDECODE"] = "1"
         self.assertEqual(self.wb("driver")[1], f"driver: {driver.CLAUDE_CODE}\n")
+
+    def test_a_driver_whose_window_cant_hold_the_procedure_is_told_every_request_will_compact(self):
+        # #1487 (2026-11-26): a 32K or 40K local driver never answered in Workbench mode on
+        # OpenCode, every request over its compaction point (window less max(15%, 16K)), and the
+        # only note said "a larger window reviews more at once"; the real SKILL.md is judged
+        from workbench import driver
+        self.assertEqual(driver.auto_ceiling(32_768), 16_768)
+        self.assertEqual(driver.auto_ceiling(65_536), 49_536)
+        self.assertEqual(driver.auto_ceiling(28_672), 24_372)
+        for window in (28_672, 36_864, 40_960):
+            said = driver.notes("ollama/m", mock.Mock(config={"limit": {"context": window}}), "gpu", None)
+            self.assertEqual([n["key"] for n in said], ["fit:ollama/m"], window)
+            self.assertIn("can't hold the Workbench procedure", said[0]["text"])
+            self.assertIn("every request will compact and none will answer", said[0]["text"])
+            self.assertIn("64K window or more in /models", said[0]["text"])
+        self.assertEqual(driver.notes("ollama/m", mock.Mock(config={"limit": {"context": 65_536}}), "gpu", None), [])
+        # OpenCode compacts against the input window: the smaller of input and context
+        tight = mock.Mock(config={"limit": {"context": 131_072, "input": 32_768}})
+        self.assertEqual([n["key"] for n in driver.notes("ollama/m", tight, "gpu", None)], ["fit:ollama/m"])
 
     def test_wb_driver_model_says_the_tuis_selection_over_the_beats_and_its_notes_once(self):
         # the live check of #1316's pane (2026-11-26): OpenCode commits a /models pick to the session
