@@ -21,7 +21,7 @@ import { Apprentice, mountSplash, PANEL, replaySplash, type Panel, type SplashHo
 import { AGENT, WorkbenchPane, type Link, type Live, type PaneTask, type Tasks } from './pane.ts'
 import { WorkbenchDriver } from './driver.ts'
 import {
-  driverRow, footer, lineRun, MODELS, modelineOf, panelRows, pixels, Poll, runOf, scoped, separator, sidebar, spinAt, target,
+  driverRow, footer, lineRun, LinkPoll, MODELS, modelineOf, panelRows, pixels, Poll, runOf, scoped, separator, sidebar, spinAt, target,
   TOKEN, WHO, wrap, type DriverInfo, type Here, type Run, type Token,
 } from './pane-view.ts'
 import { capRow, focusOf, frameOf, speechOf } from '../mod/hooks/tasks.ts'
@@ -109,25 +109,21 @@ function Runs(props: { readonly theme: PaneHost['theme']; readonly runs: readonl
 class Feed {
   readonly state = createSignal<Tasks | null>(null)
   readonly link = createSignal<Link>({ state: 'checking' })
-  private linkAt = -Infinity
   private readonly loop: Poll<Tasks>
+  // the web app's link, for the modeline: asked when the panel draws and each LINK_MS while it shows (#1518)
+  private readonly links: LinkPoll
   constructor(private readonly rpc: Record<string, (input?: unknown) => Promise<unknown>>, private readonly busy: () => boolean) {
     this.loop = new Poll(() => this.rpc.tasks!({}) as Promise<Tasks>, t => this.state[1](t), () => {
       const open = (this.state[0]()?.tasks ?? []).some(t => !CLOSED.has(t.phase))
       return open || this.busy() ? POLL_MS : IDLE_MS
     })
+    this.links = new LinkPoll(() => this.rpc.link!({}) as Promise<Link>, l => this.link[1](l), busy)
   }
   start() { void this.loop.now() }
-  stop() { this.loop.stop() }
+  stop() { this.loop.stop(); this.links.stop() }
   /** Read now (a press that opens the panel): still the one loop. */
   poll() { return this.loop.now() }
-  // the web app's link, for the modeline: asked when the panel draws, kept a minute (pane.ts LINK_MS)
-  wantLink() {
-    const now = Date.now()
-    if (now - this.linkAt < 60_000) return
-    this.linkAt = now
-    void (this.rpc.link!({}) as Promise<Link>).then(l => this.link[1](l), () => {})
-  }
+  wantLink() { void this.links.want() }
 }
 
 const hereOf = (host: Host, sessionID: string): Here => ({

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
-import { capOf, COMMAND, diffLines, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
+import { capOf, COMMAND, diffLines, LINK_MS, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
   WorkbenchPane, type Files, type PaneTask } from '../pane.ts'
-import { CHANGE, driverRow, footer, mine, MODELS, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target,
+import { CHANGE, driverRow, footer, LinkPoll, mine, MODELS, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target,
   type Here } from '../pane-view.ts'
 import { ROWS } from '../../mod/hooks/apprentice.ts'
 import { kernel } from '../../mod/hooks/core.ts'
@@ -205,6 +205,36 @@ test('the tasks are read by one loop however often a press asks for a read at on
   expect(pending.size).toBe(0)
   await loop.now()
   expect(answers.length).toBe(5)
+})
+
+test('an open panel asks for the web app\'s link again each LINK_MS, so a web app started meanwhile reaches the modeline (#1518)', async () => {
+  // a panel opened while the web app was down said `web app down` until it was closed and opened
+  // again: the link was asked only as the panel drew (2026-11-26)
+  let now = NOW, shown = true
+  const pending = new Map<number, () => void>()
+  let id = 0
+  const timers = { set: (f: () => void, _ms: number) => { pending.set(++id, f); return id }, clear: (h: unknown) => { pending.delete(h as number) } }
+  const answers = [linkDown('not started'), { state: 'up' as const, url: 'http://h/' }]
+  let asked = 0
+  const drawn: string[] = []
+  const links = new LinkPoll(async () => answers[Math.min(asked++, 1)]!, l => drawn.push(l.state), () => shown, () => now, timers)
+  await links.want()
+  await links.want()                       // the splash's next layout, within the minute: no second ask
+  expect([asked, drawn, pending.size]).toEqual([1, [answers[0]!.state], 1])
+  now += LINK_MS
+  const tick = [...pending.values()][0]!
+  pending.clear()
+  tick(); await Promise.resolve(); await Promise.resolve()
+  expect([asked, drawn]).toEqual([2, [answers[0]!.state, 'up']])
+  // the panel closed: the next tick asks nothing and schedules nothing
+  expect(pending.size).toBe(1)
+  shown = false
+  now += LINK_MS
+  const last = [...pending.values()][0]!
+  pending.clear()
+  last(); await Promise.resolve()
+  expect([asked, pending.size]).toEqual([2, 0])
+  links.stop()
 })
 
 const task = (name: string, phase: string, more: Partial<PaneTask> = {}): PaneTask => ({

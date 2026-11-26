@@ -9,7 +9,7 @@ import { CLOSED, openCounts, owns } from '../mod/hooks/core.ts'
 import { modeline, type Link } from '../mod/hooks/modeline.ts'
 import { ROWS } from '../mod/hooks/apprentice.ts'
 import { clip, compactWanted, taskLines, type Part } from '../mod/hooks/tasks.ts'
-import type { PaneTask } from './pane.ts'
+import { LINK_MS, type PaneTask } from './pane.ts'
 
 /** The panel's name: `ui.panel.open(PANEL)` (splash.tsx's PANEL, the same word). */
 export const NAME = 'Workbench'
@@ -21,14 +21,15 @@ export const MARK = '⚒'
  * opens the panel): the pending timer goes, and an older read still in flight neither draws nor
  * schedules. The review of #1332: every press started another loop that ran for the life of the
  * TUI, each one a scan of every task every 2 s. A failed read keeps the last one drawn. */
+type Timers = { set(f: () => void, ms: number): unknown; clear(h: unknown): void }
+const TIMERS: Timers = { set: (f, ms) => setTimeout(f, ms), clear: h => clearTimeout(h as ReturnType<typeof setTimeout>) }
+
 export class Poll<T> {
   private timer: unknown
   private gen = 0
   private stopped = false
   constructor(private readonly read: () => Promise<T>, private readonly draw: (t: T) => void,
-    private readonly delay: () => number,
-    private readonly timers: { set(f: () => void, ms: number): unknown; clear(h: unknown): void } =
-      { set: (f, ms) => setTimeout(f, ms), clear: h => clearTimeout(h as ReturnType<typeof setTimeout>) }) {}
+    private readonly delay: () => number, private readonly timers: Timers = TIMERS) {}
   async now(): Promise<void> {
     if (this.stopped) return
     if (this.timer !== undefined) this.timers.clear(this.timer)
@@ -39,6 +40,30 @@ export class Poll<T> {
     if (this.stopped || gen !== this.gen) return
     if (got) this.draw(got.t)
     this.timer = this.timers.set(() => void this.now(), this.delay())
+  }
+  stop() { this.stopped = true; if (this.timer !== undefined) this.timers.clear(this.timer) }
+}
+
+/** The web app's link for the modeline: asked when the panel draws (`want`: the page's opening,
+ * each of the splash's layouts), at most once a LINK_MS (the server part keeps its answer as
+ * long, pane.ts `chatLink`), and asked again LINK_MS after each answer while the panel shows
+ * (`shown`), as the mod rechecks its chat: a panel opened while the web app was down said
+ * `web app down` until it was closed and opened again (#1518, 2026-11-26). */
+export class LinkPoll {
+  private at = -Infinity
+  private timer: unknown
+  private stopped = false
+  constructor(private readonly read: () => Promise<Link>, private readonly draw: (l: Link) => void,
+    private readonly shown: () => boolean, private readonly now: () => number = Date.now,
+    private readonly timers: Timers = TIMERS) {}
+  async want(): Promise<void> {
+    if (this.stopped || this.now() - this.at < LINK_MS) return
+    this.at = this.now()
+    if (this.timer !== undefined) this.timers.clear(this.timer)
+    this.timer = undefined
+    try { this.draw(await this.read()) } catch { /* the server part is restarting: the next ask */ }
+    if (this.stopped || this.timer !== undefined || !this.shown()) return
+    this.timer = this.timers.set(() => { this.timer = undefined; if (this.shown()) void this.want() }, LINK_MS)
   }
   stop() { this.stopped = true; if (this.timer !== undefined) this.timers.clear(this.timer) }
 }

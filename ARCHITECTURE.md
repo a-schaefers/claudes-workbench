@@ -8801,7 +8801,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     the apprentice as art at 20 rows by 40 columns or more, else its face). `separator`, `wrap`.
     `Poll`: a read on a timer that stays one loop however often `now()` is asked (each press that
     opens the panel): the pending timer is cleared and an older read still in flight neither draws
-    nor schedules (once every press started another loop for the life of the TUI).
+    nor schedules (once every press started another loop for the life of the TUI). `LinkPoll`:
+    the web app's link for the modeline, asked as the panel draws (the page's opening, each of the
+    splash's layouts) at most once a `LINK_MS`, and again `LINK_MS` after each answer while the
+    panel shows (a panel opened with the web app down said so until it was reopened, #1518).
   - `pane.tsx` (the OpenTUI views): `mountPane(host, home)` mounts the page on the panel through
     `mountSplash`, adds the `sidebar.content` and `prompt.footer.status` slots and a palette entry
     `workbench.panel` (`Workbench: show or hide its panel`, a global layer). Selecting the
@@ -8809,7 +8812,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     the driver's notes (`WorkbenchDriver.driver` with `once`, each note's `text`; never for a session
     not on screen, whose notes would be spent unseen); leaving it closes the panel and arms
     the splash again (`replaySplash`). `Feed` polls `tasks` (one `Poll`) every `POLL_MS` 2 s while a task is open
-    or the panel shows, else `IDLE_MS` 10 s, and `link` while the panel shows. The page (the
+    or the panel shows, else `IDLE_MS` 10 s, and `link` while the panel shows (`LinkPoll`, below). The page (the
     panel's width at 108 columns or more beside the session, fullscreen narrower): the driver row
     (`driverRow`; its press opens `/models`, *The driver*), the task rows (a press on a task's first line follows it, the mod's
     `followTask`), the separator (`── <task> · transcript ───`, a press or `d` switches to `diff`),
