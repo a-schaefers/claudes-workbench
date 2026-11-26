@@ -3935,6 +3935,23 @@ class Lifecycle(Base):
         self.assertIn("+# changed in round 2", run_wb("diff", "t-fb"))  # wb diff's "all of it" too
         self.assertIn("since your last review: (no changes)", runner.review_diff(t))
 
+    def test_the_web_apps_task_sheet_shows_the_ignored_files_wb_diff_and_accept_include_count(self):
+        # #1548 (the 2.2 bar seal, 2026-11-26): the agent shell-wrote lib/util.py under an ignored
+        # lib/; wb diff and the review notice listed it, but the phone's task sheet (chat.task_diff)
+        # passed no force, so it showed main.py importing a module it never listed
+        from workbench import chat
+        self.ignore_lib()
+        self.start("t-sheet", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-sheet", {"review"})
+        t = store.Task("t-sheet")
+        self.assertEqual(runner.ignored_to_commit(t), ["lib/util.py"])
+        d = chat.task_diff(t)
+        self.assertIn("lib/util.py", [f["path"] for f in d["files"]])
+        self.assertEqual(d["stat"], run_wb("diff", "t-sheet", "--stat").rstrip("\n"))
+        one = chat.task_diff(t, full=True, path="lib/util.py")
+        self.assertIsNotNone(one)
+        self.assertIn("+++ b/lib/util.py", one["diff"])
+
     def test_wb_verify_and_wb_shot_run_the_candidate_with_the_ignored_files_accept_commits(self):
         # #1275 (the 2.0 bar loop, 2026-11-24): #1259 put the agent's lib/util.py, under
         # Python.gitignore's lib/, in the review diff but not in verify's candidate: wb verify

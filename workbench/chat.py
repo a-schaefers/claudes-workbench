@@ -1132,14 +1132,17 @@ def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dic
     """`wb diff <t> --stat`, against the same base (gitops.diff_base: HEAD after `wb next`), and
     its files (`numstat`); ``full``, the diff instead of the stat (of ``path`` alone, one of the files), each
     line cut at transcript.JSON_LINE_CHARS (`lines_cut`), or null with `cut` past
-    TASK_DIFF_CHARS. None for a ``path`` that isn't in it."""
-    from . import gitops, transcript
+    TASK_DIFF_CHARS. None for a ``path`` that isn't in it. The ignored files --include commits
+    are in it too (runner.ignored_to_commit), as in wb diff: without them the phone showed a
+    change importing a lib/util.py it never listed, under an ignored lib/ (#1548, 2026-11-26)."""
+    from . import gitops, runner, transcript
     base = gitops.diff_base(t)
     out = {"base": base if base == "HEAD" else base[:12], "stat": "", "files": []}
     if not t.worktree.is_dir():
         return {**out, "note": "no worktree yet" if t.status.get("phase") in store.ACTIVE else "its worktree is gone"}
+    force = runner.ignored_to_commit(t)
     try:
-        for line in (gitops.diff(t.worktree, base, numstat=True) or "").splitlines():
+        for line in (gitops.diff(t.worktree, base, numstat=True, force=force) or "").splitlines():
             added, deleted, name = (line.split("\t", 2) + ["", ""])[:3]
             out["files"].append({"path": name, "added": int(added) if added.isdigit() else None,
                                  "deleted": int(deleted) if deleted.isdigit() else None})
@@ -1147,9 +1150,9 @@ def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dic
             return None
         paths = [":(literal)" + path] if path is not None else ()
         if not full:  # the stat first; the diff when asked for
-            out["stat"] = gitops.diff(t.worktree, base, stat=True, paths=paths) or ""
+            out["stat"] = gitops.diff(t.worktree, base, stat=True, paths=paths, force=force) or ""
         else:
-            text = gitops.diff(t.worktree, base, paths=paths, limit=TASK_DIFF_CHARS)
+            text = gitops.diff(t.worktree, base, paths=paths, limit=TASK_DIFF_CHARS, force=force)
             if text is None:
                 out.update(diff=None, cut=True)
             else:
