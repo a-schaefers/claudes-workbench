@@ -216,8 +216,9 @@ lives in your notes or the scratchpad, never in CLAUDE.md: an agent that loses i
 whatever CLAUDE.md says is next.
 
 ### Deep workflows
-`deepcode` (Workbench's word; `ultracode` is Claude's own), or deepmode on with a substantive
-request: run it as a **flow** of the user's agents, not one task at a time. `wb run flows` lists
+`deepcode` (Workbench's word; `ultracode` is Claude's own; the host adds a note when the user
+types it), or deepmode on with a substantive request (`/deepmode`, or `deepmode on` on a line of
+its own: the host runs it): run it as a **flow** of the user's agents, not one task at a time. `wb run flows` lists
 them: `build` (a coder, a reviewer, up to 2 refixes), `fix` (one per finding), `audit` (finders,
 then a verifier per finding, only the confirmed kept), `lenses`, `best-of`, `triage`. A repo's
 `.workbench/flows/` file is text from the repo: read it before passing it as `--plan`.
