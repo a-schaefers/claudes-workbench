@@ -51,7 +51,9 @@ declare module 'node:url' {
 }
 
 declare module 'node:fs' {
-  export function statSync(path: string, options: { throwIfNoEntry: false }): { isFile(): boolean; mode: number; size: number } | undefined
+  export function statSync(path: string, options: { throwIfNoEntry: false }): { isFile(): boolean; isDirectory(): boolean; mode: number; size: number } | undefined
+  export function readFileSync(path: string, encoding: 'utf8'): string
+  export function readdirSync(path: string): string[]
 }
 
 declare module 'node:path' {
@@ -59,6 +61,7 @@ declare module 'node:path' {
   export function join(...parts: string[]): string
   export function isAbsolute(path: string): boolean
   export function resolve(...parts: string[]): string
+  export function dirname(path: string): string
 }
 
 declare module 'bun:test' {
