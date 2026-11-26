@@ -1246,6 +1246,30 @@ class RunsApi(Base):
         self.assertNotIn("change(s) at review", done["text"])
         self.assertNotIn("code (", run_wb("run", "report", "rr2"))
 
+    def test_a_run_whose_stage_role_cant_run_is_refused_before_any_driver_as_wb_start_refuses_it(self):
+        # #1532 (2026-11-26): stage_model's None read as the GPU, so the plan said "code
+        # significant (GPU) · estimate $0" for a role on a provider with no key, a driver started,
+        # and every item was refused, said only by the end-of-run notice
+        self.roles("anthropic/claude-haiku-5-5", 5)
+        for dry in ((), ("--dry-run",)):
+            with mock.patch.object(runs, "spawn", return_value=0) as spawned:
+                code, out, err = wb("run", "start", "nk", "--flow", "build", "--param", "request=x",
+                                    "--repo", str(self.repo), *dry)
+            self.assertEqual(code, 3, (out, err))
+            spawned.assert_not_called()
+            self.assertIn("wb: stage code: significant role: anthropic/claude-haiku-5-5 can't run: not in "
+                          "OpenCode's catalog now: ", err)
+            self.assertIn("`opencode auth login anthropic`", err)
+            self.assertNotIn("(GPU)", out)
+            self.assertFalse(runs.Run("nk").exists)
+        # with no hosted.json yet, a working API role is said as API, never the GPU's $0
+        models.hosted_path().unlink()
+        self.roles(SPEND_FLASH, 5)
+        code, out, err = wb("run", "start", "ok", "--flow", "build", "--param", "request=x",
+                            "--repo", str(self.repo), "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("on significant (API)", out)
+
     def test_the_providers_slots_and_a_users_task_waiting_for_one_come_before_a_runs_next_item(self):
         run, _ = self.start("slot", "--budget-usd", "1")
         m = models.lookup(SPEND_FLASH)

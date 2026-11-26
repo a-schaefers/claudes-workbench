@@ -1088,6 +1088,24 @@ def stage_model(stage: dict, it: "Item | None" = None):
     return m if m is not None and m.kind == "api" else None
 
 
+def role_cant_run(role: str) -> str:
+    """wb start's own line for a role on API whose model can't be found (routes.resolve's: no
+    API model, or one the catalog doesn't list, a missing key named), or "". Read fresh, not
+    cached: stage_model's None read as the GPU, so `wb run start` said `significant (GPU) ·
+    estimate $0` for a role on a provider with no key, and every item was then refused; with no
+    hosted.json yet, a working API role read as the GPU too (#1532, 2026-11-26)."""
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        return ""  # wb start says why for each item
+    if routes.effective_via(doc, role) != "api":
+        return ""
+    if not (mid := doc["roles"][role].get("api")):
+        return routes.no_api_model(role)
+    m = models.lookup(mid)
+    return "" if m is not None and m.kind == "api" else routes.cant_run(role, mid, models.unlisted_why(mid), "", doc)
+
+
 def stage_role(stage: dict) -> str:
     role = stage.get("role")
     if not role and stage.get("card"):
@@ -1972,11 +1990,13 @@ def cmd_start(a) -> None:
     except (RuntimeError, gitops.GitError) as e:
         _die(str(e))
     said: list[str] = []
-    for s in stages(flow):  # an API role with no cap is refused before any file is written
+    for s in stages(flow):  # an API role with no cap, or that can't run, is refused before any file is written
         if s.get("final") or s.get("claude"):
             continue
         for k in range(len(s.get("escalate") or []) + 1):  # its escalate roles' too
             probe = Item(s["id"], "1" + (f"#e{k}" if k else ""), None)
+            if why := role_cant_run(item_role(s, probe)):  # wb start's exit 3, before a driver (#1532)
+                _die(f"stage {s['id']}: {why}", 3)
             m = stage_model(s, probe)
             if m is not None and not (meter.is_plan(m) or meter.is_free(m)) and meter.cap() is None:
                 _die(f"stage {s['id']} runs on {m.id} (role {item_role(s, probe)}), and {meter.no_cap()}")
