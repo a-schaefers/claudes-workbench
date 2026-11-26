@@ -1,61 +1,38 @@
-// The web app's shared types (#1323): what the chat server sends (chat.py's state, patches and
-// /api/task; settings.py's rows) and the views' API, window.WB, that app.ts sets and stats.ts and
+// The web app's types (#1323): what the chat server sends, taken from the one module the mod and
+// the OpenCode plugin read it through too (mod/types/wire.d.ts: chat.py's state, patches and
+// /api/task; settings.py's rows), and the views' API, window.WB, that app.ts sets and stats.ts and
 // settings.ts build against. Global, not a module: the pages are plain scripts, and a module's
-// `export {}` would stop the browser loading them as they are loaded now. A shape here follows the
-// server's: change it with the Python (ARCHITECTURE.md, *Couplings*), and the browser test says
-// whether the page still works.
+// `export {}` would stop the browser loading them as they are loaded now; `import()` types keep it
+// global. A shape follows the server's: change it in wire.d.ts with the Python (ARCHITECTURE.md,
+// *Couplings*), and the browser test says whether the page still works.
 
 // ---- the chat's state (GET /api/state, the stream's `state` and `patch`, chat.snapshot) ----
-interface WbFile { id: string; name: string; size: number; type: string }
+type WbFile = import('../../../mod/types/wire.js').ChatFile
 // a draft's file (wb-chat-files): picked, uploaded once by its id, sent by id
 interface DraftFile extends WbFile { mod: number; state: 'up' | 'retry' | 'done' | 'refused'; why?: string }
-// what a message is about: a task, a pair of screenshots (n, step) or a kept take (audio, n, name)
-interface About { task?: string | null; n?: number; step?: number; audio?: string; name?: string }
-interface ShotSide { pruned?: boolean; image?: unknown; exit?: number | null; rev?: string }
-interface Shots { task: string; step: number; round: number; n: number; viewport: string; base: ShotSide; candidate: ShotSide }
-interface Listen { batch: string; clips?: { n: number; name: string; line?: string }[] }
-// which driver (#1366, #1319): on the listener, and on each reply as its writer (none before 2.2)
-interface Driver { tool: string; model?: string }
-interface Msg {
-  id: string; cid?: string; from: string; role?: string; text: string; ts: number; to?: string[]
-  local?: boolean; error?: string; about?: About; files?: WbFile[]
-  received?: { how?: string; ts: number; by?: string }; expired?: boolean; what?: string; shots?: Shots; audio?: Listen
-  driver?: Driver
-}
+type About = import('../../../mod/types/wire.js').About
+type Shots = import('../../../mod/types/wire.js').Shots
+type Listen = import('../../../mod/types/wire.js').Listen
+type Driver = import('../../../mod/types/wire.js').Driver
+type Msg = import('../../../mod/types/wire.js').ChatMsg
 // a message in the outbox (wb-chat-out-<cid>), until the server has it
 interface Outgoing { cid: string; text: string; ts: number; error?: string; about?: About; files?: WbFile[] }
-// an OpenCode server's claim says `tool: "opencode"` too (chat.hold)
-interface Listener { cwd: string; busy?: boolean; tool?: string; driver?: Driver }
-// chat.open_tasks: the strip's and the task sheet's
-interface OpenTask { name: string; phase: string; model?: string; via?: string; provider_name?: string }
-interface ApiCost { tasks: number; unknown: number; plan?: number; cost: number; prices?: string }
-interface ApiWeek extends ApiCost { by_provider?: Record<string, ApiCost>; names?: Record<string, string> }
-// chat.week_saved
-interface Savings { score?: { score: number; color: string } | null; saved: number; tasks?: number; wh?: number; cost?: number | null; api?: ApiWeek | null }
-interface Limits { file: number; message: number; files: number }
-interface ChatState {
-  messages: Msg[]; push: { key?: string; test?: number }; listener: Listener | null; savings?: Savings | null
-  expire?: number; uploads?: Limits | null; tasks?: OpenTask[]; dictate?: boolean
-}
-// a state as the server sends it, whole or a patch's fields (`now`, its clock; `build`, its files)
-interface Snapshot extends Partial<Omit<ChatState, 'messages'>> { messages?: Msg[]; now?: number; build?: string }
-interface Patch extends Omit<Snapshot, 'messages'> { messages?: { put?: Msg[]; drop?: string[] } }
+type Listener = import('../../../mod/types/wire.js').Listener
+type OpenTask = import('../../../mod/types/wire.js').OpenTask
+type ApiCost = import('../../../mod/types/wire.js').ApiCost
+type ApiWeek = import('../../../mod/types/wire.js').ApiWeek
+type Savings = import('../../../mod/types/wire.js').Savings
+type Limits = import('../../../mod/types/wire.js').Limits
+type ChatState = import('../../../mod/types/wire.js').ChatState
+type Snapshot = import('../../../mod/types/wire.js').Snapshot
+type Patch = import('../../../mod/types/wire.js').Patch
 
 // ---- GET /api/task: one open task's summary, diff or log (chat.task_summary, task_diff, task_log) ----
-interface TaskPart {
-  error?: string; task?: string; phase?: string; round?: number; step?: number; model?: string; via?: string
-  provider_name?: string; now: number; created_at?: number; updated_at?: number; last?: string; report?: string
-  report_cut?: boolean; verify?: string[]; base?: string; note?: string; stat?: string; cut?: boolean; diff: string
-  lines_cut?: number; files: { path: string; added: number | null; deleted?: number }[]
-  rows: { ok?: boolean; ts?: number; round?: number; text: string }[]; more?: boolean
-}
+type TaskPart = import('../../../mod/types/wire.js').TaskPart
 
 // ---- GET /api/settings: settings.py's rows ----
-interface SettingChoice { value: string; label: string; says?: string }
-interface SettingRow {
-  key: string; group: string; kind: string; label: string; value?: string | number | null; text?: string
-  says?: string; choices?: SettingChoice[]; other?: boolean; unit?: string
-}
+type SettingChoice = import('../../../mod/types/wire.js').SettingChoice
+type SettingRow = import('../../../mod/types/wire.js').SettingRow
 
 // ---- the views' API (app.ts's window.WB, frozen) ----
 // a POST under app.ts's deadline (`post`): the reply read whole, its JSON on asking

@@ -1,3 +1,6 @@
+// The mod's state atoms (`$.state`): self-contained, as `claude plugin validate` requires. What wb
+// sends (the task files, notices, the chat, `wb route --json`, …) is ./wire.d.ts's (#1323).
+
 /** One delegated task as the pane draws it, read from the task's status.json and task.json. */
 export type WbTask = {
   name: string
@@ -72,7 +75,9 @@ export type WbTask = {
   spend: number | 'plan' | 'none' | null
 }
 
-/** One line of `wb watch --json`: a style name and the text. */
+/** One line of `wb watch --json`: a style name and the text. This file is Claude Code's contract and
+ * must import nothing (`claude plugin validate`), so this and WbChat's `link` restate wire.d.ts's
+ * WatchLine and ChatLink (wb's shapes, #1323); modeline.ts holds them equal for the type check. */
 export type WbLine = { s: string; t: string }
 
 /** The task the pane follows live, and its transcript so far (the newest lines). */
@@ -89,43 +94,6 @@ export type WbChat = { key: string; delegating: boolean
 /** The pane: Tasks only (#1283: Stats and Settings are the web app's). `open` and `focus` are kept
  * for the shape; `minimized`, whether the user closed it (a strip above the prompt stands in). */
 export type WbPane = { open: string; focus: string; minimized: boolean }
-
-/** `wb route --json` as the Tasks view's day-cap line reads it (#1023, #1048): routes.json normalized (`use` the Agents
- * switch, `busy` the busy-GPU opt-in, the day cap, each role's selector and both models), spend
- * today from the day ledger, and each API provider's key state (`stored`, `copilot` and an `env`
- * one with `runs` run tasks; `ollama` runs its cloud models). */
-export type WbRoutes = {
-  v: 1
-  use: 'gpu' | 'api' | 'both'
-  busy: 'wait' | 'api'
-  day_usd: number | null
-  /** `thinks`: what the role's API model does with each thinking setting (routes.with_thinks, #1263) */
-  roles: Record<'significant' | 'trivial' | 'writing', { via: 'gpu' | 'api'; gpu: string; api?: string;
-    thinking: 'off' | 'on'; label: string; thinks?: { api: string; off: string; on: string } }>
-  /** `prices`: the dollars' basis (meter.basis, #1135): catalog (an estimate, ≈), yours (wb model price), provider */
-  spend_today: { usd: number; prices?: 'catalog' | 'yours' | 'provider'; by_provider: Record<string, number> }
-  // runs: a key in the environment the keyhole reads (#1189), which runs tasks as a stored one does;
-  // copilot: GitHub Copilot's sign-in, held as a key (#1191)
-  providers: Record<string, { name: string; key: 'stored' | 'copilot' | 'ollama' | 'env' | 'oauth' | 'none'; why?: string; runs?: boolean }>
-}
-
-/** `wb models --json` (#1023): the GPU models (cards: the numbers its Ollama sees, null unknown),
- * the API models wb can run (stored keys only), those tasks ran on, optimize's state. */
-export type WbModels = {
-  gpu: { id: string; label: string; window: number | null; sizes: string[]; cards: number[] | null }[]
-  api: { id: string; name: string; provider: string; provider_name: string; window: number | null;
-    price: { input: number | null; output: number | null } | null; free: boolean }[]
-  used: string[]
-  free_line: string
-  optimize: { done_at: number | null; models: number; running: boolean }
-  /** #1047: each media kind's engines and the one used without --engine (absent from an older wb,
-   * and a kind whose file doesn't parse is left out) */
-  media?: Partial<Record<'image' | 'speech' | 'sfx' | 'music', WbMedia>>
-}
-
-/** One media kind in `wb models --json`'s media (#1047): its default (null with no engine) and its
- * engines in file order, `gpu` false for one off this GPU (media.on_gpu). */
-export type WbMedia = { default: string | null; engines: { name: string; gpu: boolean }[] }
 
 /** What this conversation was told of the rules that depend on the state (#540): the user's
  * notes, that wakes are off, the Claude-coding rule, the roles (#1014: routes.summary and

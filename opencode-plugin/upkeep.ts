@@ -31,6 +31,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type * as Core from '../mod/hooks/core.ts'
+import type { StatusFile, TaskFile } from '../mod/types/wire.d.ts'
 import { AGENT } from './agent.ts'
 import { REPLY_ID, typedByUser } from './chat.ts'
 import { sessionRunner, whereOf, type SessionRun } from './commands.ts'
@@ -108,10 +109,11 @@ export interface Io {
 
 export interface Task { readonly name: string; readonly phase: string; readonly parked: boolean }
 
-const json = (text: string | undefined): Record<string, unknown> => {
+// a JSON file of wb's (a task file: wire.d.ts's shape `T`), {} for one missing, torn or not an object
+const json = <T extends object = Record<string, unknown>>(text: string | undefined): Partial<T> => {
   try {
     const v = JSON.parse(text ?? '')
-    return v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+    return v && typeof v === 'object' && !Array.isArray(v) ? v as Partial<T> : {}
   } catch {
     return {}
   }
@@ -122,11 +124,11 @@ export function openTasks(k: Kernel, io: Io, home: string, sessionID: string): T
   const dir = join(home, 'tasks')
   const out: Task[] = []
   for (const name of io.list(dir)) {
-    const st = json(io.read(join(dir, name, 'status.json')))
+    const st = json<StatusFile>(io.read(join(dir, name, 'status.json')))
     // a task without a status yet is no one's open task until its first one (the next look sees it)
     const phase = String(st.phase ?? '')
     if (!k.ACTIVE.has(phase) && !k.NEEDS.has(phase)) continue
-    const sp = json(io.read(join(dir, name, 'task.json')))
+    const sp = json<TaskFile>(io.read(join(dir, name, 'task.json')))
     if (!sp.name || sp.bench || sp.session !== sessionID) continue
     out.push({ name, phase, parked: !!st.parked })
   }

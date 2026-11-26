@@ -19,6 +19,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ServerContext } from './host.d.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv, wbHome } from './wb.ts'
+import type { ChatMsg, ChatOpen, ListenerClaim } from '../mod/types/wire.d.ts'
 
 export const POLL_MS = 2_000          // a look at chat/open.json (a file read, no wb run)
 export const CHECK_MS = 60_000        // `wb chat url --json`: on or off, as the mod's CHAT_CHECK_MS
@@ -87,7 +88,7 @@ export const EVENTS = [
 ]
 
 // Another agent's name, as wb makes them, else '' (the mod's agentOf)
-export function agentOf(m: Row): string {
+export function agentOf(m: Partial<ChatMsg>): string {
   return m.role === 'agent' && /^[a-z0-9-]{1,32}$/.test(String(m.from ?? '')) ? String(m.from) : ''
 }
 
@@ -102,7 +103,7 @@ export function attachedLines(files: unknown): string {
 
 // The prompt a web message goes in as: the user's `[web chat] …`, an agent's `[agent <name>] …`
 // with its later lines indented and its id to answer (the mod's chatPrompt), then the note
-export function chatPrompt(m: Row): string {
+export function chatPrompt(m: Partial<ChatMsg>): string {
   const agent = m.role === 'agent'
   const head = agent ? `[agent ${agentOf(m) || 'unknown'}]` : WEB
   const a = m.about && typeof m.about === 'object' ? m.about : null
@@ -188,7 +189,7 @@ export class ChatLane {
   path(name: string) { return join(this.deps.home, 'chat', name) }
 
   // chat/listener.json as it stands, {} for none
-  claim(): Row {
+  claim(): ListenerClaim {
     try {
       const c = JSON.parse(this.deps.read(this.path('listener.json')) ?? '{}')
       return c && typeof c === 'object' ? c : {}
@@ -275,9 +276,9 @@ export class ChatLane {
     }
     await this.notices()
     if (this.reverting || !this.sessions) return
-    let work: Row = {}
+    let work: ChatOpen = {}
     try { work = JSON.parse(this.deps.read(this.path('open.json')) ?? '{}') } catch { return }
-    const waiting = Object.values((work.messages && typeof work.messages === 'object') ? work.messages : {}) as Row[]
+    const waiting: Partial<ChatMsg>[] = Object.values((work.messages && typeof work.messages === 'object') ? work.messages : {})
     const now = this.deps.now()
     for (const m of waiting.sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))) {
       const id = String(m.id ?? '')

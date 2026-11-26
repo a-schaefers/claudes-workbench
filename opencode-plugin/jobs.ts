@@ -20,7 +20,8 @@
 // "Quiet": no task anywhere active, and none of this server's waiting on its driver lately
 // (rewakePlan's `recent`): the mod's quietForJobs.
 import { ACTIVE, rewakePlan } from '../mod/hooks/core.ts'
-import { JOB_MS, noticeId, type NoticeLane, type Row } from './notices.ts' // a cycle: used only at call time
+import { JOB_MS, noticeId, type NoticeLane } from './notices.ts' // a cycle: used only at call time
+import type { ListenerClaim, SettingsOffers } from '../mod/types/wire.d.ts'
 
 export const QUIET_MS = 60_000
 export const LOCAL_CHANGES = 'local changes in the marketplace clone' // patches.CHECK_LINE's opening (the mod's)
@@ -74,7 +75,7 @@ export class Jobs {
   // else the one the user last typed in here; '' while another listener's claim stands, or none
   target(): string {
     const l = this.lane
-    let claim: Row = {}
+    let claim: ListenerClaim = {}
     try { claim = JSON.parse(l.deps.read(l.path('chat', 'listener.json')) ?? '{}') ?? {} } catch { /* none */ }
     if (claim && typeof claim.session === 'string' && claim.session) {
       if (claim.tool === 'opencode' && Number(claim.pid) === l.deps.pid) return claim.session
@@ -92,7 +93,7 @@ export class Jobs {
     const r = await l.deps.run(['settings', 'offers', '--if-due', '--json'], sid, JOB_MS)
     if (r.code !== 0) return
     this.changesSize = size
-    let got: { offers?: Row[]; notes?: Row[] } = {}
+    let got: SettingsOffers = {}
     try { got = JSON.parse(r.out) } catch { return }
     for (const o of got.offers ?? []) {
       const key = `settings:${String(o.key ?? '')}`
@@ -105,7 +106,7 @@ export class Jobs {
       // a steer that doesn't resume: OpenCode publishes pending steers together with the next
       // turn's own (the user's prompt), so the note is read in that turn; a queued one would be
       // promoted alone after it, a turn of its own (2.4.1's inbox.ts promote, the 2026-11-26 review)
-      const last = (got.notes ?? []).at(-1) ?? {}
+      const last: { ts?: number } = (got.notes ?? []).at(-1) ?? {}
       await l.send(sid, offerId({ key: 'notes', ts: last.ts }), `[workbench] ${notes.join('\n')}`, 'steer',
         { kind: 'settings', ts: last.ts, title: 'settings changed on the web app' }, false)
     }
@@ -113,4 +114,4 @@ export class Jobs {
 }
 
 // an offer's inbox id, bound to its row (notices.ts's noticeId: idempotent across servers)
-const offerId = (o: Row) => noticeId(`settings:${String(o.key ?? '')}`, 'offer', Number(o.ts) || 0)
+const offerId = (o: { key?: unknown; ts?: unknown }) => noticeId(`settings:${String(o.key ?? '')}`, 'offer', Number(o.ts) || 0)

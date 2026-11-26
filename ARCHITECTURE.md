@@ -7231,7 +7231,8 @@ webworker, its `sw.d.ts` giving lib.webworker's `WorkerGlobalScope` the `Service
 members it uses). Each is still a plain script, an IIFE (the worker's at its top), never a module: the pages share
 `window.WB` and load as `index.html` names them, and a module's `export {}` would change that. Their
 types are global, `src/types.d.ts`: the server's shapes (`ChatState`, `Snapshot`, `Patch`, `Msg`,
-`Outgoing`, `OpenTask`, `TaskPart`, `Savings`, `SettingRow`), `WbApi` (`window.WB`, `declare var WB`),
+`OpenTask`, `TaskPart`, `Savings`, `SettingRow`), each an `import()` type of *wb's shapes in one module*
+(below), which keeps the file global; the page's own (`Outgoing`, `DraftFile`), `WbApi` (`window.WB`, `declare var WB`),
 what lib.dom lacks (`navigator.standalone`, `beforeinstallprompt`), and `Json` for the Stats feeds
 (`wb stats --json`, `wb top --json`: wide, Python's, read field by field with a fallback each).
 `python3 scripts/web.py build` compiles both projects, strict, `target: esnext` (nothing
@@ -7249,6 +7250,32 @@ against the commit, and no other `.js` in `chat_static/`. A change edits `src/`,
 commits both; CI's `kernel` job rebuilds and fails on a `git diff` or an untracked file there.
 `tests/test_docs.py`'s `TypeScriptOrPureScript` fails on any `.js`, `.mjs` or `.cjs` in the repo but
 `mod/hooks/kernel.js` and these, each with its header and its `src/*.ts`.
+
+**wb's shapes in one module** (#1323): `mod/types/wire.d.ts`, types only, declares what wb sends as
+the Python writes it, and the web app, the mod and the OpenCode plugin all read it from there: the
+task files (`TaskFile`, `TaskDriver`, `StatusFile`: every field optional, as a reader takes `{}`
+for a file missing or torn and an older wb writes fewer, with an `unknown` index signature),
+notify.jsonl's `NoticeRow`, the chat's (`ChatMsg`, `ChatFile`, `About`, `Driver`, `ChatState`,
+`Snapshot`, `Patch`, `OpenTask`, `TaskPart`, `Savings`; chat/listener.json's `ListenerClaim` and the
+state's `Listener`; chat/open.json's `ChatOpen`; `wb chat url --json`'s `ChatLink`), settings.py's
+`SettingRow`, `SettingChoice` and `SettingsOffers` (`wb settings offers --json`), and `WatchLine`
+(`wb watch --json`), `RouteJson` (`wb route --json`), `ModelsJson` and `MediaJson` (`wb models
+--json`). It lives in the mod because the mod is installed as its own directory (marketplace.json's
+`./mod`) and can import nothing outside it. Its readers: the web's `src/types.d.ts` (`import()` types,
+`.js` named so the browser tests' `nodenext` resolves it too); the mod's `register.tsx` (`readJson<T>`
+of the task files, the listener's claim and open.json, the notices' rows; `WbRoutes` and `WbModels` are
+`RouteJson` and `ModelsJson` imported under those names), `tasks.ts` (`viewFacts(sp: TaskFile, st:
+StatusFile)`) and `modeline.ts` (`LINK_STATES` from a record keyed by `ChatLink`'s states, so a state
+wb adds fails the type check). `types/index.d.ts`, the state atoms, is Claude Code's contract, which
+`claude plugin validate` refuses to see import anything, so its `WbLine` and `WbChat.link` restate
+`WatchLine` and `ChatLink` (or `checking`), and `modeline.ts`'s `WireHeld` holds each pair equal;
+the plugin's `pane.ts`, `notices.ts`, `upkeep.ts`, `chat.ts` and `jobs.ts`, by `import type` (erased
+before it runs, so OpenCode's Git install needs no `mod/types/` file). Type checks that meet it:
+`web.py build` and `check` (the pages), `web.py tests` (the browser tests), `opencode check -p
+opencode-plugin` (the plugin, and the mod files it imports); `register.tsx` itself only `claude plugin
+validate` where Claude Code has generated the gitignored `.claude-plugin/types/`, as warnings (CI's has none). `tests/test_docs.py`'s `OneCopyOfWbsShapes` fails when
+one of those readers takes nothing from it, or any of the three declares one of its names again but
+as its alias.
 
 ### The admin table (settings.py)
 
@@ -7471,7 +7498,7 @@ setting `userConfig.wake` `on`|`off`, default `on`, changed with `claude plugin 
 workbench@workbench`, which reloads the module), `hooks/hooks.json` (`{"modules":
 ["./register.tsx"]}`), `hooks/register.tsx` (everything), `hooks/apprentice.ts`, `hooks/splash.ts`
 (#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/keywords.ts` (#1278: deepcode and deepmode in what the user typed, the OpenCode plugin's too), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
-(the atom types), `.claude-plugin/icon.png` (the `work` pose), `bin/wb` (#1190: the launcher
+(the atom types), `types/wire.d.ts` (wb's shapes, #1323: *wb's shapes in one module*), `.claude-plugin/icon.png` (the `work` pose), `bin/wb` (#1190: the launcher
 Claude Code puts on its Bash tool's PATH, *Installing*).
 The root's `.claude-plugin/marketplace.json` (source `./mod`) makes the id `workbench@workbench`,
 read from the clone: `wb update` plus `/reload-plugins` upgrades it. `mod/tsconfig.json` extends
@@ -10882,7 +10909,7 @@ doc needs its own `!/` line).
   `reference/patching.md`. **`patches.SUITES`** (`KERNEL_CHECK`, `MOD_TESTS`, `PLUGIN_TESTS`, #1328) → `check.yml`'s
   `kernel`, `mod` and `opencode-plugin` jobs (`tests/test_workflows.py` holds the plugin's to `PLUGIN_TESTS`), and
   `_own_runs`' runners; **`patches.PLUGIN_SHARED`** → what `opencode-plugin/` imports from `mod/` (the kernel's core, the splash's
-  `splash.ts` and `apprentice.ts`, the panel's `tasks.ts` and `modeline.ts`, `deep.ts`'s `keywords.ts`; a LocalPatches test reads the imports). **`Workbench-Driver`** (`patches.DRIVER_TRAILER`) → `stamp_driver`, the pull request
+  `splash.ts` and `apprentice.ts`, the panel's `tasks.ts` and `modeline.ts`, `deep.ts`'s `keywords.ts`, the readers' `types/wire.d.ts`, #1323; a LocalPatches test reads the imports). **`Workbench-Driver`** (`patches.DRIVER_TRAILER`) → `stamp_driver`, the pull request
   template's `Written by:` line. **The crash hint's `CONTRIBUTING.md`** → that file at the root. **`patches.CARRIED`, the
   `Scope:` trailer** (`%(trailers:key=Scope)`, `me`) → `wb patch list`, `upstream`, `_refuse_send`, `doctor_lines`,
   CONTRIBUTING.md, the skill's `reference/patching.md`. **`PATCH_BRANCH`** → `cmd_update`, `doctor_lines`, the docs.
@@ -10930,7 +10957,7 @@ doc needs its own `!/` line).
 start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --model` stays refused), and
   `route-ok.json`'s `approval` (`cli._route_argv`) ↔ `routes.approved`; **a `wb route` or `wb start` flag** →
   `routeCalls` (`--m` is `--model`'s only prefix among wb start's flags; a new `--m…` flag there breaks that).
-  **`wb route --json`** and **`wb models --json`** → the `WbRoutes`/`WbModels` types and `rolesNow` (the day-cap line); `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`; a role's `fallback` (#1196) → `routesValid`, `readRoutes`' plain check and `routesSummary`.
+  **`wb route --json`** and **`wb models --json`** → wire.d.ts's `RouteJson`/`ModelsJson` (the mod's `WbRoutes`/`WbModels`) and `rolesNow` (the day-cap line); `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`; a role's `fallback` (#1196) → `routesValid`, `readRoutes`' plain check and `routesSummary`.
 - **A fallback and `--image`** (#1196, #1199): `runner._fallback_move`'s `models.takes_images` check ↔
   `cli._images_fit` (wb start's): a task's pictures go only to a model that says it takes them; the
   move also sets `CURRENT["model"]`, which `runner.lane_ports` reads (#1197).
@@ -10939,7 +10966,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (`cli.api_key_lines`, `models.connected`); **SCOUT_NOTE's opening** (`[workbench] The weekly model check is
   due.`) → its readers, which match it (register.test.tsx); **`routes.change_pairs`' line** → the skill's
   first-run question and register.test.tsx's two-role dialog.
-- **`wb watch --json`** → the mod's `LINE_STYLE`, its pose regex, `live-1`; `--last`, `JSON_LINE_CHARS` with
+- **`wb watch --json`** → wire.d.ts's `WatchLine` (and its restatement, `types/index.d.ts`'s `WbLine`), the mod's `LINE_STYLE`, its pose regex, `live-1`; `--last`, `JSON_LINE_CHARS` with
   `KEEP_LINES`, `LINE_CHARS`.
 - **task.json's routing keys** (`via`, `role`, `provider`, `provider_name`, #1016) → the mod's row builder (`scan`,
   tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/src/app.ts`'s strip; **`wb status`, `report`, `diff` and
@@ -10953,7 +10980,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (`REVIEW_ONLY`), `routesSummary`, `routesValid` and `readRoutes`' all-default check.
 - **A `$.state` atom's type** → its tag (`tasks-12`, `live-1`, `chat-5`, `sessions-1`, `pane-2`, `said-3`,
   `splash-1`).
-- **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → the mod's `WbChat.link`, `LINK_STATES`, `linkOf`,
+- **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → wire.d.ts's `ChatLink` (the mod's `WbChat.link`), `LINK_STATES`, `linkOf`,
   modeline.ts's words per state, its `LINK_STATES` and `linkDown` (OpenCode's panel's `linkOf`, pane.ts). **settings-changes.jsonl's row** (the web app's Settings) → `settingsTurns`,
   `settingSaid`, `SETTING_HELP`, and `settings.offers`, `change_said` (the OpenCode plugin's, the same words,
   #1334); a setting the conversation hears from `unsaid` → `SAID_ELSEWHERE`, and `settings.SAID_ELSEWHERE`.
@@ -11015,7 +11042,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (`python3 scripts/web.py build`) in the same commit (CI's `kernel` job fails otherwise); a new script → its own
   `src/<name>.ts`, `index.html` (or the worker's registration), the project's `files` in `src/tsconfig.json` or
   `tsconfig.sw.json`. **A shape the page reads** (chat.snapshot, chat.patch, `/api/task`'s parts, settings.py's
-  rows) → `src/types.d.ts`. **`scripts/install-tsc.sh`'s `version`** → its four hashes, and a rebuild (the
+  rows) → `mod/types/wire.d.ts`, and `src/types.d.ts`'s alias of a new one. **Anything else wb writes that a
+  TypeScript reader reads** (task.json's and status.json's keys, notify.jsonl's rows, chat/listener.json,
+  chat/open.json, `wb watch`, `route`, `models`, `chat url` and `settings offers --json`) → `mod/types/wire.d.ts`,
+  then the three type checks (*wb's shapes in one module*). **`scripts/install-tsc.sh`'s `version`** → its four hashes, and a rebuild (the
   headers name it). **`tests/e2e_*.mts`' page probes** (`window.<x>` a check sets) → `tests/e2e_page.d.ts`;
   **chat.yml's `NODE_TYPES_VERSION`** → the Node line it runs. **`/api/state`'s asks or messages** → `sw.ts`. **A key of
   `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
@@ -11025,7 +11055,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   not a server's, as a tool run in the server has none) → `chat.listener_driver`, `chat._listens_across`;
   **the driver's shape** (`{tool, model?}`, `chat.DRIVER_TOOLS`) → `chat.writer_driver`, `/api/health`,
   `ask_workbench.who` (`DRIVERS`), the MCP server, docs/chat-api.md's *The driver*, docs/chat-api.yaml's `Driver`,
-  and the web app's names for it (`app.ts`'s `DRIVER_NAMES` and `readBy`, `sw.ts`'s `NAMES`, `src/types.d.ts`'s `Driver`).
+  and the web app's names for it (`app.ts`'s `DRIVER_NAMES` and `readBy`, `sw.ts`'s `NAMES`, `mod/types/wire.d.ts`'s `Driver`).
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.ts`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
