@@ -8,10 +8,10 @@
 // no model variable, and the agent's own `model` never shows in the session's selection) and when
 // (`used`), which says who owns a task and which models a local driver holds on the GPU.
 //
-// The pane's label and /workbench's pin come through the `workbench-driver` RPC (`driver`:
-// `wb driver --session … --json`, `--once` for the notes said once; `pin`: routes.json's standing
-// `driver` applied with `session.switchModel`), so the pane and /workbench (#1312) draw from wb's
-// one answer. Nothing runs at import time.
+// The pane's driver row and /workbench's pin come through the `workbench-driver` RPC (`driver`:
+// `wb driver --session … --json`, `--model` for the TUI's selection, `--once` for the notes said
+// once; `pin`: routes.json's standing `driver` applied with `session.switchModel`), so the pane
+// and /workbench (#1312) draw from wb's one answer. Nothing runs at import time.
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import type { Registration, RpcDefinition, RpcHandlers } from './host.d.ts'
@@ -83,6 +83,10 @@ export function storePath(env: Record<string, string | undefined>, channel: stri
 }
 
 export const refText = (m: ModelRef): string => `${m.providerID}/${m.id}`
+// A ref's variant, none for `default`: OpenCode's word for the model's own (session.ts
+// `switchModel` compares `variant ?? "default"`), which a session's selection carries (seen live,
+// 2026-11-26: the beat said `#default`)
+export const variantOf = (m: ModelRef): string | undefined => (m.variant && m.variant !== 'default' ? m.variant : undefined)
 
 // `provider/id#variant` as OpenCode parses it (schema/src/model.ts `Model.Ref.parse`)
 export function parseRef(text: string): ModelRef | undefined {
@@ -143,7 +147,8 @@ export function beatOf(pid: number, store: string | undefined, ts: number, rows:
     const row: Row = {}
     if (info.model?.providerID && info.model.id) {
       row.model = refText(info.model)
-      if (info.model.variant) row.variant = info.model.variant
+      const v = variantOf(info.model)
+      if (v) row.variant = v
     }
     if (info.location?.directory) row.dir = info.location.directory
     const u = used.get(info.id)
@@ -179,11 +184,12 @@ export function wbRunner(options: Options, base: Record<string, string | undefin
 export const WorkbenchDriver = {
   id: 'workbench-driver',
   methods: {
-    // `wb driver --session <id> --json` (--once: only the notes not said before, then recorded)
+    // `wb driver --session <id> --json` (model: the TUI's selection, `--model`; once: only the
+    // notes not said before, then recorded)
     driver: {
       input: {
         type: 'object',
-        properties: { sessionID: { type: 'string' }, once: { type: 'boolean' } },
+        properties: { sessionID: { type: 'string' }, model: { type: 'string' }, once: { type: 'boolean' } },
         required: ['sessionID'],
         additionalProperties: false,
       },
@@ -249,7 +255,7 @@ export async function startDriver(host: DriverHost, run: Run = wbRunner(host.opt
       regs.push(await host.session.hook('model.request', (input) => {
         // the agent loop's own requests only: a title or compaction request may use another model
         if (input.kind !== 'primary' || !input.model) return
-        used.set(input.sessionID, { model: refText(input.model), variant: input.model.variant, used: Date.now() / 1000 })
+        used.set(input.sessionID, { model: refText(input.model), variant: variantOf(input.model), used: Date.now() / 1000 })
       }))
     } catch { /* no `model.request` here: the beat says each session's selection alone */ }
   }
@@ -262,7 +268,7 @@ export async function startDriver(host: DriverHost, run: Run = wbRunner(host.opt
           const sid = ev.data?.sessionID, m = ev.data?.model
           const was = sid ? used.get(sid) : undefined
           if (ev.type === 'session.model.selected' && sid && m && was) {
-            used.set(sid, { model: refText(m), variant: m.variant, used: was.used })
+            used.set(sid, { model: refText(m), variant: variantOf(m), used: was.used })
           }
         }
       } catch { /* the stream ended with the server: nothing to record */ }
@@ -272,7 +278,11 @@ export async function startDriver(host: DriverHost, run: Run = wbRunner(host.opt
     driver: async (input) => {
       const sid = sessionOf(input)
       const once = (input as { once?: unknown }).once === true
-      const r = await run(['driver', '--session', sid, '--json', ...(once ? ['--once'] : [])])
+      // the TUI's selection, which OpenCode commits to the session (and so to a beat) only at its
+      // next prompt: a /models pick, or a new session's model (seen live, 2026-11-26)
+      const model = (input as { model?: unknown }).model
+      const next = typeof model === 'string' && parseRef(model) ? ['--model', model] : []
+      const r = await run(['driver', '--session', sid, '--json', ...next, ...(once ? ['--once'] : [])])
       try {
         return JSON.parse(r.stdout) as object
       } catch {

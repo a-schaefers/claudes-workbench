@@ -4591,7 +4591,7 @@ def cmd_driver(a):
     routes.json's standing pin, and the notes wb says of it once (--once); `beat`, the OpenCode
     plugin's heartbeat. Under Claude Code: Claude Code, fixed."""
     if a.action == "beat":
-        if a.session or a.once or a.json:
+        if a.session or a.once or a.json or a.model:
             die("wb driver beat takes the plugin's heartbeat on stdin, and no flag")
         try:
             doc = json.loads(sys.stdin.read() or "null")
@@ -4605,6 +4605,8 @@ def cmd_driver(a):
     if a.session is not None and not store.SESSION_RE.fullmatch(a.session):
         die(f"{a.session!r} isn't an OpenCode session id")
     sid = a.session or store.opencode_session()
+    if a.model is not None and not sid:
+        die("wb driver --model is a session's: name it with --session, or run it from its shell")
     if not sid and store.caller_kind() == "claude":
         d = driver.claude_info()
         print(json.dumps(d) if a.json else f"driver: {d['label']}")
@@ -4612,7 +4614,13 @@ def cmd_driver(a):
     if sid:
         # the caller's own session runs wb in its directory (a tool's wb child, its shell);
         # --session (the plugin's RPC) from the server's: the beat's `dir` then
-        d = driver.info(sid, where=None if a.session else os.getcwd())
+        row = driver.session_row(sid)
+        if a.model is not None:
+            try:
+                row = driver.selected(row, a.model)
+            except ValueError as e:
+                die(str(e))
+        d = driver.info(sid, where=None if a.session else os.getcwd(), row=row)
         if a.once:
             d["notes"] = driver.once(d["notes"])
         print(json.dumps(d) if a.json else "\n".join(_driver_text(d)))
@@ -9552,6 +9560,8 @@ def parser() -> argparse.ArgumentParser:
                    "caller's, OPENCODE_SESSION_ID; none: every session that drove lately)")
     s.add_argument("--once", action="store_true", help="only the notes not said before, then "
                    "recorded as said (the plugin's /workbench)")
+    s.add_argument("--model", metavar="REF", help="the model the session runs on next, "
+                   "provider/id#variant, over its beat's (the plugin's TUI: its /models selection)")
     s.add_argument("--json", action="store_true", help="as JSON (the plugin's RPC)")
     s.set_defaults(f=cmd_driver)
     s = sub.add_parser("experiment", help="the experiments (changes measured before they are "
