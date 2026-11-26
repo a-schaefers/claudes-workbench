@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Stands in for `opencode run --format json` in tests. FAKE_SCENARIO picks the behaviour:
+"""Stands in for `opencode run --format json` in tests. FAKE_SCENARIO picks the behaviour
+(FAKE_SCENARIO_BY_TASK, {task: scenario}, one task's by its WB_TASK):
 
   ok     write answer.txt = "42", say so
   patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
@@ -409,7 +410,9 @@ if args[:2] == ["session", "list"]:  # transcript.find_session before the first 
         print(f"{sid}\t{title}\t11/22/2026, 11:31:45 PM")
     sys.exit(0)
 session = args[args.index("--session") + 1] if "--session" in args else f"ses_{uuid.uuid4().hex[:12]}"
-scenario = os.environ.get("FAKE_SCENARIO", "ok")
+# FAKE_SCENARIO_BY_TASK: {task name: scenario}, by the agent's WB_TASK (a run's escalation, #1278)
+scenario = (json.loads(os.environ.get("FAKE_SCENARIO_BY_TASK") or "{}").get(os.environ.get("WB_TASK", ""))
+            or os.environ.get("FAKE_SCENARIO", "ok"))
 t = lambda: int(time.time() * 1000)  # noqa: E731
 
 
