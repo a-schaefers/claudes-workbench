@@ -21,6 +21,8 @@
     "skill.ts",
     "agent.ts",
     "spans.ts",
-    "splash.tsx"
+    "splash.tsx",
+    "upkeep.ts",
+    "commands.ts"
   ]
 }

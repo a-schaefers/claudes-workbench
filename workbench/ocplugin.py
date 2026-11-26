@@ -217,7 +217,7 @@ def copy_info(d: Path) -> dict | None:
 
 def shared_files(root: Path | None = None, rev: str = "HEAD") -> list[tuple[str, str]]:
     """(path, blob) at the clone's ``rev`` of each Claude Code mod file the plugin imports from beside
-    it (`../mod/hooks/…`: spans.ts's splash.ts and apprentice.ts, #1333), as HEAD's root
+    it (`../mod/hooks/…`: spans.ts's splash.ts and apprentice.ts, #1333; upkeep.ts's core.ts and its kernel.js, #1315), as HEAD's root
     package.json `files` name them under mod/ (the Git install's list), there; a copy carries them."""
     root = root or PKG_ROOT
     try:

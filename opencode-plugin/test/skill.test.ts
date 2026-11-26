@@ -57,8 +57,12 @@ test('the prompt is SKILL.md\'s body, without its frontmatter, and the workbench
 test("until the plugin delivers wakes (#1313), the driver waits with wb wait in the background, never for a wake (the #1335 review)", () => {
   expect(R.prompt.includes("**Don't poll.** Run `wb wait <name>` with the shell tool's `background: true`")).toBe(true)
   expect(/woken\s+by\s+a\s+`\[workbench\]`\s+prompt|end\s+your\s+turn\s+and\s+wait\s+for\s+it/.test(R.prompt)).toBe(false)
-  // the user's two commands aren't OpenCode's yet (#1312): their words do the same
-  expect(R.prompt.includes("Where those commands aren't offered, the user may ask for the same in words")).toBe(true)
+})
+
+test("the user's two commands are the plugin's (#1315): a quit switches the session to Build, and without the plugin words do the same", () => {
+  expect(R.prompt.includes('the plugin runs them, switches this session to the Build agent and tells you what it did:')).toBe(true)
+  expect(R.prompt.includes('Without the plugin, the user may ask for the same in words; run those commands then.')).toBe(true)
+  expect(R.prompt.includes('`/workbench-quit-and-hand-back`') && !R.prompt.includes('-hand-back-claude')).toBe(true)
 })
 
 test('every reference file is a workbench-<name> skill, and every one the text names is given', () => {
