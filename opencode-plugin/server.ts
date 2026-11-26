@@ -20,6 +20,7 @@ import { notices } from './notices.ts'
 import { upkeep, type UpkeepHost } from './upkeep.ts'
 import { deep, type DeepHost } from './deep.ts'
 import { registerCommands, type CommandHost } from './commands.ts'
+import { registerFlows } from './flows.ts'
 import { startPane, type PaneHost } from './pane.ts'
 
 export const ID = 'workbench'
@@ -60,6 +61,10 @@ const plugin: ServerPlugin = {
     if (stopUpkeep) stops.push(stopUpkeep)
     const stopCommands = await registerCommands(ctx as unknown as CommandHost).catch(() => undefined)
     if (stopCommands) stops.push(stopCommands)
+    // the flows' own /commands (#1295), awaited: a transform added after setup returned was never
+    // listed in the TUI (seen live with OpenCode 2.4.1, 2026-11-26), so its one wb call waits here
+    const stopFlows = await registerFlows(ctx as unknown as CommandHost).catch(() => undefined)
+    if (stopFlows) stops.push(stopFlows)
     stops.push(await startPane(ctx as ServerContext & PaneHost))  // the panel's data and /workbench (#1312)
     return async () => { for (const stop of stops.reverse()) await stop().catch(() => {}) }
   },

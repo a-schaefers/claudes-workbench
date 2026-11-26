@@ -42,11 +42,32 @@ SHIPPED = PKG_ROOT / "agent" / "flows"
 # <run>-<stage>-<n> fits a task name (store.NAME_RE, 48) and the run a group (cli.GROUP_RE, 32)
 RUN_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}\Z")
 STAGE_RE = re.compile(r"^[a-z][a-z0-9]{0,7}\Z")
-FLOW_KEYS = ("v", "name", "description", "params", "budget_usd", "budget_min", "context", "stages")
+FLOW_KEYS = ("v", "name", "description", "params", "budget_usd", "budget_min", "context", "stages",
+             "command", "from")
 STAGE_KEYS = ("id", "card", "kind", "role", "items", "from", "split", "keep", "flow", "batch",
               "attempts", "schema", "tools", "skills", "ask", "setup", "test", "refix", "on_failure",
-              "max_items", "claude", "final", "prompt", "compare", "escalate")
-PARAM_TYPES = ("string", "int", "list", "json", "file", "runs")
+              "max_items", "claude", "final", "prompt", "compare", "escalate", "unless_exists")
+PARAM_TYPES = ("string", "int", "list", "json", "file", "files", "runs")
+# a param is its type alone ("list"), or an object of these (#1295, Goose's recipe parameters):
+# `choices` for a string or int, `default` used when --param leaves it out, `optional` absent then
+PARAM_KEYS = ("type", "description", "default", "choices", "optional")
+FILE_KEYS = ("file", "name", "stem", "dir")  # a `files` param's item, {item.<key>}
+FILES_MAX = 1000       # a `files` param's matches, at most: past it, narrow the pathspec
+DRY_SPEC_CUT = 1500    # characters of a stage's first spec `wb run start --dry-run` shows
+# a flow's `command` (#1295): one lowercase word; never wb's own nor either host's built-ins
+COMMAND_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")
+RESERVED_COMMANDS = frozenset((
+    "deepmode",
+    # Claude Code's
+    "add-dir", "agents", "bashes", "bug", "clear", "compact", "config", "context", "cost", "doctor",
+    "exit", "export", "help", "hooks", "ide", "init", "install-github-app", "login", "logout", "mcp",
+    "memory", "model", "output-style", "permissions", "plugin", "pr-comments", "privacy-settings",
+    "quit", "release-notes", "reload-plugins", "resume", "review", "rewind", "security-review",
+    "status", "statusline", "terminal-setup", "todos", "upgrade", "usage", "vim", "feedback", "keybindings",
+    "rename", "copy", "skills", "theme", "files", "plan", "loop", "schedule", "fork", "add",
+    # OpenCode's TUI
+    "connect", "details", "editor", "models", "new", "redo", "sessions", "share", "themes", "thinking",
+    "undo", "unshare"))
 RUN_REFUSED = ("No one answers in a run (wb run): Claude reads your result at its end, and nothing outside "
                "your task's rules can be granted. Do the task without it, and say so in your result.")
 ESCALATE_MAX = 3       # a code stage's `escalate` roles, at most
@@ -192,9 +213,15 @@ def validate(flow) -> list[str]:
     if not (isinstance(flow.get("name"), str) and RUN_RE.match(flow["name"])):
         errs.append("name: lowercase letters, digits and hyphens, at most 24")
     params = flow.get("params") or {}
-    if not isinstance(params, dict) or any(t not in PARAM_TYPES for t in params.values()):
-        errs.append(f"params: each a type of {', '.join(PARAM_TYPES)}")
+    if not isinstance(params, dict):
+        errs.append(f"params: an object, each param a type of {', '.join(PARAM_TYPES)} or {{type, …}}")
         params = {}
+    for k, v in params.items():
+        errs += [f"param {k}: {e}" for e in param_errors(v)]
+    if "command" in flow:
+        errs += command_errors(flow)
+    if "from" in flow and not (isinstance(flow["from"], str) and re.fullmatch(r"[0-9a-f]{40}", flow["from"])):
+        errs.append("from: the shipped flow's blob sha a copy came from (wb flow copy writes it)")
     for k in ("budget_usd", "budget_min"):
         if k in flow and flow[k] is not None and not (isinstance(flow[k], (int, float)) and flow[k] >= 0):
             errs.append(f"{k}: a number")
@@ -322,6 +349,8 @@ def validate(flow) -> list[str]:
             elif place != "item" and place != "params" and sub:
                 errs.append(f"{where}: {{{place}.{sub}}}: only item and params take a key")
         items = s.get("items")
+        if "unless_exists" in s:
+            errs += [f"{where}: {e}" for e in unless_errors(s, params)]
         if isinstance(items, str):
             ph = placeholders(items)
             if len(ph) != 1 or ph[0][0] != "params" or ph[0][1] not in params or items.strip() != f"{{params.{ph[0][1]}}}":
@@ -339,37 +368,222 @@ def validate(flow) -> list[str]:
     return errs
 
 
-def parse_params(flow: dict, given: list[str]) -> dict:
+def param_decl(v) -> dict:
+    """A param's declaration as an object: a bare type ("list") is {"type": "list"}."""
+    return {"type": v} if isinstance(v, str) else dict(v) if isinstance(v, dict) else {}
+
+
+def param_type(v) -> str:
+    return str(param_decl(v).get("type") or "")
+
+
+def param_errors(v) -> list[str]:
+    """What is wrong with one param's declaration, [] when nothing."""
+    d = param_decl(v)
+    t = d.get("type")
+    if t not in PARAM_TYPES:
+        return [f"a type of {', '.join(PARAM_TYPES)}, alone or as {{type, {', '.join(PARAM_KEYS[1:])}}}"]
+    errs = [f"unknown key {k!r} (a param takes {', '.join(PARAM_KEYS)})" for k in d if k not in PARAM_KEYS]
+    if "description" in d and not isinstance(d["description"], str):
+        errs.append("description is text")
+    if "optional" in d and not isinstance(d["optional"], bool):
+        errs.append("optional is true or false")
+    ch = d.get("choices")
+    if ch is not None:
+        kind = int if t == "int" else str
+        if t not in ("string", "int") or not (isinstance(ch, list) and ch and all(
+                isinstance(c, kind) and not isinstance(c, bool) for c in ch)):
+            errs.append("choices is a list of strings for a string param, of whole numbers for an int")
+            ch = None
+    if "default" in d:
+        dv = d["default"]
+        ok = {"int": isinstance(dv, int) and not isinstance(dv, bool), "list": isinstance(dv, list), "json": True,
+              "files": isinstance(dv, str) or isinstance(dv, list) and all(isinstance(x, str) for x in dv)
+              }.get(t, isinstance(dv, str))
+        if not ok:
+            errs.append(f"default is a {t}" + (" (a pathspec, or a list of them)" if t == "files" else ""))
+        elif ch and dv not in ch:
+            errs.append(f"default {dv!r} isn't one of its choices")
+    return errs
+
+
+def command_errors(flow: dict) -> list[str]:
+    """A flow's `command` (#1295): one lowercase word, none of wb's (`workbench*`, `deepmode`) or
+    the hosts' own, and no other flow's (the user's or a shipped one of another name)."""
+    c = flow.get("command")
+    if not (isinstance(c, str) and COMMAND_RE.match(c)):
+        return ["command: one lowercase word (letters, digits, hyphens; at most 32), without its /"]
+    if c.startswith("workbench") or c in RESERVED_COMMANDS:
+        return [f"command /{c} is {'Workbench' if c.startswith('workbench') or c == 'deepmode' else 'a host'}'s own: "
+                "name it otherwise"]
+    other = next((n for n, cmd in _commands_on_disk() if cmd == c and n != flow.get("name")), None)
+    return [f"command /{c} is flow {other}'s already"] if other else []
+
+
+def _commands_on_disk() -> list[tuple[str, str]]:
+    """(flow name, command) of the user's and the shipped flows that set one, the user's shadowing
+    the shipped (read, never validated: validate calls this)."""
+    out = []
+    for name, _, _ in flow_names():
+        try:
+            c = json.loads(flow_path(name).read_text(encoding="utf-8")).get("command")
+        except (OSError, ValueError, AttributeError, UnicodeDecodeError):
+            continue
+        if isinstance(c, str):
+            out.append((name, c))
+    return out
+
+
+def files_param(stage: dict, params: dict) -> str | None:
+    """The `files` param a stage's items come from (`items: "{params.<it>}"`), else None."""
+    items = stage.get("items")
+    if not isinstance(items, str):
+        return None
+    ph = placeholders(items)
+    k = ph[0][1] if len(ph) == 1 and ph[0][0] == "params" else None
+    return k if k in params and param_type(params[k]) == "files" else None
+
+
+def unless_errors(stage: dict, params: dict) -> list[str]:
+    """A stage's `unless_exists` (#1295): a path template on a stage fed by a `files` param, its
+    places the item's own keys and the flow's params."""
+    tpl = stage.get("unless_exists")
+    if not (isinstance(tpl, str) and tpl.strip()):
+        return ["unless_exists is a path template (`tests/{item.stem}_test.py`)"]
+    if files_param(stage, params) is None:
+        return ["unless_exists goes on a stage whose items are a files param (\"{params.<files>}\")"]
+    if (stage.get("batch") or 1) > 1:
+        return ["unless_exists checks one file per item: no batch"]
+    errs = []
+    for place, sub in placeholders(tpl):
+        if place == "item" and sub in FILE_KEYS:
+            continue
+        if place == "params" and sub in params:
+            continue
+        errs.append(f"unless_exists: {{{place}{'.' + sub if sub else ''}}} isn't one of "
+                    f"{', '.join('{item.' + k + '}' for k in FILE_KEYS)} or a declared {{params.<k>}}")
+    return errs
+
+
+def unless_path(stage: dict, item, params: dict) -> str:
+    """The path a stage's `unless_exists` names for ``item``, normalized (`./x` is `x`)."""
+    import posixpath
+    return posixpath.normpath(render(stage["unless_exists"], {"item": item, "params": params}))
+
+
+def existing(flow: dict, params: dict, repo: Path, base: str) -> dict:
+    """{stage id: [paths]}: for each stage with `unless_exists`, the paths its items name that
+    exist at ``base``, found once at the start (run.json `exists`); its items there are
+    not_run, `exists at base: <path>` (state)."""
+    out = {}
+    for s in stages(flow):
+        if s.get("unless_exists") and (k := files_param(s, flow.get("params") or {})):
+            at = gitops.paths_at(repo, base)
+            hits = sorted({p for it in params.get(k) or () if (p := unless_path(s, it, params)) in at})
+            if hits:
+                out[s["id"]] = hits
+    return out
+
+
+def file_item(path: str) -> dict:
+    """A `files` param's item: the file's path from the repo's root, its name, stem and directory
+    (`.` at the root)."""
+    name = path.rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name.lstrip(".") else name
+    return {"file": path, "name": name, "stem": stem, "dir": path.rsplit("/", 1)[0] if "/" in path else "."}
+
+
+def _one_param(t: str, v, repo: Path | None, base: str | None):
+    """One param's value from its text (--param's, or a default's) by its type."""
+    if t == "int":
+        return v if isinstance(v, int) else int(v)
+    if t == "list":
+        if isinstance(v, list):
+            return v
+        out = json.loads(v) if v.strip().startswith("[") else [x.strip() for x in v.split(",") if x.strip()]
+        if not isinstance(out, list):
+            raise ValueError("not a list")
+        return out
+    if t == "json":
+        return json.loads(v) if isinstance(v, str) else v
+    if t == "file":
+        return Path(v).expanduser().read_text(encoding="utf-8")[:CUTS["item"]]
+    if t == "files":
+        specs = v if isinstance(v, list) else (json.loads(v) if v.strip().startswith("[")
+                                               else [x.strip() for x in v.split(",") if x.strip()])
+        if not specs or not all(isinstance(x, str) and x for x in specs):
+            raise ValueError("a pathspec, or several comma separated")
+        if repo is None or not base:
+            raise ValueError("no repository to match it in")
+        try:
+            found = gitops.files_at(repo, base, specs)
+        except gitops.GitError as e:
+            raise ValueError(str(e).splitlines()[-1][:300]) from None
+        if not found:
+            raise ValueError(f"{', '.join(specs)} matches no file committed at {base[:12]}")
+        if len(found) > FILES_MAX:
+            raise ValueError(f"{', '.join(specs)} matches {len(found):,} files, over {FILES_MAX:,}: narrow it")
+        return [file_item(f) for f in found]
+    if t == "runs":
+        return [f["result"] for f in report_of(v)["final"]]
+    return v if isinstance(v, str) else str(v)
+
+
+def parse_params(flow: dict, given: list[str], repo: Path | None = None, base: str | None = None) -> dict:
     """--param k=v, each by its declared type; RuntimeError with why. A list is JSON or comma
-    separated; a file is read (16 KB); runs is an earlier run's final results."""
-    decl = flow.get("params") or {}
+    separated; a file is read (16 KB); files is a pathspec matched at ``base`` in ``repo``
+    (committed files only, each an item {file, name, stem, dir}); runs is an earlier run's final
+    results. One left out takes its `default`, or stays absent when `optional`."""
+    decl = {k: param_decl(v) for k, v in (flow.get("params") or {}).items()}
     out = {}
     for kv in given or ():
         k, sep, v = kv.partition("=")
         if not sep or k not in decl:
             raise RuntimeError(f"--param {kv!r}: the flow takes {', '.join(decl) or 'no params'} (k=v)")
-        t = decl[k]
+        out[k] = v
+    typed = set()  # a default is its value already (validate checked it), but a path or a run to read
+    for k, d in decl.items():
+        if k not in out and "default" in d:
+            out[k] = d["default"]
+            if d["type"] in ("string", "int", "list", "json"):
+                typed.add(k)
+    for k in list(out):
+        t = decl[k]["type"]
         try:
-            if t == "int":
-                out[k] = int(v)
-            elif t == "list":
-                out[k] = json.loads(v) if v.strip().startswith("[") else [x.strip() for x in v.split(",") if x.strip()]
-                if not isinstance(out[k], list):
-                    raise ValueError("not a list")
-            elif t == "json":
-                out[k] = json.loads(v)
-            elif t == "file":
-                out[k] = Path(v).expanduser().read_text(encoding="utf-8")[:CUTS["item"]]
-            elif t == "runs":
-                out[k] = [f["result"] for f in report_of(v)["final"]]
-            else:
-                out[k] = v
-        except (ValueError, OSError, RuntimeError, UnicodeDecodeError) as e:
+            out[k] = out[k] if k in typed else _one_param(t, out[k], repo, base)
+        except (ValueError, TypeError, OSError, RuntimeError, UnicodeDecodeError) as e:
             raise RuntimeError(f"--param {k}: a {t} ({e})") from None
-    missing = [k for k in decl if k not in out]
+        ch = decl[k].get("choices")
+        if ch and out[k] not in ch:
+            raise RuntimeError(f"--param {k}: one of {', '.join(map(str, ch))}, not {out[k]!r}")
+    missing = [k for k, d in decl.items() if k not in out and not d.get("optional")]
     if missing:
-        raise RuntimeError(f"the flow needs --param {', '.join(f'{k}=<{decl[k]}>' for k in missing)}")
+        need = ", ".join(f"{k}=<{decl[k]['type']}>" for k in missing)
+        raise RuntimeError(f"the flow needs --param {need}")
     return out
+
+
+def parse_args(flow: dict, raw: str) -> list[str]:
+    """A slash command's arguments (#1295) as --param words, for both hosts (they pass the line
+    as typed: `wb run start --args`): a flow with one param takes the whole line as it; otherwise
+    `k=v` words, shell quoted (`area="a b"`). RuntimeError with why."""
+    import shlex
+    decl = list((flow.get("params") or {}).keys())
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    if not decl:
+        raise RuntimeError(f"flow {flow.get('name')} takes no arguments")
+    if len(decl) == 1:  # the whole line, a leading `<k>=` of its own dropped
+        return [f"{decl[0]}={raw.removeprefix(decl[0] + '=')}"]
+    try:
+        words = shlex.split(raw)
+    except ValueError as e:
+        raise RuntimeError(f"the arguments: {e}") from None
+    bad = [w for w in words if "=" not in w or w.split("=", 1)[0] not in decl]
+    if bad:
+        raise RuntimeError(f"{bad[0]!r}: the arguments are k=v words, k one of {', '.join(decl)}")
+    return words
 
 
 def _text(v, cut: int) -> str:
@@ -739,24 +953,29 @@ def state(run: Run) -> dict:
             inputs = [(key, [v for _, v in ms], None) for key, ms in groups.items()]
         cap = int(s.get("max_items") or MAX_ITEMS)
         esc = (s.get("escalate") or []) if is_code(s) else []
+        there = set((spec.get("exists") or {}).get(sid) or ()) if s.get("unless_exists") else set()
         items = []
-        idx = -1
+        idx, passed = -1, 0  # passed: the items unless_exists skipped, which count to no cap
         while (idx := idx + 1) < len(inputs):
             key, v, src = inputs[idx]
             it = Item(sid, key, v, src=src, members=groups.get(key))
             row = started.get((sid, key))
             if row:
                 it.n, it.task = row.get("n"), row.get("task")
+            hit = unless_path(s, v, params) if there and not row else None
             if (sid, key) in final:
                 it.state, it.why = final[(sid, key)]
                 if it.n is not None and it.state in ("done", "filtered", "superseded"):
                     it.output = (store.read_json(run.output_file(sid, it.n), {}) or {}).get("result")
+            elif hit in there:
+                it.state, it.why = "not_run", f"exists at base: {hit}"
+                passed += 1
             elif sid in skipped:
                 it.state, it.why = "not_run", "skipped (wb run amend --skip)"
             elif s.get("compare") and len(it.members or ()) < 2:
                 it.state, it.why = "not_run", (f"{len(it.members or ())} of its attempts reached review: "
                                                "nothing to compare (wb run report names the rest)")
-            elif idx >= cap and "#e" not in key:
+            elif idx - passed >= cap and "#e" not in key:
                 it.state, it.why = "not_run", f"past the stage's max_items ({cap})"
             elif v is WAITING:
                 it.state, it.input = "waiting", None
@@ -1564,9 +1783,10 @@ def status_line(name: str) -> str:
     return line + (f"\n  why: {st['why']}" if st.get("why") and st.get("phase") != "running" else "")
 
 
-def estimate(flow: dict, params: dict) -> tuple[float | None, float, list[str]]:
+def estimate(flow: dict, params: dict, exists: dict | None = None) -> tuple[float | None, float, list[str]]:
     """(dollars for the stages whose items are known now, GPU minutes for them, the stages whose
-    count is known only as they run), from each card's `est` × meter.price."""
+    count is known only as they run), from each card's `est` × meter.price; the items
+    `unless_exists` skips (``exists``, existing's) cost nothing."""
     usd, mins, later = 0.0, 0.0, []
     priced = True
     for s in stages(flow):
@@ -1575,7 +1795,8 @@ def estimate(flow: dict, params: dict) -> tuple[float | None, float, list[str]]:
         if "items" not in s:
             later.append(s["id"])
             continue
-        n = min(len(_items_of(s, Run("-"), params)), int(s.get("max_items") or MAX_ITEMS)) * int(s.get("attempts") or 1)
+        n = len(_items_of(s, Run("-"), params)) - len((exists or {}).get(s["id"]) or ())
+        n = min(n, int(s.get("max_items") or MAX_ITEMS)) * int(s.get("attempts") or 1)
         if (s.get("batch") or 1) > 1:
             n = math.ceil(n / s["batch"])
         try:
@@ -1714,7 +1935,6 @@ def cmd_start(a) -> None:
         _die("--overnight goes with --budget-usd: a run past midnight has a budget of its own")
     try:
         flow = load_flow(a.flow, a.plan)
-        params = parse_params(flow, a.param)
     except RuntimeError as e:
         _die(str(e))
     repo = Path(a.repo or os.getcwd()).resolve()
@@ -1723,6 +1943,12 @@ def cmd_start(a) -> None:
     base = gitops.base_commit(repo, a.base or "HEAD")
     if not base:
         _die(f"no commit {a.base or 'HEAD'} in {repo}")
+    try:
+        given = [*(parse_args(flow, a.args) if getattr(a, "args", None) else []), *(a.param or [])]
+        params = parse_params(flow, given, repo, base)
+        exists = existing(flow, params, repo, base)
+    except (RuntimeError, gitops.GitError) as e:
+        _die(str(e))
     said: list[str] = []
     for s in stages(flow):  # an API role with no cap is refused before any file is written
         if s.get("final") or s.get("claude"):
@@ -1740,13 +1966,24 @@ def cmd_start(a) -> None:
         except (OSError, UnicodeDecodeError) as e:
             _die(f"--context-file {a.context_file}: {getattr(e, 'strerror', None) or e}")
     ctx = ctx or flow.get("context") or ""
-    est_usd, est_min, later = estimate(flow, params)
+    est_usd, est_min, later = estimate(flow, params, exists)
+    roles = ", ".join(dict.fromkeys(f"{s['id']} {stage_role(s)}" + (" (API)" if stage_model(s) else " (GPU)")
+                                    + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
+                                    for s in stages(flow) if not (s.get("final") or s.get("claude"))))
+    est = (meter.usd(est_usd) if est_usd is not None else "unpriced") + (f", GPU ~{est_min:g} min" if est_min else "")
+    if getattr(a, "dry_run", False):
+        for line in dry_run(a.name, flow, params, exists, ctx, base, est, later, usd_):
+            print(line)
+        for line in said:
+            print(line)
+        return
     d = run_dir(a.name)
     d.mkdir(parents=True)
     for sub in ("inbox", "outputs", "specs"):
         (d / sub).mkdir()
     spec = {"name": a.name, "flow": flow, "flow_name": flow["name"], "flow_sha": flow_sha(flow),
-            "params": params, "context": ctx[:CUTS["context"]], "repo": str(repo), "base": base,
+            "params": params, **({"exists": exists} if exists else {}),
+            "context": ctx[:CUTS["context"]], "repo": str(repo), "base": base,
             "base_ref": a.base, "cwd": os.getcwd(), "budget_usd": usd_, "budget_min": mins,
             "overnight": bool(a.overnight), "trial": bool(a.trial), "no_claude_md": bool(a.no_claude_md),
             "created": store.now(), "driver": {"python": sys.executable, "machine": store.machine()},
@@ -1762,10 +1999,6 @@ def cmd_start(a) -> None:
     run = Run(a.name)
     run.log(kind="start", flow=flow["name"], flow_sha=spec["flow_sha"])
     pid = spawn(run)
-    roles = ", ".join(dict.fromkeys(f"{s['id']} {stage_role(s)}" + (" (API)" if stage_model(s) else " (GPU)")
-                                    + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
-                                    for s in stages(flow) if not (s.get("final") or s.get("claude"))))
-    est = (meter.usd(est_usd) if est_usd is not None else "unpriced") + (f", GPU ~{est_min:g} min" if est_min else "")
     print(f"run {a.name}: flow {flow['name']} · {roles} · estimate {est}"
           + (f" (and {', '.join(later)} as their items come)" if later else "")
           + (f" · budget {meter.usd(usd_)}" if usd_ is not None else "") + f" · driver pid {pid}")
@@ -1774,6 +2007,57 @@ def cmd_start(a) -> None:
     # the mod wakes Claude for no run row yet: wb wait in the background is the wake (#1278's review)
     print(f"stop: wb run stop {a.name}. Wait for its notices (a checkpoint, a pause, the end) with "
           f"wb wait {a.name} in the background, again after each: don't poll.")
+
+
+def dry_run(name: str, flow: dict, params: dict, exists: dict, ctx: str, base: str, est: str,
+            later: list[str], usd_) -> list[str]:
+    """`wb run start --dry-run` (#1295): what the run would do, writing and starting nothing: a
+    line per stage (its role and side, where its items come from), the first item's spec of each
+    stage whose items are known before the run (cut at DRY_SPEC_CUT), and the estimate."""
+    out = [f"dry run {name}: flow {flow['name']} at {base[:12]} (nothing written, nothing started)"]
+    for s in stages(flow):
+        sid = s["id"]
+        if s.get("final"):
+            out.append(f"  {sid}: final, yours" + (f" (over {s['from']})" if s.get("from") else ""))
+            continue
+        if s.get("claude"):
+            out.append(f"  {sid}: a checkpoint of yours over {s['from']} (wb run feed)")
+            continue
+        side = "API" if stage_model(s) else "GPU"
+        what = s.get("card") or "code"
+        if "items" in s:
+            n = len(_items_of(s, Run("-"), params))
+            skip = len((exists or {}).get(sid) or ())
+            src = f"{n} item(s)" + (f" from {s['items']}" if isinstance(s["items"], str) else "") + \
+                (f", {skip} skipped: exists at base" if skip else "")
+            cap = int(s.get("max_items") or MAX_ITEMS)
+            if n - skip > cap:
+                src += f", {n - skip - cap} past max_items {cap}"
+        else:
+            src = f"from {s['from']}" + (f" split by {s['split']}" if s.get("split") else "") + \
+                (", once all are in" if s.get("flow") == "barrier" else ", as each comes")
+        att = int(s.get("attempts") or 1)
+        out.append(f"  {sid}: {what} on {stage_role(s)} ({side}) · {src}" + (f" · {att} attempts" if att > 1 else "")
+                   + (f" · batches of {s['batch']}" if (s.get("batch") or 1) > 1 else ""))
+    for s in stages(flow):
+        if "items" not in s or s.get("final") or s.get("claude"):
+            continue
+        there = set((exists or {}).get(s["id"]) or ())
+        first = next((v for v in _items_of(s, Run("-"), params)
+                      if not (there and unless_path(s, v, params) in there)), None)
+        if first is None:
+            continue
+        b = int(s.get("batch") or 1)
+        if b > 1:  # the first batch, its members as the judge gets them
+            first = [member(str(i + 1), v) for i, v in enumerate(_items_of(s, Run("-"), params)[:b])]
+        text = render(s.get("prompt") or DEFAULT_PROMPT, {
+            "item": first, "params": params,
+            "context": ctx, "run": name, "stage": s["id"], "base": base})
+        cut = text if len(text) <= DRY_SPEC_CUT else text[:DRY_SPEC_CUT] + f"\n[… {len(text) - DRY_SPEC_CUT:,} characters more]"
+        out += [f"--- {s['id']}'s first item's spec ---", cut]
+    out.append(f"estimate {est}" + (f" (and {', '.join(later)} as their items come)" if later else "")
+               + (f" · budget {meter.usd(usd_)}" if usd_ is not None else ""))
+    return out
 
 
 def _runs_in_scope(a) -> list[Run]:
@@ -1974,13 +2258,57 @@ def cmd_close(a) -> None:
     print(f"closed {run.name}: its report stays (wb run report {run.name})")
 
 
+def flow_rows(repo: Path | None = None) -> list[dict]:
+    """Every flow as `wb run flows --json` gives it: {name, where, description, mark (a user's
+    shadowing a shipped one, cards.shadow_mark), command (the user's and shipped only, valid:
+    what the hosts register as /<command>), params ({name: {type, …}})}."""
+    out = []
+    for name, where, desc in flow_names(repo):
+        d = dict(flow_places(repo))[where]
+        path = d / f"{name}.json"
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            doc = {}
+        doc = doc if isinstance(doc, dict) else {}
+        cmd = doc.get("command") if where != "repo" else None
+        if cmd is not None and (command_errors(doc) or validate(doc)):
+            cmd = None  # a flow wb run start would refuse has no command
+        out.append({"name": name, "where": where, "description": desc,
+                    "mark": cards.shadow_mark(path, SHIPPED / f"{name}.json", cards.recorded_from(path))
+                    if where == "yours" else "",
+                    "command": cmd, "params": {k: param_decl(v) for k, v in (doc.get("params") or {}).items()}
+                    if isinstance(doc.get("params"), dict) else {}})
+    return out
+
+
 def cmd_flows(a) -> None:
     repo = Path(a.repo).resolve() if a.repo else Path(os.getcwd())
-    rows = flow_names(repo)
+    rows = flow_rows(repo)
+    if getattr(a, "json", False):
+        print(json.dumps(rows))
+        return
     if not rows:
         print("no flows")
-    for name, where, desc in rows:
-        print(f"{name} ({where}{': read it first, then --plan' if where == 'repo' else ''}): {desc}")
+    for r in rows:
+        marks = [r["mark"]] if r["mark"] else []
+        if r["where"] == "repo":
+            marks.append("read it first, then --plan")
+        print(f"{r['name']} ({r['where']}{', ' + ', '.join(marks) if marks else ''})"
+              + (f" /{r['command']}" if r["command"] else "") + f": {r['description']}")
+
+
+def cmd_flow_copy(a) -> None:
+    """wb flow copy|reset <name> (#1295): a shipped flow to customize as yours, or yours set aside."""
+    if not RUN_RE.match(a.name or ""):
+        _die(f"{a.name!r}: a flow's name is lowercase letters, digits and hyphens, at most 24")
+    try:
+        if a.flow_cmd == "copy":
+            print(cards.copy_shipped(SHIPPED / f"{a.name}.json", flows_dir() / f"{a.name}.json", a.force))
+        else:
+            print(cards.reset_shipped(SHIPPED / f"{a.name}.json", flows_dir() / f"{a.name}.json"))
+    except (RuntimeError, OSError, ValueError) as e:
+        _die(str(e))
 
 
 def cmd_ack(a) -> None:
