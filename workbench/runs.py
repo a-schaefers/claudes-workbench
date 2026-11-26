@@ -20,7 +20,7 @@ Files, in $WB_HOME/runs/<run>/: run.json (who started it, the flow whole, its pa
 budgets), status.json (the phase and each stage's counts), journal.jsonl (each item started,
 its output, its null, its not-run, each refix and notice: resume replays it by stage and item),
 inbox/ (Claude's feeds for a `claude` stage), outputs/ (each item's object), specs/ (each item's
-spec), notify.jsonl (the items' notices, the driver's alone), result.json (the end's report),
+spec), schemas/ (each batch's schema), notify.jsonl (the items' notices, the driver's alone), result.json (the end's report),
 acked (the run's notices taken), driver.log.
 """
 import hashlib
