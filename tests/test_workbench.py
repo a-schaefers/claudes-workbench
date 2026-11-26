@@ -48388,6 +48388,36 @@ class ApiStats(Base):
         a.set_status(api={"usd": 0.2})                              # the meter's key (#1019)
         self.assertEqual(runner._spend_part(store.Task(a.name)), " · ≈$0.20 so far")
 
+    def test_a_plan_tasks_round_report_and_wb_top_say_plan_usage_never_dollars_so_far(self):
+        # #1522 (2026-11-26): a plan task read "$0 so far" (a coding plan's 0 prices) or a catalog
+        # estimate (OpenCode Go's) in the round report, wb top and the web, where its close said
+        # plan usage; a model only the meter's status `api.plan` names (gone from hosted.json) too
+        from workbench import results, top
+        now = time.time()
+        go = self.api_task("t-plan-go", {"phase": "running", "updated_at": now},  # no `api` booked yet
+                           model=SPEND_GO, provider="opencode-go")
+        gone = self.api_task("t-plan-gone", {"phase": "running", "updated_at": now,
+                                             "api": {"usd": None, "plan": "deepseek"}}, model="deepseek/gone-1")
+        for t in (go, gone):
+            store.append_jsonl(t.dir / "events.jsonl", {"ts": now - 5, "round": 1, "kind": "step",
+                                                        "in": 10, "out": 5, "cost": 0.03})
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: None), \
+                mock.patch.object(hardware, "_run", lambda *argv: ""):
+            snap = top.Top(2, drm=drm).tick()
+        run = {r["task"]: r for r in snap["running"]}
+        for t, plan in ((go, "opencode-go"), (gone, "deepseek")):
+            t = store.Task(t.name)
+            self.assertEqual(runner._spend_part(t), f" · plan usage ({plan})")
+            self.assertIsNone(results.spend_so_far(t))
+            self.assertEqual(run[t.name]["plan"], plan)
+            self.assertNotIn("spend", run[t.name])
+        go.set_status(api={"usd": None, "plan": "opencode-go"})     # what the meter books for a plan
+        self.assertEqual(runner._spend_part(store.Task(go.name)), " · plan usage (opencode-go)")
+        self.assertIn("API opencode-go · plan usage", top.render(snap, 200, color=False))
+
     def test_a_step_event_keeps_opencodes_cost_and_the_cache_read_and_write_apart(self):
         from workbench import events
         raw = {"type": "step_finish", "part": {"cost": 0.0011, "tokens": {"input": 5, "output": 2,

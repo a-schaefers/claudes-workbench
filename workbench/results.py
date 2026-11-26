@@ -284,11 +284,24 @@ def live_basis(st: dict) -> str:
     return b if b in meter.BASES else meter.CATALOG
 
 
+def live_plan(model_id: str, st: dict) -> str | None:
+    """The plan a live or closed API task's usage counts against (`_plan`, else the meter's status
+    `api.plan`), or None: what the close's `source: "plan"` reads, for the live figures too."""
+    if (plan := _plan(model_id)) is not None:
+        return plan
+    booked = st.get("api") if isinstance(st.get("api"), dict) else {}
+    return booked["plan"] if isinstance(booked.get("plan"), str) and booked["plan"] else None
+
+
 def live_spend(model_id: str, st: dict, total: float) -> float | None:
     """A live API task's dollars so far: the runner's meter, else ``total``, the step events'
     summed `cost` over the whole events.jsonl (a tail's sum was a fraction of a long task's,
     #1022's review; wb top keeps a running sum), else 0 for a free model; None when unknown (never
-    a false 0: an unpriced model's steps say 0)."""
+    a false 0: an unpriced model's steps say 0) and for a plan (`live_plan`: its usage is quota, not
+    dollars; the round report and wb top read "$0 so far" where its close said plan usage, #1522,
+    2026-11-26)."""
+    if live_plan(model_id, st) is not None:
+        return None
     if (v := metered(st)) is not None:
         return v
     if total > 0:
@@ -385,9 +398,7 @@ def _api_usage(task: store.Task) -> dict | None:
         out["served_model"] = got
     # the meter's own `api.plan` too: an Ollama cloud model hosted.json no longer lists at close
     # read as no price where the meter had counted it as plan usage (#1106, 2026-11-23)
-    booked = st.get("api") if isinstance(st.get("api"), dict) else {}
-    if (plan := _plan(model) or (booked.get("plan") if isinstance(booked.get("plan"), str)
-                                 and booked["plan"] else None)) is not None:
+    if (plan := live_plan(model, st)) is not None:
         return {**out, "source": "plan", "plan": plan}
     price = catalog_price(model)
     cur = st.get("session")

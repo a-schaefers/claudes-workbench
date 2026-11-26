@@ -729,7 +729,9 @@ when `_plan` finds none (a cloud model hosted.json no longer lists at close, #11
 `cache_write`, a row from before the split by its `cache`); `backend` is status `served.by`
 (OpenRouter's served provider, the keyhole's), the last seen, and `served_model` status
 `served.model` when it isn't the id asked for (#1122). Live, `results.live_spend` is the
-meter, else the steps' summed `cost`, else 0 for a free model, else unknown (`spend_so_far` for the
+meter, else the steps' summed `cost`, else 0 for a free model, else unknown, and none for a plan
+(`results.live_plan`, the close's `_plan` or status `api.plan`: the round report, `wb top` and the
+web read plan usage, never "$0 so far", #1522) (`spend_so_far` for the
 round report, every step of events.jsonl; `wb top` keeps a running sum, below). A known cost carries
 `prices` (status `api.prices`, `results.live_basis`; what OpenCode's export, `opencode` or `mixed`,
 adds past the meter is its catalog estimate, so `provider` reads `catalog` there, but not when the
@@ -1904,7 +1906,8 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
    reads; an API task's says `agent tokens`: an API model's tokens are neither local nor free,
    #1022), for an API task then
    `· ≈$0.12 so far` (`results.spend_so_far`: the runner's meter, else the step
-   events' `cost`; plain `$0.12 so far` at the user's own prices or the provider's figure, #1135) or
+   events' `cost`; plain `$0.12 so far` at the user's own prices or the provider's figure, #1135),
+   `· plan usage (<provider>)` (a plan, `results.live_plan`, #1522) or
    `· cost unknown` (`runner._spend_part`); ahead of it in the review notice and `summary.md`,
    `auto-fix skipped: <cause>`.
 2. `agent context: U.UK of WK (P%)[, compacted Nx][; next round fresh][; N% read before its first
@@ -4127,7 +4130,8 @@ floor); `read_from: "median"`. No first-token time: OpenCode's events carry none
 else the steps' `cost` over all of events.jsonl, which `_Files.step_cost` sums on from the offset
 the last tick reached, again from the start when the file is replaced or cut; the 64 KB
 `EVENTS_TAIL` held a fraction of a long task's; absent when unknown, never 0 for a missing
-price; `prices`, `results.live_basis`, #1135) and, queued for one of its provider's slots, `waits: "a <provider> slot"`. No live server
+price; `prices`, `results.live_basis`, #1135), or on a plan `plan` (its provider, `results.live_plan`,
+no `spend`: the text and the web's live row say `plan usage`, #1522) and, queued for one of its provider's slots, `waits: "a <provider> slot"`. No live server
 rate (no server of ours: the last call's rate still works). It is never in the rack, which stays
 `discover()`'s GPU models, nor the queue, the lease's waiters: an API task takes no lease. The text
 row ends `  API deepseek · ≈$0.12`.
@@ -7329,7 +7333,7 @@ as cards (`nowCards`): a card per GPU and for RAM (`GPU 0 <card's name>`, `cardN
 and a busy bar, toned at 80 and 95 % as the pane's, watts, `GPU may wire`) with an
 SVG sparkline of the last `BUSY_KEEP` 60 busy samples, kept here per GPU (`busyKey`: the RAM row
 keeps none); Running (`▶ <task> <model> · phase · round · secs · tok/s · context% · $spend`, an API
-task's model by `modelWord`, `apiParts`, or `Nothing running.`); Models, the rack, the idle, can't-run
+task's model by `modelWord`, `apiParts`: `$spend`, or `plan usage` on a plan, #1522, or `Nothing running.`); Models, the rack, the idle, can't-run
 and remote ones folded past `RACK_FOLD_MIN` 2 into `+N more (wb top)` (#1322; no `another machine:
 no telemetry`); Queue. **The history** is `statsLines` ported label for label and in its order
 (`statsRows`): This week and All time (tasks, landed, the API dollars: `apiPeriod`, `API no known

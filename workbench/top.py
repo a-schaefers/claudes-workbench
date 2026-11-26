@@ -422,7 +422,8 @@ class Top:
 
     def _api(self, d: Path, spec: dict, st: dict) -> dict:
         """An API task's part of its RUNNING row (#1022): `via`, its provider, `spend` (dollars so
-        far; absent when unknown, never 0 for a missing price) and, queued, the provider slot it
+        far; absent when unknown, never 0 for a missing price) or, on a plan, `plan` (its provider,
+        #1522) and, queued, the provider slot it
         waits for. It takes no lease and no model of the rack: it is never in either."""
         if spec.get("via") != "api":
             return {}
@@ -430,8 +431,9 @@ class Top:
         mid = str(spec.get("model") or "")
         pid = spec.get("provider") or mid.split("/", 1)[0]
         out = {"via": "api", "provider": pid}
-        spend = results.live_spend(mid, st, self.files.step_cost(d / "events.jsonl"))
-        if spend is not None:
+        if (plan := results.live_plan(mid, st)) is not None:  # quota, never "$0" (#1522)
+            out["plan"] = plan
+        elif (spend := results.live_spend(mid, st, self.files.step_cost(d / "events.jsonl"))) is not None:
             out["spend"] = spend
             out["prices"] = results.live_basis(st)  # its `≈` unless at the user's prices (#1135)
         if st.get("phase") == "queued":
@@ -725,7 +727,8 @@ def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
         if r.get("via") == "api":  # its provider and its spend (#1022): no GPU of ours
             row.append(("", f"  API {p(r.get('provider') or '?')}"
                         + (f" · {meter.money(r['spend'], r.get('prices', meter.CATALOG))}"
-                           if isinstance(r.get("spend"), (int, float)) else "")
+                           if isinstance(r.get("spend"), (int, float))
+                           else " · plan usage" if r.get("plan") else "")
                         + (f" · waits for {p(r['waits'])}" if r.get("waits") else "")))
         out.append(row)
         if r.get("last"):

@@ -4637,11 +4637,14 @@ def steps_line(task: store.Task) -> str | None:
 
 def _spend_part(task: store.Task) -> str:
     """The round report's money for an API task (#1022): ` · ≈$0.12 so far` (plain `$0.12` at the
-    user's own prices or the provider's figure, #1135), ` · cost unknown` (no price: never a
+    user's own prices or the provider's figure, #1135), ` · plan usage (<provider>)` (a plan's
+    quota, as its close says: it read "$0 so far", #1522), ` · cost unknown` (no price: never a
     false $0); nothing for a GPU task."""
     if task.spec.get("via") != "api":
         return ""
-    from .results import live_basis, spend_so_far
+    from .results import live_basis, live_plan, spend_so_far
+    if (plan := live_plan(str(task.spec.get("model") or ""), task.status)) is not None:
+        return f" · plan usage ({plan})"
     v, b = spend_so_far(task), live_basis(task.status)
     return f" · {meter.money(v, b)} so far" if v is not None else " · cost unknown"
 
