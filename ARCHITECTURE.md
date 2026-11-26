@@ -55,6 +55,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   started by a detached driver that wakes Claude only at checkpoints and the end.
 - **The web chat** (`chat.py`, `chat_static/`, `webpush.py`): the same session from a phone;
   `settings.py`, the admin table its Settings are drawn from (*The admin table (settings.py)*).
+  Its scripts are TypeScript (`chat_static/src/`), built by `scripts/web.py` into the committed
+  plain scripts the page loads (*The page's TypeScript*); users need no Node or compiler.
 - **The kernel** (`kernel/`, `scripts/kernel.py`; *The kernel*): the pure decisions the mod and
   the OpenCode plugin must make the same way, in PureScript, compiled into the committed
   `mod/hooks/kernel.js`. Users install nothing for it; wb never imports it.
@@ -6637,7 +6639,7 @@ client; the server needs no browser.
   `{error, code, …}` (`Handler._json` adds `code` from `ERROR_CODES` by status unless the answer
   names its own: `token_revoked`, `not_local`, `unknown_host`, `agent_forbidden`,
   `bad_idempotency_key`, and `not_audio` for `/api/transcribe/`'s 415 (the upload's type, not the
-  request's), `ERRORS_SAID`); `error` stays the text, as `app.js` and `ask_workbench.py`
+  request's), `ERRORS_SAID`); `error` stays the text, as `app.ts` and `ask_workbench.py`
   show it as is. `Handler.send_error` answers http.server's own refusals (501 for another method,
   a malformed request line) in that shape: they were HTML. A revoked agent token's sha256 moves to
   `chat-agents.json`'s `revoked` (the newest `REVOKED_KEPT` 200; `chat.token_revoked`), so its
@@ -6835,14 +6837,14 @@ address (#534).
   (not `/api/file`), `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, a CSP (`default-src 'self'`,
   inline styles only, images also and media only from `blob:`, no framing, no forms).
 - `GET /`, `/<name>` with a known suffix (`TYPES`: html, js, css, svg, png, webmanifest) from
-  `chat_static/`, else 404; `/manifest.webmanifest?k=<token>` (constant time) gives `start_url:
+  `chat_static/` itself, never a subdirectory (so never `src/`, the TypeScript), else 404; `/manifest.webmanifest?k=<token>` (constant time) gives `start_url:
   "/?token=<it>"`, any other `k` the plain `/`.
 - The API wants `Authorization: Bearer <token>` (constant time), the user's or an agent's
   (*Other agents*), else 401 "bad or missing token: open the link from `wb chat url`".
 - `GET /api/health` → `{api, listening}`; `GET /api/wait` (*Other agents*).
 - `GET /api/latest` (`chat.latest`): for a push: Claude's last message or an open notice (from
   the last `LATEST_BYTES` 1 MiB; a settled notice skipped), `push`: the snapshot's shape, which
-  `sw.js` reads.
+  `sw.ts` reads.
 - `GET /api/state`: `{api, messages (the last 200 from `THREAD_BYTES` 4 MiB, user rows with
   `received`; a settled notice left out), push ({key or null, `chat._push_key_or_none`, #924; test}), listener,
   savings (`chat.week_saved`: `wb savings --json` over 7 days, no `period`; its `api` adds each
@@ -6858,7 +6860,8 @@ address (#534).
   25-task backlog took the screen from the thread on a phone, the queued read as running (#1097); the
   stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
   task's own status write; a tap on the strip opens the task sheet, `GET /api/task` below), now}`. `build`
-  (`chat.build`, a crc32 of the page files' names, mtimes, sizes) makes a stale page reload.
+  (`chat.build`, a crc32 of the served page files' names, mtimes, sizes: `chat_static/`'s files with a
+  `TYPES` suffix, never `src/`, #1323) makes a stale page reload.
 - `GET /api/shot?task=&n=&side=base|candidate`: a PNG, only for a task passing `store.NAME_RE`, an
   `n` with shots.json and a capture that worked, `O_NOFOLLOW`, at most `SHOT_MAX` 16 MB; `pruned`
   (`store.SLIM_DAYS`, #821) 410 "expired"; else 404 "no such screenshot". `GET /api/audio?batch=&n=`: a take, the batch matching
@@ -6953,7 +6956,7 @@ so after a reload or an outage too); the words join the box's end; a refusal sho
 (`makeNotice`: the waiting line, no buttons, and no dialog cards since #1350) and the Settings and Stats cards (`#away-when` states the away rule
 above, `#away-prompts` that prompts are answered in the terminal and the line says one waits; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43).`, or that alone, #1022, #1135; the saving is the badge's
-one line, `~3K Claude tokens saved this week`, #1322) are in `app.js`. Over plain HTTP
+one line, `~3K Claude tokens saved this week`, #1322) are in `app.ts`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
 
 **The shell** (#1284; the owner, 2026-11-24: merecatholicity.com's three buttons at the foot). Three
@@ -6980,7 +6983,7 @@ for the user newer than when the thread was left (`leftAt`, the server's clock; 
 page opened on another view takes its first live state's `now`), `99+` at most, in its
 `aria-label` too (`Chat, 3 new`), cleared on Chat (`drawBadge`). The thread keeps its place while
 hidden (`toEnd` waits; `chatTop`). A notification's click posts `{kind: "view", view: "chat"}` to an
-open page, else opens `/#chat` (`sw.js`). The gear and its sheet are gone: its sections are
+open page, else opens `/#chat` (`sw.ts`). The gear and its sheet are gone: its sections are
 Settings' cards, While away, Notifications, The app, This chat, This device (`#settings` is their
 grid), under `#settings-rows`; What it saved (`#badge`, `#saved`) is a Stats card under `#stats-body`;
 the ids are as they were, and `drawShown` draws the cards of the view shown (`drawSettings`,
@@ -6988,11 +6991,11 @@ the ids are as they were, and `drawShown` draws the cards of the view shown (`dr
 The manifest has no shortcuts to the views: the keyed one is built in `chat.py`, and a shortcut without the key
 would open an iPhone app keyless.
 
-**The views' API** (`window.WB`, frozen, set by `app.js` before `stats.js` and `settings.js` run:
+**The views' API** (`window.WB`, frozen, set by `app.ts` before `stats.ts` and `settings.ts` run:
 `defer`, after it; `stats.css`, `settings.css` after `app.css`): `token()` (`''` without a key),
 `api(path, init?)` (`fetch` with the bearer header and `cache: 'no-store'`; a plain-object body is
 sent as JSON, and a JSON or string body gets `Content-Type: application/json`), `post(path, body)`
-(`app.js`'s `post`: JSON, the key, given up after `POST_MS` of silence; a `{ok, status, headers,
+(`app.ts`'s `post`: JSON, the key, given up after `POST_MS` of silence; a `{ok, status, headers,
 json()}`, #1391), `view(name, {mount(root),
 show(), hide()})` (`stats` gets `#stats-body`, `settings` `#settings-rows`; mounted once, at once,
 shown and hidden on each switch and on `visibilitychange`, and the view shown is shown again,
@@ -7001,7 +7004,7 @@ second registration is ignored),
 `toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
-**The Stats view** (#1285; `stats.js`, `stats.css`; it took over the pane's Stats tab, *Seeing
+**The Stats view** (#1285; `stats.ts`, `stats.css`; it took over the pane's Stats tab, *Seeing
 what the agent does*). `WB.view('stats', …)`: `mount` puts two sections in `#stats-body`, Now
 (`.st-now-box`) and the history (`.st-hist-box`), drawn apart so a tick redraws Now alone. `show`
 fetches `GET /api/stats` (`{feed, routes, models}`, the feed `wb stats --json`'s), again every
@@ -7033,12 +7036,12 @@ yet: delegate one with /workbench, and how it went shows here.` The names follow
 `wb top`'s rack and running rows, provider names from `routes.providers` and `models.api`'s
 `provider_name`; `usd` is `meter.usd`'s rule. No score, saving, spec-gap discards, energy, streak,
 work absorbed, questions, Claude's tokens a task, 30 days' bars, bests or milestone: #1322 took
-them from the feed and the pane. The charts are inline SVG built in `stats.js` (no library, so the CSP holds),
+them from the feed and the pane. The charts are inline SVG built in `stats.ts` (no library, so the CSP holds),
 coloured by the page's tokens (`--accent`, `--accent-soft`, `--line`, `--ok`, `--warn`, `--bad`) in
-light and dark. What it saved (`#saved-card`) stays below, drawn by `app.js`.
+light and dark. What it saved (`#saved-card`) stays below, drawn by `app.ts`.
 
 
-**The task sheet** (#1201, `app.js`'s `showTaskSheet`): away, the strip's one line was all the
+**The task sheet** (#1201, `app.ts`'s `showTaskSheet`): away, the strip's one line was all the
 user saw of the work, and "is it on track?" cost a message to Claude. A tap (or Enter) on `#tasks`
 opens `#task-sheet` under it in `#view-chat` (closed by Esc, a tap outside, a strip gone empty or
 another view shown): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
@@ -7050,8 +7053,9 @@ markup: the page holds the user's token, which changes their Settings, so markup
 would be a way to both. "Reply about this task" sets `about: {task}` (`setAbout`), so the next message
 reaches Claude as `[web chat] (about task <task>) …`; steering stays Claude's (`wb steer`), and the
 page never steers, edits or accepts.
-**The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.js` removes its link
-over http: localhost counts as secure and one computer got two apps). The `badge` is
+**The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.ts` removes its link
+over http: localhost counts as secure and one computer got two apps); there the Settings card says how to get
+https, its `tailscale serve --bg 1337` drawn as code (`paraCode`: a line's backticked part as a `<code>`, #1323). The `badge` is
 `badge-96.png`, white on transparent (Android uses alpha only, #757). `sw.js` (`updateViaCache:
 'none'`) caches nothing and answers no fetch (an offline cache gave iOS white screens). Pushes carry
 no payload (RFC 8030), signed with VAPID (RFC 8292, ES256 in plain integers in `webpush.py`, checked
@@ -7074,6 +7078,32 @@ Python) and `NODE_EXTRA_CA_CERTS`'s CAs, and drops `VERIFY_X509_STRICT` (#1385).
 page what to say (#539).
 
 A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The tests*).
+
+**The page's TypeScript** (#1323, the owner, 2026-11-24: "either typescript or purescript, no more
+javascript"). `chat_static/src/` holds the sources: `app.ts`, `stats.ts`, `settings.ts` (the pages,
+`src/tsconfig.json`: lib dom) and `sw.ts` (the service worker, `src/tsconfig.sw.json`: lib
+webworker, its `sw.d.ts` giving lib.webworker's `WorkerGlobalScope` the `ServiceWorkerGlobalScope`
+members it uses). Each is still a plain script, an IIFE (the worker's at its top), never a module: the pages share
+`window.WB` and load as `index.html` names them, and a module's `export {}` would change that. Their
+types are global, `src/types.d.ts`: the server's shapes (`ChatState`, `Snapshot`, `Patch`, `Msg`,
+`Outgoing`, `OpenTask`, `TaskPart`, `Savings`, `SettingRow`), `WbApi` (`window.WB`, `declare var WB`),
+what lib.dom lacks (`navigator.standalone`, `beforeinstallprompt`), and `Json` for the Stats feeds
+(`wb stats --json`, `wb top --json`: wide, Python's, read field by field with a fallback each).
+`python3 scripts/web.py build` compiles both projects, strict, `target: esnext` (nothing
+downlevelled), comments kept, nothing emitted on an error, with the TypeScript `scripts/install-tsc.sh`
+pins (7.0.2, native: npm's `@typescript/typescript-<platform>` tarball, its sha256 pinned per
+platform, Linux x64/arm64 and macOS arm64/x64, unpacked into `${XDG_CACHE_HOME:-~/.cache}/workbench/tsc/<version>` (`TSC_DIR` moves it)
+and checked again on each run; neither npm nor Node needed; the mod's type check runs on Claude Code's own
+compiler, so this can't borrow it), and writes `chat_static/<name>.js`, each opening with `// Generated by
+scripts/web.py from workbench/chat_static/src/<name>.ts: do not edit; run python3 scripts/web.py build
+(TypeScript <version>).` tsc adds a top-level `"use strict";` (the IIFEs said it already) and reprints
+the code (semicolons, its own indentation): the scripts' syntax trees are the hand-written ones' but
+for that and two `String()`s where a number met a string-typed DOM setter (`dataset.from`, `--n`),
+which the setter did implicitly. `web.py check`: the same build into a temp directory, byte for byte
+against the commit, and no other `.js` in `chat_static/`. A change edits `src/`, runs `build`, and
+commits both; CI's `kernel` job rebuilds and fails on a `git diff` or an untracked file there.
+`tests/test_docs.py`'s `TypeScriptOrPureScript` fails on any `.js`, `.mjs` or `.cjs` in the repo but
+`mod/hooks/kernel.js` and these, each with its header and its `src/*.ts`.
 
 ### The admin table (settings.py)
 
@@ -7185,7 +7215,7 @@ The chat server's side of the web app's Stats and Settings views, the user's tok
   terminal (#1283): the terminal stays primary, and a setting whose value needs Claude's help to
   work (`help`, `settings.HELP`) still gets Claude's offer, which installs nothing without a yes
   (the owner, 2026-11-24). The server only returns `help` and records it; showing it on the page
-  is the Settings view's job (`chat_static/settings.js`, #1286).
+  is the Settings view's job (`chat_static/src/settings.ts`, #1286).
 - `GET /api/stats`: `{feed: stats.feed() (wb stats --json, in-process), routes, models}`, the last two
   `settings.reads()` (the rows' cache of the two `--json` reads, or null), so the page names models
   as the pane's `namesNow` did.
@@ -7206,11 +7236,11 @@ The chat server's side of the web app's Stats and Settings views, the user's tok
   CORS headers; a JSON body forces a preflight the server never answers, so a cross-site page
   can't write; the Host check (`Handler._allowed`) stops DNS rebinding. Nothing more is added.
 
-### The Settings view (settings.js)
+### The Settings view (settings.ts)
 
 The web app's Settings view (#1286) draws the admin rows (*The admin table (settings.py)*: which
 rows there are and what each runs) and sends the owner's changes. It takes over the pane's
-Settings and roles sections. `settings.js` and `settings.css` are its own, built on `window.WB`
+Settings and roles sections. `settings.ts` and `settings.css` are its own, built on `window.WB`
 alone, and a generic renderer: a new setting touches only Python.
 
 - **Read.** `WB.view('settings', …)`; each `show` (the tab, or the page back on screen), and the
@@ -7260,7 +7290,7 @@ alone, and a generic renderer: a new setting touches only Python.
   left the focus on the page, and the next Tab began again at the first row (#1409). A blur caused
   by the redraw itself sends nothing (`drawing`).
 
-`tests/e2e_settings.mjs` checks it once per device (*The tests*).
+`tests/e2e_settings.mts` checks it once per device (*The tests*).
 
 ## Stopping everything
 
@@ -9164,7 +9194,9 @@ or edits, by name, before `scripts/ship.sh` hands the rest to CI (CLAUDE.md, *Co
 
 From the repo root: `python3 -m unittest` (`tests/__init__.py` makes `tests` a package), `tests.test_workbench.Context
 [.test_…]`, `-k handover`; the mod: `claude plugin validate mod && claude plugin test mod`; the chat:
-`PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs`.
+`PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mts` (Node runs the TypeScript as it is,
+its types stripped: Node 22.18 or 23.6 and later); its types, `python3 scripts/web.py tests <node_modules
+with @types/node>` (*The page's TypeScript*).
 
 **CI.** `check.yml` on every push to main and pull request: `suite` in six shards (`WB_TEST_SHARD=K/6`, `fail-fast`
 off) on Python 3.11, the floor, each run by `scripts/suite.sh K/6 4` as four `python3 -m unittest` processes at once,
@@ -9173,7 +9205,7 @@ headed by its `WB_TEST_SHARD`, as its process ends; every log on a cancel, which
 one process left the CPUs half idle (a local shard 1/6, 404 s wall for 221 s of CPU; 142 s in four), and the slowest
 shard, 6.5 to 10 minutes, was the 9.5 to 10.5 minute check (40 runs to 2026-11-25); `mod` with `CLAUDE_CODE_VERSION`; `kernel` (*The kernel*: OpenCode for its Bun,
 `actions/cache` of `~/.cache/workbench/kernel` keyed on `toolchain.json` and `spago.lock`, `kernel.py fetch`, `kernel.py
-check` with its props); `opencode-plugin` (#1328: the pinned OpenCode, then `BUN_BE_BUN=1 opencode test opencode-plugin/test` and `BUN_BE_BUN=1 opencode check -p opencode-plugin`, the plugin's types: `patches.PLUGIN_TESTS`, so a patch on either path can't break the other's unseen); `check`, the required one, `needs` all four, runs
+check` with its props, then `python3 scripts/web.py build` and `git diff --exit-code`/`git status --porcelain` on `workbench/chat_static`, #1323); `opencode-plugin` (#1328: the pinned OpenCode, then `BUN_BE_BUN=1 opencode test opencode-plugin/test` and `BUN_BE_BUN=1 opencode check -p opencode-plugin`, the plugin's types: `patches.PLUGIN_TESTS`, so a patch on either path can't break the other's unseen); `check`, the required one, `needs` all four, runs
 `always()` (a skipped required check passes) and is green only when all four succeeded, so the ruleset waits on one name. A pull request touching only
 `README.md`, `docs/releases/` or images in `docs/` (the `Scope` step, its merge commit against its base) runs only
 `tests.test_docs` and `tests.test_workflows` in shard 1; the suite reads ARCHITECTURE.md, CLAUDE.md, the skill, the
@@ -9199,7 +9231,9 @@ OSError`, 2026-11-22). Job limits 60 min, `check.yml`'s shards 30. Linux jobs in
 a profile without a git identity gets a scratch one. Credential-read enforcement needs Landlock (Seatbelt's real test,
 `test_seatbelt_holds_the_lane_on_a_real_mac`, runs on the macOS job, #1194), the Snap launcher test
 Linux; the killed-runner test checks kernel cleanup on Linux, cleanup after reaping on both. `chat.yml` runs the browser test (`PLAYWRIGHT_VERSION`) when
-`chat.py`, `webpush.py`, `chat_static/`, the test or itself change; not required. A newer push cancels a branch's run,
+`chat.py`, `webpush.py`, `chat_static/`, the tests (`tests/e2e_*`, `tests/tsconfig.json`), `scripts/web.py`,
+`scripts/install-tsc.sh` or itself change, after type-checking the tests against `@types/node` (`NODE_TYPES_VERSION`,
+installed beside Playwright: `web.py tests`); not required. A newer push cancels a branch's run,
 never main's (shields.io shows a cancelled run as failing). Dependabot moves the SHA pins. Not in CI: a real model. The real run, after a change to how OpenCode is invoked or read: a scratch repo from `wb init` with a committed CLAUDE.md, `wb start <t> --trial --size trivial --spec <f> --repo <dir> --test '<cmd>'`, `wb watch <t>`, `wb report <t>`, then `wb discard <t>`; it takes the GPU and writes the real state directory, and `--trial` keeps it out of the router's evidence and the lessons.
 
 **Floors** live here; the README names only Python 3.11, git 2.34, OpenCode 2.3 (`runner.OPENCODE_TESTED`'s floor), a
@@ -9250,7 +9284,7 @@ wb's refusal passed back, turning probe on without `probe` returning the note th
 #1287's `wb settings`: every row listed with its choices, `wb settings set coding ask` applied and recorded `by: "claude"`,
 `role-significant api` under `CLAUDECODE` exiting 3 until the dialog's approval from its dry run, then written `by:
 "dialog"`, a row `wb route` doesn't gate dry-running to no dialog, probe's `help` printed, exit 2 for an unknown key or
-value, an agent's shell denied `wb settings`); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`. The tests' own
+value, an agent's shell denied `wb settings`); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mts`. The tests' own
 `HTTPServer`/`ThreadingHTTPServer` (`_Listens`, 0.02 s tick) listen at once: http.server's looked the name up first, 35 s
 on macOS runners (#950), and the fake's `serve --stdio` server too, whose lookup outlasted `model_list`'s 30 s and
 failed every catalog read on macOS (nightly run 45454423406); not patched suite-wide, so `WebChat` still catches
@@ -9445,7 +9479,7 @@ shell has its own session, `AI_AGENT=opencode` and `WB_TASK` (`DRIVER_ENV`, `sto
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
 
-**The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on 13371 (`WB_E2E_PORT`), on a temp home
+**The browser test** (`e2e_chat.mts`): the real `bin/wb chat serve` on 13371 (`WB_E2E_PORT`), on a temp home
 whose roles, OpenCode config and OpenCode are its own too (`WB_ROUTES`, `WB_OPENCODE_CONFIG`, `WB_OPENCODE_BIN`
 `false`: the Settings rows read `wb route --json` and `wb models --json`, and the user's catalog, read into its
 hosted.json, renamed the Stats check's providers, #1286), WebKit as an iPhone 13
@@ -9454,7 +9488,11 @@ and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7,
 on a phone and the rail on the desktop (and with an iPhone's sideways insets, app.css with them written in for
 `env()`, each tab 44 px or wider, #1413), the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
 (a visual viewport made short by hand; on the Pixel the whole page too, #1414), the cards' styles kept out of the chat (the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
-then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). `e2e_stats.mjs` (#1285): a fixture
+then each view's own, `e2e_stats.mts` and `e2e_settings.mts` (`check(page, ctx)`, `E2eCtx`, once per device).
+The three are TypeScript, ES modules (`.mts`: Node and tsc both read them as such) run by Node with
+their types stripped; `tests/tsconfig.json` checks them strict, against `@types/node`, lib dom (the code
+`page.evaluate` runs) and `tests/e2e_page.d.ts` (what a check leaves on the page's `window` and `document`,
+and the page's own `types.d.ts`); Playwright stays `any`, loaded from `$PLAYWRIGHT` at run time. `e2e_stats.mts` (#1285): a fixture
 results.jsonl's task count under This week (waited for whole, `3 tasks · 2 landed (67%)`: shown again the view
 draws its last read at once, and the savings check's feed said `3 tasks` too, so a wait on that ended before the new
 read came, #1418), the labels in `statsLines`' order and none of the rows
@@ -9931,8 +9969,8 @@ doc needs its own `!/` line).
   context block and the echo say it; `Routes` and register.test.tsx check one fixture each), and
   **`routes.thinking_said`** ↔ the mod's `thinkingSaid` (a role's `thinks`, #1263; `RoleResolution` and
   register.test.tsx's #1263 test), and `runner.THINKING_LOWEST`'s opening ↔ `settings.LOWEST_SAID` (the
-  lowest effort, still cheaper than On); **`settings.GROUPS` and `KINDS`** ↔ `settings.js`'s `GROUPS` (order and
-  names) and its kinds, and #1280's `/api/settings` shapes ↔ its `load` and `pump` and `e2e_settings.mjs`'s
+  lowest effort, still cheaper than On); **`settings.GROUPS` and `KINDS`** ↔ `settings.ts`'s `GROUPS` (order and
+  names) and its kinds, and #1280's `/api/settings` shapes ↔ its `load` and `pump` and `e2e_settings.mts`'s
   stand-in; **the change line**
   (`routes.change`, `cli.start_line`) → the mod's dialog, which shows what `wb route --dry-run --json` prints (an API
 start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --model` stays refused), and
@@ -9950,8 +9988,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`wb watch --json`** → the mod's `LINE_STYLE`, its pose regex, `live-1`; `--last`, `JSON_LINE_CHARS` with
   `KEEP_LINES`, `LINE_CHARS`.
 - **task.json's routing keys** (`via`, `role`, `provider`, `provider_name`, #1016) → the mod's row builder (`scan`,
-  tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/app.js`'s strip; **`wb status`, `report`, `diff` and
-  `log`'s words** → the web chat's task sheet (`chat.task_summary`, `task_diff`, `task_log`; app.js's `drawSummary`,
+  tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/src/app.ts`'s strip; **`wb status`, `report`, `diff` and
+  `log`'s words** → the web chat's task sheet (`chat.task_summary`, `task_diff`, `task_log`; app.ts's `drawSummary`,
   `drawDiff`, `drawLog`), through the helpers both read: `store.Task.report`, `verify.report_lines`,
   `gitops.diff_base`/`diff_tip`, `transcript.log_body`/`LOG_KINDS` (#1201); **the `routed` watch kind** → the mod's
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
@@ -9975,14 +10013,14 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   the ` - ` between, the padding of 1 each side `modeline` takes off the room, the link's rows under it) → splash.ts's
   `BAR`, `pageShape`'s `head` (the modeline and the link's rows), `splashTarget`, and the render's `modeline` Box.
 - **Stats folds**: `top.FOLD`, `stats.STATS_MODEL_LINES`, `model_lines`' `more`/`older`/`variants`, `wb stats
-  --json`'s and `wb top --json`'s keys → the web app's `stats.js` (`RACK_FOLD`, `STATS_SHOWN`, its `statsLines`;
+  --json`'s and `wb top --json`'s keys → the web app's `stats.ts` (`RACK_FOLD`, `STATS_SHOWN`, its `statsLines`;
   *The Stats view*), and `cli.cmd_stats`.
 - **`cli.CODING`** → the mod's `CODING_RULES`, the skill's *Claude coding* bullet.
 - **`savings.totals`' keys** → `drawSaved` (the web app); the cost's label (no currency sign) → `wb savings`,
   `drawSaved`.
 - **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share and badge
   GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, the web app's
-  `apiMoney`, `apiPeriod` (`stats.js`), the chat's `apiSaved`; `meter.usd` → the mod's `usd`, `apiSaved`'s, `stats.js`' `usd`; `meter.basis`' values
+  `apiMoney`, `apiPeriod` (`stats.ts`), the chat's `apiSaved`; `meter.usd` → the mod's `usd`, `apiSaved`'s, `stats.ts`' `usd`; `meter.basis`' values
   (`meter.BASES`: `catalog`, `yours`, `provider`) → the mod's `isEst`, tasks.ts' `est`, `apiSaved`'s `est`
   (#1135); the `kind` default (`gpu`) →
   `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`). `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
@@ -10006,8 +10044,14 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `gitops.drop_reviews` there, or each review round's `refs/workbench/review/<task>/<n>` outlives it (#1198).
 - **A new tuned knob** → `tuning.KNOBS`, `tuning.value(task, name)`, a ceiling in `drive`; an evidence flag (`fills`,
   `passed`) → `tuning.acted` and its row field (`peak_share`, `self_review_due`).
-- **`chat.py` or `chat_static/`** → the browser test. **`window.WB`** (`app.js`) → `stats.js`, `settings.js`, *The
-  views' API*. **`/api/state`'s asks or messages** → `sw.js`. **A key of
+- **`chat.py` or `chat_static/`** → the browser test. **`window.WB`** (`app.ts`) → `stats.ts`, `settings.ts`, *The
+  views' API*, `src/types.d.ts`'s `WbApi`. **`chat_static/src/*.ts`** → its `chat_static/<name>.js`, rebuilt
+  (`python3 scripts/web.py build`) in the same commit (CI's `kernel` job fails otherwise); a new script → its own
+  `src/<name>.ts`, `index.html` (or the worker's registration), the project's `files` in `src/tsconfig.json` or
+  `tsconfig.sw.json`. **A shape the page reads** (chat.snapshot, chat.patch, `/api/task`'s parts, settings.py's
+  rows) → `src/types.d.ts`. **`scripts/install-tsc.sh`'s `version`** → its four hashes, and a rebuild (the
+  headers name it). **`tests/e2e_*.mts`' page probes** (`window.<x>` a check sets) → `tests/e2e_page.d.ts`;
+  **chat.yml's `NODE_TYPES_VERSION`** → the Node line it runs. **`/api/state`'s asks or messages** → `sw.ts`. **A key of
   `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
 - **listener.json's `parent`** (the mod's `listen`) → `chat.caller_listens`; **a Claude row's `claude_pid`** (`chat.send`)
   → the mod's `owedAtTurnEnd` (#1129). **An OpenCode claim's `session` and `driver`** (the OpenCode plugin's
@@ -10016,7 +10060,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   **the driver's shape** (`{tool, model?}`, `chat.DRIVER_TOOLS`) → `chat.writer_driver`, `/api/health`,
   `ask_workbench.who` (`DRIVERS`), the MCP server, docs/chat-api.md's *The driver*, docs/chat-api.yaml's `Driver`.
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
-  `chat._inbound`, `chat.AGENT_RESERVED`, `sw.js`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
+  `chat._inbound`, `chat.AGENT_RESERVED`, `sw.ts`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
 - **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths;
   a route → `chat.ROUTES` and `docs/chat-api.yaml`, which `test_docs` checks against each other and the handlers;
@@ -10053,7 +10097,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   parses (`url --json`'s `state`, `notice`'s id, `away`'s `away`, `claim`'s ` expired: `) → `chat.ts`.
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
-- **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`) → `e2e_chat.mjs`, the WebChat tests, reference/driving.md
+- **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`) → `e2e_chat.mts`, the WebChat tests, reference/driving.md
   and SKILL.md's *the web chat*, `chat.WAITING_FOR` beside it (OpenCode's, `DRIVER_NAMES`); **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
   once #1296's core exists (`texts.ts`), `chat.ts`'s `AWAY_QUESTION` (#1319's `execute.before`, naming `REPLY_ID`, `workbench_chat_reply`), reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
 - **A message's `about`** (`{task, n, step, round}`, `{audio, n, name, path}`) → `listen`'s prefix, `aboutTag`,
@@ -10081,5 +10125,5 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   task* and *First run*; `freshInstall`'s files ↔ `tasks/`, `results.jsonl`, routes.json.
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), `routes.thinking_of` (the dialog's thinking clause, `cli.start_line`, `routes.model_line` and `routed_line`, #1237), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
-- **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → `stats.js`'s `GUARD_WORDS`, *Stats recording*'s list.
+- **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → `stats.ts`'s `GUARD_WORDS`, *Stats recording*'s list.
 - **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173; status `images` ↔ `meter.IMAGE_TOKENS` ↔ `meter.body_tokens`, #1199's review) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU` ↔ `runner._agents_gpu`'s stop, which `routes.AGENTS_STOPS`, the change line's clause (`routes._agents_part`), promises (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `privacy.standing_refusal` (#1227), `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.

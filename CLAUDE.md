@@ -22,7 +22,8 @@ months behind: the 2026-11-16 audit). Before every commit:
 python3 -m unittest                                   # the whole suite: CI's, never run here
 python3 -m unittest tests.test_workbench.Context      # one class (.Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod
-PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat
+PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mts   # the web chat
+python3 scripts/web.py build                          # the web app's scripts, from chat_static/src/*.ts
 wb doctor
 ```
 **The tests run in CI, not here** (owner, 2026-11-23: two local runs of the whole suite cost an
@@ -48,6 +49,8 @@ or comment without the user's yes for it.
 - Versions are cut by hand: the last number runs .1, .2, .3 at most, then the next minor (1.91,
   1.91.1, 1.91.2, 1.91.3, then 1.92, never 1.91.4); 2.0 only for a change big enough.
 - `chat.py`, `webpush.py`, `chat_static/`: CI's `chat.yml` runs the browser test (Playwright isn't a dependency).
+  The page's scripts are TypeScript, `chat_static/src/`: edit there, `python3 scripts/web.py build`, commit
+  both (the built `.js` never by hand; no new JavaScript anywhere: #1323).
 - `kernel/src`, or a value Tables copies: `python3 scripts/kernel.py check` (the toolchain once;
   its props need Bun: `bun`, or OpenCode's).
 - How OpenCode is invoked or read (argv, event or export fields): `tests/fake_opencode.py` in the
@@ -101,7 +104,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   `verify.py`, `optimize.py`, `top.py` (API tasks under RUNNING, never in rack or queue), `images.py`, `audio.py` (`media.py`, what those two
   share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the web
   app's Stats, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
-  inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat; `settings.py`,
+  inotify and pidfd waits. `chat.py` + `chat_static/` (its scripts built from `src/*.ts` by `scripts/web.py`), `webpush.py`: the web chat; `settings.py`,
   its admin rows and their wb calls (*The admin table (settings.py)*). `try/`:
   `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:

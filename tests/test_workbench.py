@@ -30788,6 +30788,21 @@ class WebChat(Base):
             (d / "app.js").write_text((d / "app.js").read_text() + "\n")
             self.assertNotEqual(chat.build(), first)
 
+    def test_the_build_counts_only_the_served_files_and_the_typescript_is_never_served(self):
+        # #1323: the scripts are built from chat_static/src/*.ts, committed beside the page; the
+        # sources and their tsconfigs aren't the page's, so an edit there alone reloads no phone
+        chat, d = self.chat, Path(self.tmp.name) / "static"
+        shutil.copytree(chat.STATIC, d)
+        with mock.patch.object(chat, "STATIC", d):
+            first = chat.build()
+            (d / "src" / "app.ts").write_text((d / "src" / "app.ts").read_text() + "\n")
+            (d / "src" / "tsconfig.json").write_text("{}\n")
+            (d / "tsconfig.json").write_text("{}\n")   # one beside the page is no page file either
+            self.assertEqual(chat.build(), first)
+        for path in ("/src/app.ts", "/src/tsconfig.json", "/src", "/app.ts"):
+            self.assertEqual(self.call(path)[0], 404, path)
+        self.assertEqual(self.call("/app.js")[0], 200)
+
     def test_a_retried_send_lands_once(self):
         tok = self.chat.token()
         a = self.call("/api/send", {"text": "hi", "cid": "c-1"}, token=tok)[1]
