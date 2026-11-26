@@ -25125,6 +25125,33 @@ class Setup(Base):
             self.assertTrue(second.exists())
             self.assertNotIn("older than", self.setup(cmd="doctor")[1])
 
+    def test_a_refresh_to_a_new_copy_keeps_the_users_wake_off_and_env_keys_in_the_entrys_options(self):
+        # #1505: the move to a new copy wrote only wb and this shell's WB_*, so wb update dropped
+        # wake: "off" (the one way to turn the wakes off) and the user's env keys, unasked
+        from workbench import ocplugin
+        self.opencode_home()
+        clone, git = plugin_repo(Path(self.tmp.name) / "clone")
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(ocplugin, "PKG_ROOT", clone), mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
+            ocplugin.install()
+            cfg = json.loads(conf.read_text())
+            first = cfg["plugins"][0]["package"]
+            opts = cfg["plugins"][0]["options"]
+            cfg["plugins"][0]["options"] = {**opts, "wake": "off", "env": {**opts.get("env", {}), "WB_EXTRA_X": "/x"}}
+            conf.write_text(json.dumps(cfg))
+            (clone / "opencode-plugin/server.ts").write_text("// changed\n")
+            git("commit", "-qam", "the plugin changed")
+            self.assertTrue(ocplugin.refresh())
+            entry = json.loads(conf.read_text())["plugins"][0]
+            self.assertNotEqual(entry["package"], first)
+            self.assertEqual(entry["options"]["wake"], "off")
+            self.assertEqual(entry["options"]["env"]["WB_EXTRA_X"], "/x")
+            self.assertEqual(entry["options"]["env"]["WB_HOME"], os.path.abspath(os.environ["WB_HOME"]))
+            self.assertEqual(entry["options"]["wb"], str(clone / "bin/wb"))
+            with mock.patch.dict(os.environ, {"WB_HOME": ""}):    # a shell that sets no WB_*: the env stays
+                ocplugin.install()
+            self.assertEqual(json.loads(conf.read_text())["plugins"][0]["options"]["env"]["WB_EXTRA_X"], "/x")
+
     def test_every_file_the_opencode_plugin_imports_from_beside_it_comes_with_each_install(self):
         # #1333: the TUI part draws the splash from the Claude Code mod's own splash.ts and
         # apprentice.ts (`../mod/hooks/…`), and #1312's panel its Tasks view (tasks.ts, core.ts
