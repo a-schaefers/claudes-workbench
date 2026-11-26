@@ -8,7 +8,9 @@ updates it in the same commit.
 
 "The user" is the person running Claude Code; "Claude" is the Claude Code session driving the
 work; "the agent" is the model running in OpenCode on one task: on this machine's GPU, or an API
-model through a provider the user connected.
+model through a provider the user connected. On the OpenCode path (2.2) the user runs OpenCode
+alone and "the driver" (the model with the final say, picked in OpenCode's `/models`) stands where
+Claude stands here: *Workbench in OpenCode*.
 
 Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-this-way) ·
 [A task, start to finish](#a-task-start-to-finish) · [The runner, inside](#the-runner-inside) ·
@@ -17,6 +19,7 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 [Seeing what the agent does](#seeing-what-the-agent-does) · [Models](#models-found-loaded-chosen) ·
 [Bench](#bench-real-tasks-replayed) · [The skill library](#the-skill-library) · [Images](#images) · [Audio](#audio) · [Git, commits and projects](#git-commits-and-projects) ·
 [The web chat](#the-web-chat) · [Stopping everything](#stopping-everything) · [The mod, inside](#the-mod-inside) ·
+[Workbench in OpenCode](#workbench-in-opencode) · [The OpenCode plugin](#the-opencode-plugin) ·
 [Waiting without polling](#waiting-without-polling) · [Every `wb` command](#every-wb-command) ·
 [Files and formats](#files-and-formats) · [The tests](#the-tests) · [Couplings](#couplings-change-one-change-the-other)
 
@@ -59,6 +62,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   `settings.py`, the admin table its Settings are drawn from (*The admin table (settings.py)*).
   Its scripts are TypeScript (`chat_static/src/`), built by `scripts/web.py` into the committed
   plain scripts the page loads (*The page's TypeScript*); users need no Node or compiler.
+  `story.py` holds every sentence it and the docs tell of the driver, `scripts/gen_story.py`
+  their copies (*The story*).
 - **The kernel** (`kernel/`, `scripts/kernel.py`; *The kernel*): the pure decisions the mod and
   the OpenCode plugin must make the same way, in PureScript, compiled into the committed
   `mod/hooks/kernel.js`. Users install nothing for it; wb never imports it.
@@ -5394,8 +5399,9 @@ spends the other's yes (#1363, *Both drivers on one machine*). Else exit 3:
 `in Claude Code a role changes only through the workbench mod's dialog, and the user approved none
 for this change, so nothing changed (is the mod loaded? wb doctor says). Or the user runs it in a
 terminal of their own: wb route …`; under an OpenCode driver `in OpenCode … only through the workbench plugin's
-dialog, … (the plugin's workbench_route tool asks them; is the plugin loaded?)` (`workbench_start` for an API
-start); in an agent's shell `in an agent's shell … only on the user's yes in the
+form, … (the plugin's workbench_route tool asks them; is the plugin loaded?). Or the user runs it in OpenCode's
+terminal pane (ctrl+x t) or a terminal of their own: …` (`workbench_start` for an API start; the pane is a real
+terminal whose wb has no `OPENCODE_SESSION_ID`, so the user's: `patches.PANE_OR_TERMINAL`, #1321's finding 17); in an agent's shell `in an agent's shell … only on the user's yes in the
 driver's dialog, … Ask the reviewer (ask_reviewer); or the user runs it in a terminal of their own: …`
 (`cli.gate_refusal`, by `store.caller_kind`). `by`: `dialog` (`pane` when the approval says so: the pane's own rows
 wrote it until #1283, #1023), `terminal` (outside a model), `web` (outside a model with
@@ -6287,7 +6293,7 @@ change arriving as a row (`sayRules`, #540). Shell edits aren't seen: the block 
 
 **Dynamic workflows (deepmode)** (#1041, named deepmode by #1278: `cli.WORKFLOWS_LABEL`; `wb deepmode` and,
 its name before, `wb workflows`, one command; on, a substantive request runs as a deep workflow, *Deep
-workflows*; the `/deepmode` command is the host side, not yet made).
+workflows*; `/deepmode [on|off]` in both hosts, and `deepmode on|off` typed, *The keywords* below).
 Whether Claude may split one request into several tasks that run at once:
 the user's choice, `wb deepmode on|off` (the web app's Settings), kept beside the coding choice in `$WB_HOME/workflows.json` `{mode, ts}`
 (`cli.WORKFLOWS`, `workflows_mode`), read fresh, default `off` (no file, unreadable JSON, an unknown mode). Like
@@ -6306,6 +6312,26 @@ merged logic first, then tests, then UI or docs. Each task runs on its own role'
 nothing new decides what runs together: the GPU lease (`models.apart` cards together, the rest queued)
 and the provider slots (#1015). No cap on tasks at once (the owner's call, not asked for). Its Settings
 row is the web app's (#1283; the pane's until then, #1023).
+
+**The keywords** (#1278; `mod/hooks/keywords.ts`, both hosts' one copy, held to `tests/fixtures/keywords.json`
+as `runs.keywords` is; text, so never the kernel's: kernel/BOUNDARY.md): `deepcode`, a whole word outside
+backticks and fences, and a line of its own `deepmode on|off` (the last wins; `onlyToggles`: nothing else in
+the text), read as Python reads it (`\w` Unicode, `\s` as `str.isspace`, a line ending at `\n` alone: a seeded
+run of the two agreed on 300,000 texts, #1325). Only the user's own words: in the terminal (the mod's `prompt.submit`, `byUser` and none of `[web
+chat]`, `[agent `, `[workbench]` nor a slash command) or the user's web message (never an agent's), never
+Claude's `ultracode`. `deepcode` adds `wb deepmode --rule` (`runs.DEEPCODE_RULE`, read once a load;
+`DEEPCODE_FALLBACK` from a wb without it) to that prompt: the hidden `context` entry in the terminal, the text
+(`chatPrompt`'s `about`) for a web message, as a plugin's prompt has no context. `deepmode on|off` is the user's
+yes: the mod runs `wb deepmode on|off`, toasts its line, and a prompt of toggles alone is dropped with that
+line (no turn; `sayRules`' row tells Claude); else the rest goes on. `/deepmode [on|off]` (the mod's
+`DEEPMODE`, the one command not named `workbench-*`: the user's word) sets or shows it. In OpenCode
+(`opencode-plugin/deep.ts`, its prompt hook registered before upkeep's so that a toggle is in workflows.json
+when upkeep reads it): the session `prompt` hook reads a typed prompt (no metadata) or the chat's delivery of
+the user's (`chat.SOURCE`, `[web chat]`), never a subagent's (a session with a `parentID`: OpenCode's
+subagent prompt comes unmarked too, #1325), runs wb as the session, and the `context` hook adds the rule, or the
+toggle's `TOGGLED` line, as system parts to that prompt's requests (while it is the newest user message, by
+the requests' message ids; to the next prompt without them); `/deepmode` is a server command (`command.transform`),
+said with a `synthetic` message that starts no turn.
 
 ## Experiments
 
@@ -6475,9 +6501,57 @@ why it is down (*Seeing what the agent does*).
 **What it's for** (#1341; the owner, 2026-11-24): message the driver from anywhere, and most work
 can run from here; a prompt the driver raises waits in its terminal (ssh + tmux) unless the driver
 runs with permissions granted, and the settings live here too. The empty state (`#intro`) says so,
-and over a thread the same words are a hint (`#hint`, copied from the intro's) until dismissed on
-that device (`localStorage` `wb-chat-hint`, read and written in try/catch: a storage that throws
-shows it on each open). It says "the driver", not Claude, for the OpenCode path too.
+and over a thread the same words are a hint (`#hint`) until dismissed on that device
+(`localStorage` `wb-chat-hint`, read and written in try/catch: a storage that throws shows it on
+each open). Both are the story's `purpose` (*The story*), naming the driver that listens (else the
+last that wrote, else "your driver").
+
+### The story
+
+One source for every sentence the chat, the web app and the docs tell the user about where the
+driver lives and what the chat is for (#1355; the owner's rule, 2026-11-24: the terminal is where
+the driver lives and a prompt it raises is answered there; most work can still run from the chat,
+more so with permissions granted; the web app's Settings are the source of truth). They had
+drifted: the page said "Run Claude" to an OpenCode user, and the docs called the chat off by
+default after 2.0 turned it on.
+- **`workbench/story.py`**: `DRIVERS` (`claude-code`, `opencode`, `any`: each one's `who`, `app`,
+  `listen`, `grant`), `TEXTS` (each sentence once, a template: `{field}` from the driver and the
+  caller, `{Field}` capitalized), `ONLY` (the drivers a key is said for: `next.grant` names a
+  command only Claude Code and OpenCode have), `PAGE` (the keys the web app reads), `DOCS` (the doc
+  blocks). `text(key, driver, **fields)`, `fill(t, fields, partial)`, `driver_of(tool)`. Keys:
+  `purpose`, `rule.terminal`, `rule.chat`, `rule.settings`, `state.*` and `next.*` (`none`, `idle`,
+  `working`, `waiting`, `next.grant`), `wait.*` (`permission`, `question`, `plan`, `elicitation`,
+  `consent`: what `state.waiting`'s `{what}` is), `note.waiting` and `note.grant` (the notice row's
+  bytes, `chat.WAITING`, `WAITING_GRANT`), `receipt.blocked`, `prompts` and `lane` (Settings cards), `doc.rule`.
+- **`scripts/gen_story.py`** writes `chat_static/src/story.ts` (`STORY_DRIVERS`, `STORY_TEXTS` for
+  `PAGE`'s keys, `storyFill`, `storyText`; a plain script, loaded before app.js, built into
+  `story.js` by `scripts/web.py`) and fills each doc block, `<!-- story:KEY[:driver] -->` …
+  `<!-- /story -->` (README.md's `doc.rule`); `--check` writes nothing and names each copy that
+  differs. `tests/test_story.py` runs the check, so CI holds the copies to the source.
+- **The page**: an element with `data-story="<key>"` (the intro and hint, the Settings cards *How
+  the chat works* and *While away*) says that sentence for the driver (`drawStory`), its backticks as
+  `code`; the HTML's own text is `any`'s, so the page reads right before a state arrives
+  (`test_story` checks it). `receipt.blocked` is a message's line while the driver waits on a prompt.
+- **No words in the kernel** (amends #1356's draft): a decision returns a key and facts, and a
+  wording patch needs no PureScript toolchain; `test_story` fails on a string of four or more words
+  in hand-written `kernel/src`.
+
+### The driver's state line
+
+`chat.driver_state(lst, rows)`, the snapshot's `driver` (#1355): `{state, driver, who, where?,
+waiting?, line, next, grant?}`, from the facts the hosts already write. Waiting beats working beats
+idle; no live listener is `none` (named by the newest driver that wrote, else `any`). The wait is
+the listener claim's own `waiting` (`{kind, tool, since, what?}`, `chat.WAIT_KINDS`), else the
+oldest open notice row under `ASK_STALE` (the one the turn is stuck on). `line` and `next` are the
+story's `state.*` and `next.*`, `{what}` its `wait.<kind>`; `grant` (`next.grant` and the command)
+only for a permission, on a known driver (`claude --permission-mode auto`, `opencode --auto`): a
+question or a plan waits however the driver runs. The page (`drawState`, `#driver-state`,
+`role="status"`) shows it under the header while it asks something of the user, waiting or none:
+the line, the command waiting, what to do, and for a permission the grant with Copy, its one
+button (nothing answers a prompt from the phone, #1350); the header's presence says `waiting for
+you in the terminal`. A notice is no thread row any more: the state line says it, and its push
+still goes as before. `WAITING_AFTER` (2 s) is the hosts' filter for the claim's `waiting`: a
+dialog answered sooner (an auto-accept) is never written.
 
 **Keeping it up.** One `chat._Server` per bound address, binding without HTTPServer's host-name
 lookup (it stalled macOS, #236). `systemd/wb-chat.service`: a user unit, `Restart=always`, no start
@@ -6632,7 +6706,8 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   in the terminal, and the page shows one line while it does, a `notice` (`wb chat notice`): `Claude
   is waiting for you in the terminal.` (OpenCode's: `OpenCode is waiting for you in the terminal.`,
   #1319), a permission's adding `Run it with permissions granted to
-  work from the chat.` (`chat.WAITING`, `WAITING_GRANT`): the driver's own permission modes and
+  work from the chat.` (`chat.WAITING`, `WAITING_GRANT`, the story's `note.*`); the page draws it as
+  the driver's state line (*The driver's state line*), not a thread row: the driver's own permission modes and
   rules are the one permission policy, and run with them granted most work goes on from the chat
   (#1350's comment). No buttons; every kind, away or not, an agent's turn too; pushed as Claude's
   messages; at the terminal only for one still up after `NOTICE_AFTER_MS` 30 s, while away at once;
@@ -6865,7 +6940,7 @@ client; the server needs no browser.
   never hands a message to a session it can't judge). A `notice` (`wb chat notice`) has `text: "Claude is waiting for you in the
   terminal."` (a permission's adds `Run it with permissions granted to work from the chat.`; from an
   OpenCode session, `store.caller_kind`, `OpenCode is waiting for you in the terminal.`,
-  `chat.WAITING_FOR` with `chat.DRIVER_NAMES`, and `driver: {tool: "opencode"}`) and adds
+  the story's `note.waiting` for `chat.DRIVER_NAMES`' driver, and `driver: {tool: "opencode"}`) and adds
   `tool, kind: "permission"|"plan"|"question"|"elicitation", what?` (2000 characters): news like
   Claude's (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only
   `from: claude`; `chat.thread` leaves it out once settled (the page's line clears, #1350). `files`: `[{id, name, size, type, path}]`.
@@ -6894,7 +6969,9 @@ client; the server needs no browser.
   Host, #1374); `{at: 0}` on a prompt typed in any session, a terminal
   dialog settled there (on OpenCode `wb chat back`, `chat.back`), or the chat off.
 - `page.json`: `{at}`, the last page use, chat on or not (for `PAGE_RECENT`).
-- `listener.json`: `{session, cwd, pid, start, machine, parent, busy}` (from the `wb events` hello;
+- `listener.json`: `{session, cwd, pid, start, machine, parent, busy, waiting?}` (from the `wb events` hello;
+  `waiting`, either host's: the oldest dialog up in its terminal 2 s or more, `{kind, tool, since,
+  what?}`, `mod/hooks/waiting.ts`'s `waitingFact`, which `chat.driver_state` reads, #1355;
   `parent` its parent, the listening Claude Code, which `chat.caller_listens` checks against a
   `wb chat reply`'s `CLAUDE_PID`, #1129). An OpenCode session's claim (#1319's) names the
   listening OpenCode session's id as `session`, which `chat._listens_across` checks against a
@@ -6909,7 +6986,9 @@ client; the server needs no browser.
   cwd, pid, start, machine, busy}` (`chat.listener_driver` names it OpenCode by its `tool`, with the
   session's model from its server's beat, `store.beat_of`), `pid` the server's, `start` as wb reads it; it counts while that process runs
   (pid and start) and, once the server beats, while its fresh beat (`store.beat_of`) lists the
-  session whenever the beat names its `store` (`chat._server_listens`); `{}` once dropped
+  session whenever the beat names its `store`, or that beat's listing began (`ts`) before the claim was
+  written (listener.json's mtime: a new session's first prompt claims up to 30 s before a beat lists it,
+  #1319's live check) (`chat._server_listens`); `{}` once dropped
   (`chat.drop`).
 - `wb chat pending` lists every unreceipted message (#265). A notice open past `ASK_STALE` (an
   hour) no longer counts in `waiting_on_user` (a session that died with its dialog up). A user message unread past `MESSAGE_EXPIRE` (6 h, the one threshold) is `expired: true`; claim
@@ -6967,7 +7046,8 @@ address (#534).
   (*Other agents*), else 401 "bad or missing token: open the link from `wb chat url`".
 - `GET /api/health` → `{api, listening}`; `GET /api/wait` (*Other agents*).
 - `GET /api/latest` (`chat.latest`): for a push: Claude's last message or an open notice (from
-  the last `LATEST_BYTES` 1 MiB; a settled notice skipped), `push`: the snapshot's shape, which
+  the last `LATEST_BYTES` 1 MiB; a settled notice skipped), `listener` (`chat.listener_view`: its
+  `driver` titles a push whose row names none, #1319), `push`: the snapshot's shape, which
   `sw.ts` reads.
 - `GET /api/state`: `{api, messages (the last 200 from `THREAD_BYTES` 4 MiB, user rows with
   `received`; a settled notice left out), push ({key or null, `chat._push_key_or_none`, #924; test}), listener,
@@ -7053,11 +7133,17 @@ reader (WebKit keeps the socket); back on screen after `AWAY_MS` 3 s, or from th
 `STALE_MS` 20 s, or on the worker's `{kind: "push"}`, it dials at once (2026-11-20); a new `build`
 reloads (`reloadOnce`, once a minute). While the stream fails past its first two tries (the banner's `Can't reach
 the computer`) or the page is offline, the header says `computer unreachable · messages wait` with a grey dot
-(`reachable`, set again by the next state), never the last listener's green `listening` (#1415). The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
+(`reachable`, set again by the next state), never the last listener's green `listening` (#1415). The page names
+the driver (#1319, `driverName`, `DRIVER_NAMES` in `app.ts`: `Claude` or `OpenCode`): a reply's meta by its row's
+`driver` (none: `Claude`), a receipt (`Read by`, `Queued for`) by its `by` (`readBy`: OpenCode's `ses_…` session
+ids, else Claude Code's), and the header (`OpenCode · listening in …`), `Not passed to`, `Waiting for a Claude
+session`/`an OpenCode session` and `… is on it` by the listener's `driver` (an
+OpenCode claim's `tool`), with none listening by the newest reply or waiting line that names one, else `Claude`;
+`sw.ts` titles a push by the row's `driver`, else `/api/latest`'s `listener`, else `Claude`. The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
 releases it; a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
 after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). A screen reader
 hears the thread through `#say` (`role=log`, `.sr-only`), outside it: each new message from Claude and each waiting line once,
-whole (`say`, after the reveal), and "Claude is on it" once; the thread was the live region, and every update read
+whole (`say`, after the reveal), and "Claude is on it" (the driver's name) once; the thread was the live region, and every update read
 each row's time and `copy` out again, a reply in its reveal's fragments (#1408). A row's `.meta` is made anew only
 when its words change (`dataset.said`), so its buttons keep the focus (#1409), or once the copy a pressed
 *send again* sent (its `data-cid`) has left the outbox, landed or deleted, so the button is pressable again. The message box, focused, has a
@@ -7076,9 +7162,10 @@ in `nearLater`, judged again by `nearAgain` where that thread put them (a photo 
 in a secure context `MediaRecorder` (a tap starts, a tap stops, `RECORD_MS` 5 min at most; webm, else mp4 or ogg, as the
 browser has), over plain http `#pick-voice` (`accept="audio/*" capture`: the phone's recorder or a voice memo); clips
 waiting for their words in `wb-chat-dictate`, bytes in IndexedDB beside the draft's, sent by `hearAll` (from `flush`,
-so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts, notices
-(`makeNotice`: the waiting line, no buttons, and no dialog cards since #1350) and the Settings and Stats cards (`#away-when` states the away rule
-above, `#away-prompts` that prompts are answered in the terminal and the line says one waits; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
+so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts
+(`receipt.blocked` while the driver waits on a prompt), the state line (`drawState`, *The driver's state line*: a notice is no thread row since
+#1355, and no dialog cards since #1350) and the Settings and Stats cards (*How the chat works*: the story's `rule.*`; `#away-when` states the away rule
+above, `#away-prompts` (the story's `prompts`) that prompts are answered in the terminal and the line at the top says one waits; *This chat*, `lane`; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43).`, or that alone, #1022, #1135; the saving is the badge's
 one line, `~3K Claude tokens saved this week`, #1322) are in `app.ts`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
@@ -7208,9 +7295,12 @@ javascript"). `chat_static/src/` holds the sources: `app.ts`, `stats.ts`, `setti
 `src/tsconfig.json`: lib dom) and `sw.ts` (the service worker, `src/tsconfig.sw.json`: lib
 webworker, its `sw.d.ts` giving lib.webworker's `WorkerGlobalScope` the `ServiceWorkerGlobalScope`
 members it uses). Each is still a plain script, an IIFE (the worker's at its top), never a module: the pages share
-`window.WB` and load as `index.html` names them, and a module's `export {}` would change that. Their
+`window.WB` and load as `index.html` names them, and a module's `export {}` would change that.
+`story.ts` (the story's tables and fill, *The story*) is written by `scripts/gen_story.py`, never by
+hand, and loads first: its `STORY_*` names and `storyText` are the pages' globals. Their
 types are global, `src/types.d.ts`: the server's shapes (`ChatState`, `Snapshot`, `Patch`, `Msg`,
-`Outgoing`, `OpenTask`, `TaskPart`, `Savings`, `SettingRow`), `WbApi` (`window.WB`, `declare var WB`),
+`OpenTask`, `TaskPart`, `Savings`, `SettingRow`), each an `import()` type of *wb's shapes in one module*
+(below), which keeps the file global; the page's own (`Outgoing`, `DraftFile`), `WbApi` (`window.WB`, `declare var WB`),
 what lib.dom lacks (`navigator.standalone`, `beforeinstallprompt`), and `Json` for the Stats feeds
 (`wb stats --json`, `wb top --json`: wide, Python's, read field by field with a fallback each).
 `python3 scripts/web.py build` compiles both projects, strict, `target: esnext` (nothing
@@ -7228,6 +7318,32 @@ against the commit, and no other `.js` in `chat_static/`. A change edits `src/`,
 commits both; CI's `kernel` job rebuilds and fails on a `git diff` or an untracked file there.
 `tests/test_docs.py`'s `TypeScriptOrPureScript` fails on any `.js`, `.mjs` or `.cjs` in the repo but
 `mod/hooks/kernel.js` and these, each with its header and its `src/*.ts`.
+
+**wb's shapes in one module** (#1323): `mod/types/wire.d.ts`, types only, declares what wb sends as
+the Python writes it, and the web app, the mod and the OpenCode plugin all read it from there: the
+task files (`TaskFile`, `TaskDriver`, `StatusFile`: every field optional, as a reader takes `{}`
+for a file missing or torn and an older wb writes fewer, with an `unknown` index signature),
+notify.jsonl's `NoticeRow`, the chat's (`ChatMsg`, `ChatFile`, `About`, `Driver`, `ChatState`,
+`Snapshot`, `Patch`, `OpenTask`, `TaskPart`, `Savings`; chat/listener.json's `ListenerClaim` and the
+state's `Listener`; chat/open.json's `ChatOpen`; `wb chat url --json`'s `ChatLink`), settings.py's
+`SettingRow`, `SettingChoice` and `SettingsOffers` (`wb settings offers --json`), and `WatchLine`
+(`wb watch --json`), `RouteJson` (`wb route --json`), `ModelsJson` and `MediaJson` (`wb models
+--json`). It lives in the mod because the mod is installed as its own directory (marketplace.json's
+`./mod`) and can import nothing outside it. Its readers: the web's `src/types.d.ts` (`import()` types,
+`.js` named so the browser tests' `nodenext` resolves it too); the mod's `register.tsx` (`readJson<T>`
+of the task files, the listener's claim and open.json, the notices' rows; `WbRoutes` and `WbModels` are
+`RouteJson` and `ModelsJson` imported under those names), `tasks.ts` (`viewFacts(sp: TaskFile, st:
+StatusFile)`) and `modeline.ts` (`LINK_STATES` from a record keyed by `ChatLink`'s states, so a state
+wb adds fails the type check). `types/index.d.ts`, the state atoms, is Claude Code's contract, which
+`claude plugin validate` refuses to see import anything, so its `WbLine` and `WbChat.link` restate
+`WatchLine` and `ChatLink` (or `checking`), and `modeline.ts`'s `WireHeld` holds each pair equal;
+the plugin's `pane.ts`, `notices.ts`, `upkeep.ts`, `chat.ts` and `jobs.ts`, by `import type` (erased
+before it runs, so OpenCode's Git install needs no `mod/types/` file). Type checks that meet it:
+`web.py build` and `check` (the pages), `web.py tests` (the browser tests), `opencode check -p
+opencode-plugin` (the plugin, and the mod files it imports); `register.tsx` itself only `claude plugin
+validate` where Claude Code has generated the gitignored `.claude-plugin/types/`, as warnings (CI's has none). `tests/test_docs.py`'s `OneCopyOfWbsShapes` fails when
+one of those readers takes nothing from it, or any of the three declares one of its names again but
+as its alias.
 
 ### The admin table (settings.py)
 
@@ -7253,7 +7369,11 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   call's `wb route --dry-run --json` (as Claude); for any other `{"change": "", "gate": false}`.
   `wb settings set --dry-run` prints it, for the mod's dialog.
 - `record(before, key, value, done, by)`: the change's row of `settings-changes.jsonl` (`chat.admin_set`'s
-  with `by` `web`, `wb settings set`'s with `claude`, or `terminal` outside Claude Code).
+  with `by` `web`, `wb settings set`'s with `store.caller_kind`'s), and chat/settings-rev.json's
+  stamp of it; None, nothing written, for a `choice` or `number` set to the value it had (#1355).
+- `changes(n)`, `changed()`, `rev()`: the newest changes (`{ts, key, label, from, to, by}`, newest
+  first, never `said`), each key's newest within `CHANGED_FOR` (7 days; `rows()` puts it on its row as
+  `changed`), and the stamp (*The Settings view (settings.ts)*, who changed what).
 
 **A row** is JSON-safe: `key`, `group`, `label`, `kind` and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
@@ -7379,6 +7499,14 @@ alone, and a generic renderer: a new setting touches only Python.
   (`.set-retry`); the view shown is read again once the line is back (`reshowView`, *The views'
   API*), so one opened before it was, as a phone waking, no longer waits for a tab switch (#1412). A read that left
   before a write ended is dropped (`reads`, `wrote`), since the write's own rows are newer.
+- **Who changed what** (#1355): a row with `changed` says `Changed by <who> · <when>`
+  (`.set-changed`; who from its `by`: the web app, Claude, OpenCode, the terminal, an agent), and a
+  *Recent changes* card (`.set-changes`, no group's `.set-card`) lists GET's `changes`, `label: from → to, by <who>`. A
+  change made anywhere moves the chat state's `settings` (chat/settings-rev.json, *The driver's
+  state line*): the view shown reads its rows again with no reload (a draft being typed kept, as any
+  redraw keeps it), and any view toasts `<label> set to <value> by <who>`, unless it is this page's
+  own write (`by: "web"` while a POST waits or within 5 s of one). The first state only sets the
+  mark. Last writer wins: no lock.
 - **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
   order with their names: `shared` "Agents and roles", `gpu` "GPU", `api` "API", `terminal`
   "Terminal", `experimental` "Experimental"; a group the table adds later follows, under its key. A
@@ -7449,8 +7577,8 @@ mode and close the pane (`/workbench` turns it back on).
 setting `userConfig.wake` `on`|`off`, default `on`, changed with `claude plugin configure
 workbench@workbench`, which reloads the module), `hooks/hooks.json` (`{"modules":
 ["./register.tsx"]}`), `hooks/register.tsx` (everything), `hooks/apprentice.ts`, `hooks/splash.ts`
-(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
-(the atom types), `.claude-plugin/icon.png` (the `work` pose), `bin/wb` (#1190: the launcher
+(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/keywords.ts` (#1278: deepcode and deepmode in what the user typed, the OpenCode plugin's too), `hooks/waiting.ts` (#1355: the driver's wait for the page's state line, both hosts'; its `waiting.test.ts`), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
+(the atom types), `types/wire.d.ts` (wb's shapes, #1323: *wb's shapes in one module*), `.claude-plugin/icon.png` (the `work` pose), `bin/wb` (#1190: the launcher
 Claude Code puts on its Bash tool's PATH, *Installing*).
 The root's `.claude-plugin/marketplace.json` (source `./mod`) makes the id `workbench@workbench`,
 read from the clone: `wb update` plus `/reload-plugins` upgrades it. `mod/tsconfig.json` extends
@@ -7783,7 +7911,12 @@ rule finishing beside one asking cleared an away user's line and marked them bac
 `classic.ElicitationResult` an elicitation's, and `turn.complete` any left (an interrupt drops a
 waiting hook): `termDialogDone` drops it, runs `back` (settling is the user at the terminal, #1350)
 and `wb chat notice --done <id>`. In an agent's turn the same (#1042's cards are gone). The relay it
-replaced answered the dialog from the page.
+replaced answered the dialog from the page. **The state line** (#1355): `listen` puts
+`waitingFact(mem.termDialogs, now)` (`mod/hooks/waiting.ts`: the oldest up `WAITING_AFTER_MS` 2 s or
+more) in the claim as `waiting`, left out when none (`mem.waitSaid`, what it last said); the
+tick (`POLL_MS`) polls when the fact moved, so the page has it within a tick and not the idle
+poll's 30 s. A consent dialog (`consent`: a send, a role change, a coding edit) is one too,
+`kind: "consent"`, `tool: "workbench"`, for as long as `$.ui.ask` is up, never a notice row.
 
 **The weekly model check** (`scoutIfDue`): in a session delegating now or in this load, with wakes
 on (another project's session spent the offer, #919; such a session leaves scout.json alone), once
@@ -7961,7 +8094,13 @@ words, `KEEP_ON_COMPACT` among them, and `firstTask`, a parse, stay in the host)
 stays out (rendering). The gate classifier `gateOf`, which every Bash and Monitor gate in
 `register.tsx` reads (`delegates`, `runs`, `upstreamAim`, `sendQuestion`, `routeCalls`,
 `writesTo`), its hand copies deleted (#1325, after #1364); and the coding gate's rules,
-`codingGate` and `editTools` (`codingRefusal`, `callRows`).
+`codingGate` and `editTools` (`codingRefusal`, `callRows`). What #1325 planned and the entry test
+and the rulings leave out (2026-11-26): the keywords (reading a prompt is parsing: `mod/hooks/keywords.ts`,
+one TypeScript module both hosts import, *Deep workflows*); the weekly check's offer (scout timing is wb's,
+`cli.scout_offer_due`, which `wb scout --if-due` runs for the OpenCode plugin; the mod's `scoutIfDue` checks
+the same two times in scout.json on its quiet polls, a coupling); the web chat's asks (#1350 to #1352 removed
+most; what is left matches each host's own delivery); and the chat API's shapes (types, not decisions: #1323's
+one shared types module).
 
 - **The membrane**: `mod/hooks/core.ts`, the one importer of `./kernel.js` (with its generated
   `kernel.d.ts`), exports `kernel` (every export by name, untyped, for the goldens: only tests,
@@ -8133,6 +8272,83 @@ stays out (rendering). The gate classifier `gateOf`, which every Bash and Monito
   Bun goldens, #1328) are part of the required `check`; the first shard of `nightly.yml`'s `macos` runs `check` too (the same bundle bytes
   on macOS), and `opencode.yml` the Bun goldens on the newest OpenCode (`BUN_BE_BUN` is undocumented).
 
+## Workbench in OpenCode
+
+Two paths, one backend (#1296, 2.2). **Claude Code with Claude's Workbench**: the mod and the
+`/workbench` skill, exactly as before 2.2; Claude drives. **OpenCode alone**: `/workbench` in
+OpenCode's TUI, and the driver (the model with the final say: review, accept, the bar) is whatever
+the session runs on, picked in OpenCode's own `/models`, a GPU model, an API model or Claude through
+OpenCode's `claude-agent` provider. Everything below the driver is one copy: `wb`, the runner, the
+lanes, the keyhole, routes.json and the roles, the web app, results.jsonl, the skill library. The
+supported hosts are the two CLIs (the owner, locked 2026-11-25): OpenCode's TUI and Claude Code's;
+OpenCode Desktop, `opencode web` and IDE surfaces are neither built for nor tested, and whatever of
+the plugin works there is incidental. How the plugin is built: *The OpenCode plugin*; its rule is the
+host-shape decision (https://github.com/a-schaefers/workbench/issues/1296#issuecomment-7158435888):
+the same outcomes, OpenCode-native, wb the system of record, the kernel pure decisions only, and
+Claude Code's path unchanged by a byte (its tests unedited, SKILL.md its own copy).
+
+**Installing.** One `plugins` entry, either way (a second is a duplicate `wb doctor` names): `opencode plugin add
+'github:a-schaefers/workbench#main'` (`ocplugin.ADD`, OpenCode's Git install: the plugin with the wb
+it brings, in OpenCode's package cache, which OpenCode updates and replaces: `wb update` leaves it to
+OpenCode, `wb setup` and `wb patch` refuse there), or a clone's `bin/wb setup --opencode` (the `~/.local/bin/wb`
+link and the plugins entry, a copy of the clone's committed `opencode-plugin/` that `wb update`
+refreshes; never Claude Code's skill link, which OpenCode would list too). `wb doctor` names each
+install and the wb it runs; on the OpenCode path alone a missing Claude Code item is a `--` line, never BAD. Both
+drivers on one machine: *Both drivers on one machine*.
+
+**Each feature and its counterpart.** The same outcome on both, built from each host's own parts:
+
+| Claude Code (the mod, the skill) | OpenCode (the plugin) | Where |
+|---|---|---|
+| `/workbench [request]`: the skill, the mode on, the pane | `/workbench [request]`, a server command: the driver pin applied, the session switched to the Workbench agent, whose prompt is the procedure; the panel opens on that switch | `pane.ts`, `agent.ts`, *The driver* |
+| `/workbench-quit`, `/workbench-quit-and-hand-back-claude`, `/workbench-models`, `/workbench-update` | `/workbench-quit`, `/workbench-quit-and-hand-back` (switching to Build ends the mode and closes the panel), `/workbench-models`, `/workbench-update` | `commands.ts` |
+| SKILL.md and `reference/`, read through the skill link | the same files rendered for OpenCode when the plugin starts (`skill.ts`): the agent's prompt, the `workbench` skill and one `workbench-<name>` skill per reference file, Claude Code's lines replaced by OpenCode's facts | `skill.ts`, `agent.ts` |
+| `wb` recipes typed in Bash | typed tools in the `workbench` namespace (`workbench_start`, `_status`, `_diff`, `_feedback`, `_accept`, `_discard`, `_wait`), the shell for the rest | `tools.ts` |
+| The pane "Claude's Workbench": Tasks, the modeline, the splash and the apprentice, the `⚒ wb ·` status line, the minimized strip | the panel "Workbench" (beside the session at 108 columns or more, fullscreen narrower), the sidebar section, the footer item; one Tasks view (`mod/hooks/tasks.ts`) and one animation for both | `pane.tsx`, `pane-view.ts`, `spans.ts`, `splash.tsx` |
+| Wakes: a `[workbench] Task …` prompt, exactly once (`wb events`, `wb ack`) | `session.synthetic` from the server part's one `wb events`, the same text and ack; an agent's question steers into a running turn | `notices.ts`, *Notices on OpenCode* |
+| The context blocks, `KEEP_ON_COMPACT`, compaction at a task boundary | session instruction entries (the `context` hook as fallback), the `compaction` hook | `upkeep.ts` |
+| The consent dialog: an API role, an API `--model` start, a role's Settings row, `wb patch send` | a session form asked by the gated tool (`workbench_route`, `workbench_start`, `workbench_settings_set`, `workbench_patch_send`); the shell path to them denied on the permission hook; no TUI, no form: refused | `consent.ts`, `gates.ts` |
+| The coding gate (`wb coding`), routes.json and approval-file edits refused, `local_only` | the same rules on the permission hook and `execute.before` | `consent.ts` |
+| Whose task: `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, `claude-sessions/` | `OPENCODE_SESSION_ID` and the server's heartbeat (`drivers/`), task.json `driver` | *The OpenCode driver: whose task it is* |
+| The driver's own edits in `claude-calls/` | `execute.after` writes the same rows | `calls.ts` |
+| The driver is Claude Code (fixed) | `/models`, a standing pin (`wb route driver`, the web app's `driver` row), the once-only notes; a GPU driver held beside the agents | *The driver*, *A local driver on the GPU* |
+| The web chat: listener, turns, replies, the waiting line | the same over `session.prompt`/`synthetic` and `workbench_chat_reply` | `chat.ts`, *The web chat on OpenCode* |
+| The weekly model check, the update check, settings help turns, `wb optimize --if-due` | the same due rules in wb, toasted from the idle hook | `jobs.ts`, *Background jobs on OpenCode* |
+| `deepcode`, `deepmode` | the same keywords, the same `wb run` flows | `deep.ts`, *Deep workflows* |
+| `wb patch` and its procedure | the same commands; the procedure in OpenCode's facts (below) | *Local patches*, `skill.ts` |
+
+**What differs, and why.**
+- **The driver is the user's choice**, and wb can't make a weak model hold the bar, so it says so
+  once, never as a refusal (*The driver*'s notes: the driver is the agent's own model; an API driver
+  in a `local_only` repo, whose code reaches the API through the driver).
+- **A command that asks the user something** (sudo's password, gh's login): Claude Code's `!`
+  runs it in the user's terminal; OpenCode's `!` (shell mode, typed at the prompt's start) runs it
+  with no terminal (2.4.1's process-daemon: a pipe, stdin closed, a session of its own), so nothing
+  can ask. wb's hints and the rendered procedure name OpenCode's terminal pane (`terminal.toggle`,
+  ctrl+x t by default: a real terminal, its wb the user's, no `OPENCODE_SESSION_ID`) or a terminal
+  of the user's own instead (`patches.PANE_OR_TERMINAL`, `skill.ts`'s, #1321's finding 17). Seen
+  live on 2.4.1 (2026-11-26): `tty` under `!` says `not a tty`, in the pane `/dev/pts/<n>`, and
+  neither sets `OPENCODE_SESSION_ID` (a wb typed in either is the user's, `store.caller_kind`'s
+  `terminal`; only the driver's own shell tool sets it).
+- **Sends upstream**: the mod's dialog holds every outward command (a gh write, a `git push`, a
+  GitHub MCP tool's write) as well as `wb patch send`; of those, the plugin's forms ask for
+  `workbench_patch_send` alone (the kernel's `send` gate; its `outward` one has no OpenCode
+  counterpart), so the rendered procedure has the driver ask in words before an issue or a comment,
+  and away on the web chat the form waits for the user rather than refusing.
+- **A patch to the plugin**: OpenCode's Git install can't keep one (`wb patch` refuses there and
+  names the clone to make); with a clone's wb, the plugin's own code stays the Git install's while
+  OpenCode's `plugins` entry names it, so a patch under `opencode-plugin/` needs that entry swapped
+  for the clone's (*Local patches*; #1321, finding 7).
+- **Claude Code only**: `wb schedule`'s fires (Claude Code headless, `claude -p`), `ultracode` (a
+  Claude Code keyword), `/reload-plugins` (OpenCode reloads a plugin by itself), the marketplace
+  rescue (met on OpenCode only with Claude Code installed too), and the savings score's Claude fit:
+  no cost machinery is built for a non-Claude driver (#1318, closed by the owner); Stats shows what
+  OpenCode reports.
+- **Claude's own files**: an OpenCode driver reads `~/.claude/CLAUDE.md` when the user has no
+  OpenCode `AGENTS.md`, unless the user sets OpenCode's `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`:
+  OpenCode's behaviour in the user's own session (#1296 row 19), while agents never read it
+  (*What the agent knows*).
+
 ## The OpenCode plugin
 
 Workbench inside OpenCode (#1296, 2.2) is an OpenCode plugin, `opencode-plugin/`, beside `mod/`:
@@ -8145,7 +8361,8 @@ laned `opencode run --standalone` per round from the runner. The skeleton (#1311
 `skill.ts`, `agent.ts`, below), the driver part (#1316), the notices and the background jobs (#1313,
 #1334, `notices.ts`, `jobs.ts`: *Notices on OpenCode*, below), the conversation's upkeep and the
 user's commands (#1315, `upkeep.ts`, `commands.ts`, below), the consent gates and the driver's call
-rows (#1314, #1331: `consent.ts`, `calls.ts` below), and the pane (#1312, #1332: `/workbench`, the
+rows (#1314, #1331: `consent.ts`, `calls.ts` below), the procedure's typed wb tools (#1335, `tools.ts`
+below), the pane (#1312, #1332: `/workbench`, the
 panel, the sidebar section and the footer item, `pane.ts`, `pane-view.ts`, `pane.tsx`), and the
 agents' sessions as the lead's child sessions (#1331: `children.ts`, `children-tui.ts`, below). The chat runs `wb chat` commands only, as the session it acts for
 (`OPENCODE_SESSION_ID`), its claim in the session's directory; the driver part's (#1316) take no
@@ -8165,7 +8382,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   as `../mod/hooks/…`: one animation for both hosts, #1333), the kernel's membrane
   `mod/hooks/core.ts` and the `kernel.js` it imports (which `upkeep.ts`, the notices and the panel
   import, #1315, #1313, #1312; not `kernel.d.ts`, types only), `mod/hooks/tasks.ts` and
-  `mod/hooks/modeline.ts` (the panel's: one Tasks view for both hosts, #1312) and `LICENSE` (the plugin and
+  `mod/hooks/modeline.ts` (the panel's: one Tasks view for both hosts, #1312), `mod/hooks/keywords.ts` (`deep.ts`'s,
+  #1278), `mod/hooks/waiting.ts` (`chat.ts`'s, #1355) and `LICENSE` (the plugin and
   the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
   executable); no `type` field, so nothing else in the repository changes how it loads. Each
   `mod/` entry is a file the plugin imports, itself or through another mod file, and each file a
@@ -8176,7 +8394,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   classify commands with, `consent.ts`'s dynamic import of the mod's core, #1314).
   `opencode-plugin/package.json` (`type: module`, `files` the parts and their modules:
   `server.ts`, `tui.ts`, `rpc.ts`, `wb.ts`, `chat.ts`, `driver.ts`, `skill.ts`, `agent.ts`, `notices.ts`,
-  `notices-tui.ts`, `jobs.ts`, `spans.ts`, `splash.tsx`, `upkeep.ts`, `commands.ts`, `consent.ts`, `consent-tui.ts`, `gates.ts`, `words.ts`, `calls.ts`,
+  `notices-tui.ts`, `jobs.ts`, `spans.ts`, `splash.tsx`, `upkeep.ts`, `commands.ts`, `deep.ts`, `consent.ts`, `consent-tui.ts`, `tools.ts`, `gates.ts`, `words.ts`, `calls.ts`,
   `pane.ts`, `pane-view.ts`, `pane.tsx`, `children.ts`, `children-tui.ts`) is the one a clone's
   entry loads (`wb setup --opencode`'s `opencode-plugin/` directory). Each part is TypeScript, run
   as it is by OpenCode's Bun, a package's in `node_modules` too.
@@ -8184,7 +8402,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     `core/src/plugin/module.ts` `Module`). Setup registers the RPC's `status` handler, sets up
     the web chat (`chat.ts`'s `chat(ctx)`), the Workbench agent and its skills (`agent.ts`'s
     `registerAgent`; no `skill/` to read, none, the rest stands), starts the driver part
-    (`startDriver`), the consent gates (`consent(ctx)`) and the call rows (`calls(ctx)`), and the notices (`notices.ts`'s `notices(ctx)`, which runs the background jobs
+    (`startDriver`), the consent gates (`consent(ctx)`), the procedure's tools (`tools(ctx)`) and the call rows (`calls(ctx)`), and the notices (`notices.ts`'s `notices(ctx)`, which runs the background jobs
     too), sets up the upkeep (`upkeep`) and the commands (`registerCommands`), each
     skipped on a server without its API, starts the panel's part (`startPane`: its RPC and
     `/workbench`) and the child sessions' RPC (`startChildren`); each part's cleanup joins `stops`, and setup returns one cleanup that runs
@@ -8203,11 +8421,15 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     server runs (the driver, a subagent, another plugin's call). Its parts:
     - **The tools**, in the namespace `workbench` (`ctx.tool.transform`; OpenCode names them
       `workbench_<name>`; its one description, `wb.ts`'s `NAMESPACE_DESCRIPTION`, is the chat's too,
-      as the last part to declare it wins): `workbench_route {args}`, `workbench_start {args}`,
+      as the last part to declare it wins, `tools.ts` declaring it too): `workbench_route {args}`, `workbench_start`
+      (typed by `tools.ts`'s `START_INPUT`, its argv `startCall`'s: `{name, spec | spec_file, repo, role,
+      size, test, model, skill[], image[], setup, auto_fix, args[]}`, a value one `--flag=value` word, the
+      spec on stdin as `--spec -`, which the dry run doesn't read; `{args}` alone, the tool's first shape
+      and what the gates' `VIA_TOOL` refusal names, is that argv as it is),
       `workbench_settings_set {key, value}` and `workbench_patch_send {slug, title, body_file,
       draft?, anyway?}`. Each runs wb (`runner`: the plugin's wb, `findWb`, in the session's
       directory, with `OPENCODE_SESSION_ID` the calling session's and `CLAUDECODE`,
-      `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID` and `WB_TASK` dropped, stdin closed). Route, start (an
+      `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID` and `WB_TASK` dropped, stdin a typed start's spec, else closed). Route, start (an
       arg starting `--m`, a `--model`) and settings first run wb's dry run (`wb route --dry-run
       --json …`, `--start …`, `wb settings set k v --dry-run --json`); a `gate: true` answer asks
       the user in a form (`Allow` / `Don't`), and on the yes writes the dry run's `approval` to
@@ -8267,6 +8489,26 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   - `gates.ts`, `words.ts`: the pure rules `consent.ts` applies (paths: `places`, `guarded`,
     `taskOfPath`; `shellRefusal`, `lineCommands`; `codingMode`; the local_only rules; the patch text's files and
     lines) and the shell splitter, each tested alone.
+  - `tools.ts` (#1335; the host-shape decision's "tool schemas replace the command recipes"): the
+    procedure's everyday wb commands as typed tools in the `workbench` namespace, `codemode: false`
+    (direct tools), each one wb command run as the calling session (`runner`: the options' wb,
+    `OPENCODE_SESSION_ID` the session's, consent's dropped marks, stdin fed, killed on the call's
+    signal or its limit) in the session's directory (`sessionDirs`: `session.get`'s location and
+    subpath, read once), its fields the flags by name (`SPECS`), its answer wb's report:
+    `workbench_status {task?, all?, all_sessions?}`, `workbench_diff {task, stat?, all?, paths?}`,
+    `workbench_feedback {task, text, fresh?, keep_context?, spec_gap?, image?}` (the text on stdin,
+    `--message -`), `workbench_accept {task, message?, merge?, merge_as?, include?, take_claude_md?,
+    no_sign?, spec_gap?}` (`ACCEPT_MS` 10 minutes: a signing key's touch), `workbench_discard {task,
+    reason?, spec_gap?, keep_branch?, drop_steps?}` and `workbench_wait {task?, minutes?}` (`wb wait
+    --timeout`, `WAIT_MIN` 10 minutes, at most `WAIT_MAX_MIN` 60, its exit 2, timed out or closed,
+    an answer, not a failure). A value is one `--flag=value` argv word, so one starting with `-` is
+    never a flag (`wb diff`'s flags go first, then `-- <task> <paths>`: argparse takes `--` only
+    with no flag after the name). A nonzero exit is wb's words and `(exit N)`, thrown (the
+    procedure reads some exits by number: 3, accept's 5). `workbench_start` is `consent.ts`'s (an API
+    model asks first), typed by `START_INPUT` and `startCall` from here. No permission rule: OpenCode
+    reads a tool's `options.permission` only to hide a denied one (`core/src/tool.ts`). The
+    rendering's recipes name them (`skill.ts`); the shell's `wb` still works. `tools-env.d.ts`: the
+    runtime only it uses (chat-env.d.ts's rule).
   - `calls.ts` (#1331): the driver's own calls in a task's worktree as `claude-calls/` rows,
     the mod's rule (`callRows`, `tasksNamed`, `callFile`, `rowText`): `execute.before` writes a
     row begun for an `edit`, `write` or `patch` of a file in `tasks/<t>/` or a `shell` command run
@@ -8461,23 +8703,53 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     is: OpenCode's Git install leaves it out), driving.md's *Headless: a scheduled run* left out
     (a scheduled fire is Claude Code headless), *Deep workflows*' `ultracode` beside a flow left out
     (OpenCode's driver has no Workflow tool), the suites `wb patch` runs keeping "the Claude Code
-    mod's" (its `mod/` tests, never this plugin's), and the wake paragraph as SKILL.md's no-mod branch:
-    `wb wait <name>` with `background: true`, never a wait for a `[workbench]` wake, which the
-    plugin doesn't deliver before #1313 (the #1335 review); the user's two commands as the plugin's
-    (`commands.ts`, #1315), which `the plugin runs them, switches this session to the Build agent and
-    tells you what it did`; a rule's later change as
-    `an update of that context block` (the entry's, `upkeep.ts`), never a `[workbench]` note. `render(texts, where)` gives `{prompt, skill,
+    mod's" (its `mod/` tests, never this plugin's), and the wake paragraph as SKILL.md's mod branch,
+    the plugin waking the session with a `[workbench]` message (`notices.ts`, #1313) and no
+    without-the-mod branch (the prompt is the plugin's), or with the options' `wake: "off"`
+    (`Where.wakes`, as `notices.ts` reads it) that none will come and `workbench_wait` only when the
+    user asks; the user's two commands as the plugin's (`commands.ts`, #1315), which `the plugin runs
+    them, switches this session to the Build agent (which closes the Workbench panel) and tells you
+    what it did` (#1312), and SKILL.md's "Without the mod, the user may ask for the same in words"
+    left out (wherever the prompt is, the commands are); a rule's later change as
+    `an update of that context block` (the entry's, `upkeep.ts`), never a `[workbench]` note. The
+    recipes are the typed tools (`tools.ts`, #1335): `TOOLS_NOTE` after the wb line (the everyday
+    tools, use them for `wb start`, `status`, `diff`, `feedback`, `accept`, `discard`, the shell for
+    the rest, `workbench_wait` for when no wake comes; the four changes that are the user's only
+    through `workbench_route`, `workbench_start`, `workbench_settings_set` and
+    `workbench_patch_send`, which ask in a form; `[web chat]` answered with `workbench_chat_reply`),
+    §3's `wb start` block as `workbench_start`'s fields, §5's feedback, §6's accept and discard by
+    their tools' fields, the route, settings and send lines through their tools and forms
+    (patching.md's send too), every `wb chat reply` as `workbench_chat_reply` (`to` an id or
+    `user`), and the mod's "the dialog" (where the user approves a change) as "the form". The patch
+    procedure (patching.md, SKILL.md's *When workbench itself has a bug*) states OpenCode's facts,
+    not Claude Code's (#1321, finding 7): step 1 is the clone a patch lives in (OpenCode's own
+    install can't keep one, so `wb patch` refuses there and prints the `git clone` and `bin/wb setup
+    --opencode` that make one; the plugin's own code stays that install's while OpenCode's
+    `plugins` entry names it, so a patch under `opencode-plugin/` needs that entry swapped for the
+    clone's; `wb patch init` only for Claude Code's marketplace install on a machine with both);
+    the form asks for `workbench_patch_send` alone, so an issue, a comment or another send through
+    gh goes on the user's yes in words, and away on the web chat the form waits (nothing refuses
+    it); the GitHub plugin for Claude Code is a GitHub MCP server in OpenCode's `mcp`; the
+    marketplace rescue is met only with Claude Code installed too; and each `! <cmd>` (gh's login,
+    `setup-git`, the workflow scope, models.md's Ollama install) is typed `PANE_OR_TERMINAL`, in
+    OpenCode's terminal pane (ctrl+x t) or a terminal of their own, as OpenCode's `!` runs a
+    command with no terminal (`BANG`; 2.4.1's process-daemon: a pipe, stdin closed, #1321's finding
+    17, as `patches.PANE_OR_TERMINAL` says in wb's own hints). `render(texts, where)` gives `{prompt, skill,
     parts}`: the prompt is SKILL.md's body without its frontmatter, the `workbench` skill the same
     text with SKILL.md's description, each reference file a part `workbench-<name>` (`partId`).
     `readSkill(root)`: the files, or undefined without SKILL.md. `hostLineMatches` counts each
-    rule's matches, which the test asserts nonzero: a reworded SKILL.md fails by the rule's name.
+    rule's matches in the text the rules before it left, as `skillFor` applies them, which the test
+    asserts nonzero: a reworded SKILL.md fails by the rule's name, and so does an exact line a
+    recurring rule placed ahead of it already rewrote (the recurring ones go last).
   - `agent.ts` (#1335): `registerAgent(ctx)`. `skillRoot`: `skill/` from the package's own root
     (a clone, or the Git install), else the clone the options' `wb` runs from (`wb setup
-    --opencode`'s copy holds `opencode-plugin/` alone); `where`: the wb `findWb` finds. It
+    --opencode`'s copy holds `opencode-plugin/` alone); `where`: the wb `findWb` finds, and `wakes`
+    (the options' `wake` isn't `"off"`). It
     registers a skill transform (`defineSkills`: `workbench` and each part, `autoinvoke: false`,
     so no other agent's list offers them, path `skill://<id>/SKILL.md`, in memory), an agent
     transform (`defineAgent`: the agent `workbench`, `Workbench`, primary, OpenCode's default
-    permissions and the question tool, as Build's; the gates, #1314, add theirs there; the mode,
+    permissions and the question tool, as Build's; the gates, #1314, add no rule there, deciding
+    on the permission hook every call passes (`consent.ts`, `permission.hook("evaluate")`); the mode,
     #1315, is the agent itself: `upkeep.ts` reads a session's agent) and the session `context` hook (`withPrompt`: on the Workbench agent's requests
     only, `intro` + the prompt last in the system prompt, `intro` being OpenCode's own words for
     an agent's instructions). Not Agent.Info's `instructions`: 2.4.1 has no such field (set, it
@@ -8499,7 +8771,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     - **The rules are session instruction entries** (`session.instructions.entry` `list`, `put`,
       `remove`: OpenCode's experimental API, `core/src/session/instruction-entry.ts`), one per
       block, keyed by the mod's block names (`KEYS`: `workbench-mode`, `claude-coding`,
-      `user-notes`, `dynamic-workflows`, `workbench-routes`; `TASKS_KEY` `workbench`; `OURS`), which
+      `user-notes`, `dynamic-workflows`, `web-chat`, `workbench-wake`, `workbench-routes`; `TASKS_KEY`
+      `workbench`; `OURS`), which
       SKILL.md names. OpenCode sends each as `<context key="…">` with its instructions, again after
       a compaction (its summary leaves instructions out: the next request gets their current
       values), and tells the model a change or a removal itself at the next step ("The context under
@@ -8509,7 +8782,12 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       answer, `blocksOf`): `mode` while its agent is `workbench` (Workbench mode is the agent),
       `notes` then too, `coding` (not `decide`), `workflows` (on) and `routes` (routes.json not the plain
       default, GPU-only changes too, as the mod's `readRoutes`: `wb route`'s lines, read again when
-      routes.json changes, `routesPath`, `routesSaid`)
+      routes.json changes, `routesPath`, `routesSaid`), `away` (`web-chat`, AWAY_NOTE in OpenCode's
+      words: tell the user with the `workbench_chat_reply` tool) while `wb chat away` as the session
+      says `away` (wb's `chat.away`: the web chat used last, within six hours or while the session
+      has a task open; asked only when chat/away.json has a time, `Upkeep.away`), and `wakeOff`
+      (`workbench-wake`, WAKE_OFF_NOTE: no `[workbench]` message will come, a toast will) while the
+      config entry's options `wake` is `"off"`, as notices.ts reads it,
       while in the mode or with a task of its own open; plus `workbench`, `wb status` as the session
       in its directory, while it has open tasks (read again when their names or phases change).
       `refresh` reads those facts (`openTasks`: `tasks/*/status.json` active or waiting, `task.json`
@@ -8518,8 +8796,11 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       names a session switched to the Workbench agent before any hook has, or
       the `context` hook seeing a new one) and each idle look; `sync` lists the session's entries
       once, then puts each block whose text differs and removes each of `OURS` it shouldn't have
-      (another plugin's keys are never touched), one refresh at a time per session. `away` and
-      `wakeOff` are never wanted (the chat tells the driver itself; the notices have no wake setting).
+      (another plugin's keys are never touched), one refresh at a time per session. Unlike the
+      mod's once-per-conversation `web-chat` block, the entry follows away: a prompt the user typed
+      (chat.ts's `typedByUser`) is them back, so that prompt's refresh skips the away check
+      (`refresh(…, back)`: chat.ts's `wb chat back` for it runs beside this part's `prompt` hook, not
+      before) and the entry goes before that turn ("… no longer applies").
       A server without the entries API gets the same blocks appended to the session's own
       requests' system prompt by the `context` hook, as `<context key="…">` text (the fallback).
     - **What a compaction keeps**: the `compaction` hook adds `KEEP_ON_COMPACT` (the mod's words,
@@ -8691,6 +8972,11 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   names its session, store and directory; the RPC answers),
   `opencode-plugin/test/chat.test.ts` (the web chat's lane against a fake wb and session
   API, *The web chat on OpenCode*; wb's side in `tests/test_chat_opencode.py`),
+  `opencode-plugin/test/deep.test.ts` (#1278: every `tests/fixtures/keywords.json` case on the shared
+  module; the rule and the toggle's line on that prompt's requests alone; no other plugin's prompt, agent's
+  or subagent's read, #1325; `/deepmode`) and `RealOpenCodePlugin`'s
+  `test_deepcode_typed_brings_wbs_rule_to_the_model_and_a_deepmode_line_sets_it` (a real server's request
+  carries the rule, the toggle set and said, by the ids its two hooks see),
   `opencode-plugin/test/notices.test.ts` (the notices' lane and the jobs against an in-memory state
   dir, a fake wb and session API, and the TUI's toasts: *Notices on OpenCode*), `RealOpenCodePlugin`'s
   `test_a_review_notice_reaches_its_session_once_and_a_resend_under_its_id_adds_nothing` and
@@ -8701,7 +8987,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   the real kernel: a Workbench session's entries are `tellPlan`'s blocks under the mod's names,
   each put once and `wb status` read once while nothing changes, a stale one of ours replaced and
   another plugin's untouched, none sent by the requests themselves; a switch away drops the mode's,
-  nothing open the rest; no roles block for the plain default, one for a GPU-only change; without the entries API the blocks
+  nothing open the rest; no roles block for the plain default, one for a GPU-only change; `web-chat` while `wb chat away`
+  says so (asked as the session, only with a time in chat/away.json, never for a session out of the mode with nothing
+  open) and removed once back, before the turn of a prompt the user typed; `workbench-wake` with the `wake` option off, in the mode or with a task open; without the entries API the blocks
   in the session's own requests' system prompt; a task closing compacts at half of OpenCode's own
   point, not below it, once; `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
   OpenCode doesn't list; KEEP_ON_COMPACT once, only for a session that delegated with a task open or in the boundary compaction after the last one closed;
@@ -8713,8 +9001,14 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   `command.transform`),
   `opencode-plugin/test/consent.test.ts` (the words, each shell and edit refusal, the
   forms by the server's id with a yes, a no, a cancel, another session's reply and no TUI, each
-  tool's dry run, form, approval file and call, the coding gate's verdicts and its one form, the
-  local_only throws, the TUI half, the wiring), `calls.test.ts` (the rows, their tasks, begun, over
+  tool's dry run, form, approval file and call, the typed start's argv and its spec on stdin past
+  the dry run, the coding gate's verdicts and its one form, the
+  local_only throws, the TUI half, the wiring), `tools.test.ts` (#1335: each tool's wb command and
+  flags, one argv word a value, the feedback on stdin, wb's refusal thrown and wait's exit 2 its
+  answer, its minutes bounded, the typed start's argv and the `{args}` shape, every schema closed,
+  the runner as the session without Claude Code's or an agent's marks, stdin fed, stopped on the
+  signal, the session's directory, the six registered direct in the namespace, each named in this
+  file), `calls.test.ts` (the rows, their tasks, begun, over
   and denied, through the hooks, a decline's row denied from the bus), `children.test.ts` (#1331:
   the membrane's info, the messages kept, the titles, `wb watch --export`'s answer and its RPC, the
   mark, the import's two names and none; a stopped task imported once and a running one never, a
@@ -8751,10 +9045,14 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   width), the panel's rows (a press on each first line, the followed name underlined, the compact
   form, `Workbench steers it next`), the separator, the theme tokens, the splash target at the
   modeline; no `location`, `move` or `vcs` in the pane's modules), `opencode-plugin/test/skill.test.ts` (#1335: Claude Code's copy of every skill file
-  is the file byte for byte; every host line matches; OpenCode's copy has no `run_in_background`,
+  is the file byte for byte; every host line matches, in the text the lines before it left (a
+  recurring rule ahead of an exact one fails it); OpenCode's copy has no `run_in_background`,
   no `$CLAUDE_CODE_SESSION_ID`, `Claude` only in `Claude Code`, no plan mode, Bash, the mod or a
-  `reference/` path; the driver waits with `wb wait`, never for a wake (#1313's to change); the
-user's two commands the plugin's, a quit switching to Build (#1315); every
+  `reference/` path or `wb chat reply`; the plugin's wakes end the driver's turn, and with `wake`
+  off none is waited for, `workbench_wait` only when asked (#1313); the
+  user's two commands the plugin's, a quit switching to Build and closing the panel, no words
+  branch (#1315, #1312); every `workbench_` tool the text names is one the plugin registers, each
+  named, the recipes as tools (#1335); every
   named `workbench-<name>` skill exists; the wb line's forms; the skills
   replace the `~/.claude` copy; the agent; the prompt on the Workbench agent's requests alone;
   `keepOurs` registering again once), `Setup -k opencode` (the install and doctor's lines) and
@@ -8874,7 +9172,8 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   change (`rewoken`). Looked at by the idle hook (`experimental.idle`: what it admits runs in the
   same execution), each execution's end and the timer.
 - **Wakes off**: the config entry's options `wake: "off"` (the mod's option): toasts only, no
-  synthetic, no rewake, no settings offer turn.
+  synthetic, no rewake, no settings offer turn; the upkeep's `workbench-wake` entry tells the
+  driver so (`upkeep.ts`, #1315).
 - **Toasts** go to the TUI part over the RPC `WorkbenchNotices` (`id: "workbench-notices"`, no
   methods, the event `toast` `{key, title, message, variant, sessionID, notify}`), emitted from every
   instance's registration; `notices-tui.ts`'s `noticesTui` subscribes (`client.rpc(...).events.on`)
@@ -8977,6 +9276,9 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   dialog answered within `BACK_AFTER_MS` 2 s of asking was answered by OpenCode itself (the TUI's
   autoaccept, `--auto`), so it clears without `back`. No
   dialog is answered from the phone (#1340: the relay through `permission.list`/`reply` is struck).
+  The page's state line (#1355): `hold` passes `--waiting <json>` (`mod/hooks/waiting.ts`'s
+  `waitingFact` over `dialogs`, the mod's one), and the poll (`POLL_MS` 2 s) holds again when that
+  moved (`waitSaid`), so a dialog up 2 s shows within a poll and one answered sooner never does.
 - **A question while away** (#1340 B): `execute.before` refuses the `question` tool in the listening
   session's tree with `AWAY_QUESTION` while `wb chat away` says `away`.
 
@@ -9070,9 +9372,9 @@ Claude has the final say (the owner's rule on #1278): every flow ends at a `fina
 
 **The pieces.** `schema.py` (a JSON Schema subset, checked outside the lane: `check`, `valid` refusing a keyword
 it can't check, `last_object`), `cards.py` (role cards), `runs.py` (flows, runs, the driver, `wb run`, the
-keywords' reference). Shipped: cards `agent/roles/` find, verify, judge (tools none), review, critic, build,
-fix; schemas `agent/schemas/` findings (`maxItems` 12), verdict, judgments, review, triage; flows
-`agent/flows/` build, audit, fix, best-of, lenses, triage. The user's own come first: `$WB_ROLES`
+keywords' reference). Shipped: cards `agent/roles/` find, verify, judge (tools none), review, choose, critic, build,
+fix; schemas `agent/schemas/` findings (`maxItems` 12), verdict, judgments, review, choice, triage; flows
+`agent/flows/` build, audit, fix, fix-escalate, best-of, lenses, triage. The user's own come first: `$WB_ROLES`
 (`~/.config/workbench/roles/`, its `schemas/`), `$WB_FLOWS` (`~/.config/workbench/flows/`). A repo's
 `.workbench/flows/` is listed (`wb run flows`) as "read it first"; `--flow` never takes it, `--plan` does.
 
@@ -9116,6 +9418,25 @@ exactly N long, each `id` one of the batch's, written to `runs/<run>/schemas/<st
 duplicate in its place) goes under `not_run` as `unjudged` (`runs.unanswered`); a batch's trail lists its
 members as its judge was given them, and a null batch names them (`members`). Before, lenses' and triage's
 judgments reached Claude without what they judged, by ids the judge invented, a skipped one gone.
+**A compare stage** (`compare: true`, a report over a code stage with `attempts` of 2 or more; no split,
+batch, attempts or refix): one item per item of the code stage, once all its attempts ended, its members the
+attempts that reached review (fewer than two: `not_run`, nothing to compare). Its prompt's `{diffs}`
+(`runs._diffs_of`) carries each attempt's diff as `### a<k> (task <t>; tests passed|failed|no tests)`, each
+cut to its share of `CUTS['diff']`; only the green ones when two or more are, the rest named
+(`runs._attempts`); its schema `runs.compare_schema`: `best` and `ranking` one of the labels shown. The
+shipped best-of is code → review → choose (the `choose` card, `choice` schema `{best, ranking, why}`) →
+Claude, whose final row carries the pick and, as its trail, every attempt's task: nothing is discarded on
+the chooser's word (#1134's study: Claude read every review and most diffs, N times the handoff; SWE-agent's
+Chooser).
+**Escalation** (`escalate: [roles]` on a code stage, 1 to `ESCALATE_MAX` 3 distinct `routes.ROLES`): an item
+that ends null (stuck, failed, discarded), or whose review's asks are left once refix's `max` is spent (`_take`
+journals `escalate` {stage, key, task, why} and supersedes that review: `escalated: …`; the attempt's task
+stays at review for Claude), is tried again from the base as `<key>#e<k>` on the k-th role (`runs.escalation`,
+`escalation_key`, `item_role`: `wb start --role`; `stage_model(stage, it)` for its room, budget and
+`request_floor`), its start journalled `escalated` {key, after, role}; a stuck code item checkpoints Claude only
+when it was the last role's, and `wb run start` refuses an escalate API role with no day cap as it does the
+stage's, its line `<stage> <role> (GPU|API), then <roles>`. Shipped: `fix-escalate` (fix on trivial, then
+significant). An escalated item past `max_items` still runs (its item counted once).
 Refused: an unknown key or placeholder, a last stage that isn't `final`, and after a code stage anything but a
 report over its `{diff}`. Run names `runs.RUN_RE` (24), stage ids `STAGE_RE` (8): `<run>-<stage>-<n>` fits a task
 name, and the run a `--group`. A run and a task never share a name (`runs.taken`, `cmd_start`).
@@ -9126,7 +9447,9 @@ bench's, under its `drive` lock; `runs.spawn`). Each pass (`runs.tick`, woken by
 pass woke the driver itself, 20 passes a second while an item ran): it takes its items' notices (`_ack_items`: an open run's item, its driver alive
 (`runs.item_open`), notifies `runs/<run>/notify.jsonl` with its `noticed` mark, `store.Task.notify`, and the
 driver claims each ack up to it, so neither the mod's wake nor its idle net wakes Claude for one; with the driver
-dead an item's notice is Claude's, a task's as any), reaps dead runners, resumes an item stopped from outside
+dead an item's notice is Claude's, a task's as any), refuses an item's open ask at once (`runs.RUN_REFUSED`,
+`ask_mcp.answer_once`, as the bench's `REFUSED`: nobody is told of it, and a finder's ask for a path held the GPU its
+20-minute `ask_timeout` in the real GPU audit, 2026-11-26), reaps dead runners, resumes an item stopped from outside
 its step whose cause passes or is the user's to lift (`_held`, `runs._outside`: `cli._interrupted`, a restart, a
 killed runner, a shutdown's signal, an update, or `cli.stopped_outside` in `runs.held_infra`: the day cap in a
 round, a provider's rate limit, outage or refusal, a repo made local-only, `wb stop --all`; `wb resume`, journal
@@ -9186,8 +9509,9 @@ closed run, or one at `review`, never goes on (`runs._ended`; `wb run feed` asks
 flow import X.md` (`runs.import_command`) writes a flow of yours (`$WB_FLOWS/<name>.json`, or `--out`): one stage
 over the list param `items` (a code stage, or `--card`'s), its prompt the command's body with `$ARGUMENTS` as
 `{item}` (appended when absent) and its own braces kept as text, `description` from the frontmatter; a positional
-`$1` is refused. **The host side** (the mod's wake for a run row, `/deepmode`, the keywords' detection in the mod
-and the OpenCode plugin, the web chat's Settings row) is not in wb yet, but the mod's `WORKFLOWS_RULE`:
+`$1` is refused. **The host side**: the keywords and `/deepmode` are in both hosts (*The keywords*, under
+*Dynamic workflows (deepmode)*); the mod's wake for a run row and the web chat's run strip and Settings rows are
+not made yet, but the mod's `WORKFLOWS_RULE`:
 `runs.keywords`, `tests/fixtures/keywords.json`, `runs.DEEPCODE_RULE` (`wb deepmode --rule`), the run rows and
 `wb top --json`'s `runs` are its seam.
 
@@ -9308,7 +9632,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--default NAME`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. `--default NAME` (no prompt) sets images.json's `"default"` (*The default engines*). |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy]` (`chat.hold`: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (`chat.WAITING_FOR`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and its listener `(OpenCode)` | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy] [--waiting <json>]` (`chat.hold`, `waiting` the dialog up in its terminal, `{kind, tool, since, what?}`, #1355, exit 1 for another shape: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (the story's `note.waiting`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and its listener `(OpenCode)` | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
 | `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one), `--queue` (accepted, a no-op: the sample queues behind the GPU's holders as any start does, #1251, #1322), `--force` (passed to wb start: the sample waits for a model whose server isn't up yet, else exit 3 with wb start's can't-run refusal, whose `--force` advice wb try once rejected as an unknown argument, #1297) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016) and `--no-sign`, set up by `wb init --no-sign` (a locked key failed it or hung it on a prompt, #1226), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) says so in wb start's model line (#1322: its own line went). |
 | `wb chat reply --turn-answer` | `--text`, `--to <id>` (again for more), `--if-owed` (the OpenCode plugin's: only the `--to` messages its session still owes, `chat.owed`; none: `not owed: the session replied`, exit 0; a post says `sent to the web chat: <ids>`; without `--turn-answer` and `--to`, exit 1) | The mod's: a turn's own answer for a web message it didn't reply to (*The web chat listener*, #1352): an `auto` row, cut to `chat.TURN_ANSWER_MAX` 4,000 characters (`chat.turn_answer`). The OpenCode plugin's the same, with `--if-owed` (*The web chat on OpenCode*). |
 | `wb init <dir>` | `--no-sign` (its commits unsigned, whatever `commit.gpgsign` says; else signed as accept's, `UNLOCK` at once for a locked key, #1226) | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`), no hooks run (#1254). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
@@ -9348,7 +9672,7 @@ $WB_HOME (~/.local/state/workbench)
                                  repo, base, base_ref, cwd, budget_usd, budget_min, overnight, trial, no_claude_md, created, driver {python, machine},
                                  session? (Claude Code's, or an OpenCode driver's with session_kind: opencode, #1309), claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,
                                  why, pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
-                                 budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|fed|amend|notice|resumed|reaped,
+                                 budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|escalate|escalated|fed|amend|notice|resumed|reaped,
                                  stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), ok?}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
                                  {key, input, result, task}; specs/<stage>-<n>.md (each item's spec); schemas/<stage>-<n>.json (a batch's schema, runs.batch_schema); notify.jsonl (its items' notices, the driver's);
                                  result.json (runs.report_of at the end); acked (its notices taken); driver.log
@@ -9435,6 +9759,7 @@ $WB_HOME (~/.local/state/workbench)
                                  audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json, .transcript.txt) uploads.lock
                                  turns.jsonl ({ids, ended, by}: the mod's turn ends, wb chat ended; #1042)
                                  idempotency.json idempotency.lock (POST /api/send's Idempotency-Key: caller and key's sha256 → {ts, req, id}; #1138)
+                                 settings-rev.json ({ts, key, label, to, by}: the newest Settings change, settings.record's stamp, the state's `settings`; #1355)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, AGENTS.md (the user's ~/.config/workbench/AGENTS.md, copied: #1061),
                                  project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
                                  imports/<n>/<name> (an import from outside the repo: context.import_files),
@@ -9967,8 +10292,11 @@ approve; outside it the user typing it is the yes. CONTRIBUTING.md is the contri
   this OS from `OS_RELEASE`, labelled official or community as GitHub's docs label it, `GH_DOCS`, `GH_RELEASES`; never
   snap; the distro's own apt `gh` warned off; `the user runs: ! ` before a sudo or pamac (polkit) line, `the user
   runs, as root:` before apk's, as Claude's Bash can't answer a password; from an OpenCode driver each `! ` line
-  is `…, in a terminal of their own: <cmd>` and `Claude` is `OpenCode's model` (`_user_runs`, `driver_name`: its `!`
-  had no terminal to prompt on in 2.3.2's source, #1321 finding 17); brew offered with no sudo), `logged-out`
+  is `…, in OpenCode's terminal pane (ctrl+x t) or a terminal of their own: <cmd>` (`PANE_OR_TERMINAL`) and `Claude`
+  is `OpenCode's model` (`_user_runs`, `driver_name`: its `!` runs a command with no terminal to prompt on, a pipe
+  with stdin closed under a daemon in a session of its own, read in 2.3.2's source and 2.4.1's (process-daemon
+  `service/pipe/unix.rs`, `client.rs`); its terminal pane, `terminal.toggle` on `<leader>t`, is a real terminal,
+  #1321 finding 17); brew offered with no sudo), `logged-out`
   (also a 401: `! gh auth login --hostname github.com --git-protocol <p>`, `_guess_protocol`: an insteadOf rule by its
   target, the `url.<base>` key (`GH_SSH`, `GH_HTTPS`: one rewriting `git@github.com:` to https forces https, and was once
   read as ssh by its value), else ssh with a key, else the remote's URL; https adds `! gh auth setup-git`, an edit to
@@ -9976,8 +10304,8 @@ approve; outside it the user typing it is the yes. CONTRIBUTING.md is the contri
   source; a `GH_TOKEN`/`GITHUB_TOKEN` overriding the stored login is said). `gh_line` prints it. Claude never handles a
   token: the login is the user's own `! gh auth login`.
 - **The send**: `_refuse_send`'s checks, then gh `ready`, then, under Claude Code (`CLAUDECODE=1`, which its Bash
-  sets), an OpenCode driver (`store.under_model`, #1309: the refusal names the workbench plugin's `workbench_patch_send` tool, and
-  the approval is the session's own `send-ok.<session>.json`, `store.approval_name`, #1363) or in an agent's shell (`WB_TASK`, #1310: the refusal sends it to its reviewer), the mod's approval (`_approved`): `send-ok.json`, written by the dialog's `Send it`, renamed away so one send
+  sets), an OpenCode driver (`store.under_model`, #1309: the refusal names the workbench plugin's `workbench_patch_send` tool and, for the
+  user, OpenCode's terminal pane or their own terminal, `PANE_OR_TERMINAL`; the approval is the session's own `send-ok.<session>.json`, `store.approval_name`, #1363) or in an agent's shell (`WB_TASK`, #1310: the refusal sends it to its reviewer), the mod's approval (`_approved`): `send-ok.json`, written by the dialog's `Send it`, renamed away so one send
   consumes it, matching or not, and taken only when fresh (`SEND_OK_SECS` 120) with this slug, title, absolute body
   path, body text and flags. Without the mod (not installed, disabled, its hooks failing to load) nothing asked the
   user, and Claude's Bash sent anyway; it refuses, naming the command for the user's own terminal. Then `gh repo fork
@@ -10096,6 +10424,15 @@ round-tripping a `coding` change and its settings-changes.jsonl row, probe turne
 415 without the JSON type, /api/stats' feed, an agent token 403 on the four and on every path and method outside
 `AGENT_MAY`, /api/top's `top` event and its child gone within `TOP_LINGER_S`+5 s of the viewer hanging up; a refusal's
 409 with `settings.apply` stood in for);
+`test_story.py` (*The story*: `gen_story.py --check` clean, a one-byte edit to `story.ts` or README.md's block failing it,
+`tests/fixtures/story/fill.json` through Python's `fill` and, with node, the page's `storyFill`, every key rendered for
+each driver it is said for (no "Claude" on OpenCode's), unknown keys and fields raising, the notice rows' bytes, every key
+read somewhere, the HTML's `data-story` text being `any`'s, no string of four words in hand-written `kernel/src`);
+`test_chat_driver.py` (*The driver's state line*: none named by the last driver that wrote, idle and working where it runs,
+waiting beating working and naming the oldest open notice until settled, a stale notice no wait, the claim's own `waiting`
+for each kind with the grant only for a permission and never for `any`, odd facts ignored, the snapshot's `driver` and
+`settings`; `SettingsProvenance`: a choice or number set to its value logs nothing, an action always, `changes` newest first
+without `said`, each row's `changed` within a week, the stamp the state reads);
 `test_sizing.py` (the slice guess, corrected from real steps); `test_kernel.py` (*The kernel*, offline: `Contract`,
 `Bundle`, `Tables`, `Imports`, `Build` (the wire types), `Toolchain` (a bad hash, a link, a path escape refused by name),
 `Props` (`kernel.py props`: Bun, else OpenCode's, else refused by name; `check` runs them), `Twins` (each golden's
@@ -10151,7 +10488,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `model` (its `-m`, #1059), `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), `env_names` (every variable's name, never a value: #1189), `shell_sees`: what a `$SHELL -c` command gets, that command given what OpenCode 2.4.1's shell tool sets on every command, `shell_marks`: its `OPENCODE_SESSION_ID` (the run's own), `OPENCODE`, `AGENT`, `AI_AGENT`, `OPENCODE_TERMINAL`, `WB_DRIVER` and `WB_TASK`, null for one unset, #1310, and `connect`: with `FAKE_CONNECT` a TCP connect to that port from inside the round, `ok` or its errno, #1197, and `files`: each `run -f` it attached, `{name, bytes}`, opened in the lane as OpenCode's client does, one it can't open `File not found`, exit 1, #1199); knobs `FAKE_LATE`, `FAKE_SLEEP`,
-`FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
+`FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO_BY_TASK` (`{task: scenario}`, by the agent's `WB_TASK`: one item of a run fails, #1278's escalation). `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review; a continued session adds a line to lib/util.py: #1259), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087; `FAKE_EXPLORE_ONCE`: no edit, a continued session like `ok`: #1134), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_RERUN`: those calls rerun the acceptance command, `FAKE_SELF_MISS`: the reads fail, #1250; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207; `FAKE_READS` 0: it restores it and goes quiet, the think, silence and wall guards' case; `FAKE_SELF_API` `ratelimit` or `down`: its run plays that API scenario on the green tree, the provider's stop at OpenCode's exit; `FAKE_SELF_REFILL`: each of its sessions breaks or restores it, by turns, and fills 76%, the last past `HANDOVER_MAX` on the green tree: #1261; `FAKE_SELF_CRASH`: after its reads, a provider.http 500 and exit 1, the server still up: #1270), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
@@ -10573,18 +10910,22 @@ doc needs its own `!/` line).
   `HOST_LINES`, which match Claude Code's exact wording (`skill.test.ts` names a rule that no longer
   matches); **a new reference file** → nothing (each is a `workbench-<name>` skill); **a Claude
   Code-only word in it** (a tool, a variable, `Claude` alone) → a host line, or `skill.test.ts`'s
-  offenders fail. **A slice that makes one of the rendering's "the plugin …" claims true** (the
-  mod → the plugin turns each of SKILL.md's mod lines into one) → its host line: the `[workbench]`
-  wakes (#1313) → the wake line (`wb wait` until then) and its `skill.test.ts` test; the claims of
-  a slice not yet built, said as the plugin's meanwhile: the coding gate's refusal and dialog
-  (#1314), `/workbench` answered by the plugin and the pane a quit closes (#1312). **The Workbench
+  offenders fail. **A plugin part that changes one of the rendering's "the plugin …" claims** (the
+  mod → the plugin turns each of SKILL.md's mod lines into one) → its host line and its
+  `skill.test.ts` test: the `[workbench]` wakes and the `wake` option (`notices.ts`, #1313) → the
+  wake line (`Where.wakes`); the coding gate's refusal and form (#1314); `/workbench` and the panel
+  a quit closes (#1312) → the two commands' line. **A flag of `wb start`, `status`, `diff`,
+  `feedback`, `accept`, `discard` or `wait` added, renamed or dropped** (`cli.py`'s parser) →
+  `opencode-plugin/tools.ts`'s `SPECS` or `START_INPUT` and `startCall`, and the recipe host lines
+  that name the fields (`skill.ts`); **a tool added to the `workbench` namespace** →
+  `skill.test.ts`'s registered set, and the rendering names it (`TOOLS_NOTE` or a host line). **The Workbench
   agent's id** (`agent.ts` `AGENT`, `workbench`) → the slash command or pane that switches to it
   (#1312), and `upkeep.ts` (a session on it is in the mode) and `commands.ts` (a quit switches from
   it to `AFTER`, `build`). **The mod's context block names** (`prompt.context`'s `workbench-mode`,
-  `claude-coding`, `user-notes`, `dynamic-workflows`, `workbench-routes`, `workbench`) → `upkeep.ts`'s
+  `claude-coding`, `user-notes`, `dynamic-workflows`, `web-chat`, `workbench-wake`, `workbench-routes`, `workbench`) → `upkeep.ts`'s
   `KEYS` and `TASKS_KEY` (the entries' keys) and SKILL.md, which names them; **the mod's
   `KEEP_ON_COMPACT`** → `upkeep.ts`'s, word for word; **its `SCOUT_NOTE`, `QUIT_NOTE`,
-  `DONE_NOTE`, `CODING_RULES`, `WORKFLOWS_RULE`, `MODE_NOTE`, `NOTES_NOTE`** → `commands.ts`'s and
+  `DONE_NOTE`, `CODING_RULES`, `WORKFLOWS_RULE`, `MODE_NOTE`, `NOTES_NOTE`, `AWAY_NOTE`, `WAKE_OFF_NOTE`** → `commands.ts`'s and
   `upkeep.ts`'s, the same meaning in OpenCode's words (#1315); **the `wb` commands the quit commands
   run** (`stop --all --park-waiting`, `takeover --all --user`, `update`) → `commands.ts` too.
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught (`schema.py`, the ask server's import since #1278).
@@ -10597,13 +10938,18 @@ doc needs its own `!/` line).
   (`theme.hue.accent[400]`) → the colour #1312's modeline gives its row, the row the words fall into; **a mod file the
   plugin imports** (`../mod/hooks/…`) → the root `package.json`'s `files`, which OpenCode's Git install fetches and
   `ocplugin.shared_files` copies beside a clone's copy (#1333), with what that file imports in turn.
+- **Where the user types a command that asks them, on OpenCode** (#1321, finding 17): `patches.PANE_OR_TERMINAL`
+  (wb's hints, `_user_runs`, and the OpenCode refusals of `patches.send` and `cli.gate_refusal`) ↔
+  `opencode-plugin/skill.ts`'s `PANE_OR_TERMINAL` and `BANG` (the patch procedure's and models.md's `! <cmd>` lines),
+  word for word; a change of OpenCode's `!` (a terminal for its commands) or of the terminal pane's key → both, the
+  tests that quote them (`skill.test.ts`, the OpenCode cases in `tests.test_workbench`) and *Workbench in OpenCode*.
 - **The Tasks view on both hosts** (#1312): tasks.ts's `taskLines`, `capRow`, `focusOf`, `speechOf`, `frameOf`,
   `viewFacts` and `isEst` (moved there from register.tsx, which re-exports `viewFacts` and `isEst`) → the OpenCode
   panel's `pane-view.ts` and `pane.tsx`, so a change draws on both; their `who` (`Claude` by default, `WHO` in OpenCode)
   is the one each host names as acting next; modeline.ts's `modeline(link, cols, name)` (`MODELINE` by default,
   `Workbench` in OpenCode); the colour names `Part` uses → `pane-view.ts`'s `TOKEN`; `wb watch --json`'s and `wb diff`'s
   output → `pane.ts`'s `parseLines`, `diffLines`; the owner keys `owns` reads → `pane.ts`'s `PaneTask`.
-- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ each host's detection (the mod, the OpenCode plugin, the kernel's Keywords, #1325); `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip.
+- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ `mod/hooks/keywords.ts` (both hosts' detection; the root package.json's `files` brings it to the OpenCode plugin, `opencode-plugin/test/deep.test.ts` reads the fixture); `runs.PLACES`' `{report}` ↔ the shipped build, fix and best-of reviews and the review card; `runs.compare_schema`'s `best` and `ranking` ↔ `agent/schemas/choice.json` and the choose card; `runs.answers_key` (an array of objects requiring `id`) ↔ judgments' and triage's schemas; an item key's suffixes (`#a<k>` attempts, `#e<k>` escalations, `~r<k>` refixes, `.<j>` splits) ↔ `runs.escalation`, the compare stage's grouping and `attempt_label`; `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip.
 - **The wb the mod runs** (`findWb` in register.tsx: `WB_BIN`, `wb` on PATH, `~/.local/bin/wb`) → `cli.mod_wb`, what wb
   doctor says the mod runs, and wb setup's PATH note (#1200).
 - **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).
@@ -10807,7 +11153,7 @@ doc needs its own `!/` line).
   `reference/patching.md`. **`patches.SUITES`** (`KERNEL_CHECK`, `MOD_TESTS`, `PLUGIN_TESTS`, #1328) → `check.yml`'s
   `kernel`, `mod` and `opencode-plugin` jobs (`tests/test_workflows.py` holds the plugin's to `PLUGIN_TESTS`), and
   `_own_runs`' runners; **`patches.PLUGIN_SHARED`** → what `opencode-plugin/` imports from `mod/` (the kernel's core, the splash's
-  `splash.ts` and `apprentice.ts`, the panel's `tasks.ts` and `modeline.ts`; a LocalPatches test reads the imports). **`Workbench-Driver`** (`patches.DRIVER_TRAILER`) → `stamp_driver`, the pull request
+  `splash.ts` and `apprentice.ts`, the panel's `tasks.ts` and `modeline.ts`, `deep.ts`'s `keywords.ts`, `chat.ts`'s `waiting.ts` (#1355), the readers' `types/wire.d.ts`, #1323; a LocalPatches test reads the imports). **`Workbench-Driver`** (`patches.DRIVER_TRAILER`) → `stamp_driver`, the pull request
   template's `Written by:` line. **The crash hint's `CONTRIBUTING.md`** → that file at the root. **`patches.CARRIED`, the
   `Scope:` trailer** (`%(trailers:key=Scope)`, `me`) → `wb patch list`, `upstream`, `_refuse_send`, `doctor_lines`,
   CONTRIBUTING.md, the skill's `reference/patching.md`. **`PATCH_BRANCH`** → `cmd_update`, `doctor_lines`, the docs.
@@ -10855,7 +11201,7 @@ doc needs its own `!/` line).
 start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --model` stays refused), and
   `route-ok.json`'s `approval` (`cli._route_argv`) ↔ `routes.approved`; **a `wb route` or `wb start` flag** →
   `routeCalls` (`--m` is `--model`'s only prefix among wb start's flags; a new `--m…` flag there breaks that).
-  **`wb route --json`** and **`wb models --json`** → the `WbRoutes`/`WbModels` types and `rolesNow` (the day-cap line); `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`; a role's `fallback` (#1196) → `routesValid`, `readRoutes`' plain check and `routesSummary`.
+  **`wb route --json`** and **`wb models --json`** → wire.d.ts's `RouteJson`/`ModelsJson` (the mod's `WbRoutes`/`WbModels`) and `rolesNow` (the day-cap line); `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`; a role's `fallback` (#1196) → `routesValid`, `readRoutes`' plain check and `routesSummary`.
 - **A fallback and `--image`** (#1196, #1199): `runner._fallback_move`'s `models.takes_images` check ↔
   `cli._images_fit` (wb start's): a task's pictures go only to a model that says it takes them; the
   move also sets `CURRENT["model"]`, which `runner.lane_ports` reads (#1197).
@@ -10864,7 +11210,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (`cli.api_key_lines`, `models.connected`); **SCOUT_NOTE's opening** (`[workbench] The weekly model check is
   due.`) → its readers, which match it (register.test.tsx); **`routes.change_pairs`' line** → the skill's
   first-run question and register.test.tsx's two-role dialog.
-- **`wb watch --json`** → the mod's `LINE_STYLE`, its pose regex, `live-1`; `--last`, `JSON_LINE_CHARS` with
+- **`wb watch --json`** → wire.d.ts's `WatchLine` (and its restatement, `types/index.d.ts`'s `WbLine`), the mod's `LINE_STYLE`, its pose regex, `live-1`; `--last`, `JSON_LINE_CHARS` with
   `KEEP_LINES`, `LINE_CHARS`.
 - **`wb watch --export`'s object** (`transcript.exports`) → the OpenCode plugin's `sessionsOf` (`children.ts`);
   **OpenCode's `experimental.session.import` input and `Session.Info`** → `children.ts`'s `ImportInput`,
@@ -10882,7 +11228,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (`REVIEW_ONLY`), `routesSummary`, `routesValid` and `readRoutes`' all-default check.
 - **A `$.state` atom's type** → its tag (`tasks-12`, `live-1`, `chat-5`, `sessions-1`, `pane-2`, `said-3`,
   `splash-1`).
-- **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → the mod's `WbChat.link`, `LINK_STATES`, `linkOf`,
+- **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → wire.d.ts's `ChatLink` (the mod's `WbChat.link`), `LINK_STATES`, `linkOf`,
   modeline.ts's words per state, its `LINK_STATES` and `linkDown` (OpenCode's panel's `linkOf`, pane.ts). **settings-changes.jsonl's row** (the web app's Settings) → `settingsTurns`,
   `settingSaid`, `SETTING_HELP`, and `settings.offers`, `change_said` (the OpenCode plugin's, the same words,
   #1334); a setting the conversation hears from `unsaid` → `SAID_ELSEWHERE`, and `settings.SAID_ELSEWHERE`.
@@ -10944,7 +11290,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   (`python3 scripts/web.py build`) in the same commit (CI's `kernel` job fails otherwise); a new script → its own
   `src/<name>.ts`, `index.html` (or the worker's registration), the project's `files` in `src/tsconfig.json` or
   `tsconfig.sw.json`. **A shape the page reads** (chat.snapshot, chat.patch, `/api/task`'s parts, settings.py's
-  rows) → `src/types.d.ts`. **`scripts/install-tsc.sh`'s `version`** → its four hashes, and a rebuild (the
+  rows) → `mod/types/wire.d.ts`, and `src/types.d.ts`'s alias of a new one. **Anything else wb writes that a
+  TypeScript reader reads** (task.json's and status.json's keys, notify.jsonl's rows, chat/listener.json,
+  chat/open.json, `wb watch`, `route`, `models`, `chat url` and `settings offers --json`) → `mod/types/wire.d.ts`,
+  then the three type checks (*wb's shapes in one module*). **`scripts/install-tsc.sh`'s `version`** → its four hashes, and a rebuild (the
   headers name it). **`tests/e2e_*.mts`' page probes** (`window.<x>` a check sets) → `tests/e2e_page.d.ts`;
   **chat.yml's `NODE_TYPES_VERSION`** → the Node line it runs. **`/api/state`'s asks or messages** → `sw.ts`. **A key of
   `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
@@ -10953,7 +11302,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   listener, #1319: it must say `driver: "opencode"`, and `session` is the listening session's `OPENCODE_SESSION_ID`,
   not a server's, as a tool run in the server has none) → `chat.listener_driver`, `chat._listens_across`;
   **the driver's shape** (`{tool, model?}`, `chat.DRIVER_TOOLS`) → `chat.writer_driver`, `/api/health`,
-  `ask_workbench.who` (`DRIVERS`), the MCP server, docs/chat-api.md's *The driver*, docs/chat-api.yaml's `Driver`.
+  `ask_workbench.who` (`DRIVERS`), the MCP server, docs/chat-api.md's *The driver*, docs/chat-api.yaml's `Driver`,
+  and the web app's names for it (`app.ts`'s `DRIVER_NAMES` and `readBy`, `sw.ts`'s `NAMES`, `mod/types/wire.d.ts`'s `Driver`).
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.ts`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
@@ -10993,8 +11343,15 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   parses (`url --json`'s `state`, `notice`'s id, `away`'s `away`, `claim`'s ` expired: `) → `chat.ts`.
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
-- **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`) → `e2e_chat.mts`, the WebChat tests, reference/driving.md
-  and SKILL.md's *the web chat*, `chat.WAITING_FOR` beside it (OpenCode's, `DRIVER_NAMES`); **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
+- **A sentence of the story** (`workbench/story.py`'s `TEXTS`, `DRIVERS`) → `python3 scripts/gen_story.py` (its copies:
+  `chat_static/src/story.ts`, then `scripts/web.py build`'s `story.js`; README.md's block), `tests/test_story.py` (a key
+  with no reader fails), `e2e_chat.mts` and `e2e_settings.mts` where they read it, and the HTML's own text of a
+  `data-story` element (`any`'s words). A new key read by a computed name (`state.*`, `next.*`, `wait.*`) → its family
+  in `chat.driver_state` (`WAIT_KINDS`). **The driver's state** (`chat.driver_state`) → wire.d.ts's `DriverState`,
+  app.ts's `drawState`, docs/chat-api.md and chat-api.yaml's `driver`. **The Settings stamp** (`settings.record`,
+  chat/settings-rev.json, `chat.settings_rev`) → the state's `settings`, settings.ts's refresh and toast.
+- **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`: the story's `note.*`) → `e2e_chat.mts`, the WebChat tests, reference/driving.md
+  and SKILL.md's *the web chat*, OpenCode's beside it (`DRIVER_NAMES`); **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
   once #1296's core exists (`texts.ts`), `chat.ts`'s `AWAY_QUESTION` (#1319's `execute.before`, naming `REPLY_ID`, `workbench_chat_reply`), reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
 - **A message's `about`** (`{task, n, step, round}`, `{audio, n, name, path}`) → `listen`'s prefix, `aboutTag`,
   `aboutBody`, `/api/send`'s check.

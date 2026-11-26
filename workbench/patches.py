@@ -270,7 +270,10 @@ def is_test(path) -> bool:
 # opencode-plugin/ imports from mod/ (tests/test_workbench.py checks it against the imports).
 PLUGIN_SHARED = ("mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/kernel.d.ts", "mod/hooks/golden/",
                  "mod/hooks/splash.ts", "mod/hooks/apprentice.ts",  # the splash, one for both hosts (#1333)
-                 "mod/hooks/tasks.ts", "mod/hooks/modeline.ts")  # the Tasks view, one for both hosts (#1312)
+                 "mod/hooks/tasks.ts", "mod/hooks/modeline.ts",  # the Tasks view, one for both hosts (#1312)
+                 "mod/hooks/keywords.ts",  # deepcode and deepmode typed, one for both hosts (#1278)
+                 "mod/hooks/waiting.ts",  # the driver's wait for the page's state line, one for both hosts (#1355)
+                 "mod/types/wire.d.ts")  # wb's shapes, its readers' types (#1323)
 KERNEL_CHECK = "python3 scripts/kernel.py check"
 MOD_TESTS = "claude plugin validate mod && claude plugin test mod"
 PLUGIN_TESTS = "BUN_BE_BUN=1 opencode test opencode-plugin/test && BUN_BE_BUN=1 opencode check -p opencode-plugin"
@@ -814,13 +817,21 @@ def _os_release() -> dict:
     return {}
 
 
+# Where the user types a command that asks them something, from an OpenCode driver: OpenCode's `!`
+# runs it with no terminal (2.4.1, as 2.3.2: a pipe, stdin closed, under a daemon in a session of
+# its own, process-daemon's service/pipe/unix.rs and client.rs), so sudo, pamac and gh's login
+# can't ask; its terminal pane (`terminal.toggle`, <leader>t, the leader ctrl+x by default) is a
+# real terminal, and wb there is the user's, with no OPENCODE_SESSION_ID (#1321, finding 17). The
+# OpenCode skill says the same (opencode-plugin/skill.ts PANE_OR_TERMINAL).
+PANE_OR_TERMINAL = "in OpenCode's terminal pane (ctrl+x t) or a terminal of their own"
+
+
 def _user_runs(cmd, how="the user runs", sep=": ") -> str:
     """How the user runs ``cmd``, which asks them something (a password, a login): Claude Code's
-    `! ` prefix; from an OpenCode driver, in a terminal of their own, as its `!` had no terminal
-    to prompt on (read in OpenCode 2.3.2's source: sudo, pamac and gh's login couldn't ask, and a
-    pasted `! …` went to the model; #1321, finding 17), and a terminal works on any version."""
+    `! ` prefix; from an OpenCode driver, PANE_OR_TERMINAL, as its `!` has no terminal to prompt
+    on (and a pasted `! …` went to the model in 2.3.2)."""
     if store.caller_kind() == "opencode":
-        return f"{how}, in a terminal of their own: {cmd}"
+        return f"{how}, {PANE_OR_TERMINAL}: {cmd}"
     return f"{how}{sep}! {cmd}"
 
 
@@ -1471,11 +1482,11 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
                              "dialog, and the user approved none for this send, so nothing was sent. Ask "
                              "the reviewer (ask_reviewer); or the user runs it in a terminal of their own: "
                              f"{again}")
-        if store.caller_kind() == "opencode":
-            raise PatchError("in OpenCode wb patch send goes only through the workbench plugin's dialog, "
+        if store.caller_kind() == "opencode":  # its terminal pane is the user's (PANE_OR_TERMINAL)
+            raise PatchError("in OpenCode wb patch send goes only through the workbench plugin's form, "
                              "and the user approved none for this send, so nothing was sent (the plugin's "
                              "workbench_patch_send tool asks them; is the plugin installed and loaded?). Or the "
-                             f"user runs it in a terminal of their own, outside OpenCode: {again}")
+                             f"user runs it {PANE_OR_TERMINAL}: {again}")
         raise PatchError("in Claude Code wb patch send goes only through the workbench mod's dialog, and "
                          "the user approved none for this send, so nothing was sent (is the mod installed "
                          "and loaded? wb doctor says). Or the user runs it in a terminal of their own, "

@@ -62,9 +62,10 @@ claude plugin install workbench@workbench
 
 After `wb setup` the web app is up, its link on the pane's modeline: `[•_•] Claude's Workbench - http://localhost:1337/#token=…`.
 Settings and Stats live in the web app (or ask Claude to change a setting for you). From its chat
-you message your driver from anywhere, a phone through your tailnet (chat.json `bind: tailscale`),
-and most work runs there; a prompt the driver raises waits in its terminal (ssh + tmux) unless it
-runs with permissions granted.
+you message your driver from anywhere, a phone through your tailnet (chat.json `bind: tailscale`).
+<!-- story:doc.rule -->
+The terminal is where your driver lives (locally, or over `ssh` + `tmux`), and a prompt it raises is answered there. Most work can still run from the web app's chat, more so with your driver run with permissions granted. The web app's Settings are the source of truth: your driver changes one only on your ask and yes, and never undoes a change you made.
+<!-- /story -->
 
 ### In Claude Code, inside your project
 

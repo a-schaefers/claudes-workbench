@@ -22,6 +22,7 @@ import { join, resolve } from 'node:path'
 import type { Registration, RpcDefinition, RpcHandlers, ServerContext } from './host.d.ts'
 import { findWb, wbEnv, wbHome, type Options } from './wb.ts'
 import { ACTIVE, NEEDS, NO_ANSWER, WAKE_OPENING, noticePlan, noticesDue, owns, rewakePlan } from '../mod/hooks/core.ts'
+import type { NoticeRow, StatusFile, TaskFile } from '../mod/types/wire.d.ts'
 import { Jobs } from './jobs.ts'
 
 export const SCAN_MS = 15_000          // the timer's look: held notices, the rewake net, the jobs
@@ -95,12 +96,12 @@ export const AWAY_TAIL = '(The user is away from the terminal: tell them in the 
 
 export type Row = Record<string, any>
 
-const batchOf = (row: Row): string[] | null =>
+const batchOf = (row: NoticeRow): string[] | null =>
   Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
-const outsideTheStep = (row: Row) => typeof row.cause === 'string' && !THE_STEP.has(row.cause)
+const outsideTheStep = (row: NoticeRow) => typeof row.cause === 'string' && !THE_STEP.has(row.cause)
 
 // A notice's headline (the toast's too), by its kind and cause: the mod's headlineOf
-export function headlineOf(row: Row): string {
+export function headlineOf(row: NoticeRow): string {
   const batch = batchOf(row)
   return batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted` : 'was interrupted')
     : row.cause === 'provider' ? PROVIDER_HEADLINE
@@ -109,7 +110,7 @@ export function headlineOf(row: Row): string {
 }
 
 // Its next step: the mod's nextOf (`capped`: routes.json has a day cap)
-export function nextOf(row: Row, name: string, capped: boolean): string {
+export function nextOf(row: NoticeRow, name: string, capped: boolean): string {
   const batch = batchOf(row)
   return batch ? BATCH_NEXT(batch)
     : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, capped))
@@ -119,7 +120,7 @@ export function nextOf(row: Row, name: string, capped: boolean): string {
 }
 
 // The wake's text: `[workbench] Task `<n>` <headline>.`, the notice, the next step
-export function wakeText(row: Row, name: string, capped: boolean): string {
+export function wakeText(row: NoticeRow, name: string, capped: boolean): string {
   const batch = batchOf(row)
   const who = batch && batch.length > 1 ? `[workbench] Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
     : `${WAKE_OPENING} \`${name}\` ${headlineOf(row)}`
@@ -179,16 +180,17 @@ export interface LaneDeps {
   readonly alive: (pid: number) => boolean
 }
 
-const json = (text: string | undefined): Row => {
+// a JSON object wb wrote (wire.d.ts's shape `T`), {} for none
+const json = <T extends object = Row>(text: string | undefined): Partial<T> => {
   try {
     const v = JSON.parse(text ?? '')
     return v && typeof v === 'object' ? v : {}
   } catch { return {} }
 }
-export const parseLines = (text: string): Row[] => text.split('\n').flatMap(line => {
+export const parseLines = (text: string): NoticeRow[] => text.split('\n').flatMap(line => {
   try {
     const r = JSON.parse(line)
-    return r && typeof r === 'object' && typeof r.task === 'string' && typeof r.ts === 'number' ? [r as Row] : []
+    return r && typeof r === 'object' && typeof r.task === 'string' && typeof r.ts === 'number' ? [r as NoticeRow] : []
   } catch { return [] }
 })
 
@@ -241,7 +243,7 @@ export class NoticeLane {
   // The session here a task is delivered to, '' for none: its recorded `session` (OpenCode's,
   // `driver.tool`), when this server's store holds it, judged by the kernel's owns (by session:
   // adoption by directory is wb adopt's)
-  async ownerOf(spec: Row): Promise<string> {
+  async ownerOf(spec: TaskFile): Promise<string> {
     const sid = typeof spec.session === 'string' ? spec.session : ''
     const tool = spec.driver && typeof spec.driver === 'object' ? String(spec.driver.tool ?? '') : ''
     if (!sid || tool !== 'opencode') return ''
@@ -281,7 +283,7 @@ export class NoticeLane {
   }
 
   // whether routes.json has a day cap, for a stop at it (cause `spend`): read only then (the mod's readRoutes)
-  capped(row: Row | null): boolean {
+  capped(row: NoticeRow | null): boolean {
     if (row?.cause !== 'spend') return false
     return typeof json(this.deps.read(this.deps.routes)).day_usd === 'number'
   }
@@ -304,17 +306,17 @@ export class NoticeLane {
   }
 
   // The open tasks, from their status.json, with the session here each is delivered to
-  tasks(now: number): { name: string; phase: string; parked: boolean; updatedAt: number; spec: Row }[] {
-    const out: { name: string; phase: string; parked: boolean; updatedAt: number; spec: Row }[] = []
+  tasks(now: number): { name: string; phase: string; parked: boolean; updatedAt: number; spec: TaskFile }[] {
+    const out: { name: string; phase: string; parked: boolean; updatedAt: number; spec: TaskFile }[] = []
     let names: string[] = []
     try { names = this.deps.list(this.path('tasks')) } catch { return out }
     for (const name of names) {
       if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(name)) continue
-      const st = json(this.deps.read(this.path('tasks', name, 'status.json')))
+      const st = json<StatusFile>(this.deps.read(this.path('tasks', name, 'status.json')))
       const phase = String(st.phase ?? '')
       if (!ACTIVE.has(phase) && !NEEDS.has(phase)) continue
       out.push({ name, phase, parked: !!st.parked, updatedAt: (Number(st.updated_at) || 0) * 1000,
-        spec: json(this.deps.read(this.path('tasks', name, 'task.json'))) })
+        spec: json<TaskFile>(this.deps.read(this.path('tasks', name, 'task.json'))) })
     }
     void now
     return out
@@ -340,11 +342,11 @@ export class NoticeLane {
       const picks = d.picks.map(i => rows[i]!).filter(Boolean)
       let acked = this.num(this.path('tasks', name, 'acked'))
       if (picks.every(r => r.ts <= acked)) continue
-      const spec = json(this.deps.read(this.path('tasks', name, 'task.json')))
+      const spec = json<TaskFile>(this.deps.read(this.path('tasks', name, 'task.json')))
       const sid = await this.ownerOf(spec)
       if (!sid) continue // another driver's, another server's or no session's: theirs to deliver (or wb wait's)
       this.delegated.add(name)
-      const status = json(this.deps.read(this.path('tasks', name, 'status.json')))
+      const status = json<StatusFile>(this.deps.read(this.path('tasks', name, 'status.json')))
       for (const row of picks) {
         const key = `${name}:${row.ts}`
         const kind = String(row.kind ?? '')

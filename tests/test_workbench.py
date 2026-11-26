@@ -24878,7 +24878,8 @@ class Setup(Base):
                 todo += [(target, t) for t in deps(ROOT / target)]
             imports.add(target)
         self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts",
-                         "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts"} <= imports)
+                         "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts",
+                         "mod/hooks/keywords.ts", "mod/hooks/waiting.ts"} <= imports)  # deep.ts's keywords (#1278), chat.ts's wait (#1355)
         # and every mod file the Git install brings is one the plugin needs, itself or through another
         self.assertEqual({f for f in root if f.startswith("mod/")}, {t for t in imports if t.startswith("mod/")})
 
@@ -24894,7 +24895,8 @@ class Setup(Base):
                 mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
             self.assertEqual([p for p, _ in ocplugin.shared_files(clone)],
                              ["mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/kernel.js",
-                              "mod/hooks/modeline.ts", "mod/hooks/splash.ts", "mod/hooks/tasks.ts"])
+                              "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/splash.ts",
+                              "mod/hooks/tasks.ts", "mod/hooks/waiting.ts"])
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
             first = Path(self.plugins()[0]["package"])
@@ -26776,9 +26778,10 @@ class LocalPatches(Base):
             (Path(self.tmp.name) / "os-release").write_text('NAME="Alpine Linux"\nID=alpine\n')
             self.assertEqual(patches._os_release()["ID"], "alpine")
 
-    def test_from_an_opencode_driver_a_prompting_step_goes_to_a_terminal_and_names_opencodes_model(self):
+    def test_from_an_opencode_driver_a_prompting_step_goes_to_its_terminal_pane_and_names_opencodes_model(self):
         # #1321 (findings 17, 27): the hints said `! cmd` and "Claude", Claude Code's; OpenCode's `!`
-        # had no terminal for sudo's password or gh's login, and no Claude drove it
+        # has no terminal for sudo's password or gh's login (2.4.1 too), its terminal pane does, and
+        # no Claude drove it
         real = shutil.which
         with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"), \
                 mock.patch.object(patches, "_os_release", lambda: {"ID": "arch"}), \
@@ -26786,18 +26789,19 @@ class LocalPatches(Base):
                 mock.patch.object(patches.hardware, "system", lambda: "linux"), \
                 mock.patch.object(patches.shutil, "which", lambda n: None if n != "git" else real(n)):
             missing = patches.gh_state()["hint"]
-        self.assertIn("OpenCode's model asks first, then the user runs, in a terminal of their own: sudo pacman "
-                      "-S github-cli", missing)
+        self.assertIn("OpenCode's model asks first, then the user runs, in OpenCode's terminal pane (ctrl+x t) or "
+                      "a terminal of their own: sudo pacman -S github-cli", missing)
         self.gh_auth(hosts=False)
         https = mock.patch.object(patches, "_guess_protocol", lambda root=None: "https")
         https.start(); self.addCleanup(https.stop)
         with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"):
             login = patches.gh_state()["hint"]
             crash = patches.driver_name()
-        self.assertIn("the user runs, in a terminal of their own: gh auth login --hostname github.com "
-                      "--git-protocol https (a browser or one-time code; OpenCode's model never handles the token)",
-                      login)
-        self.assertIn("then, in a terminal of their own: gh auth setup-git, so git pushes", login)
+        self.assertIn("the user runs, in OpenCode's terminal pane (ctrl+x t) or a terminal of their own: gh auth "
+                      "login --hostname github.com --git-protocol https (a browser or one-time code; OpenCode's "
+                      "model never handles the token)", login)
+        self.assertIn("then, in OpenCode's terminal pane (ctrl+x t) or a terminal of their own: gh auth setup-git, "
+                      "so git pushes", login)
         self.assertNotIn("! ", missing + login)
         self.assertEqual(crash, "OpenCode's model")
         self.assertIn("the user runs: ! gh auth login", patches.gh_state()["hint"])  # Claude Code's, as it was
@@ -26970,9 +26974,11 @@ class LocalPatches(Base):
         os.environ["OPENCODE_SESSION_ID"] = "ses_x"
         ok = store.home() / "send-ok.ses_x.json"            # its session's own (#1363)
         out = self.send(body)
-        self.assertIn("in OpenCode wb patch send goes only through the workbench plugin's dialog", out)
+        self.assertIn("in OpenCode wb patch send goes only through the workbench plugin's form", out)
         self.assertIn("the plugin's workbench_patch_send tool asks them", out)
-        self.assertIn(f'outside OpenCode: wb patch send fix-thing --title "Fix it" --body-file {body}', out)
+        # its terminal pane is the user's own terminal (#1321, finding 17): never "outside OpenCode"
+        self.assertIn("Or the user runs it in OpenCode's terminal pane (ctrl+x t) or a terminal of their own: "
+                      f'wb patch send fix-thing --title "Fix it" --body-file {body}', out)
         self.assertEqual(self.gh_argv(), [])
         self.assertFalse(self.sent())
         store.write_json(ok, {"slug": "fix-thing", "title": "Fix it", "body_file": str(body),
@@ -35720,6 +35726,48 @@ console.log(JSON.stringify({ failed }))
         self.assertEqual(left, [])
 
 
+    def test_deepcode_typed_brings_wbs_rule_to_the_model_and_a_deepmode_line_sets_it(self):
+        # #1278 on OpenCode (opencode-plugin/deep.ts): the prompt hook keeps the notes by the
+        # message's id and the context hook adds them while that message is the newest user one,
+        # which only a real server shows works (the ids it hands the two hooks match; #1325)
+        from workbench import chat, ocplugin, runs
+        chat.set_on(False)  # the prompt reaches the chat part too (see the tests above)
+        os.environ["HOME"] = str(self.root / "home")
+        state = self.root / "wb-state"
+        state.mkdir()
+        with mock.patch.dict(os.environ, {"WB_HOME": str(state)}):
+            chat.set_on(False)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = self.root / "requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out)])
+        self.addCleanup(lambda: (server.kill(), server.wait()))
+        self.conf.write_text(json.dumps({
+            "plugins": [{"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(state)}}}],
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 131072, "output": 1024}}}}}}))
+        url = self.serve(WB_HOME="")
+        self.listed(url, ocplugin.PLUGIN_ID)
+
+        def system(words):  # the system text of the requests with tools (not the title's) for that prompt
+            reqs = [json.loads(line) for line in out.read_text().splitlines()]
+            return ["".join(json.dumps(m["content"]) for m in r["messages"] if m["role"] == "system") for r in reqs
+                    if r.get("tools") and words in json.dumps([m for m in r["messages"] if m["role"] == "user"][-1:])]
+        self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepcode audit the parser")
+        said = system("deepcode audit the parser")
+        self.assertTrue(said, out.read_text())
+        self.assertIn(json.dumps(runs.DEEPCODE_RULE)[1:-1], said[0])
+        self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepmode on")
+        self.assertEqual(json.loads((state / "workflows.json").read_text())["mode"], "on")
+        toggled = system("deepmode on")
+        self.assertTrue(toggled, out.read_text())
+        self.assertIn("line set it (wb ran `wb deepmode on`): Dynamic workflows (deepmode): On.", toggled[0])
+        self.assertNotIn(json.dumps(runs.DEEPCODE_RULE)[1:-1], toggled[0])  # the last prompt's notes are done
+
+
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCodeSkillFiles(Base):
     """A handed skill's supporting files: what OpenCode tells the agent when it loads the skill."""
@@ -41348,10 +41396,11 @@ class OpenCodeDriver(Base):
         self.assertTrue(store.under_model())
         code, out, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.assertEqual((code, out), (3, ""))
-        self.assertIn("in OpenCode a role changes only through the workbench plugin's dialog, and the user "
+        self.assertIn("in OpenCode a role changes only through the workbench plugin's form, and the user "
                       "approved none for this change, so nothing changed (the plugin's workbench_route tool "
-                      "asks them; is the plugin loaded?). Or the user runs it in a terminal of their own: wb "
-                      "route trivial deepseek/deepseek-flash --day-usd 5", err)
+                      "asks them; is the plugin loaded?). Or the user runs it in OpenCode's terminal pane "
+                      "(ctrl+x t) or a terminal of their own: wb route trivial deepseek/deepseek-flash "
+                      "--day-usd 5", err)
         self.assertFalse(self.path.exists())
         os.environ["OPENCODE_SESSION_ID"] = "not an id!"           # a malformed id is still gated
         self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 3)
@@ -41452,7 +41501,7 @@ class OpenCodeDriver(Base):
         with self.assertRaises(SystemExit) as out, redirect_stderr(err):
             cli.start_gate("t-api", m)
         self.assertEqual(out.exception.code, 3)
-        self.assertIn("in OpenCode an API model starts only through the workbench plugin's dialog", err.getvalue())
+        self.assertIn("in OpenCode an API model starts only through the workbench plugin's form", err.getvalue())
         self.assertIn("the plugin's workbench_start tool asks them", err.getvalue())
         store.write_json(self.ok, {"start": {"task": "t-api", "model": "acme/coder-flash"},
                                    "change": cli.start_line("t-api", m), "at": time.time()})

@@ -27,6 +27,7 @@
   </div>
 </header>
 <div class="net" id="net" hidden></div>
+<div class="dstate" id="driver-state" role="status" aria-live="polite" hidden></div>
 <section class="view" id="view-chat" aria-label="Chat">
   <div class="tasks" id="tasks" role="button" tabindex="0" aria-expanded="false" aria-controls="task-sheet" hidden></div>
   <section class="tasksheet" id="task-sheet" hidden aria-label="Tasks">
@@ -47,15 +48,17 @@
     </div>
   </section>
   <div class="purpose" id="hint" hidden>
-    <p id="hint-text"></p>
+    <p id="hint-text" data-story="purpose">Message your driver from anywhere: most work can run from here. A prompt your driver raises
+    waits in its terminal (<code>ssh</code> + <code>tmux</code>); run your driver with permissions granted to skip those.
+    Your settings live here too.</p>
     <button id="hint-x" type="button" aria-label="Dismiss this hint">✕</button>
   </div>
   <main id="scroll">
     <div class="thread" id="thread">
       <div class="intro" id="intro">
         <div class="intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
-        <p>Message your driver from anywhere: most work can run from here. A prompt the driver raises
-        waits in its terminal (<code>ssh</code> + <code>tmux</code>); run the driver with permissions granted to skip those.
+        <p data-story="purpose">Message your driver from anywhere: most work can run from here. A prompt your driver raises
+        waits in its terminal (<code>ssh</code> + <code>tmux</code>); run your driver with permissions granted to skip those.
         Your settings live here too.</p>
         <div class="chips"><button class="chip" type="button">Status?</button><button class="chip" type="button">What needs me?</button><button class="chip" type="button">What are you working on?</button></div>
       </div>
@@ -104,10 +107,16 @@
   <div class="view-in">
     <div id="settings-rows"></div>
     <div class="cards" id="settings">
+      <div class="card" id="how">
+        <h3>How the chat works</h3>
+        <p class="small" data-story="rule.terminal">The terminal is where your driver lives, on this machine or over <code>ssh</code> + <code>tmux</code>: a prompt your driver raises is answered there, never in the chat.</p>
+        <p class="small" data-story="rule.chat">Most work can still run from the chat, more so with your driver run with permissions granted.</p>
+        <p class="small" data-story="rule.settings">The web app's Settings are the source of truth: your driver changes one only when you ask and say yes.</p>
+      </div>
       <div class="card">
         <h3>While away</h3>
         <p class="small" id="away-when">You're away from the moment you use the chat on another device (open it or send a message here) after using the terminal, until you type or answer a prompt in the terminal again. Stats and Settings don't count, nor this page opened on the computer itself (its localhost link) unless you send a message. Away ends by itself 6 hours after you last used the chat, unless a night's batch is still running.</p>
-        <p class="small" id="away-prompts">Claude's prompts (a permission, a question, a plan) are answered in the terminal, never here. While one waits, a line here says so: at once while you're away, after half a minute while you're at the terminal. Run Claude with permissions granted to work from the chat.</p>
+        <p class="small" id="away-prompts" data-story="prompts">Your driver's prompts (a permission, a question, a plan) are answered in the terminal, never here. While one waits, the line at the top of the chat says so. Run your driver with permissions granted to work from the chat.</p>
       </div>
       <div class="card">
         <h3>Notifications</h3>
@@ -119,10 +128,10 @@
       </div>
       <div class="card">
         <h3>This chat</h3>
-        <p>A second lane to Claude, not a copy of the terminal. What you send here reaches the Claude Code
-        session running <code>/workbench</code> on your computer; Claude answers here with what matters:
-        results, questions, its plans and permission prompts. The terminal's full output stays on
-        the computer. Ask Claude to keep you posted here, and it will.</p>
+        <p data-story="lane">A second lane to your driver, not a copy of the terminal. What you send here reaches the session
+        listening on your computer; your driver answers here with what matters: results, questions, its plans.
+        Its prompts wait in the terminal, and the terminal's full output stays on the computer.
+        Ask your driver to keep you posted here, and it will.</p>
       </div>
       <div class="card">
         <h3>This device</h3>
@@ -139,6 +148,7 @@
   <button type="button" class="tab" data-view="stats"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M7 16.5V11M12 16.5V5.5M17 16.5V8.5"/></svg><span class="tab-lbl">Stats</span></button>
   <button type="button" class="tab" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="tab-lbl">Settings</span></button>
 </nav>
+<script src="/story.js"></script>
 <script src="/app.js"></script>
 <script src="/stats.js" defer></script>
 <script src="/settings.js" defer></script>

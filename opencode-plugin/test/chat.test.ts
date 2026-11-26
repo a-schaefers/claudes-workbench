@@ -3,6 +3,9 @@ import {
   AGENT_NOTE, AWAY_QUESTION, BACK_AFTER_MS, ChatLane, NOTICE_AFTER_MS, REPLY_ID, RETRY_MS, SOURCE, WEB_NOTE, chat,
   chatPrompt, inboxId, replyTool,
 } from '../chat.ts'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { waitingFact, WAITING_AFTER_MS } from '../../mod/hooks/waiting.ts'
 
 // The web chat on OpenCode's path (#1319, #1340), under OpenCode's own Bun: the lane against a
 // fake wb and a fake session API. wb's side of each call: tests/test_chat_opencode.py.
@@ -320,6 +323,35 @@ test('a dialog OpenCode answers at once (autoaccept) is not the user being back'
   w.tick(BACK_AFTER_MS)
   await w.lane.event({ id: 'r2', type: 'permission.replied', data: { sessionID: 'ses_root', requestID: 'per_2', reply: 'once' } })
   expect(w.said().includes('chat back')).toBe(true)
+})
+
+// #1355: the page's state line, from the oldest dialog up two seconds (mod/hooks/waiting.ts, the
+// mod's too); the same cases on Claude Code's runtime in mod/hooks/waiting.test.ts
+test('waitingFact gives every case of tests/fixtures/story/dialogs.json under OpenCode\'s Bun', () => {
+  const doc = JSON.parse(readFileSync(fileURLToPath(new URL('../../tests/fixtures/story/dialogs.json', import.meta.url)), 'utf8'))
+  expect(doc.cases.length > 5).toBe(true)
+  for (const c of doc.cases) expect([c.why, waitingFact(c.dialogs, c.now)]).toEqual([c.why, c.out])
+})
+
+test('a dialog up two seconds is in the claim from the next poll, and settled it is out (#1355)', async () => {
+  const w = world()
+  await w.lane.typed({ sessionID: 'ses_root', prompt: { text: 'go' } })
+  w.mine()
+  await w.lane.event({ id: 'p', type: 'permission.asked', data: { id: 'per_1', sessionID: 'ses_child', action: 'shell', resources: ['rm -rf build'] } })
+  w.calls.length = 0
+  await w.lane.poll()                                            // up 0 s: an auto-accept's would be gone
+  expect(w.said().some(s => s.startsWith('chat listener'))).toBe(false)
+  w.tick(WAITING_AFTER_MS)
+  await w.lane.poll()
+  const since = (1_800_000_000_000) / 1000
+  expect(w.said().filter(s => s.startsWith('chat listener'))).toEqual([
+    `chat listener ses_root --pid 4242 --waiting ${JSON.stringify({ kind: 'permission', tool: 'shell', since, what: 'rm -rf build' })}`])
+  w.calls.length = 0
+  await w.lane.poll()                                            // said: not again
+  expect(w.said().some(s => s.startsWith('chat listener'))).toBe(false)
+  await w.lane.event({ id: 'r', type: 'permission.replied', data: { sessionID: 'ses_child', requestID: 'per_1', reply: 'once' } })
+  await w.lane.poll()
+  expect(w.said().filter(s => s.startsWith('chat listener'))).toEqual(['chat listener ses_root --pid 4242'])
 })
 
 test('while away the question tool is refused into the web chat; at the terminal it asks (#1340 B)', async () => {

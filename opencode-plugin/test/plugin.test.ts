@@ -67,6 +67,7 @@ test('the server part registers the status method, the Workbench agent and its s
   }
   expect(registered).toEqual(['workbench', 'status', 'status', 'skill.transform', 'agent.transform', 'session.hook',
     'session.hook', 'workbench-driver', 'driver', 'pin', 'driver', 'pin',  // the driver's model.request hook
+    'session.hook', 'session.hook', 'command.transform',  // deep's prompt and context hooks, /deepmode (#1278)
     'session.hook', 'session.hook', 'session.hook', 'command.transform',  // the upkeep's three hooks, the commands (#1315)
     'workbench-pane', 'tasks', 'live', 'diff', 'link', 'tasks', 'live', 'diff', 'link', 'command.transform',  // the panel's, /workbench (#1312)
     'workbench-children', 'sessions', 'sessions'])  // the agent sessions' messages, for the TUI's child sessions (#1331)

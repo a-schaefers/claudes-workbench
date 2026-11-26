@@ -12,11 +12,13 @@ import { Workbench, type Status } from './rpc.ts'
 import { calls } from './calls.ts'
 import { chat } from './chat.ts'
 import { consent } from './consent.ts'
+import { tools } from './tools.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
 import { registerAgent } from './agent.ts'
 import { startDriver, type DriverHost } from './driver.ts'
 import { notices } from './notices.ts'
 import { upkeep, type UpkeepHost } from './upkeep.ts'
+import { deep, type DeepHost } from './deep.ts'
 import { registerCommands, type CommandHost } from './commands.ts'
 import { startPane, type PaneHost } from './pane.ts'
 import { startChildren } from './children.ts'
@@ -45,10 +47,15 @@ const plugin: ServerPlugin = {
     // the consent gates before the calls: their execute.before refusal comes before a call's row (#1314)
     const stopConsent = await consent(ctx)
     if (stopConsent) stops.push(stopConsent)
+    const stopTools = await tools(ctx).catch(() => undefined) // the procedure's typed wb tools (#1335)
+    if (stopTools) stops.push(stopTools)
     const stopCalls = await calls(ctx) // the driver's calls in claude-calls/ (#1331)
     if (stopCalls) stops.push(stopCalls)
     const stopNotices = await notices(ctx) // the notices and the background jobs (#1313, #1334)
     if (stopNotices) stops.push(stopNotices)
+    // deepcode and deepmode typed, /deepmode (#1278): its prompt hook before upkeep's, which reads the toggle
+    const stopDeep = await deep(ctx as unknown as DeepHost).catch(() => undefined)
+    if (stopDeep) stops.push(stopDeep)
     // the conversation's rules, what a compaction keeps, the boundary compaction; the commands (#1315)
     const stopUpkeep = await upkeep(ctx as unknown as UpkeepHost).catch(() => undefined)
     if (stopUpkeep) stops.push(stopUpkeep)

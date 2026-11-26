@@ -23,12 +23,13 @@ export interface Where {
   readonly wb: string        // the wb the plugin runs
   readonly onPath: boolean   // that wb was found by name on OpenCode's PATH, so a shell's `wb` is it
   readonly docs: boolean     // root holds ARCHITECTURE.md (a clone; OpenCode's Git install doesn't)
+  readonly wakes: boolean    // the plugin delivers `[workbench]` wakes: its options' `wake` isn't "off" (notices.ts)
 }
 
 export const SKILL_ID = 'workbench'
 export const partId = (file: string): string => `workbench-${file.replace(/^reference\//, '').replace(/\.md$/, '')}`
 
-interface Rule {
+export interface Rule {
   readonly from: RegExp
   readonly to: string | ((w: Where) => string)
   readonly files: readonly string[] | '*'   // the source files it applies to ('*': every one)
@@ -38,11 +39,21 @@ interface Rule {
 // matches any whitespace, newlines and indents included
 const phrase = (s: string): RegExp =>
   new RegExp(s.trim().split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+'), 'g')
-const line = (from: string, to: string | ((w: Where) => string), files: readonly string[] | '*' = ['SKILL.md']): Rule =>
+export const line = (from: string, to: string | ((w: Where) => string), files: readonly string[] | '*' = ['SKILL.md']): Rule =>
   ({ from: phrase(from), to, files })
 
 const SKILL = ['SKILL.md']
 const CC_LINK = '`readlink -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/workbench"`'
+
+// Where the user types a command that asks them something (sudo's password, gh's login). Claude
+// Code's `!` runs it in the user's terminal; OpenCode's `!` (shell mode, typed at the prompt's
+// start) runs it with no terminal: a pipe, stdin closed, under a daemon in a session of its own
+// (2.4.1's process-daemon, service/pipe/unix.rs and client.rs), so nothing can ask. Its terminal
+// pane (`terminal.toggle`, `<leader>t`, the leader ctrl+x by default) is a real terminal, and wb
+// there is the user's: no OPENCODE_SESSION_ID (#1321, finding 17; patches.PANE_OR_TERMINAL, wb's
+// own hints, says the same)
+export const PANE_OR_TERMINAL = "in OpenCode's terminal pane (ctrl+x t) or a terminal of their own"
+export const BANG = "OpenCode's `!` runs a command with no terminal"
 
 const cli = (w: Where): string => (w.onPath
   ? '`wb` is the workbench CLI (on PATH as `wb`; `wb --help`).'
@@ -50,6 +61,26 @@ const cli = (w: Where): string => (w.onPath
   + (w.docs
     ? ` Its code, ARCHITECTURE.md included, is at \`${w.root}\`.`
     : ` Its code is at \`${w.root}\`; ARCHITECTURE.md, its design, is in a clone of github.com/a-schaefers/workbench (OpenCode's install leaves it out).`)
+
+// The procedure's everyday commands are typed tools on OpenCode (tools.ts, consent.ts): said once
+// after the wb line, and at the recipes below
+export const TOOLS_NOTE = "Its everyday commands are typed tools here, each that `wb` command run as this session in its directory, its "
+  + 'fields the flags by name: `workbench_start`, `workbench_status`, `workbench_diff`, `workbench_feedback` (the whole text in '
+  + '`text`), `workbench_accept` and `workbench_discard`: use them wherever this says `wb start`, `wb status`, `wb diff`, '
+  + "`wb feedback`, `wb accept` or `wb discard` (a flag is the field of its name; one start's fields lack goes in its `args`), "
+  + 'and the shell for the rest of `wb`. `workbench_wait` holds the turn until a task needs you, for when no wake will come; '
+  + "a wait in the background stays the shell's `wb wait` with `background: true`. Four changes are the user's, through the tools that ask them "
+  + 'in a form first, never the shell, which refuses them: an API role (`workbench_route`), a start on an API model '
+  + "(`workbench_start`), a Settings row a role needs (`workbench_settings_set`) and a patch sent upstream (`workbench_patch_send`). "
+  + 'A `[web chat]` message is answered with `workbench_chat_reply`.'
+
+// The wake paragraph: the plugin's `[workbench]` wakes (notices.ts, #1313), or with its `wake`
+// option off none, so a wait only when the user asks for one
+const wakes = (w: Where): string => (w.wakes
+  ? "**Don't poll.** The plugin wakes this session with a `[workbench]` message when the task needs you (review, question, "
+    + "stuck, failed): end your turn and wait for it; an agent's question can't wait, so it reaches you mid-turn too: answer it then."
+  : "**Don't poll.** Wakes are off (the plugin's `wake` option): no `[workbench]` message will come. Tell the user it runs, "
+    + 'and wait (`workbench_wait`, which returns when the task needs you) only if they ask.')
 
 // Claude Code's lines and what each says on OpenCode. The exact lines first, then the ones that
 // recur. Each must match its file (the test fails by name when one doesn't).
@@ -86,6 +117,27 @@ export const HOST_LINES: readonly Rule[] = [
   line('That holds in plan mode, which is read-only: read the code, `wb models` and `wb status` if you can, and start nothing until the plan is approved;',
     'That holds when the user wants the plan first: read the code, `wb models` and `wb status`, and start nothing until they approve it;'),
   line('`wb` is the workbench CLI (on PATH as `wb`; `wb --help`). Its code, ARCHITECTURE.md included, is two directories above ' + CC_LINK + '.', cli),
+  line("don't go digging in raw logs unless a report says to.", "don't go digging in raw logs unless a report says to. " + TOOLS_NOTE),
+  // the recipes: the tools by their fields (tools.ts; start's in consent.ts)
+  { from: /```\nwb start <kebab-name> --spec[\s\S]*?```\n`--auto-fix` defaults to 2 on the GPU and 1 on API\./, files: SKILL,
+    to: '`workbench_start`: `name` (kebab-case), `spec` (its whole text, or `spec_file`), `repo`, `role` (significant, trivial '
+      + 'or writing) and `test` (the acceptance command); as needed `skill`, `model`, `auto_fix` (default 2 on the GPU, 1 on API), '
+      + "`setup` and `image`; any other flag below in `args`, as on wb start's command line (`[\"--copy\", \"node_modules\"]`)." },
+  line('Numbered, concrete changes in a file → `wb feedback <name> --message <file>` (or `--text "…"`).',
+    'Numbered, concrete changes → `workbench_feedback` with the `task` and its whole `text`.'),
+  line('Approved: `wb accept <name> -m "<conventional commit subject>"` commits',
+    'Approved: `workbench_accept` with the `task` and its `message`, a conventional commit subject, commits'),
+  line('`wb discard <name> --reason "…"` drops it', '`workbench_discard` with the `task` and its `reason` drops it'),
+  // the gated changes: the tools that ask the user in a form (consent.ts, #1314)
+  line("(the mod's dialog then asks them, and a \"not changed\" means no)", '(`workbench_start` then asks them in a form, and a "not changed" means no)'),
+  line('change, run it as a command of its own (`wb route trivial', "change, run it through `workbench_route`, a call of its own whose `args` are wb route's words (`wb route trivial"),
+  line('the mod shows them the change in a dialog', 'it shows them the change in a form'),
+  line('`wb settings set <key> <value>` applies it as the web app does', '`workbench_settings_set` with the `key` and the `value` applies it as the web app does'),
+  line("A role moved to API still goes through the mod's dialog, as `wb route` does:", 'A role moved to API still asks them in its form, as `workbench_route` does:'),
+  line('then the one `wb patch send` it printed, as a command of its own, `--title` and `--body-file` written out. The mod asks the user to approve that send in a dialog,',
+    "then the `wb patch send` it printed, through `workbench_patch_send` (`slug`, `title`, `body_file`, `draft` if they want one), never the shell. It asks the user to approve that send in a form,"),
+  line('Then run the printed `wb patch send <slug> --title "…" --body-file <f>` (`--draft` if they want one); the mod\'s dialog shows the title and the body\'s start, and the user approves it there. Run it as a command of its own, the flags spelled out (`--title`, `--body-file`, never shortened, never a `$VAR`): the dialog refuses what it can\'t show. If wb says the dialog approved none (the mod isn\'t loaded), the user runs that command in a terminal of their own.',
+    "Then send what it printed through `workbench_patch_send` (`slug`, `title`, `body_file`, `draft` if they want one), never the shell; its form shows the title and the body's start, and the user approves it there. It refuses what it can't show. If it says no window was open to ask in, the user runs that command in a terminal of their own.", ['reference/patching.md']),
   // agents read OpenCode's global AGENTS.md (context.py, the project-config note), as the driver does
   line("It never gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`: those are yours. When you will review against one of those global rules,",
     "It never gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`; it does get OpenCode's global `~/.config/opencode/AGENTS.md`, as you do. When you will review against a global rule it doesn't get,"),
@@ -99,16 +151,21 @@ export const HOST_LINES: readonly Rule[] = [
   // a Claude Code Workflow beside a flow: OpenCode's driver has no Workflow tool
   { from: /With `ultracode` and `deepcode` in one prompt,[\s\S]*?never redoes it\.\n/, to: '', files: SKILL },
   line('run in the background (Bash `run_in_background`)', "run in the background (the shell tool's `background: true`)"),
-  // wakes: until the plugin delivers `[workbench]` notices (#1313) the driver waits with `wb wait`,
-  // never for a wake that won't come (the #1335 review, 2026-11-25); #1313 rewrites this line
+  // wakes: the plugin's `[workbench]` messages (notices.ts, #1313), the mod's branch; no "without
+  // the mod" branch: this prompt is the plugin's, so it is always there. With its `wake` option
+  // off, none comes (`wakes`)
   line("**Don't poll.** With the workbench mod loaded the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck, failed) — end your turn and wait for it; an agent's question can't wait, so it reaches you mid-turn too: answer it then. Without the mod, run `wb wait <name>` with Bash `run_in_background: true` and act on its notification. If the context says wakes are off (the plugin's wake setting), none will come: tell the user it runs, and wait only if they ask.",
-    "**Don't poll.** Run `wb wait <name>` with the shell tool's `background: true` and act on what it prints: it returns when the task needs you (review, question, stuck, failed); an agent's question can't wait, so answer it at once."),
+    wakes),
   // the user's two commands are the plugin's server commands (commands.ts, #1315): a quit leaves
-  // the Workbench agent for Build, the mode's end here (the pane is #1312's)
+  // the Workbench agent for Build, which closes the panel (pane.tsx, #1312), the mode's end here
   line('the mod runs them, closes the pane and tells you what it did:',
-    'the plugin runs them, switches this session to the Build agent and tells you what it did:'),
+    'the plugin runs them, switches this session to the Build agent (which closes the Workbench panel) and tells you what it did:'),
+  // they are the plugin's own commands wherever OpenCode runs this prompt, which only the plugin
+  // gives: never words (the mod's absent branch has no OpenCode case)
+  { from: /\nWithout the mod, the user may ask for the same in words; run those commands then\./, to: '', files: SKILL },
   line('once (a marketplace install can\'t keep one: Claude Code re-clones it)',
     "once (OpenCode's own install of workbench can't keep one: wb patch names the clone to make and its `bin/wb setup --opencode`)"),
+  line('the login is theirs (`! gh auth login`)', `the login is theirs, typed ${PANE_OR_TERMINAL} (\`gh auth login\`; ${BANG})`),
 
   // reference/driving.md
   line("(`~/.claude/CLAUDE.md`, `wb notes`, the repo's CLAUDE.md)", "(`~/.config/opencode/AGENTS.md`, `wb notes`, the repo's CLAUDE.md)", ['reference/driving.md']),
@@ -129,17 +186,76 @@ export const HOST_LINES: readonly Rule[] = [
   line("(each directory's: the mod's,", "(each directory's: the Claude Code mod's,", ['reference/patching.md']),
 
   // reference/models.md
-  line("with Claude Code's `!` prefix", "with OpenCode's `!` prefix", ['reference/models.md']),
+  // OpenCode's `!` can't prompt (`BANG`): sudo's password goes to a terminal
+  line("with Claude Code's `!` prefix or in a terminal of their own if sudo can't ask there",
+    `${PANE_OR_TERMINAL} (${BANG}, so sudo couldn't ask)`, ['reference/models.md']),
   line('Claude sets it up on request;', 'You set it up on request;', ['reference/models.md']),
   line('tell the user to restart Claude Code or run `/reload-plugins` after)',
     "OpenCode reloads the plugin by itself after it; an install OpenCode made from Git it updates itself, as wb update says)", ['reference/models.md']),
 
-  // reference/patching.md
-  line('Then the user runs `/reload-plugins`.', 'Then, on Claude Code, the user runs `/reload-plugins`.', ['reference/patching.md']),
+  // reference/patching.md: Claude Code's facts, OpenCode's here (#1321, finding 7)
+  // the clone a patch lives in: OpenCode's own install can't keep one, and `wb patch` refuses there
+  // (cli.cmd_patch); wb setup --opencode keeps a Git entry's source, so the plugin's own code stays
+  // that install's until the entry names the clone (ocplugin.install)
+  { from: /1\. Once, on a marketplace install: `wb patch init`[\s\S]*?`--track` gets it from `wb update` or `wb patch init`\)\./,
+    to: '1. Once, a clone the user owns: patches are commits on its branch `local`. OpenCode\'s own install\n'
+      + "   of workbench (from Git, in OpenCode's package cache) can't keep one, as OpenCode replaces it\n"
+      + '   when it updates: `wb patch` refuses there and prints the two commands that make one, a `git\n'
+      + "   clone` and that clone's `bin/wb setup --opencode`; run them on the user's yes. The plugin then\n"
+      + "   runs the clone's `wb`, and its own code stays OpenCode's install while OpenCode's `plugins`\n"
+      + '   entry names that install (`wb doctor` says which copy loads, from which file): for a patch\n'
+      + "   under `opencode-plugin/`, that entry comes out of OpenCode's config (on the user's yes) and\n"
+      + "   the clone's `bin/wb setup --opencode` runs again, which loads the clone's. Run from Claude\n"
+      + "   Code's marketplace install (a machine with both), `wb patch init` (on the user's yes; it\n"
+      + '   refuses while tasks run) moves it to a full clone, `~/.local/share/workbench/source` or\n'
+      + "   `--dir`/`WB_SOURCE`, OpenCode's plugin too when it ran from there, and the user runs\n"
+      + '   `/reload-plugins` in Claude Code. On a clone the user already owns, `wb patch init` says so:\n'
+      + '   work on branch `local` there (`git -C <root> switch -c local --track origin/main`; one made\n'
+      + '   without `--track` gets it from `wb update` or `wb patch init`).',
+    files: ['reference/patching.md'] },
   line('copies the committed HEAD into the plugin cache), then `/reload-plugins`.',
-    "copies the committed HEAD into the plugin cache), then `/reload-plugins`; one under `opencode-plugin/` reaches OpenCode through `wb update` too (it loads a copy of what is committed, and reloads it by itself).", ['reference/patching.md']),
+    "copies the committed HEAD into the plugin cache), then `/reload-plugins`; one under `opencode-plugin/` reaches OpenCode through `wb update` too while OpenCode loads the plugin from this clone (step 1): a copy of what is committed, which it reloads by itself.", ['reference/patching.md']),
+  // the plugin's form asks only for wb patch send (consent.ts): gh's and git's own sends, an MCP
+  // tool's, go out on the user's yes in words; while they are away the form waits (no NOT_SENT_AWAY)
+  { from: /The mod holds every send to\s+workbench upstream[\s\S]*?until they are back at the terminal\./,
+    to: 'Nothing goes to\nworkbench upstream (an issue, a comment, a fork, a push, a pull request) without '
+      + "the user's yes\nto that one thing, asked each time: a yes is never remembered. A pull request goes only "
+      + 'through\n`workbench_patch_send`, which asks them in a form, and wb refuses a send its form didn\'t '
+      + 'approve,\nso never send one with gh, git or a GitHub MCP tool yourself. The form is only for that send: '
+      + 'an\nissue or a comment (step 1) goes out through gh, on their yes in words to the text you showed\nthem. '
+      + 'Show them what goes public first, so the form only confirms what they have read. A "Don\'t\nsend" is a '
+      + "no: tell them it wasn't sent and leave it, unless they bring it up. If they are away on\nthe web chat, "
+      + 'tell them there what it would send: the form waits in the terminal for their answer.',
+    files: ['reference/patching.md'] },
+  // the marketplace clone's rescue is Claude Code's, met here only with both installed (#1321's
+  // "checked and fine": it never fires on an OpenCode clone)
+  line("It found local changes in Claude Code's clone,", "On a machine with Claude Code's install too, it found local changes in Claude Code's clone,",
+    ['reference/patching.md']),
+  line('nothing sent, so no dialog asks;', 'nothing sent, so no form asks;', ['reference/patching.md']),
+  // gh's login asks the user (a browser, a code): OpenCode's `!` has no terminal for it (`BANG`)
+  line("the login is the user's own: `! gh auth login --hostname github.com --git-protocol <ssh|https>` as wb prints it",
+    `the login is the user's own, typed ${PANE_OR_TERMINAL}, never with \`!\` (${BANG}): \`gh auth login --hostname github.com --git-protocol <ssh|https>\` as wb prints it`,
+    ['reference/patching.md']),
+  line('Over https, `! gh auth setup-git` too,', 'Over https, `gh auth setup-git` there too,', ['reference/patching.md']),
+  line("needs the token's workflow scope: `! gh auth refresh -h github.com -s workflow`.",
+    "needs the token's workflow scope: `gh auth refresh -h github.com -s workflow`, typed there too.", ['reference/patching.md']),
+  // Claude Code's GitHub plugin: on OpenCode, a GitHub MCP server in its own config
+  { from: /- \*\*The GitHub plugin for Claude Code is optional\*\*[\s\S]*?a pull request still goes through `wb patch send`\./,
+    to: "- **A GitHub MCP server is optional**, never needed for a pull request. If the user wants one,\n"
+      + "  it goes in their OpenCode config's `mcp`, with a personal access token they create on GitHub\n"
+      + '  and set in their own shell profile (never from `gh auth token` unless they ask for exactly\n'
+      + '  that); `opencode mcp list` checks it connects. Its tools that write to upstream are sends like\n'
+      + "  gh's: each on the user's yes; a pull request still goes through `workbench_patch_send`.",
+    files: ['reference/patching.md'] },
 
   // what recurs
+  // (after every line above, which match Claude Code's words) the web chat's replies: chat.ts's tool (#1319)
+  { from: /`wb chat reply\s+--to\s+<id>\s+--text\s+"…"`/g, to: '`workbench_chat_reply`, `to` its id', files: '*' },
+  { from: /`wb chat reply\s+--to\s+user(?:\s+--text\s+"…")?`/g, to: '`workbench_chat_reply`, `to` `user`', files: '*' },
+  { from: /`wb chat reply(?:\s+--text\s+"…")?`/g, to: '`workbench_chat_reply`', files: '*' },
+  // what remains of the mod's dialogs where the user approves a change: the plugin's form (a
+  // "dialog's" too: \b ends the word at its apostrophe)
+  { from: /\b(the|a)(\s+)dialog\b/g, to: '$1$2form', files: ['SKILL.md', 'reference/models.md', 'reference/patching.md'] },
   { from: /two directories above\s+`readlink -f "\$\{CLAUDE_CONFIG_DIR:-\$HOME\/\.claude\}\/skills\/workbench"`/g, to: (w) => `at \`${w.root}\``, files: '*' },
   { from: /\s+--session\s+"\$CLAUDE_CODE_SESSION_ID"/g, to: '', files: SKILL },  // wb takes the caller's session (#1309)
   { from: /`\/workbench-quit-and-hand-back-claude`/g, to: '`/workbench-quit-and-hand-back`', files: SKILL },
@@ -175,11 +291,21 @@ export function skillFor(host: Host, file: string, text: string, where: Where): 
   return loads(out)
 }
 
-// How often each host line matches its files: a 0 is a line SKILL.md no longer has
-export function hostLineMatches(texts: Readonly<Record<string, string>>): number[] {
-  return HOST_LINES.map((rule) => Object.entries(texts)
-    .filter(([file]) => applies(rule, file))
-    .reduce((n, [, text]) => n + (text.match(new RegExp(rule.from.source, 'g'))?.length ?? 0), 0))
+// How often each host line matches its files, each in the text the lines before it left (as
+// skillFor applies them): a 0 is a line SKILL.md no longer has, or one an earlier line rewrote
+// first (a recurring rule must come after the exact lines whose words it changes)
+const ANY_WHERE: Where = { root: '/workbench', wb: '/workbench/bin/wb', onPath: true, docs: true, wakes: true }
+export function hostLineMatches(texts: Readonly<Record<string, string>>, where: Where = ANY_WHERE,
+                                rules: readonly Rule[] = HOST_LINES): number[] {
+  const now: Record<string, string> = { ...texts }
+  return rules.map((rule) => {
+    let n = 0
+    for (const file of Object.keys(now).filter((f) => applies(rule, f))) {
+      n += now[file]!.match(new RegExp(rule.from.source, 'g'))?.length ?? 0
+      now[file] = now[file]!.replace(rule.from, typeof rule.to === 'string' ? rule.to : rule.to(where))
+    }
+    return n
+  })
 }
 
 export interface Part {

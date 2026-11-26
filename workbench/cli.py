@@ -3929,9 +3929,9 @@ def gate_refusal(what: str, command: str, tool: str = "workbench_route") -> str:
                 f"user approved none for this change, so nothing changed. Ask the reviewer "
                 f"(ask_reviewer); or the user runs it in a terminal of their own: {command}")
     if store.caller_kind() == "opencode":
-        return (f"in OpenCode {what} only through the workbench plugin's dialog, and the user "
+        return (f"in OpenCode {what} only through the workbench plugin's form, and the user "
                 f"approved none for this change, so nothing changed (the plugin's {tool} tool asks "
-                f"them; is the plugin loaded?). Or the user runs it in a terminal of their own: {command}")
+                f"them; is the plugin loaded?). Or the user runs it {patches.PANE_OR_TERMINAL}: {command}")
     return (f"in Claude Code {what} only through the workbench mod's dialog, and the user approved "
             f"none for this change, so nothing changed (is the mod loaded? wb doctor says). Or the "
             f"user runs it in a terminal of their own: {command}")
@@ -7481,7 +7481,8 @@ def cmd_chat(a):
             print(json.dumps(lst) if lst else "none")
             return
         try:
-            ok, claim = chat.hold(a.id, a.pid or 0, a.busy)
+            waiting = json.loads(a.waiting) if a.waiting else None
+            ok, claim = chat.hold(a.id, a.pid or 0, a.busy, waiting=waiting)
         except ValueError as e:
             die(f"wb chat listener: {e}")
         if not ok:
@@ -9755,6 +9756,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--pid", type=int, help=argparse.SUPPRESS)       # listener: the server's pid
     s.add_argument("--busy", action="store_true", help=argparse.SUPPRESS)  # listener: in a turn
     s.add_argument("--drop", action="store_true", help=argparse.SUPPRESS)  # listener: stop listening
+    s.add_argument("--waiting", help=argparse.SUPPRESS)  # listener: the dialog up in its terminal, JSON (#1355)
     s.add_argument("--away", action="store_true", help=argparse.SUPPRESS)  # ack: the user is away now
     s.add_argument("--if-owed", action="store_true", help=argparse.SUPPRESS)  # reply: owed ones only
     s.add_argument("--turn-answer", action="store_true", help="reply: the mod's: a turn's own answer, "

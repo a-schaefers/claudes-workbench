@@ -308,6 +308,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Message"
+                  listener:
+                    $ref: "#/components/schemas/Listener"
                   push:
                     type: object
         "401":
@@ -911,16 +913,24 @@ components:
           description: "OpenCode's model for that session, <provider>/<id>, when its server says"
     Listener:
       type: [object, "null"]
-      description: the listening session, or null when nobody listens
+      description: >-
+        the listening session, or null when nobody listens. Claude Code's claim: pid its wb events
+        process, parent its Claude Code. OpenCode's: tool opencode, session the OpenCode session's
+        id, pid and start the OpenCode server's whose plugin delivers into it, no parent
       properties:
         session:
           type: string
+        tool:
+          type: string
+          enum: [opencode]
+          description: on OpenCode's claim only
         cwd:
           type: string
         pid:
           type: integer
         start:
-          type: number
+          type: [string, "null"]
+          description: when pid started, as wb reads it (a recycled pid is no listener)
         machine:
           type: string
         parent:
@@ -986,6 +996,9 @@ components:
             type: string
         driver:
           $ref: "#/components/schemas/Driver"
+        opencode_session:
+          type: string
+          description: on a row an OpenCode session wrote, that session's id (never session or claude_*)
       additionalProperties: true
     SettingRow:
       type: object
@@ -1035,6 +1048,14 @@ components:
         dictate:
           type: boolean
           description: the computer has a listener for /transcribe
+        driver:
+          type: object
+          description: >-
+            the driver's state (none, idle, working, waiting), in the story's words: {state, driver,
+            who, where?, waiting?, line, next, grant?}
+        settings:
+          type: [object, "null"]
+          description: the newest Settings change, {ts, key, label, to, by}
         expire:
           type: number
           description: seconds a message waits before it is never passed on (21600)

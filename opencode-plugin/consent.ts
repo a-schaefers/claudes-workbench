@@ -37,6 +37,7 @@ import {
   localOnlyPatchRefusal, localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, wordPath, type Classify, type Coding, type Env, type Places,
 } from './gates.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv } from './wb.ts'
+import { START_INPUT, startCall } from './tools.ts'
 import { simpleWords } from './words.ts'
 
 export const NAMESPACE = 'workbench'
@@ -209,7 +210,7 @@ export class Asker {
 
 // --- running wb, as the session that asked (OPENCODE_SESSION_ID), in its directory
 export interface Ran { readonly code: number; readonly out: string; readonly err: string }
-export type Run = (args: string[], opts: { session: string; cwd?: string; timeout?: number }) => Promise<Ran>
+export type Run = (args: string[], opts: { session: string; cwd?: string; timeout?: number; input?: string }) => Promise<Ran>
 
 export function runner(options: ServerContext['options'], base: Env = process.env): Run {
   return (args, opts) => new Promise(done => {
@@ -224,7 +225,8 @@ export function runner(options: ServerContext['options'], base: Env = process.en
         code: e ? (typeof e.code === 'number' ? e.code : 1) : 0, out: String(stdout ?? ''),
         err: String(stderr ?? '') || (e && typeof e.code !== 'number' ? String(e.message) : ''),
       }))
-    child.stdin?.end()
+    // a typed start's spec (`--spec -`, tools.ts), else closed
+    ;(child.stdin as { end(data?: string): void } | null | undefined)?.end(opts.input ?? '')
   })
 }
 
@@ -290,7 +292,7 @@ export interface Deps {
 
 // One gated wb call: its dry run, the form on a gated change, the approval, the call
 async function gated(d: Deps, session: string, signal: AbortSignal | undefined, dry: string[] | null,
-                     real: string[], what: string, timeout = RUN_MS): Promise<{ content: string }> {
+                     real: string[], what: string, timeout = RUN_MS, input?: string): Promise<{ content: string }> {
   const cwd = await d.dir(session)
   const q = dry && gatedChange(await d.run(dry, { session, cwd, timeout: DRY_MS }))
   if (q) {
@@ -299,7 +301,7 @@ async function gated(d: Deps, session: string, signal: AbortSignal | undefined, 
     if (a === 'no') throw new Error(NOT_CHANGED)
     writeApproval(d.home(), 'route-ok.json', session, q.approval, d.now?.())
   }
-  return answer(await d.run(real, { session, cwd, timeout }))
+  return answer(await d.run(real, { session, cwd, timeout, input }))
 }
 
 const argsOf = (input: unknown): string[] => {
@@ -331,15 +333,18 @@ export function tools(d: Deps) {
     },
     {
       name: 'start',
-      description: 'Start a delegated task (wb start). With a --model on an API model it asks the user in a ' +
-        'form first and starts only on their yes; otherwise it starts at once.',
-      input: ARGS('wb start\'s arguments, as on its command line (the task name first)'),
+      description: 'Start a delegated task (wb start): the spec, the repo, the role and the acceptance test ' +
+        'by name, any other flag in `args`. It returns at once; a detached runner does the work. With a ' +
+        'model that is an API model it asks the user in a form first and starts only on their yes; ' +
+        'otherwise it starts at once.',
+      input: START_INPUT,
       options: opts,
       execute: async (input: unknown, ctx: { sessionID: string; signal?: AbortSignal }) => {
-        const args = argsOf(input)
+        // the typed fields (tools.ts, #1335), the spec on stdin; `{args}` alone is the argv as it is
+        const { args, stdin } = startCall(input)
         // any abbreviation of --model (wb start's parser takes one), as the kernel's `start` gate
         const dry = args.some(a => a.startsWith('--m')) ? ['route', '--dry-run', '--json', '--start', ...args] : null
-        return gated(d, ctx.sessionID, ctx.signal, dry, ['start', ...args], 'not started')
+        return gated(d, ctx.sessionID, ctx.signal, dry, ['start', ...args], 'not started', RUN_MS, stdin)
       },
     },
     {

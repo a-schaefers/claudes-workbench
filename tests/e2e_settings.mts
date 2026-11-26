@@ -245,6 +245,27 @@ export async function check(page: any, ctx: E2eCtx) {
       await until(async () => await lit() === 'ask')
     })
 
+    await ctx.check('a change Claude makes (wb settings set under Claude Code) is drawn with no reload, stamped by Claude, listed in Recent changes and toasted (#1355)', async () => {
+      unmock()
+      const lit = async () => await row('coding').locator('[aria-checked="true"]').getAttribute('data-value')
+      const asClaude = (value: string) => new Promise<void>((resolve, reject) => execFile(join(ROOT, 'bin', 'wb'),
+        ['settings', 'set', 'coding', value], { env: { ...env, CLAUDECODE: '1' }, encoding: 'utf8', timeout: 60000 },
+        (err, _out, stderr) => err ? reject(new Error(String(stderr || err).trim())) : resolve()))
+      await reshow()
+      await until(async () => await lit() === 'decide')
+      await page.evaluate(() => { (window as any).__wbNoReload = 1 })
+      await asClaude('ask')
+      await until(async () => await lit() === 'ask', 3000).catch(async () => { throw new Error('not drawn: ' + await lit()) })
+      if (await page.evaluate(() => (window as any).__wbNoReload) !== 1) throw new Error('the page reloaded')
+      const stamp = await row('coding').locator('.set-changed').textContent()
+      if (!stamp.startsWith('Changed by Claude')) throw new Error(stamp)
+      await until(async () => (await toast()).includes('set to ask by Claude')).catch(async () => { throw new Error('toast: ' + await toast()) })
+      const listed = await page.locator('#settings-rows .set-changes').textContent()
+      if (!listed.includes('decide → ask, by Claude')) throw new Error(listed)
+      await asClaude('decide')                               // as it was
+      await until(async () => await lit() === 'decide', 3000)
+    })
+
     await ctx.check('a choice made by keyboard keeps the focus on its control, and a number sent with Enter keeps its box (#1409)', async () => {
       // #1409 (2026-11-25): the redraw took the focused radio away, the focus fell to the page,
       // and the next Tab began again at the first row

@@ -2,9 +2,12 @@ import { expect, test } from 'bun:test'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { readFileSync, readdirSync } from 'node:fs'
-import { HOST_LINES, SKILL_ID, hostLineMatches, partId, readSkill, render, skillFor, type Where } from '../skill.ts'
+import { HOST_LINES, PANE_OR_TERMINAL, SKILL_ID, hostLineMatches, line, partId, readSkill, render, skillFor, type Where } from '../skill.ts'
 import { AGENT, NAME, OURS, defineAgent, defineSkills, intro, keepOurs, registerAgent, skillRoot, where, withPrompt } from '../agent.ts'
 import { OWN } from '../wb.ts'
+import { SPECS } from '../tools.ts'
+import { tools as consentTools } from '../consent.ts'
+import { REPLY_TOOL } from '../chat.ts'
 import type { AgentInfo, SkillInfo } from '../host.d.ts'
 
 // The skill on OpenCode (#1335), under OpenCode's own Bun: `BUN_BE_BUN=1 opencode test
@@ -13,7 +16,7 @@ const ROOT = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '')
 const DIR = join(ROOT, 'skill', 'workbench')
 const FILES = ['SKILL.md', ...readdirSync(join(DIR, 'reference')).filter((n) => n.endsWith('.md')).sort().map((n) => `reference/${n}`)]
 const TEXTS: Record<string, string> = Object.fromEntries(FILES.map((f) => [f, readFileSync(join(DIR, f), 'utf8')]))
-const W: Where = { root: '/opt/workbench', wb: '/opt/workbench/bin/wb', onPath: false, docs: true }
+const W: Where = { root: '/opt/workbench', wb: '/opt/workbench/bin/wb', onPath: false, docs: true, wakes: true }
 const R = render(TEXTS, W)
 const OPENCODE: Record<string, string> = Object.fromEntries([['prompt', R.prompt], ...R.parts.map((p) => [p.id, p.content])])
 
@@ -31,6 +34,14 @@ test('every host line still matches the Claude Code text it rewrites: a reworded
   expect(unmatched).toEqual([])
 })
 
+test('a host line counts as matched only in the text the lines before it left: a recurring rule ahead of an exact one fails it', () => {
+  const exact = line('ask in the chat (`wb chat reply`) and end', 'ask in the chat and end')
+  const recurring = { from: /`wb chat reply`/g, to: '`workbench_chat_reply`', files: '*' as const }
+  const texts = { 'SKILL.md': 'So ask in the chat (`wb chat reply`) and end your turn.' }
+  expect(hostLineMatches(texts, W, [exact, recurring])).toEqual([1, 0])
+  expect(hostLineMatches(texts, W, [recurring, exact])).toEqual([1, 0])
+})
+
 test("OpenCode's copy has no run_in_background, no $CLAUDE_CODE_SESSION_ID, and Claude only in Claude Code", () => {
   expect(offenders(/run_in_background/)).toEqual([])
   expect(offenders(/CLAUDE_CODE_SESSION_ID|CLAUDE_CONFIG_DIR/)).toEqual([])
@@ -44,6 +55,22 @@ test("OpenCode's copy has no run_in_background, no $CLAUDE_CODE_SESSION_ID, and 
   // nor Claude Code's tools, plan mode, the mod, its hand-back or the reference files' paths
   expect(offenders(/AskUserQuestion|ExitPlanMode|plan mode|your own Workflow|\bBash call|your Bash|Bash's|hand-back-claude|reference\/\w+\.md|beside this file/)).toEqual([])
   expect(offenders(/\b(the|The|workbench) mod\b(?!\/|'s tests)/)).toEqual([])
+  // a web chat reply is the plugin's tool (chat.ts), never the shell's
+  expect(offenders(/wb chat reply/)).toEqual([])
+})
+
+test("the patch procedure states OpenCode's facts, never Claude Code's: no `!` prompt, the clone to make, the form only for the send (#1321, findings 7 and 17)", () => {
+  // OpenCode's `!` has no terminal for sudo or gh's login to ask on; its terminal pane does
+  expect(offenders(/`! |`!` prefix/)).toEqual([])
+  for (const id of ['prompt', 'workbench-patching', 'workbench-models']) expect(OPENCODE[id]?.includes(PANE_OR_TERMINAL)).toBe(true)
+  const patching = OPENCODE['workbench-patching'] ?? ''
+  // Claude Code's install steps, plugin and dialog: none, but where both are on one machine
+  expect(patching.match(/claude plugin install|restart of Claude|\bdialogs?\b|Once, on a marketplace install|The plugin holds every send/g)).toEqual(null)
+  // OpenCode's install can't keep a patch: wb patch says what makes a clone; the form asks for the send alone
+  const says = ["`/reload-plugins` in Claude Code", "On a machine with Claude Code's install too, it found local changes",
+    '`wb patch` refuses there and prints the two commands that make one', 'The form is only for that send',
+    'the form waits in the terminal for their answer', '**A GitHub MCP server is optional**']
+  expect(says.filter((s) => !patching.includes(s))).toEqual([])
 })
 
 test('the prompt is SKILL.md\'s body, without its frontmatter, and the workbench skill is the same text', () => {
@@ -54,15 +81,37 @@ test('the prompt is SKILL.md\'s body, without its frontmatter, and the workbench
   expect(offenders(/^## Headless/)).toEqual([])
 })
 
-test("until the plugin delivers wakes (#1313), the driver waits with wb wait in the background, never for a wake (the #1335 review)", () => {
-  expect(R.prompt.includes("**Don't poll.** Run `wb wait <name>` with the shell tool's `background: true`")).toBe(true)
-  expect(/woken\s+by\s+a\s+`\[workbench\]`\s+prompt|end\s+your\s+turn\s+and\s+wait\s+for\s+it/.test(R.prompt)).toBe(false)
+test("the plugin's wakes (#1313) end the driver's turn, and with its wake option off it waits only when asked, never for a wake", () => {
+  expect(R.prompt.includes("**Don't poll.** The plugin wakes this session with a `[workbench]` message when the task needs you (review, question, stuck, failed): end your turn and wait for it;")).toBe(true)
+  expect(R.prompt.includes('Without the mod') || R.prompt.includes('Without the plugin') || /wb wait <name>/.test(R.prompt)).toBe(false)
+  const off = render(TEXTS, { ...W, wakes: false }).prompt
+  expect(off.includes("**Don't poll.** Wakes are off (the plugin's `wake` option): no `[workbench]` message will come.")).toBe(true)
+  expect(off.includes('wait (`workbench_wait`, which returns when the task needs you) only if they ask')).toBe(true)
+  expect(/end\s+your\s+turn\s+and\s+wait\s+for\s+it/.test(off)).toBe(false)
+  expect(where(ROOT, { wb: join(ROOT, 'bin', 'wb'), wake: 'off' }, {}).wakes).toBe(false)
 })
 
-test("the user's two commands are the plugin's (#1315): a quit switches the session to Build, and without the plugin words do the same", () => {
-  expect(R.prompt.includes('the plugin runs them, switches this session to the Build agent and tells you what it did:')).toBe(true)
-  expect(R.prompt.includes('Without the plugin, the user may ask for the same in words; run those commands then.')).toBe(true)
+test("the user's two commands are the plugin's (#1315): a quit switches the session to Build, closing the panel (#1312), and words never do", () => {
+  expect(R.prompt.includes('the plugin runs them, switches this session to the Build agent (which closes the Workbench panel) and tells you what it did:')).toBe(true)
+  // the prompt is the plugin's, so its commands are always offered: no branch without it
+  expect(R.prompt.includes('may ask for the same in words')).toBe(false)
+  expect(R.prompt.includes('leave them unless asked.\n\n**The web chat.**')).toBe(true)
   expect(R.prompt.includes('`/workbench-quit-and-hand-back`') && !R.prompt.includes('-hand-back-claude')).toBe(true)
+})
+
+test("the recipes are the typed tools (#1335), and every workbench_ tool the text names is one the plugin registers", () => {
+  const registered = new Set([...SPECS.map(s => s.name), ...consentTools({} as never).map(t => t.name), REPLY_TOOL].map(n => `workbench_${n}`))
+  const named = new Set(Object.values(OPENCODE).flatMap(t => [...t.matchAll(/`(workbench_\w+)`/g)].map(m => m[1]!)))
+  expect([...named].filter(n => !registered.has(n))).toEqual([])
+  expect([...registered].filter(n => !named.has(n))).toEqual([])   // each is named somewhere
+  for (const said of ['`workbench_start`: `name` (kebab-case), `spec` (its whole text, or `spec_file`)',
+    'Numbered, concrete changes → `workbench_feedback` with the `task` and its whole `text`.',
+    'Approved: `workbench_accept` with the `task` and its `message`',
+    '`workbench_discard` with the `task` and its `reason` drops it',
+    'run it through `workbench_route`', '`workbench_settings_set` with the `key` and the `value`',
+    "unless a report says to. Its everyday commands are typed tools here"]) expect(R.prompt.includes(said)).toBe(true)
+  expect(offenders(/^wb start <kebab-name>/)).toEqual([])
+  expect(R.parts.find(p => p.id === 'workbench-patching')?.content.includes('through `workbench_patch_send` (`slug`, `title`, `body_file`')).toBe(true)
 })
 
 test('every reference file is a workbench-<name> skill, and every one the text names is given', () => {
@@ -128,7 +177,7 @@ test("skill/ comes from the package, else from the clone the options' wb runs fr
   expect(skillRoot(undefined, OWN)).toBe(ROOT)
   expect(skillRoot({ wb: join(ROOT, 'bin', 'wb') }, '/nonexistent/copy/bin/wb')).toBe(ROOT)
   expect(skillRoot({ wb: '/nonexistent/clone/bin/wb' }, '/nonexistent/copy/bin/wb')).toBeUndefined()
-  expect(where(ROOT, { wb: join(ROOT, 'bin', 'wb') }, {})).toEqual({ root: ROOT, wb: join(ROOT, 'bin', 'wb'), onPath: false, docs: true })
+  expect(where(ROOT, { wb: join(ROOT, 'bin', 'wb') }, {})).toEqual({ root: ROOT, wb: join(ROOT, 'bin', 'wb'), onPath: false, docs: true, wakes: true })
   expect(readSkill('/nonexistent')).toBeUndefined()
 })
 

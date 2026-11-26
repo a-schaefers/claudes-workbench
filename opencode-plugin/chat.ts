@@ -19,6 +19,8 @@ import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ServerContext } from './host.d.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv, wbHome } from './wb.ts'
+import type { ChatMsg, ChatOpen, ListenerClaim } from '../mod/types/wire.d.ts'
+import { sameWait, waitingFact, type Waiting } from '../mod/hooks/waiting.ts'
 
 export const POLL_MS = 2_000          // a look at chat/open.json (a file read, no wb run)
 export const CHECK_MS = 60_000        // `wb chat url --json`: on or off, as the mod's CHAT_CHECK_MS
@@ -87,7 +89,7 @@ export const EVENTS = [
 ]
 
 // Another agent's name, as wb makes them, else '' (the mod's agentOf)
-export function agentOf(m: Row): string {
+export function agentOf(m: Partial<ChatMsg>): string {
   return m.role === 'agent' && /^[a-z0-9-]{1,32}$/.test(String(m.from ?? '')) ? String(m.from) : ''
 }
 
@@ -102,7 +104,7 @@ export function attachedLines(files: unknown): string {
 
 // The prompt a web message goes in as: the user's `[web chat] …`, an agent's `[agent <name>] …`
 // with its later lines indented and its id to answer (the mod's chatPrompt), then the note
-export function chatPrompt(m: Row): string {
+export function chatPrompt(m: Partial<ChatMsg>): string {
   const agent = m.role === 'agent'
   const head = agent ? `[agent ${agentOf(m) || 'unknown'}]` : WEB
   const a = m.about && typeof m.about === 'object' ? m.about : null
@@ -134,7 +136,8 @@ export function inboxId(chatId: string): string {
 // server's or a plugin's form
 export const formKind = (form: Row | undefined) => form?.metadata?.kind === 'question' ? 'question' : 'elicitation'
 
-const typedByUser = (e: { prompt?: { text?: string }; metadata?: Row }) => {
+// upkeep.ts reads it too: a typed prompt ends away for that turn's blocks (#1315)
+export const typedByUser = (e: { prompt?: { text?: string }; metadata?: Row }) => {
   const text = String(e.prompt?.text ?? '')
   if (text.startsWith(WEB) || text.startsWith('[agent ')) return false
   // typed prompts come unmarked; automations, /goal and our own deliveries carry metadata (#1340)
@@ -167,6 +170,7 @@ export class ChatLane {
   holding = false     // and listener.json says so (wb chat listener): else another listener's claim stands
   reverting = false   // a revert staged in it: a prompt would commit it, so delivery waits (#1340)
   busy = false        // the listening session is in an execution
+  waitSaid: Waiting | null = null // the dialog the claim last said is up in the terminal (#1355)
   readonly sent = new Set<string>()
   readonly expired = new Set<string>()
   readonly retry = new Map<string, number>()
@@ -187,7 +191,7 @@ export class ChatLane {
   path(name: string) { return join(this.deps.home, 'chat', name) }
 
   // chat/listener.json as it stands, {} for none
-  claim(): Row {
+  claim(): ListenerClaim {
     try {
       const c = JSON.parse(this.deps.read(this.path('listener.json')) ?? '{}')
       return c && typeof c === 'object' ? c : {}
@@ -230,9 +234,13 @@ export class ChatLane {
     if (!this.listening) this.activate?.() // the poll and the event feed start with the first
     this.listening = sid
     if (!this.on) return
+    // the page's state line: the oldest dialog up two seconds or more (mod/hooks/waiting.ts, the mod's too)
+    const waiting = waitingFact([...this.dialogs.values()], this.deps.now())
     const { ok } = await this.deps.run(['chat', 'listener', sid, '--pid', String(this.deps.pid),
-      ...(this.busy ? ['--busy'] : [])], { session: sid, cwd: await this.dir(sid) })
+      ...(this.busy ? ['--busy'] : []), ...(waiting ? ['--waiting', JSON.stringify(waiting)] : [])],
+      { session: sid, cwd: await this.dir(sid) })
     this.holding = ok
+    if (ok) this.waitSaid = waiting
     if (ok && this.sessions) {
       const info = await this.sessions.get({ sessionID: sid }).catch(() => undefined)
       this.reverting = !!info?.revert
@@ -272,11 +280,13 @@ export class ChatLane {
       if (!claim.session) await this.hold(this.listening)
       if (!this.holding) return
     }
+    // a dialog up two seconds, or one settled: the claim says so (#1355)
+    if (!sameWait(waitingFact([...this.dialogs.values()], this.deps.now()), this.waitSaid)) await this.hold(this.listening)
     await this.notices()
     if (this.reverting || !this.sessions) return
-    let work: Row = {}
+    let work: ChatOpen = {}
     try { work = JSON.parse(this.deps.read(this.path('open.json')) ?? '{}') } catch { return }
-    const waiting = Object.values((work.messages && typeof work.messages === 'object') ? work.messages : {}) as Row[]
+    const waiting: Partial<ChatMsg>[] = Object.values((work.messages && typeof work.messages === 'object') ? work.messages : {})
     const now = this.deps.now()
     for (const m of waiting.sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))) {
       const id = String(m.id ?? '')

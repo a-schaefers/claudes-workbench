@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from . import savings, store, webpush
+from . import savings, store, story, webpush
 from .watch import Watcher
 
 PORT = 1337
@@ -926,11 +926,12 @@ _no_key: set[str] = set()
 
 
 def snapshot() -> dict:
-    return {"api": API_VERSION, "messages": thread(), "listener": listener_view(listener()),
+    rows, lst = thread(), listener()
+    return {"api": API_VERSION, "messages": rows, "listener": listener_view(lst), "driver": driver_state(lst, rows),
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
-            "tasks": open_tasks(), "dictate": dictate_ready(), "now": store.now()}
+            "tasks": open_tasks(), "dictate": dictate_ready(), "settings": settings_rev(), "now": store.now()}
 
 
 def open_tasks() -> list[dict]:
@@ -1058,13 +1059,14 @@ NEWS = ("claude", "notice")
 def latest() -> dict:
     """What a push shows, for the service worker (GET /api/latest): Claude's last message, or a
     notice still open, in the snapshot's shape. It fetched the whole /api/state, up to a
-    megabyte, within the time iOS gives a push handler (#755)."""
+    megabyte, within the time iOS gives a push handler (#755). With the `listener` (its
+    `driver`), which names a push whose row says no driver (#1319)."""
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
     # a notice whose dialog settled in the terminal is no news (#959)
     answered = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
                 if r.get("how") == "answered"}
     last = next((r for r in reversed(rows) if r.get("from") in NEWS and _for_user(r) and r.get("id") not in answered), None)
-    return {"now": store.now(), "messages": [last] if last else [],
+    return {"now": store.now(), "messages": [last] if last else [], "listener": listener_view(listener()),
             "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
 
@@ -1310,12 +1312,11 @@ ASK_TEXT = 2000
 PAGE_RECENT = 86400
 # The waiting line (#1350, from #1340's decision): no dialog is answered on the phone, only said
 # to wait, on either driver. A permission names the way out: the driver run with permissions
-# granted (its own mode and rules), so most work goes on from the chat (the owner, #1350).
-WAITING = "Claude is waiting for you in the terminal."
-WAITING_GRANT = " Run it with permissions granted to work from the chat."
-# the same line from OpenCode's session (#1319, #1340: labels from the driver; a notice row
-# says `driver: {tool: "opencode"}`): DRIVER_NAMES, by store.caller_kind
-WAITING_FOR = "{driver} is waiting for you in the terminal."
+# granted (its own mode and rules), so most work goes on from the chat (the owner, #1350). The
+# words are the story's (`note.waiting`, `note.grant`, #1355), the driver's name filled in: a
+# notice row from OpenCode's session says `driver: {tool: "opencode"}` (#1319, store.caller_kind).
+WAITING = story.text("note.waiting", "claude-code")
+WAITING_GRANT = " " + story.text("note.grant")
 DRIVER_NAMES = {"opencode": "OpenCode"}
 
 
@@ -1350,7 +1351,7 @@ def notice(tool: str, what: str, kind: str = "permission", driver: str = "") -> 
         raise ValueError(kind)
     if not webpush.subscriptions() and store.now() - page_used() > PAGE_RECENT:
         return None
-    line = WAITING_FOR.format(driver=DRIVER_NAMES[driver]) if driver in DRIVER_NAMES else WAITING
+    line = story.text("note.waiting", story.driver_of(driver)) if driver in DRIVER_NAMES else WAITING
     return send(line + (WAITING_GRANT if kind == "permission" else ""), "notice",
                 tool=tool[:200], kind=kind, what=what[:ASK_TEXT],
                 **({"driver": {"tool": driver}} if driver in DRIVER_NAMES else {}))
@@ -1656,7 +1657,11 @@ def listener() -> dict | None:
     if isinstance(st.get("machine"), str) and st["machine"] and st["machine"] != store.machine():
         return st
     if st.get("tool") == "opencode":
-        return st if _server_listens(st) else None
+        try:
+            at = (chat_dir() / "listener.json").stat().st_mtime
+        except OSError:
+            at = 0.0
+        return st if _server_listens(st, at) else None
     if st.get("pid"):
         return st if _alive(st["pid"], st.get("start")) else None
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
@@ -1669,32 +1674,51 @@ def listener() -> dict | None:
 # "opencode", pid, start, machine, cwd, busy}`, `pid` the server's, `start` as wb reads it. It
 # listens while that process runs (pid and start: a recycled pid is gone, #532) and, once the
 # server beats (store.beat_of), while the beat lists its session when it lists the whole store: a
-# session deleted in that server never listens. First live claim wins, either driver's, as two
-# Claude Code sessions' do: `hold` refuses while another's claim stands, and the Claude Code mod
-# stands by while this one's does (its `claimStands` reads the same pid and start).
-def _server_listens(st: dict) -> bool:
+# session deleted in that server never listens. A beat whose listing began (`ts`) before the claim
+# was written (``at``, listener.json's mtime) can't say: the user's first prompt in a new session
+# claims it up to 30 s before a beat lists it, and the page said "no session listening" while the
+# session took the message (#1319's live check, 2026-11-26). First live claim wins, either
+# driver's, as two Claude Code sessions' do: `hold` refuses while another's claim stands, and the
+# Claude Code mod stands by while this one's does (its `claimStands` reads the same pid and start).
+def _server_listens(st: dict, at: float = 0.0) -> bool:
     pid = st.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or not _alive(pid, st.get("start")):
         return False
     beat = store.beat_of(pid)
-    return not (beat and beat.get("store") and st.get("session") not in beat["sessions"])
+    if not (beat and beat.get("store") and st.get("session") not in beat["sessions"]):
+        return True
+    try:
+        return float(beat.get("ts") or 0) < at
+    except (TypeError, ValueError):
+        return False
 
 
-def hold(session: str, pid: int, busy: bool = False, cwd: str | None = None) -> tuple[bool, dict | None]:
+def hold(session: str, pid: int, busy: bool = False, cwd: str | None = None,
+         waiting: dict | None = None) -> tuple[bool, dict | None]:
     """The OpenCode server ``pid`` listens for its session ``session`` (`wb chat listener`): (True,
     the claim) when written, or kept as it was; (False, the claim that stands) when another
     listener's live claim does: another server's, or a Claude Code session's. The same server may
     move it to another of its sessions (the user typed there). Written only on a change: every
-    write wakes the page's streams."""
+    write wakes the page's streams. ``waiting``: the dialog up in its terminal, the plugin's
+    waitingFact `{kind, tool, since, what?}` (#1355, the page's state line); ValueError for one of
+    another shape."""
     if not store.SESSION_RE.fullmatch(session or "") or not isinstance(pid, int) or pid <= 0:
         raise ValueError("a session id and a server pid")
+    if waiting is not None and not (isinstance(waiting, dict) and waiting.get("kind") in WAIT_KINDS
+                                    and isinstance(waiting.get("tool"), str)
+                                    and isinstance(waiting.get("since"), (int, float))
+                                    and not isinstance(waiting.get("since"), bool)
+                                    and isinstance(waiting.get("what", ""), str)):
+        raise ValueError("waiting is {kind, tool, since, what?}")
     with store.locked(chat_dir() / "listener.lock"):
         cur = listener()
         if cur and not (cur.get("tool") == "opencode" and cur.get("pid") == pid
                         and cur.get("machine") in (None, store.machine())):
             return False, cur
         body = {"session": session, "tool": "opencode", "driver": "opencode", "cwd": cwd or os.getcwd(), "pid": pid,
-                "start": _started(pid), "machine": store.machine(), "busy": bool(busy)}
+                "start": _started(pid), "machine": store.machine(), "busy": bool(busy),
+                **({"waiting": {k: waiting[k] for k in ("kind", "tool", "since", "what") if k in waiting}}
+                   if waiting else {})}
         if store.read_json(chat_dir() / "listener.json", None) != body:
             store.write_json(chat_dir() / "listener.json", body)
         return True, body
@@ -1814,6 +1838,82 @@ def listener_driver(lst: dict) -> dict:
 def listener_view(lst: dict | None) -> dict | None:
     """The listener as the API serves it: the claim, with its `driver` ({tool, model?})."""
     return {**lst, "driver": listener_driver(lst)} if lst else None
+
+
+# The driver's state (#1355): the one line the page keeps at the top of the chat, from the facts
+# the hosts already write: the listener's claim (`busy`; `waiting`, the oldest dialog up in its
+# terminal for WAITING_AFTER or more, the host's own filter of an auto-accept's flicker), else the
+# oldest open notice row (the waiting line a host posts, #1350). Waiting beats working beats idle;
+# no live listener is `none`. The words are the story's (`state.*`, `next.*`, `wait.*`), and only
+# a permission names the grant (`next.grant`, the driver's own way to run with permissions
+# granted): a question or a plan waits however the driver runs.
+WAITING_AFTER = 2.0   # seconds: the hosts' WAITING_AFTER_MS, a dialog answered sooner never shown
+WAIT_KINDS = ("permission", "question", "plan", "elicitation", "consent")
+
+
+def _waiting_fact(lst: dict | None, rows: list[dict]) -> dict | None:
+    """The dialog the driver waits on, {kind, tool, since, what?}: the claim's `waiting`, else the
+    oldest open notice row under ASK_STALE old (the one the turn is stuck on); None for none."""
+    w = (lst or {}).get("waiting")
+    if isinstance(w, dict) and w.get("kind") in WAIT_KINDS and isinstance(w.get("since"), (int, float)) \
+            and not isinstance(w.get("since"), bool):
+        tool = w.get("tool") if isinstance(w.get("tool"), str) else ""
+        return {"kind": w["kind"], "tool": tool[:200], "since": float(w["since"]),
+                **({"what": w["what"][:ASK_TEXT]} if isinstance(w.get("what"), str) and w["what"] else {})}
+    now = store.now()
+    for r in rows:
+        if isinstance(r, dict) and r.get("from") == "notice" and now - (r.get("ts") or 0) <= ASK_STALE:
+            kind = r.get("kind") if r.get("kind") in WAIT_KINDS else "permission"
+            return {"kind": kind, "tool": str(r.get("tool") or "")[:200], "since": float(r.get("ts") or 0),
+                    **({"what": r["what"]} if isinstance(r.get("what"), str) and r["what"] else {})}
+    return None
+
+
+def _tilde(path: str) -> str:
+    home = os.path.expanduser("~")
+    if home not in ("", "/") and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return re.sub(r"^/home/[^/]+", "~", path)
+
+
+_LIVE: dict = {}  # driver_state's default: the live listener, read afresh
+
+
+def driver_state(lst: dict | None = _LIVE, rows: list[dict] | None = None) -> dict:
+    """The driver's state for the page (snapshot's `driver`): {state: none|idle|working|waiting,
+    driver (story's: claude-code|opencode|any), who, where?, waiting?: {kind, tool, since, what?},
+    line, next, grant?: {line, command}}. ``lst``: the live listener (default: listener(); None: none);
+    ``rows``: the thread (default: thread()), whose newest driver names a driver with none
+    listening, and whose open notice is a wait the claim doesn't say."""
+    lst = listener() if lst is _LIVE else lst
+    rows = thread() if rows is None else rows
+    if lst:
+        driver = story.driver_of(listener_driver(lst)["tool"])
+    else:
+        driver = next((story.driver_of(r["driver"]["tool"]) for r in reversed(rows)
+                       if isinstance(r, dict) and r.get("from") in NEWS and isinstance(r.get("driver"), dict)
+                       and r["driver"].get("tool") in DRIVER_TOOLS), "any")
+    who = story.DRIVERS[driver]["who"]
+    if not lst:
+        return {"state": "none", "driver": driver, "who": who,
+                "line": story.text("state.none", driver), "next": story.text("next.none", driver)}
+    where = _tilde(str(lst.get("cwd") or "")) or "its directory"
+    out = {"driver": driver, "who": who, "where": where}
+    wait = _waiting_fact(lst, rows)
+    if wait:
+        # an MCP server's name (Claude Code's `mcp:<server>`), else what the host knows: OpenCode
+        # names a form by no server
+        tool = wait["tool"].removeprefix("mcp:")
+        tool = tool if tool and tool != "form" else ("an MCP server" if wait["kind"] == "elicitation" else "a tool")
+        what = story.text(f"wait.{wait['kind']}", driver, tool=tool)
+        out.update(state="waiting", waiting=wait, line=story.text("state.waiting", driver, what=what),
+                   next=story.text("next.waiting", driver))
+        if wait["kind"] == "permission" and driver in story.ONLY["next.grant"]:
+            out["grant"] = {"line": story.text("next.grant", driver), "command": story.DRIVERS[driver]["grant"]}
+        return out
+    state = "working" if lst.get("busy") else "idle"
+    return {**out, "state": state, "line": story.text(f"state.{state}", driver, where=where),
+            "next": story.text(f"next.{state}", driver)}
 
 
 def writer_driver() -> dict | None:
@@ -2404,8 +2504,18 @@ TOP_RETRY_MAX_S = 600    # to this
 TOP_LINE_MAX = 4 << 20   # a child's line longer than this is dropped, not kept growing
 
 
+SETTINGS_REV = "settings-rev.json"  # under chat/: the newest change, settings.record's stamp (#1355)
+
+
 def changes_path() -> Path:
     return store.home() / CHANGES
+
+
+def settings_rev() -> dict | None:
+    """The newest Settings change, {ts, key, label, to, by} (chat/settings-rev.json), or None: the
+    state's `settings`, so an open page reads its rows again and says who changed what (#1355)."""
+    st = store.read_json(chat_dir() / SETTINGS_REV, None)
+    return st if isinstance(st, dict) and isinstance(st.get("ts"), (int, float)) else None
 
 
 def admin_set(key, value) -> tuple[int, dict]:
@@ -2429,7 +2539,7 @@ def admin_set(key, value) -> tuple[int, dict]:
         return 409, {"ok": False, "error": done["said"], "rows": rows}
     admin.record(before, key, value, done, "web")
     helps = {"help": done["help"]} if done.get("help") else {}
-    return 200, {"ok": True, "said": done["said"], "rows": rows, **helps}
+    return 200, {"ok": True, "said": done["said"], "rows": admin.rows(), "changes": admin.changes(), **helps}
 
 
 class TopFeed:
@@ -2852,7 +2962,7 @@ class Handler(BaseHTTPRequestHandler):
             from . import settings as admin
             # read afresh: the cache knows only this server's writes, so a change made at the
             # terminal within ROWS_CACHE_S was drawn as it had been (#1392, 2026-11-25)
-            return self._json(200, {"rows": admin.rows(fresh=True), "ts": store.now()})
+            return self._json(200, {"rows": admin.rows(fresh=True), "changes": admin.changes(), "ts": store.now()})
         if path == "/api/stats":  # the Stats view: wb stats --json in-process, and the names' reads
             from . import settings as admin, stats
             return self._json(200, {"feed": stats.feed(), **admin.reads()})

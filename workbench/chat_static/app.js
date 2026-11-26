@@ -46,7 +46,6 @@
     // as a hint until dismissed on this device. load and save catch a storage that throws: there the
     // hint shows on each open, and a dismissal holds until the page is left
     let hintGone = load(K.hint, false) === true;
-    $('hint-text').replaceChildren(...$('intro').querySelector('p').cloneNode(true).childNodes);
     function drawHint() { $('hint').hidden = hintGone || !$('intro').hidden || !!document.querySelector('.keyless'); }
     $('hint-x').onclick = () => { hintGone = true; save(K.hint, true); drawHint(); };
     // ---- the key ----
@@ -337,12 +336,35 @@
         const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean));
         const pending = outbox.filter(o => !onServer.has(o.cid))
             .map(o => ({ id: 'local-' + o.cid, cid: o.cid, from: 'user', text: o.text, ts: o.ts, local: true, error: o.error, about: o.about, files: o.files }));
-        return [...state.messages].sort((x, y) => x.ts - y.ts).concat(pending);
+        // a notice (a dialog waiting in the terminal) is no row: the strip at the top says it (#1355)
+        return state.messages.filter(m => m.from !== 'notice').sort((x, y) => x.ts - y.ts).concat(pending);
     }
     // A reply Claude wrote to agents alone (`to` without "user", #1042) is no news for the user, as
     // the server keeps it from their pushes (chat._for_user): it read as a reply to them, counted
     // in the tab's unread, with no addressee (#1128, 2026-11-23)
     const forUser = (m) => !Array.isArray(m.to) || !m.to.length || m.to.includes('user');
+    // Whom the chat talks to (#1319): the driver, Claude Code ("Claude") or OpenCode. A reply is
+    // named by its own row's `driver`, the rest by the listener's; with none listening, by the
+    // driver that wrote last (a row's or a waiting line's `driver`), else Claude, as before 2.2.
+    // OpenCode's user read "Waiting for a Claude session" and "Read by Claude" of their own driver
+    const DRIVER_NAMES = { claude: 'Claude', opencode: 'OpenCode' };
+    const nameOf = (d) => (d && DRIVER_NAMES[d.tool]) || '';
+    function driverName() {
+        const l = state.listener;
+        if (l)
+            return nameOf(l.driver) || (l.tool === 'opencode' ? 'OpenCode' : 'Claude');
+        for (let i = state.messages.length - 1; i >= 0; i--) {
+            const m = state.messages[i];
+            if ((m.from === 'claude' || m.from === 'notice') && nameOf(m.driver))
+                return nameOf(m.driver);
+        }
+        return 'Claude';
+    }
+    const aSession = (n) => (/^[AEIOU]/.test(n) ? 'an ' : 'a ') + n + ' session';
+    // who read it: the receipt's `by`, a session id, OpenCode's `ses_…` (its identifier's prefix) or
+    // Claude Code's UUID; so yesterday's receipt from Claude Code never reads as today's listener's
+    const readBy = (m) => typeof m.received?.by === 'string' && m.received.by
+        ? (m.received.by.startsWith('ses_') ? 'OpenCode' : 'Claude') : driverName();
     function metaFor(m) {
         const meta = document.createElement('div');
         meta.className = 'meta';
@@ -353,10 +375,11 @@
         if (m.role === 'agent')
             return agentMeta(meta, m);
         if (m.from === 'claude') {
+            const who = nameOf(m.driver) || 'Claude'; // its writer's; none: Claude Code's, or before 2.2
             if (forUser(m))
-                meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '));
+                meta.append(span('', who + ' · ' + clock(m.ts) + ' · '));
             else
-                meta.append(span('', 'Claude to '), span('agent-name', m.to.join(', ')), span('', ' · ' + clock(m.ts) + ' · '));
+                meta.append(span('', who + ' to '), span('agent-name', m.to.join(', ')), span('', ' · ' + clock(m.ts) + ' · '));
             const c = document.createElement('button');
             c.textContent = 'copy';
             c.onclick = async () => {
@@ -407,29 +430,34 @@
                 meta.append(span('', online ? 'Sending…' : 'Waiting for the connection…'));
             return meta;
         }
-        // one short line, one time: the receipt's once Claude has it (#103)
+        // one short line, one time: the receipt's once the driver has it (#103)
+        const who = driverName();
         if (m.received)
             meta.append(span('tick', '✓✓'), span('', (m.received.how === 'queued'
-                ? 'Queued for Claude · ' : 'Read by Claude · ') + clock(m.received.ts)));
+                ? `Queued for ${readBy(m)} · ` : `Read by ${readBy(m)} · `) + clock(m.received.ts)));
         else if (m.expired) { // unread too long: no session is given it, so never "Delivered" (#536)
             const h = Math.round((state.expire || 21600) / 3600);
-            meta.append(span('', `Not passed to Claude (over ${h} h old) · ` + clock(m.ts) + ' · '));
+            meta.append(span('', `Not passed to ${who} (over ${h} h old) · ` + clock(m.ts) + ' · '));
             const b = document.createElement('button');
             b.textContent = 'send again';
             b.onclick = () => { b.disabled = true; b.dataset.cid = newId(); resend(m, b.dataset.cid); };
             meta.append(b);
         }
         else
-            meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
-                + clock(m.ts)));
+            meta.append(span('tick', '✓'), span('', delivered(who) + clock(m.ts)));
         return meta;
     }
-    // another agent's message (#1042): its name, then Claude's receipt; never the user's to send again
+    // an unread message's line: delivered, behind a prompt in the terminal (the driver can't read it
+    // until that is answered, #1355), or waiting for a session
+    const delivered = (who) => !state.listener ? `Waiting for ${aSession(who)} · `
+        : state.driver && state.driver.state === 'waiting' ? storyText('receipt.blocked', driverKind()) + ' · ' : 'Delivered · ';
+    // another agent's message (#1042): its name, then the driver's receipt; never the user's to send again
     function agentMeta(meta, m) {
+        const who = driverName();
         meta.append(span('agent-name', m.from), span('', ' · ' + (m.received
-            ? (m.received.how === 'queued' ? 'Queued for Claude · ' : 'Read by Claude · ') + clock(m.received.ts)
-            : m.expired ? 'Not passed to Claude · ' + clock(m.ts)
-                : (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ') + clock(m.ts))));
+            ? (m.received.how === 'queued' ? `Queued for ${readBy(m)} · ` : `Read by ${readBy(m)} · `) + clock(m.received.ts)
+            : m.expired ? `Not passed to ${who} · ` + clock(m.ts)
+                : delivered(who) + clock(m.ts))));
         return meta;
     }
     for (const chip of document.querySelectorAll('.chip')) {
@@ -763,34 +791,7 @@
     }
     $('about-x').onclick = () => setAbout(null);
     setAbout(about);
-    // Claude waiting on a dialog in the terminal (#959, #1350): one line, with what a permission
-    // would run, and no buttons, since only the terminal answers it (#1340's decision)
-    function makeNotice(m) {
-        const row = document.createElement('div');
-        const b = document.createElement('div');
-        b.className = 'bubble';
-        b.append(span('notice-text', m.text));
-        if (m.what) {
-            const c = document.createElement('code');
-            c.className = 'notice-what';
-            c.textContent = m.what;
-            b.append(c);
-        }
-        if (!seen.has(m.id) && !firstVisit)
-            say(m.text + (m.what ? ' ' + m.what : ''));
-        if (document.hidden && !seen.has(m.id) && !firstVisit) {
-            unread++;
-            document.title = `(${unread}) Workbench`;
-        }
-        seen.add(m.id);
-        save(K.seen, [...seen].slice(-500));
-        row.append(b, document.createElement('div'));
-        row.lastChild.className = 'meta';
-        return row;
-    }
     function makeRow(m) {
-        if (m.from === 'notice')
-            return makeNotice(m);
         const row = document.createElement('div');
         const b = document.createElement('div');
         b.className = 'bubble';
@@ -827,7 +828,7 @@
         row.lastChild.className = 'meta';
         return row;
     }
-    // Claude has the latest message and is mid-turn: say so, counting from when it was read
+    // the driver has the latest message and is mid-turn: say so, counting from when it was read
     let working = null, workTimer = 0;
     function drawWorking(list, anchor) {
         const last = [...list].reverse().find(m => !m.local);
@@ -849,22 +850,92 @@
             dots.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
             working.append(dots, span('', ''));
             workTimer = setInterval(() => { if (working)
-                working.lastChild.textContent = 'Claude is on it · ' + since(Number(working.dataset.from)); }, 1000);
-            say('Claude is on it'); // once, not its count each second (#1408)
+                working.lastChild.textContent = driverName() + ' is on it · ' + since(Number(working.dataset.from)); }, 1000);
+            say(driverName() + ' is on it'); // once, not its count each second (#1408)
         }
         working.dataset.from = String(last.received.ts);
-        working.lastChild.textContent = 'Claude is on it · ' + since(last.received.ts);
+        working.lastChild.textContent = driverName() + ' is on it · ' + since(last.received.ts);
         if (anchor.nextSibling !== working)
             anchor.after(working);
     }
     function drawPresence() {
         const l = state.listener;
         const where = l ? l.cwd.replace(/^\/home\/[^/]+/, '~') : '';
-        presence.className = 'presence ' + (live && !reachable ? 'down' : !l ? 'away' : l.busy ? 'working' : 'listening');
+        const waits = !!l && !!state.driver && state.driver.state === 'waiting';
+        presence.className = 'presence ' + (live && !reachable ? 'down' : !l ? 'away' : waits ? 'waiting' : l.busy ? 'working' : 'listening');
         presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !reachable ? 'computer unreachable · messages wait'
             : !l ? 'no session listening · messages wait' :
-                // the app's name above, whom you talk to here (#103: a notification opened on "Claude")
-                'Claude · ' + (l.busy ? 'working in ' : 'listening in ') + where;
+                // whom you talk to here (#103: a notification opened on "Claude"), the driver's name (#1319)
+                driverName() + ' · ' + (waits ? 'waiting for you in the terminal' : (l.busy ? 'working in ' : 'listening in ') + where);
+        drawState();
+    }
+    // The state line (#1355): the driver's state at the top of the chat, the server's (chat.driver_state,
+    // in the story's words), while it asks something of the user: waiting on a prompt in the
+    // terminal (what it is, what to do, and for a permission the way to run with permissions granted,
+    // which Copy copies), or no session listening (how to start one). Only the terminal answers a
+    // prompt (#1350): Copy is its one button. It took the waiting line's place in the thread.
+    const stateLine = $('driver-state');
+    function drawState() {
+        const d = state.driver;
+        const show = !!token && live && reachable && !!d && (d.state === 'waiting' || d.state === 'none');
+        stateLine.hidden = !show;
+        if (!show || !d) {
+            stateLine.dataset.key = '';
+            return;
+        }
+        const key = JSON.stringify([d.state, d.line, d.next, d.waiting && d.waiting.what, d.grant && d.grant.line]);
+        if (stateLine.dataset.key === key)
+            return;
+        stateLine.dataset.key = key;
+        stateLine.className = 'dstate ' + d.state;
+        const parts = [];
+        if (d.state === 'waiting')
+            parts.push(span('dstate-line', d.line));
+        if (d.waiting && d.waiting.what) {
+            const c = document.createElement('code');
+            c.className = 'dstate-what';
+            c.textContent = d.waiting.what;
+            parts.push(c);
+        }
+        parts.push(span('dstate-next', d.next));
+        if (d.grant) {
+            const g = document.createElement('span');
+            g.className = 'dstate-grant';
+            storyInto(g, d.grant.line);
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'plain dstate-copy';
+            b.textContent = 'Copy';
+            b.setAttribute('aria-label', 'Copy ' + d.grant.command);
+            const cmd = d.grant.command;
+            b.onclick = async () => { b.textContent = await copyText(cmd) ? 'Copied' : 'Copy failed'; setTimeout(() => { b.textContent = 'Copy'; }, 1500); };
+            parts.push(g, b);
+        }
+        stateLine.replaceChildren(...parts);
+        if (d.state === 'waiting' && !firstVisit)
+            say(d.line + (d.waiting && d.waiting.what ? ' ' + d.waiting.what : ''));
+    }
+    // The story's sentences on the page (#1355, story.ts, generated from workbench/story.py): each
+    // element with `data-story="<key>"` says that sentence for the driver listening (else the last
+    // that wrote, else any driver), its `code` spans as code
+    const driverKind = () => (state.driver && state.driver.driver) || 'any';
+    function storyInto(el, text) {
+        el.replaceChildren(...text.split('`').map((part, i) => {
+            if (i % 2 === 0)
+                return document.createTextNode(part);
+            const c = document.createElement('code');
+            c.textContent = part;
+            return c;
+        }));
+    }
+    let storyFor = '';
+    function drawStory() {
+        const kind = driverKind();
+        if (kind === storyFor)
+            return;
+        storyFor = kind;
+        for (const el of document.querySelectorAll('[data-story]'))
+            storyInto(el, storyText(el.dataset.story, kind));
     }
     // ---- the connection ----
     let online = navigator.onLine, conn = null, failures = 0, retryTimer = 0, lastRx = 0, hiddenTimer = 0;
@@ -902,9 +973,11 @@
         reachable = true;
         if (!quiet)
             save(K.thread, (s.messages || []).slice(-50)); // a patch without messages: no rewrite (#755)
-        state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], dictate: !!s.dictate };
+        state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], dictate: !!s.dictate,
+            driver: s.driver || null, settings: s.settings || null };
         drawTasks();
         drawMic();
+        drawStory();
         drawShown();
         if (state.push.key && !pushSynced) {
             pushSynced = true;
