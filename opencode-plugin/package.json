@@ -24,6 +24,8 @@
     "notices-tui.ts",
     "jobs.ts",
     "spans.ts",
-    "splash.tsx"
+    "splash.tsx",
+    "upkeep.ts",
+    "commands.ts"
   ]
 }

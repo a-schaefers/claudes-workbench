@@ -77,6 +77,8 @@ export const HOST_LINES: readonly Rule[] = [
   // `wb coding`'s rows say Claude, the driver on Claude Code's path: `decide` is the key either way
   line('**Claude coding**', '**Your coding**'),
   line('"Let Claude decide" (the default) is this skill as written.', '`decide` (the default) is these instructions as written.'),
+  // a rule's change is OpenCode's own update of its instruction entry (upkeep.ts, #1315), never a row
+  line('a later change comes as a `[workbench]` note', 'a later change comes as an update of that context block'),
   line('a `workbench-mode` context block says the mode is still on and where this file is: read it again if its procedure is no longer in your context.',
     "these instructions are still yours: they are the Workbench agent's, sent while it is selected."),
   // plan mode is Claude Code's; OpenCode's Plan agent is another agent, without these instructions
@@ -101,9 +103,10 @@ export const HOST_LINES: readonly Rule[] = [
   // never for a wake that won't come (the #1335 review, 2026-11-25); #1313 rewrites this line
   line("**Don't poll.** With the workbench mod loaded the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck, failed) — end your turn and wait for it; an agent's question can't wait, so it reaches you mid-turn too: answer it then. Without the mod, run `wb wait <name>` with Bash `run_in_background: true` and act on its notification. If the context says wakes are off (the plugin's wake setting), none will come: tell the user it runs, and wait only if they ask.",
     "**Don't poll.** Run `wb wait <name>` with the shell tool's `background: true` and act on what it prints: it returns when the task needs you (review, question, stuck, failed); an agent's question can't wait, so answer it at once."),
-  // the user's two commands are the plugin's to add (#1312): words do the same meanwhile
-  line('Without the mod, the user may ask for the same in words; run those commands then.',
-    "Where those commands aren't offered, the user may ask for the same in words; run those commands then."),
+  // the user's two commands are the plugin's server commands (commands.ts, #1315): a quit leaves
+  // the Workbench agent for Build, the mode's end here (the pane is #1312's)
+  line('the mod runs them, closes the pane and tells you what it did:',
+    'the plugin runs them, switches this session to the Build agent and tells you what it did:'),
   line('once (a marketplace install can\'t keep one: Claude Code re-clones it)',
     "once (OpenCode's own install of workbench can't keep one: wb patch names the clone to make and its `bin/wb setup --opencode`)"),
 

@@ -14,7 +14,7 @@
 // its prompt names.
 //
 // The agent's permissions are OpenCode's default and the question tool, as Build's; the gates
-// (#1314) and the mode (#1315) add theirs here.
+// (#1314) add theirs here. The mode (#1315) is this agent itself: upkeep.ts reads a session's.
 import type { AgentEditor, Registration, ServerContext, SessionContextHook, SkillEditor } from './host.d.ts'
 import { SKILL_ID, readSkill, render, type Rendered, type Where } from './skill.ts'
 import { OWN, findWb, wbEnv, type Options } from './wb.ts'
