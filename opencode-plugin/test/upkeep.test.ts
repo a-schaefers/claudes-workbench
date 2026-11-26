@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test'
 import * as core from '../../mod/hooks/core.ts'
 import { autoCeiling, AWAY_NOTE, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, routesSaid, Upkeep,
-  upkeep, WAKE_OFF_NOTE, WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
+  TASKS_NOTE, upkeep, WAKE_OFF_NOTE, WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
+import { CLAUDE_CODE } from '../../mod/hooks/story.ts'
 
 // The driver's conversation kept (#1315), against an in-memory WB_HOME, a fake wb and a fake
 // session API: `BUN_BE_BUN=1 opencode test opencode-plugin/test/upkeep.test.ts`.
@@ -123,6 +124,15 @@ test('the blocks follow the kernel: no roles block without an API role, the defa
   expect(blocksOf(core, want, true, '', '').map(b => b[0])).toEqual(['workbench-mode'])
   expect(blocksOf(core, want, false, '', '')).toEqual([])
   expect(blocksOf(core, { ...want, coding: 'ask' }, false, '', 't1').map(b => b[0])).toEqual(['claude-coding', 'workbench'])
+})
+
+test('#1515: the open-tasks note follows a task with wb wait, never a bare wb watch, in the mod\'s words', () => {
+  // wb watch follows a task until it closes: a driver that ran it on a task at review waited out
+  // its shell's timeout. wb wait ends when the task needs the driver
+  const note = TASKS_NOTE('t1   review')
+  expect(note.includes('`wb wait <name>`')).toBe(true)
+  expect(note.includes('`wb watch <name>`')).toBe(false)
+  expect(note.endsWith(`\n${CLAUDE_CODE['tasks.pickup']}`)).toBe(true) // the mod's block ends with the same line
 })
 
 test("without OpenCode's entries API the blocks go into the session's own requests' system prompt", async () => {

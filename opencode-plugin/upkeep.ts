@@ -32,6 +32,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type * as Core from '../mod/hooks/core.ts'
 import type { StatusFile, TaskFile } from '../mod/types/wire.d.ts'
+import { OPENCODE as SAY } from '../mod/hooks/story.ts'
 import { AGENT } from './agent.ts'
 import { REPLY_ID, typedByUser } from './chat.ts'
 import { sessionRunner, whereOf, type SessionRun } from './commands.ts'
@@ -95,9 +96,10 @@ export const WAKE_OFF_NOTE =
   'Wakes are off (the workbench plugin\'s `wake` option): no [workbench] message will say when a task ' +
   'needs you. After `wb start`, tell the user it runs and that a toast says when it is ready; pick it ' +
   'up when they ask (`wb report <name>`), and wait (`wb wait <name>`) only if they ask you to.'
+// its last line the story's, the mod's word for word: `wb wait`, never `wb watch`, which follows a
+// task until it closes and so held a driver on one at review to its shell's timeout (#1515)
 export const TASKS_NOTE = (status: string) =>
-  `Tasks delegated to agents with wb (your Workbench instructions) are open:\n${status}\n` +
-  'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.'
+  `Tasks delegated to agents with wb (your Workbench instructions) are open:\n${status}\n${SAY['tasks.pickup']}`
 
 // What the facts are read with: the files, wb as the session, the clock and the environment
 export interface Io {

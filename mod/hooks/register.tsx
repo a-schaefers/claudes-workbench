@@ -3531,8 +3531,8 @@ export const register: Register = (on, options) => {
     return {
       blocks: [...blocks, {
         name: 'workbench',
-        text: `Tasks delegated to agents with wb (the /workbench skill) are open:\n${status}\n` +
-          'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.',
+        // the pick-up line is the story's, the OpenCode plugin's word for word (#1515)
+        text: `Tasks delegated to agents with wb (the /workbench skill) are open:\n${status}\n${SAY['tasks.pickup']}`,
       }],
     }
   })

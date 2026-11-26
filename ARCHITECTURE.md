@@ -6575,7 +6575,7 @@ default after 2.0 turned it on.
   `listen`, `grant`, `reply`: how it answers in the chat, `prompts`: the prompts it raises), `TEXTS`
   (each sentence once, a template: `{field}` from the driver and the
   caller, `{Field}` capitalized), `ONLY` (the drivers a key is said for: `next.grant` names a
-  command only Claude Code and OpenCode have; a `refusal.*` or `skill.*` is a host's, `HOSTS`, and
+  command only Claude Code and OpenCode have; a `refusal.*`, `skill.*` or `tasks.pickup` is a host's, `HOSTS`, and
   `refusal.plan` Claude Code's alone: OpenCode has no plan dialog), `PAGE` (the keys the web app
   reads), `HOST` (the keys the hosts' module carries), `DOCS` (the doc
   blocks). `text(key, driver, **fields)`, `fill(t, fields, partial)`, `driver_of(tool)`. Keys:
@@ -6588,12 +6588,13 @@ default after 2.0 turned it on.
   `refusal.consent` (the mod's `AWAY_QUESTION`, `AWAY_PLAN`, `CONSENT_WAITING`, the plugin's
   `AWAY_QUESTION` naming `workbench_chat_reply`); `skill.rule` (SKILL.md's terminal-primary
   paragraph) and `skill.prompts` (reference/driving.md's: prompts are answered in the terminal, and
-  the line the chat shows while one waits).
+  the line the chat shows while one waits); `tasks.pickup` (the open-tasks context block's last line,
+  the mod's `workbench` block and the plugin's `TASKS_NOTE`: `wb wait <name>` to follow a task, #1515).
 - **`scripts/gen_story.py`** writes `chat_static/src/story.ts` (`STORY_DRIVERS`, `STORY_TEXTS` for
   `PAGE`'s keys, `storyFill`, `storyText`; a plain script, loaded before app.js, built into
   `story.js` by `scripts/web.py`), `mod/hooks/story.ts` (`CLAUDE_CODE` and `OPENCODE`, `as const`
   tables of `HOST`'s keys filled for each host, pure data: `register.tsx` imports it as `SAY`,
-  `opencode-plugin/chat.ts` and `skill.ts` as their own; in the plugin's shared files,
+  `opencode-plugin/chat.ts`, `skill.ts` and `upkeep.ts` as their own; in the plugin's shared files,
   `patches.PLUGIN_SHARED`, and the root package.json's `files`) and fills each doc block,
   `<!-- story:KEY[:driver] -->` … `<!-- /story -->` (README.md's `doc.rule`; SKILL.md's
   `skill.rule` and reference/driving.md's `skill.prompts`, both Claude Code's text);
@@ -7884,7 +7885,9 @@ follow the skill, every plan is a handoff plan, the SKILL.md path); `user-notes`
 with notes; `dynamic-workflows` with Dynamic workflows on, delegating or a task open (*Dynamic workflows*); `web-chat` while away (`awayNow`; AWAY_NOTE: "The user is away from the terminal: they
 last used the web chat", reply with `wb chat reply`); `workbench-wake` with `wake` off, delegating
 or a `mine` task open (WAKE_OFF_NOTE: no wake will come, tell the user); `workbench` when `wb
-status` with `scope()` exits 0 listing open tasks (plus `wb report`/`wb watch`; a failure toasts
+status` with `scope()` exits 0 listing open tasks (plus the story's `tasks.pickup`, the OpenCode plugin's
+`TASKS_NOTE` line word for word: `wb report`, and `wb wait` to follow one, never `wb watch`, which follows a
+task until it closes, so a driver on one at review waited out its shell's timeout, #1515; a failure toasts
 once). None without a person.
 
 **The rules said later** (#540). A block can't be added after the first message, so a session that

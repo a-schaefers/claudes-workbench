@@ -4,6 +4,7 @@ import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { modeline } from './modeline.js'
 import { flowCommands, flowDescription } from './flows.js'
+import { OPENCODE } from './story.js'
 import type { WbTask } from '../types'
 
 // the no-break space the pane holds a unit whole with (`GPU 2+3`, `per M`, `61 tok/s`; #1048's review)
@@ -2150,6 +2151,25 @@ test('a closed task compacts Claude early, keeping the delegation state; open ta
   files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'discarded', round: 2, updated_at: ts + 12 })
   await clock.advance(2000)
   expect(compactions.length).toBe(2)
+})
+
+test('#1515: the open-tasks block follows a task with wb wait, never a bare wb watch, in the OpenCode plugin\'s words', async ($, on) => {
+  // wb watch follows a task until it closes: a driver that ran it on its own task at review waited
+  // out the Bash tool's two minutes. wb wait ends when the task needs the driver
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'fix-it   review   1 q', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const text = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench')?.text ?? ''
+  expect(text).toContain('fix-it   review')
+  expect(text).toContain('`wb wait <name>`')
+  expect(text).not.toMatch(/`wb watch <name>`/)
+  expect(text.endsWith(`\n${OPENCODE['tasks.pickup']}`)).toBe(true) // the plugin's TASKS_NOTE ends with the same line
+  await clock.advance(2000) // the load's own calls settle before the test ends
 })
 
 test('a session that never delegated is not compacted when a task closes', async ($, on) => {
