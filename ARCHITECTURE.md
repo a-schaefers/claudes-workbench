@@ -967,7 +967,8 @@ each request): the cap less today less the request at its worst (its body's leng
 dearest tier's input price, each image at `meter.IMAGE_TOKENS` in place of its base64, `meter.body_tokens`
 (the keyhole's, `keyhole.body_tokens`, re-exported, as a cut's estimate counts the same, #1474):
 `images_in` finds a `data:image/` URI or a `data` string beside an `image/` media type, OpenAI's, Anthropic's
-and Google's shapes; at bytes / 4 a 10 MiB image was 3.5M tokens, $10.49 at $3/M, past a $10 cap, #1199's review; its `max_tokens`, `max_completion_tokens` or `max_output_tokens`, Gemini's
+and Google's shapes, and Bedrock Converse's `image: {format, source: {bytes}}` (#1483: missed, a 3 MiB image
+was $3.15 at $3/M); at bytes / 4 a 10 MiB image was 3.5M tokens, $10.49 at $3/M, past a $10 cap, #1199's review; its `max_tokens`, `max_completion_tokens` or `max_output_tokens`, Gemini's
 `generationConfig.maxOutputTokens` or Converse's `inferenceConfig.maxTokens` (`meter.max_output`, #1192),
 else `models.API_OUTPUT`, at the output price). Negative: refused the same way, and status
 `api_stop` `{guard: spend, worst, text}` stops the round on the next tick; its text leads with `STOP`

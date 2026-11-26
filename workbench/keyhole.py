@@ -1705,9 +1705,20 @@ IMAGE_TOKENS = 16_384
 MEDIA_KEYS = ("media_type", "mimeType", "mime_type", "mediaType")
 
 
+def _converse_image(x: dict) -> str | None:
+    """A Bedrock Converse image block's base64, as OpenCode builds it: `{image: {format, source:
+    {bytes}}}`, its type in `format` and no media type key, so images_in's other shapes missed it
+    and the room priced a 3 MiB one at 1M tokens, $3.15 at $3/M (#1483, 2026-11-26)."""
+    img = x.get("image")
+    src = img.get("source") if isinstance(img, dict) and isinstance(img.get("format"), str) else None
+    data = src.get("bytes") if isinstance(src, dict) else None
+    return data if isinstance(data, str) else None
+
+
 def images_in(body) -> tuple[int, int]:
     """A request body's images: how many, and the characters of their base64 (each a data: URI,
-    or a `data` string beside an image/ media type), which the room leaves out of its bytes / 4."""
+    a `data` string beside an image/ media type, or Converse's `image.source.bytes`), which the
+    room leaves out of its bytes / 4."""
     n = chars = 0
     todo = [body]
     while todo:
@@ -1717,6 +1728,9 @@ def images_in(body) -> tuple[int, int]:
             if isinstance(data, str) and any(isinstance(x.get(k), str) and x[k].startswith("image/")
                                              for k in MEDIA_KEYS):
                 n, chars = n + 1, chars + len(data)
+            elif (data := _converse_image(x)) is not None:
+                n, chars = n + 1, chars + len(data)
+                todo.extend(v for k, v in x.items() if k != "image")
             else:
                 todo.extend(x.values())
         elif isinstance(x, list):

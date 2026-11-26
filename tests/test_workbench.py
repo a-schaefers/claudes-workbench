@@ -45796,6 +45796,25 @@ class ApiSpend(Base):
         self.assertEqual(runner.first_tokens(task, "carry on", fresh=True) - with_none,
                          4 * self.meter.IMAGE_TOKENS)
 
+    def test_a_bedrock_converse_image_counts_at_a_providers_figure_in_the_room_not_its_base64(self):
+        # #1483 (the #1373 audit, 2026-11-26): Converse's image block, as OpenCode 2.4.1 builds it,
+        # names its type in `format` and its base64 in `source.bytes`, so images_in found none and
+        # the room priced a 3 MiB image at 1M tokens, $3.15 at $3/M, refusing a task wb start passed
+        self.cap(100)
+        eyes, m = self.eyes()
+        task = self.api_task("t-converse", eyes)
+        mt = self.meter.for_task(task, m)
+        b64 = "iVBO" * (3 << 18)                                # 3 MiB of base64
+        text = {"text": "look"}
+        image = {"image": {"format": "png", "source": {"bytes": b64}}}
+        body = {"inferenceConfig": {"maxTokens": 32768}, "messages": [
+            {"role": "user", "content": [text, image]}]}
+        bare = {"inferenceConfig": {"maxTokens": 32768}, "messages": [{"role": "user", "content": [text]}]}
+        self.assertEqual(self.meter.images_in(body), (1, len(b64)))
+        with_image, without = mt.room(body, len(json.dumps(body))), mt.room(bare, len(json.dumps(bare)))
+        price = max(p["input"] for p in mt.prices)
+        self.assertLessEqual(without - with_image, (self.meter.IMAGE_TOKENS + 64) * price / 1e6)
+
     def test_a_large_next_spec_counts_in_wb_nexts_look_ahead_so_the_cap_it_names_lets_the_step_through(self):
         # #1173's review (2026-11-24): with a small next spec only the carried context tipped the
         # look ahead, so wb next passing its step's prompt went untested: left out, wb next passed
