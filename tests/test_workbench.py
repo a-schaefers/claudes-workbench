@@ -10389,12 +10389,17 @@ class AskServer(Base):
         tools = ask_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, task)
         self.assertEqual(tools["result"]["tools"][0]["name"], "ask_reviewer")
 
-        threading.Thread(target=self.answer_soon, args=(task, "Use 42.")).start()
+        first = threading.Thread(target=self.answer_soon, args=(task, "Use 42."))
+        first.start()
         call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": "ask_reviewer", "arguments": {"question": "41 or 42?"}}}
         self.assertEqual(ask_mcp.handle(call, task)["result"]["content"][0]["text"], "Use 42.")
         rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
         self.assertIn("question", [r["kind"] for r in rows])
+        # the first answerer's last relay done before the second starts: two relays at once (the
+        # runner has one) left `asking` on the answered question, and the second answer went
+        # there, hanging this test past WB_TEST_HANG_SECS in CI twice (2026-11-26)
+        first.join()
         threading.Thread(target=self.answer_soon, args=(task, "Use 42.")).start()
         ask_mcp.handle(call, task)  # second question: budget is 2
         third = ask_mcp.handle(call, task)["result"]["content"][0]["text"]
@@ -10403,9 +10408,10 @@ class AskServer(Base):
     def answer_soon(self, task, text, opened=None):
         """The runner's side (ask_mcp.relay) while a question waits, then Claude's answer."""
         opened = {} if opened is None else opened
-        for _ in range(200):
+        for _ in range(1200):   # a minute: a loaded CI runner can take more than ten seconds
             ask_mcp.relay(task, opened)
-            if task.status.get("asking"):
+            qid = task.status.get("asking")
+            if qid and not (context.ask_dir(task) / f"{qid}.answer").exists():
                 run_wb("answer", task.name, "--text", text)
                 ask_mcp.relay(task, opened)
                 return
