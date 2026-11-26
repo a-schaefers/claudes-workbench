@@ -714,6 +714,11 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.textContent('#runs')) === 'Run: night (audit) · running · find 1/3 · $0.25 of $2.00')
       const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
       if (!width) throw new Error('the page scrolls sideways')
+      // Settings opened once in this page (its rows loaded), then the chat: the tap's second
+      // visit, which landed at the top of Settings (#1527, 2026-11-26)
+      await goTo('settings')
+      await until(async () => (await page.locator('.set-card[data-group="workflows"]').count()) === 1)
+      await goTo('chat')
       await page.click('#runs')
       await until(() => page.evaluate(() => document.body.dataset.view === 'settings'))
       const row = page.locator('#settings-rows .set-row[data-key="run-night"]')
@@ -721,6 +726,12 @@ async function run(engine: string, device?: string) {
       if (!(await row.textContent()).includes('flow audit · running (no driver) · find: 1 done, 2 running · $0.25 of $2.00'))
         throw new Error('the row says: ' + await row.textContent())
       if (!(await page.locator('.set-card[data-group="workflows"]').isVisible())) throw new Error('the workflows group is not shown')
+      // in view, not only shown: on that second visit the card stayed 2,000 px down on a phone
+      const inView = () => page.evaluate(() => {
+        const top = document.querySelector('.set-card[data-group="workflows"]')!.getBoundingClientRect().top
+        return top >= 0 && top < innerHeight
+      })
+      try { await until(inView, 3000) } catch { throw new Error('the workflows card is out of view') }
       await row.locator('button[data-value="summary"]').click()
       await until(async () => (await row.locator('pre.set-detail').count()) === 1)
       const detail = await row.locator('pre.set-detail').textContent()
