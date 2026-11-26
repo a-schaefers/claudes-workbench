@@ -6,6 +6,7 @@ package:
   dependencies:
     - prelude
     - arrays
+    - strings
 workspace:
   packageSet:
     registry: 80.2.0

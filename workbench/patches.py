@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
-from . import gitops, hardware, ocplugin, store
+from . import gitops, hardware, ocplugin, spend, store
 
 PATCH_BRANCH = "local"  # the branch a clone install keeps its patches on
 BEFORE = "refs/workbench/before-update"  # the tip before wb moved the branch; its reflog, the earlier ones
@@ -256,8 +256,33 @@ TEST_NAME = re.compile(r"(?:^|/)(?:test_[^/]*\.py|[^/]*\.test\.tsx?)$")
 
 
 def is_test(path) -> bool:
-    """A patch's test file: under tests/, or a test_*.py, *.test.ts or *.test.tsx anywhere."""
-    return path.startswith("tests/") or bool(TEST_NAME.search(path))
+    """A patch's test file: under tests/ or kernel/test/ (the kernel's props, #1356), or a
+    test_*.py, *.test.ts or *.test.tsx anywhere."""
+    return path.startswith(("tests/", "kernel/test/")) or bool(TEST_NAME.search(path))
+
+
+# --- the tests by directory (#1328, 2026-11-25) -------------------------------------------------
+# Each part has its own runner, and a patch to one can break another: the OpenCode plugin imports
+# the mod's shared core (mod/hooks/core.ts, the kernel's bundle, the goldens), so a change there,
+# or to the kernel it is built from, is the plugin's too. `wb patch check` once ran every
+# *.test.ts as the mod's suite (an OpenCode plugin test passed "upstream" unrun), and `wb patch
+# upstream` named only the mod's commands (#1321, finding 18). PLUGIN_SHARED is what
+# opencode-plugin/ imports from mod/ (tests/test_workbench.py checks it against the imports).
+PLUGIN_SHARED = ("mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/kernel.d.ts", "mod/hooks/golden/")
+KERNEL_CHECK = "python3 scripts/kernel.py check"
+MOD_TESTS = "claude plugin validate mod && claude plugin test mod"
+PLUGIN_TESTS = "BUN_BE_BUN=1 opencode test opencode-plugin/test && BUN_BE_BUN=1 opencode check -p opencode-plugin"
+SUITES = (  # (what a change under these paths needs beyond python3 -m unittest, its command)
+    (("kernel/",), KERNEL_CHECK),
+    (("mod/", "kernel/"), MOD_TESTS),
+    (("opencode-plugin/", "package.json", *PLUGIN_SHARED, "kernel/"), PLUGIN_TESTS),
+)
+
+
+def suites(paths) -> list[str]:
+    """The test commands a change to ``paths`` needs beyond `python3 -m unittest`, by directory
+    (SUITES), in CI's order: the kernel, the mod, the OpenCode plugin."""
+    return [cmd for dirs, cmd in SUITES if any(p == d or p.startswith(d) for p in paths for d in dirs)]
 
 
 def _touched(root, sha) -> list[str]:
@@ -580,21 +605,66 @@ sys.exit(1 if r.failures or r.errors else
 """
 
 
-def _passes(argv, cwd, env, skipped=None) -> str:
-    """"pass", "fail" or "skipped": ``argv``'s exit within CHECK_SECS (0, else ``skipped`` when it
-    names that exit, else a failure); on the timeout, a failure, its whole process group gone."""
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
-    try:
-        code = proc.wait(timeout=CHECK_SECS)
-    except subprocess.TimeoutExpired:
+def _trial(argv, cwd, env, skipped=None) -> tuple[str, str]:
+    """("pass", "fail" or "skipped", the last line it printed): ``argv``'s exit within CHECK_SECS
+    (0, else ``skipped`` when it names that exit, else a failure); on the timeout, a failure, its
+    whole process group gone. The line is for a pull request's body, which is public: the
+    worktree's path and the home directory in it are said as `.` and `~`."""
+    with tempfile.TemporaryFile() as out:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True)
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        proc.wait()
-        return "fail"
-    return "pass" if code == 0 else "skipped" if skipped is not None and code == skipped else "fail"
+            code = proc.wait(timeout=CHECK_SECS)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            return "fail", f"no end in {CHECK_SECS} s"
+        out.seek(max(0, out.seek(0, os.SEEK_END) - 4096))
+        tail = out.read().decode("utf-8", "replace")
+    last = next((ln.strip() for ln in reversed(tail.splitlines()) if ln.strip()), f"exit {code}")
+    last = scrub(last.replace(str(cwd), ".").replace(str(Path.home()), "~"))[:200]
+    return ("pass" if code == 0 else "skipped" if skipped is not None and code == skipped else "fail"), last
+
+
+def _own_runs(wt, tests, added) -> tuple[list[tuple[str, list[str], dict, int | None]], list[str]]:
+    """How a patch's own test files run in ``wt``, by directory (#1328): ([(the command as said,
+    argv, its environment's additions, the exit that means skipped)], what can't run and why).
+    The added test methods of its test_*.py files, alone; a *.test.ts(x) under mod/, the mod's
+    suite through claude; under opencode-plugin/, the plugin's through OpenCode's Bun (or bun);
+    under kernel/, the kernel's props. Any other *.test.ts has no runner: said, never passed."""
+    runs, why = [], []
+    ids, lost = _test_ids(wt, added)
+    if ids:
+        runs.append((f"python3 -m unittest {' '.join(ids)}", [sys.executable, "-c", RUN_TESTS, *ids], {}, 3))
+    if lost:
+        why.append(f"no test class holds {', '.join(lost)}")
+    other = [p for p in tests if not p.endswith(".py")]
+    if any(p.startswith("mod/") for p in other):
+        if shutil.which("claude") is None:
+            why.append("claude isn't on PATH for the mod's tests")
+        else:
+            runs.append(("claude plugin test mod", ["claude", "plugin", "test", "mod"], {}, None))
+    if any(p.startswith("opencode-plugin/") for p in other):
+        if shutil.which("opencode"):
+            runs.append(("BUN_BE_BUN=1 opencode test opencode-plugin/test",
+                         ["opencode", "test", "opencode-plugin/test"], {"BUN_BE_BUN": "1"}, None))
+        elif shutil.which("bun"):
+            runs.append(("bun test opencode-plugin/test", ["bun", "test", "opencode-plugin/test"], {}, None))
+        else:
+            why.append("neither opencode nor bun is on PATH for the OpenCode plugin's tests")
+    if any(p.startswith("kernel/") for p in other):
+        # kernel.py props refuses with neither (exit 1): that read as upstream failing the patch
+        if shutil.which("bun") or shutil.which("opencode"):
+            runs.append(("python3 scripts/kernel.py props", [sys.executable, "scripts/kernel.py", "props"], {}, None))
+        else:
+            why.append("neither bun nor opencode is on PATH for the kernel's props")
+    stray = [p for p in other if not p.startswith(("mod/", "opencode-plugin/", "kernel/"))]
+    if stray:
+        why.append(f"no runner for {', '.join(stray)} (only mod/, opencode-plugin/ and kernel/ have one)")
+    return runs, why
 
 
 def check(root, kind, commit) -> None:
@@ -627,19 +697,14 @@ def check(root, kind, commit) -> None:
             print(f"{subject}'s tests don't apply to upstream any more: compare by hand")
             return
         env = {**os.environ, "WB_HOME": str(wt.parent / "home")}  # never the user's state
-        verdicts, why = [], []  # why: what didn't run, so a pass can't be told (#1005, 2026-11-22)
-        ids, lost = _test_ids(wt, added)
-        if ids:
-            verdicts.append(_passes([sys.executable, "-c", RUN_TESTS, *ids], wt, env, skipped=3))
+        # why: what didn't run, so a pass can't be told (#1005, 2026-11-22); each by its own
+        # directory's runner (#1328)
+        runs, why = _own_runs(wt, tests, added)
+        verdicts = []
+        for _, argv, extra, skipped in runs:
+            verdicts.append(_trial(argv, wt, {**env, **extra}, skipped)[0])
             if verdicts[-1] == "skipped":
                 why.append("a test was skipped")
-        if lost:
-            why.append(f"no test class holds {', '.join(lost)}")
-        if any(p.endswith((".test.tsx", ".test.ts")) for p in tests):
-            if shutil.which("claude") is None:
-                why.append("claude isn't on PATH for the mod's tests")
-            else:
-                verdicts.append(_passes(["claude", "plugin", "test", "mod"], wt, env))
     if "fail" in verdicts:
         print(f"upstream fails this patch's tests ({subject}): keep it")
     elif why:
@@ -747,6 +812,22 @@ def _os_release() -> dict:
     return {}
 
 
+def _user_runs(cmd, how="the user runs", sep=": ") -> str:
+    """How the user runs ``cmd``, which asks them something (a password, a login): Claude Code's
+    `! ` prefix; from an OpenCode driver, in a terminal of their own, as its `!` had no terminal
+    to prompt on (read in OpenCode 2.3.2's source: sudo, pamac and gh's login couldn't ask, and a
+    pasted `! …` went to the model; #1321, finding 17), and a terminal works on any version."""
+    if store.caller_kind() == "opencode":
+        return f"{how}, in a terminal of their own: {cmd}"
+    return f"{how}{sep}! {cmd}"
+
+
+def driver_name() -> str:
+    """The model driving wb, as a hint names it (it asks the user first, never handles a token,
+    fixes a crash as a patch): OpenCode's from an OpenCode driver, else Claude (#1321, finding 27)."""
+    return "OpenCode's model" if store.caller_kind() == "opencode" else "Claude"
+
+
 def install_hint() -> list[str]:
     """The one line that installs gh on this machine, labelled official or community as GitHub's
     docs label it. Never snap: GitHub's docs say never to install gh as one.
@@ -809,10 +890,10 @@ def install_hint() -> list[str]:
                          "run inside WSL")
     # sudo, root and polkit (pamac) lines ask for a password Claude's Bash can't answer: the
     # user's to run; apk and pamac once got "runs:" because only sudo was looked for (#1005)
-    who = ("the user runs, as root: " if cmd.startswith("apk ") else
-           "the user runs: ! " if "sudo " in cmd or cmd.startswith("pamac ") else "runs: ")
-    lines = ["gh (GitHub's CLI) isn't installed. Installing it is the user's yes: Claude asks first, then "
-             + who + cmd,
+    run = ("the user runs, as root: " + cmd if cmd.startswith("apk ") else
+           _user_runs(cmd) if "sudo " in cmd or cmd.startswith("pamac ") else "runs: " + cmd)
+    lines = [f"gh (GitHub's CLI) isn't installed. Installing it is the user's yes: {driver_name()} asks first, then "
+             + run,
              f"  ({label}; {docs}" + "".join(f"; {n}" for n in notes) + ")"]
     if platform.system() != "Darwin" and shutil.which("brew") and cmd != "brew install gh":
         lines.append("  or, with no sudo: brew install gh (official)")
@@ -858,11 +939,11 @@ def _gh(*args, timeout=120, cwd=None) -> subprocess.CompletedProcess:
 
 def _login_hint(protocol, expired=False) -> list[str]:
     lines = ["gh's github.com login has expired or was revoked (HTTP 401)"] if expired else []
-    lines.append(f"the user runs: ! gh auth login --hostname github.com --git-protocol {protocol} "
-                 "(a browser or one-time code; Claude never handles the token)")
+    lines.append(_user_runs(f"gh auth login --hostname github.com --git-protocol {protocol}")
+                 + f" (a browser or one-time code; {driver_name()} never handles the token)")
     if protocol == "https":
-        lines.append("then: ! gh auth setup-git, so git pushes over https with that login (it edits the "
-                     "user's global git config: ask first)")
+        lines.append(_user_runs("gh auth setup-git", "then") + ", so git pushes over https with that login "
+                     "(it edits the user's global git config: ask first)")
     return lines
 
 
@@ -927,6 +1008,151 @@ def gh_line(st) -> str:
     return "\n".join([head, *("  " + h.strip() for h in hint)])
 
 
+# --- a patch's evidence (#1329, 2026-11-25) -----------------------------------------------------
+# A weak driver's patch went upstream with no Scope trailer, a near-empty body and no test run,
+# and upstream couldn't tell which driver prepared it (#1321, findings 20-21). So wb patch
+# upstream says what's missing, runs the patch's own tests in its worktree and writes what they
+# printed into the body, and stamps the pr/ commit with its driver: prints and facts, never a
+# refusal (the user decides at the send).
+EVIDENCE = "Tests run by wb:"
+DRIVER_TRAILER = "Workbench-Driver"
+TOOL_NAMES = {"claude": "claude-code", "opencode": "opencode", "agent": "agent", "terminal": "terminal"}
+
+
+def _claude_model(session) -> str:
+    """The model of the newest reply in Claude Code session ``session``'s transcript, "" for none."""
+    path = spend.transcript_paths(session)[0]
+    if path is None:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, f.seek(0, os.SEEK_END) - 262144))
+            rows = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(rows):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        msg = row.get("message") if isinstance(row, dict) and row.get("type") == "assistant" else None
+        model = msg.get("model") if isinstance(msg, dict) else None
+        if isinstance(model, str) and model and not model.startswith("<"):  # <synthetic>
+            return model
+    return ""
+
+
+def driver_line() -> str:
+    """`<tool> <model>` for the Workbench-Driver trailer: who runs this wb (store.caller_kind:
+    claude-code, opencode, agent or terminal) and, when wb can read it, the model: Claude Code's
+    from its session's transcript, an OpenCode driver's from its server's heartbeat, an agent's
+    from its task."""
+    kind = store.caller_kind()
+    model = ""
+    try:
+        if kind == "claude":
+            model = _claude_model(os.environ.get("CLAUDE_CODE_SESSION_ID", ""))
+        elif kind == "opencode" and (sid := store.opencode_session()):
+            model = str(store.driver_record(sid).get("model") or "")
+        elif kind == "agent" and store.SESSION_RE.fullmatch(name := os.environ.get("WB_TASK", "")):
+            model = str(store.Task(name).spec.get("model") or "")
+    except (OSError, ValueError, TypeError, AttributeError):
+        model = ""
+    model = re.sub(r"\s+", "", model)[:120]
+    return f"{TOOL_NAMES.get(kind, kind)} {model}".strip()
+
+
+def stamp_driver(wt) -> str:
+    """Amend ``wt``'s HEAD (the pr/ commit) with `Workbench-Driver: <driver_line>`, replacing one
+    there: only the message changes, so its author, date, subject and `git patch-id --stable`
+    stay, and _landed_pr and wb update's drop still match it. Returns what it says of it: the
+    trailer's value, or why it isn't there (a fact for upstream, so a failure stops nothing)."""
+    value = driver_line()
+    try:
+        msg = _git(wt, "log", "-1", "--format=%B", "HEAD").stdout
+        new = subprocess.run(["git", *gitops.PLAIN, "interpret-trailers", "--if-exists", "replace",
+                              "--trailer", f"{DRIVER_TRAILER}: {value}"], input=msg, capture_output=True,
+                             check=True, cwd=wt).stdout
+        with tempfile.NamedTemporaryFile(dir=wt.parent, prefix=".msg-", delete=False) as f:
+            f.write(new)
+        try:
+            _git(wt, "-c", "commit.cleanup=verbatim", "commit", "-q", "--amend", "--no-verify",
+                 "--allow-empty", "-F", f.name)
+        finally:
+            Path(f.name).unlink(missing_ok=True)
+    except (gitops.GitError, subprocess.CalledProcessError, OSError) as e:
+        return f"not added ({str(e).strip()[:200] or type(e).__name__})"
+    return f"{value} (a trailer on {branch(wt)}'s commit, not the local one)"
+
+
+def evidence(root, sha, wt) -> list[str]:
+    """The `Tests run by wb:` lines of pr/<slug>: ``sha``'s own tests (as wb patch check picks
+    them, each by its directory's runner) run in its worktree ``wt``, each `<command>` → the
+    last line it printed; or `not run`, and why."""
+    tests = [p for p in _touched(root, sha) if is_test(p)]
+    if not tests:
+        return [f"{EVIDENCE} not run (the patch has no test of its own)"]
+    runs, why = _own_runs(wt, tests, _added_tests(root, sha, tests))
+    lines = []
+    with tempfile.TemporaryDirectory(prefix="wb-patch-home-") as home:
+        env = {**os.environ, "WB_HOME": home, "PYTHONDONTWRITEBYTECODE": "1"}  # never the user's state
+        for shown, argv, extra, skipped in runs:
+            verdict, last = _trial(argv, wt, {**env, **extra}, skipped)
+            lines.append(f"{EVIDENCE} `{shown}` → {last}" + ("" if verdict == "pass" else f" ({verdict})"))
+    if runs:  # what they left (not ignored) is no change of the patch's, and send refuses a tree with any
+        _git(wt, "clean", "-fdq", check=False)
+    lines += [f"{EVIDENCE} not run: {w}" for w in why]
+    return lines or [f"{EVIDENCE} not run (no test method found in {', '.join(tests)})"]
+
+
+def with_evidence(text: str, lines) -> str:
+    """The body ``text`` with ``lines`` in place of any `Tests run by wb:` lines it had: under its
+    `## Tests run` heading (the template's), else at the end."""
+    kept = [ln for ln in text.splitlines() if not ln.startswith(EVIDENCE)]
+    block = ["", *lines]
+    at = next((i for i, ln in enumerate(kept) if ln.strip().lower() == "## tests run"), None)
+    if at is None:
+        while kept and not kept[-1].strip():
+            kept.pop()
+        return "\n".join([*kept, *block]) + "\n"
+    rest = kept[at + 1:]
+    while rest and not rest[0].strip():
+        rest.pop(0)
+    return "\n".join([*kept[:at + 1], *block, "", *rest]) + "\n"
+
+
+def _plain(text: str) -> str:
+    """``text`` with its comments, the evidence lines and all whitespace gone: what was written."""
+    text = re.sub(r"(?s)<!--.*?-->", "", text)
+    return "".join(ln for ln in text.splitlines() if not ln.startswith(EVIDENCE)).replace(" ", "").replace("\t", "")
+
+
+def _bare(text: str) -> list[str]:
+    """``text``'s words but the evidence lines'."""
+    return "\n".join(ln for ln in text.splitlines() if not ln.startswith(EVIDENCE)).split()
+
+
+def _sections(text: str) -> dict[str, str]:
+    """{a `## ` heading: what's under it, _plain}, in order."""
+    out, head, rows = {}, None, []
+    for ln in text.splitlines():
+        if ln.startswith("## "):
+            if head is not None:
+                out[head] = _plain("\n".join(rows))
+            head, rows = ln[3:].strip(), []
+        elif head is not None:
+            rows.append(ln)
+    if head is not None:
+        out[head] = _plain("\n".join(rows))
+    return out
+
+
+def unfilled(body: str, template: str) -> list[str]:
+    """The template's sections that ``body`` lacks, leaves empty or leaves as the template has them."""
+    mine = _sections(body)
+    return [h for h, t in _sections(template).items() if not mine.get(h) or mine[h] == t]
+
+
 def upstream(root, kind, commit, slug) -> None:
     """A branch pr/<slug> from fresh upstream with only ``commit``, in its own worktree, gh's
     state, and the one command that sends it (wb patch send, the user's yes): nothing is pushed
@@ -958,34 +1184,55 @@ def upstream(root, kind, commit, slug) -> None:
     repo = _owner_repo(url)  # gh takes owner/repo, never a URL (gh repo fork <url> was printed)
     scope = _out(root, "log", "-1", "--format=%(trailers:key=Scope,valueonly,separator=%x2C)", sha).lower()
     tag = " (Scope: me)" if scope == "me" else ""  # a fact; the dialog says it at the send (#1322)
-    if picked.returncode:
-        print(f"{pr} from {remote}'s {up[:7]} in {wt}: {what}{tag} conflicts there. Resolve it in that "
-              "worktree, then git cherry-pick --continue, and go on below")
-        mod = True
-    else:
-        print(f"{pr} from {remote}'s {up[:7]} in {wt}, with {what}{tag}")
-        mod = _git(wt, "diff", "--quiet", up, "HEAD", "--", "mod", check=False).returncode != 0
-    if not has_test(root, sha):
-        print(NO_TEST_SEND)
+    # what a rerun can't redo, recorded before the tests run: they can take minutes, and a run
+    # killed there (Claude's Bash stops at 2) left pr/<slug>, which a rerun refuses, with no
+    # prepared row for wb update and no body file (the #1329 review, 2026-11-25)
     note_install(root)
     with _noting() as noted:  # the local commit wb update later drops when its pull request merges
         _table(noted, "prepared")[slug] = _ident(root, sha)
-    # the kernel's own check when the patch touches kernel/ (#1356): the suite holds the committed
-    # bundle offline, but only kernel.py check rebuilds it and runs its props (the toolchain once)
-    kernel = _git(root, "diff", "--quiet", f"{sha}^", sha, "--", "kernel", check=False).returncode != 0
-    print("next (none of this has run):")
-    print(f"  cd {wt} && python3 -m unittest" + (" && python3 scripts/kernel.py check" if kernel else "")
-          + (" && claude plugin validate mod && claude plugin test mod" if mod else ""))
+    # the body outside the worktree: a file left in it is an uncommitted change send refuses
+    body, template = body_path(slug), wt / ".github/pull_request_template.md"
+    had = body.exists()
+    if repo and not had and template.is_file():
+        try:
+            shutil.copyfile(template, body)
+        except OSError as e:
+            raise PatchError(f"{body}: {e.strerror or e}") from None
+    if picked.returncode:
+        print(f"{pr} from {remote}'s {up[:7]} in {wt}: {what}{tag} conflicts there. Resolve it in that "
+              "worktree, then git cherry-pick --continue, and go on below")
+        proof = [f"{EVIDENCE} not run (the patch conflicted on upstream: run its tests once it's resolved)"]
+    else:
+        # who prepared it, for upstream (#1329): a trailer on the pr/ commit only
+        print(f"{pr} from {remote}'s {up[:7]} in {wt}, with {what}{tag}")
+        print(f"{DRIVER_TRAILER}: {stamp_driver(wt)}")
+        proof = evidence(root, sha, wt)
+    if not scope:
+        print("no Scope trailer: decide first whether it is for everybody (Scope: everybody) or a preference "
+              "that stays a local patch (Scope: me), CONTRIBUTING.md section 1")
+    if not has_test(root, sha):
+        print(NO_TEST_SEND)
+    print("\n".join(proof))
+    # each directory's own suite (#1328): the kernel's check when the patch touches kernel/ (#1356:
+    # the suite holds the committed bundle offline, but only kernel.py check rebuilds it and runs
+    # its props), the mod's, and the OpenCode plugin's (it imports the mod's shared core)
+    print("next (wb ran only the patch's own tests, above):" if proof[0].startswith(f"{EVIDENCE} `")
+          else "next (none of this has run):")
+    print(f"  cd {wt} && " + " && ".join(["python3 -m unittest", *suites(_touched(root, sha))]))
     if not repo:
         print(f"{remote} ({_shown_url(url)}) isn't on GitHub, and wb patch send sends only there: send it "
               "the way that project takes changes")
     else:
-        # the body outside the worktree: a file left in it is an uncommitted change send refuses
-        body, template = body_path(slug), wt / ".github/pull_request_template.md"
-        if not body.exists() and template.is_file():
-            shutil.copyfile(template, body)
+        try:  # the evidence in the body, under its Tests run (#1329): the driver fills in the rest
+            text = body.read_text(encoding="utf-8", errors="replace") if body.exists() else ""
+            body.write_text(with_evidence(text, proof), encoding="utf-8")
+            empty = unfilled(text, template.read_text(encoding="utf-8", errors="replace")) \
+                if template.is_file() else []
+        except OSError as e:
+            raise PatchError(f"{body}: {e.strerror or e}") from None
         print(f"  fill in {body} (" + ("a copy of .github/pull_request_template.md" if template.is_file()
-                                       else "the pull request's body") + ")")
+                                       else "the pull request's body")
+              + (f"; {'still ' if had else ''}unfilled: {', '.join(empty)}" if empty else "") + ")")
         print(f"  wb patch send {slug} --title {_quote(what.split(' ', 1)[-1])} --body-file {body}")
         print(gh_line(gh_state(root)))  # the user's yes is the mod's dialog (#1322: no line for it)
     print(f"once it merges, the next wb update drops the local patch ({what.split()[0]})")
@@ -1115,7 +1362,9 @@ def _refuse_send(root, wt, pr, base, body_file) -> None:
     template = wt / ".github/pull_request_template.md"
     if not text.strip():
         raise PatchError(f"--body-file {body} is empty: fill it in from {template}")
-    if template.is_file() and text == template.read_bytes():
+    # the evidence wb patch upstream wrote in is no filling-in (#1329)
+    if template.is_file() and _bare(text.decode("utf-8", "replace")) == _bare(
+            template.read_text(encoding="utf-8", errors="replace")):
         raise PatchError(f"--body-file {body} is the template as it came: fill in every section first")
 
 
@@ -1190,6 +1439,10 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
     remote, target = _tracked(root)
     base = f"refs/remotes/{remote}/{target}"
     _refuse_send(root, wt, pr, base, body_file)
+    template = wt / ".github/pull_request_template.md"
+    if template.is_file() and (empty := unfilled(Path(body_file).read_text(encoding="utf-8", errors="replace"),
+                                                 template.read_text(encoding="utf-8", errors="replace"))):
+        print(f"note: the body leaves {', '.join(empty)} unfilled")  # a print, never a refusal (#1329)
     url = _out(root, "config", "--get", f"remote.{remote}.url", check=False)
     repo = _owner_repo(url)
     if not repo:
@@ -1203,8 +1456,8 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
     workflows = _out(wt, "diff", "--name-only", f"{base}...HEAD", "--", ".github/workflows/")
     if workflows and protocol == "https" and "workflow" not in st["scopes"]:
         raise PatchError(f"{pr} changes .github/workflows/, and GitHub refuses that push over https without "
-                         "the token's workflow scope, so nothing was sent: the user runs "
-                         "! gh auth refresh -h github.com -s workflow")
+                         "the token's workflow scope, so nothing was sent: "
+                         + _user_runs("gh auth refresh -h github.com -s workflow", sep=" "))
     # an OpenCode driver's shell too (#1309), and an agent's (#1310): store.under_model. Each
     # sent with no one asked
     if store.under_model() and not _approved(slug, title, body_file, draft, anyway):
@@ -1263,7 +1516,7 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
         time.sleep(wait)
     if r.returncode:
         if protocol == "https":
-            err += ("; if git has no login for github.com over https: the user runs ! gh auth setup-git "
+            err += ("; if git has no login for github.com over https: " + _user_runs("gh auth setup-git", sep=" ") + " "
                     "(it edits the user's global git config: ask first)")
         raise failed(f"git push to {where}", err)
     done.append(f"pushed {pr} to {where}")

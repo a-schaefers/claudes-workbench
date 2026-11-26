@@ -538,7 +538,7 @@ class Checker(unittest.TestCase):
         self.assertIn("mod/hooks/core.ts:ACTIVE is still defined", self.errors())
 
     def test_a_hand_copy_of_a_table_back_in_the_mod(self):
-        self.edit("mod/hooks/register.tsx", "import { ACTIVE, CHAT_STALE_MS, NEEDS,", "import { ACTIVE, CHAT_STALE_MS,")
+        self.edit("mod/hooks/register.tsx", "editFields, gateOf, NEEDS,", "editFields, gateOf,")
         self.edit("mod/hooks/register.tsx", "\nexport function attachedLines", "\nconst NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])\nexport function attachedLines")
         self.assertIn("mod/hooks/register.tsx:NEEDS is still defined", self.errors())
         self.edit("mod/hooks/tasks.ts", "import { CLOSED } from './core'\n", "export const CLOSED = new Set(['accepted', 'discarded'])\n")
@@ -546,7 +546,11 @@ class Checker(unittest.TestCase):
 
     def test_an_export_over_budget(self):
         self.edit("kernel/BOUNDARY.md", "| exports | 12 |", "| exports | 1 |")
-        self.assertIn("budget: 2 exports, over 1", self.errors())
+        # the count is the Exports table's rows, so the next export doesn't break this test
+        table = (self.root / "kernel/BOUNDARY.md").read_text().split("\n## Exports\n", 1)[1].split("\n## ", 1)[0]
+        rows = sum(1 for line in table.splitlines() if line.startswith("| `"))
+        self.assertGreater(rows, 1)
+        self.assertIn(f"budget: {rows} exports, over 1", self.errors())
 
     def test_a_module_over_its_lines(self):
         self.edit("kernel/BOUNDARY.md", "| module lines | 350 |", "| module lines | 10 |")
