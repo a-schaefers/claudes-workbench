@@ -24851,7 +24851,8 @@ class Setup(Base):
                 todo += [(target, t) for t in deps(ROOT / target)]
             imports.add(target)
         self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts",
-                         "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts"} <= imports)
+                         "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts",
+                         "mod/hooks/keywords.ts"} <= imports)  # deep.ts's keywords (#1278)
         # and every mod file the Git install brings is one the plugin needs, itself or through another
         self.assertEqual({f for f in root if f.startswith("mod/")}, {t for t in imports if t.startswith("mod/")})
 
@@ -35574,10 +35575,10 @@ class RealOpenCodePlugin(Base):
         self.assertEqual(left, [])
 
 
-    def test_deepcode_reaches_the_workbench_agents_model_after_the_words_and_a_deepmode_line_sets_it(self):
-        # #1278 on OpenCode (opencode-plugin/keywords.ts): the prompt hook marks the message by its
-        # id and the context hook adds wb's rule after the user's words in each request, which
-        # only a real server shows works (the ids match; OpenCode makes a message of the edit)
+    def test_deepcode_typed_brings_wbs_rule_to_the_model_and_a_deepmode_line_sets_it(self):
+        # #1278 on OpenCode (opencode-plugin/deep.ts): the prompt hook keeps the notes by the
+        # message's id and the context hook adds them while that message is the newest user one,
+        # which only a real server shows works (the ids it hands the two hooks match; #1325)
         from workbench import chat, ocplugin, runs
         chat.set_on(False)  # the prompt reaches the chat part too (see the tests above)
         os.environ["HOME"] = str(self.root / "home")
@@ -35599,23 +35600,22 @@ class RealOpenCodePlugin(Base):
                                                     "limit": {"context": 131072, "output": 1024}}}}}}))
         url = self.serve(WB_HOME="")
         self.listed(url, ocplugin.PLUGIN_ID)
-        rule = runs.DEEPCODE_RULE.replace("the /workbench skill's *Deep workflows*", "your Workbench instructions' *Deep workflows*")
 
-        def users(text):  # the user messages of the requests that offer tools (not the title's)
+        def system(words):  # the system text of the requests with tools (not the title's) for that prompt
             reqs = [json.loads(line) for line in out.read_text().splitlines()]
-            return [m for r in reqs if r.get("tools") for m in r["messages"] if m["role"] == "user"
-                    and text in json.dumps(m["content"])]
-        self.ask(url, "run", "--agent", "workbench", "-m", "cap/cap", "--format", "json", "deepcode audit the parser")
-        said = users("deepcode audit the parser")
+            return ["".join(json.dumps(m["content"]) for m in r["messages"] if m["role"] == "system") for r in reqs
+                    if r.get("tools") and words in json.dumps([m for m in r["messages"] if m["role"] == "user"][-1:])]
+        self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepcode audit the parser")
+        said = system("deepcode audit the parser")
         self.assertTrue(said, out.read_text())
-        self.assertRegex(json.dumps(said[0]["content"]), r"deepcode audit the parser.*" + re.escape(json.dumps(rule)[1:-1]))
+        self.assertIn(json.dumps(runs.DEEPCODE_RULE)[1:-1], said[0])
         self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepmode on")
         self.assertEqual(json.loads((state / "workflows.json").read_text())["mode"], "on")
-        toggled = users("deepmode on")
+        toggled = system("deepmode on")
         self.assertTrue(toggled, out.read_text())
-        self.assertIn("was carried out (wb deepmode on): Dynamic workflows (deepmode): On.", json.dumps(toggled[0]["content"]))
-        self.ask(url, "run", "--agent", "build", "-m", "cap/cap", "--format", "json", "deepcode on build")
-        self.assertNotIn("Workbench instructions", json.dumps(users("deepcode on build")))  # no instructions to follow there
+        self.assertIn("line set it (wb ran `wb deepmode on`): Dynamic workflows (deepmode): On.", toggled[0])
+        self.assertNotIn(json.dumps(runs.DEEPCODE_RULE)[1:-1], toggled[0])  # the last prompt's notes are done
+
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCodeSkillFiles(Base):

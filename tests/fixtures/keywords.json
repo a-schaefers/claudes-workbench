@@ -1,5 +1,5 @@
 {
-  "_doc": "#1278: what the hosts' keyword detection must say for each text, as runs.keywords does: mod/hooks/keywords.ts, which the Claude Code mod and the OpenCode plugin both import (opencode-plugin/test/keywords.test.ts reads this file). deepcode: the word, whole, outside backticks and fences. deepmode: a line of its own, `deepmode on` or `deepmode off`; the last such line wins; null when none.",
+  "_doc": "#1278: what the hosts' keyword detection must say for each text, as runs.keywords does: mod/hooks/keywords.ts, which the Claude Code mod and the OpenCode plugin both import (opencode-plugin/test/deep.test.ts reads this file). deepcode: the word, whole, outside backticks and fences. deepmode: a line of its own, `deepmode on` or `deepmode off`; the last such line wins; null when none.",
   "cases": [
     {"text": "deepcode fix the flaky login test", "deepcode": true, "deepmode": null},
     {"text": "please DeepCode this: audit the parser", "deepcode": true, "deepmode": null},

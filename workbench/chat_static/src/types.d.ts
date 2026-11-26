@@ -14,14 +14,18 @@ interface About { task?: string | null; n?: number; step?: number; audio?: strin
 interface ShotSide { pruned?: boolean; image?: unknown; exit?: number | null; rev?: string }
 interface Shots { task: string; step: number; round: number; n: number; viewport: string; base: ShotSide; candidate: ShotSide }
 interface Listen { batch: string; clips?: { n: number; name: string; line?: string }[] }
+// which driver (#1366, #1319): on the listener, and on each reply as its writer (none before 2.2)
+interface Driver { tool: string; model?: string }
 interface Msg {
   id: string; cid?: string; from: string; role?: string; text: string; ts: number; to?: string[]
   local?: boolean; error?: string; about?: About; files?: WbFile[]
-  received?: { how?: string; ts: number }; expired?: boolean; what?: string; shots?: Shots; audio?: Listen
+  received?: { how?: string; ts: number; by?: string }; expired?: boolean; what?: string; shots?: Shots; audio?: Listen
+  driver?: Driver
 }
 // a message in the outbox (wb-chat-out-<cid>), until the server has it
 interface Outgoing { cid: string; text: string; ts: number; error?: string; about?: About; files?: WbFile[] }
-interface Listener { cwd: string; busy?: boolean }
+// an OpenCode server's claim says `tool: "opencode"` too (chat.hold)
+interface Listener { cwd: string; busy?: boolean; tool?: string; driver?: Driver }
 // chat.open_tasks: the strip's and the task sheet's
 interface OpenTask { name: string; phase: string; model?: string; via?: string; provider_name?: string }
 interface ApiCost { tasks: number; unknown: number; plan?: number; cost: number; prices?: string }

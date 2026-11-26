@@ -104,6 +104,15 @@ of this repository (its `origin` this repository) isn't gated: that is a develop
 user's Claude. Claude Code's own copy of the plugin (under `~/.claude/plugins/`) is no developer's
 clone, and is gated.
 
+In OpenCode the workbench plugin asks in a form in the session instead: the driver sends with its
+`workbench_patch_send` tool, which shows you where it goes, the title and the body's start, and
+sends only when you pick "Send it" there. OpenCode's auto-accept answers permission asks, never
+this form, so it can't say yes for you. With no OpenCode window open on the session (`opencode
+run`), nothing is asked and nothing is sent: run `wb patch send` in a terminal of your own. A `wb
+patch send` the driver types in its shell is turned to the tool, and wb itself refuses a send
+from inside OpenCode without the form's yes. The route, start and Settings changes that need
+your yes ask in the same form.
+
 **gh setup.** `wb patch send` sends through [gh](https://cli.github.com), GitHub's CLI. `wb
 doctor`, `wb patch upstream` and a refused send say its state and the next step: the install
 line for your system (GitHub's own instructions), then `gh auth login --hostname github.com

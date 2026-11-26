@@ -343,6 +343,28 @@
     // the server keeps it from their pushes (chat._for_user): it read as a reply to them, counted
     // in the tab's unread, with no addressee (#1128, 2026-11-23)
     const forUser = (m) => !Array.isArray(m.to) || !m.to.length || m.to.includes('user');
+    // Whom the chat talks to (#1319): the driver, Claude Code ("Claude") or OpenCode. A reply is
+    // named by its own row's `driver`, the rest by the listener's; with none listening, by the
+    // driver that wrote last (a row's or a waiting line's `driver`), else Claude, as before 2.2.
+    // OpenCode's user read "Waiting for a Claude session" and "Read by Claude" of their own driver
+    const DRIVER_NAMES = { claude: 'Claude', opencode: 'OpenCode' };
+    const nameOf = (d) => (d && DRIVER_NAMES[d.tool]) || '';
+    function driverName() {
+        const l = state.listener;
+        if (l)
+            return nameOf(l.driver) || (l.tool === 'opencode' ? 'OpenCode' : 'Claude');
+        for (let i = state.messages.length - 1; i >= 0; i--) {
+            const m = state.messages[i];
+            if ((m.from === 'claude' || m.from === 'notice') && nameOf(m.driver))
+                return nameOf(m.driver);
+        }
+        return 'Claude';
+    }
+    const aSession = (n) => (/^[AEIOU]/.test(n) ? 'an ' : 'a ') + n + ' session';
+    // who read it: the receipt's `by`, a session id, OpenCode's `ses_…` (its identifier's prefix) or
+    // Claude Code's UUID; so yesterday's receipt from Claude Code never reads as today's listener's
+    const readBy = (m) => typeof m.received?.by === 'string' && m.received.by
+        ? (m.received.by.startsWith('ses_') ? 'OpenCode' : 'Claude') : driverName();
     function metaFor(m) {
         const meta = document.createElement('div');
         meta.className = 'meta';
@@ -353,10 +375,11 @@
         if (m.role === 'agent')
             return agentMeta(meta, m);
         if (m.from === 'claude') {
+            const who = nameOf(m.driver) || 'Claude'; // its writer's; none: Claude Code's, or before 2.2
             if (forUser(m))
-                meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '));
+                meta.append(span('', who + ' · ' + clock(m.ts) + ' · '));
             else
-                meta.append(span('', 'Claude to '), span('agent-name', m.to.join(', ')), span('', ' · ' + clock(m.ts) + ' · '));
+                meta.append(span('', who + ' to '), span('agent-name', m.to.join(', ')), span('', ' · ' + clock(m.ts) + ' · '));
             const c = document.createElement('button');
             c.textContent = 'copy';
             c.onclick = async () => {
@@ -407,29 +430,31 @@
                 meta.append(span('', online ? 'Sending…' : 'Waiting for the connection…'));
             return meta;
         }
-        // one short line, one time: the receipt's once Claude has it (#103)
+        // one short line, one time: the receipt's once the driver has it (#103)
+        const who = driverName();
         if (m.received)
             meta.append(span('tick', '✓✓'), span('', (m.received.how === 'queued'
-                ? 'Queued for Claude · ' : 'Read by Claude · ') + clock(m.received.ts)));
+                ? `Queued for ${readBy(m)} · ` : `Read by ${readBy(m)} · `) + clock(m.received.ts)));
         else if (m.expired) { // unread too long: no session is given it, so never "Delivered" (#536)
             const h = Math.round((state.expire || 21600) / 3600);
-            meta.append(span('', `Not passed to Claude (over ${h} h old) · ` + clock(m.ts) + ' · '));
+            meta.append(span('', `Not passed to ${who} (over ${h} h old) · ` + clock(m.ts) + ' · '));
             const b = document.createElement('button');
             b.textContent = 'send again';
             b.onclick = () => { b.disabled = true; b.dataset.cid = newId(); resend(m, b.dataset.cid); };
             meta.append(b);
         }
         else
-            meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
+            meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : `Waiting for ${aSession(who)} · `)
                 + clock(m.ts)));
         return meta;
     }
-    // another agent's message (#1042): its name, then Claude's receipt; never the user's to send again
+    // another agent's message (#1042): its name, then the driver's receipt; never the user's to send again
     function agentMeta(meta, m) {
+        const who = driverName();
         meta.append(span('agent-name', m.from), span('', ' · ' + (m.received
-            ? (m.received.how === 'queued' ? 'Queued for Claude · ' : 'Read by Claude · ') + clock(m.received.ts)
-            : m.expired ? 'Not passed to Claude · ' + clock(m.ts)
-                : (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ') + clock(m.ts))));
+            ? (m.received.how === 'queued' ? `Queued for ${readBy(m)} · ` : `Read by ${readBy(m)} · `) + clock(m.received.ts)
+            : m.expired ? `Not passed to ${who} · ` + clock(m.ts)
+                : (state.listener ? 'Delivered · ' : `Waiting for ${aSession(who)} · `) + clock(m.ts))));
         return meta;
     }
     for (const chip of document.querySelectorAll('.chip')) {
@@ -827,7 +852,7 @@
         row.lastChild.className = 'meta';
         return row;
     }
-    // Claude has the latest message and is mid-turn: say so, counting from when it was read
+    // the driver has the latest message and is mid-turn: say so, counting from when it was read
     let working = null, workTimer = 0;
     function drawWorking(list, anchor) {
         const last = [...list].reverse().find(m => !m.local);
@@ -849,11 +874,11 @@
             dots.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
             working.append(dots, span('', ''));
             workTimer = setInterval(() => { if (working)
-                working.lastChild.textContent = 'Claude is on it · ' + since(Number(working.dataset.from)); }, 1000);
-            say('Claude is on it'); // once, not its count each second (#1408)
+                working.lastChild.textContent = driverName() + ' is on it · ' + since(Number(working.dataset.from)); }, 1000);
+            say(driverName() + ' is on it'); // once, not its count each second (#1408)
         }
         working.dataset.from = String(last.received.ts);
-        working.lastChild.textContent = 'Claude is on it · ' + since(last.received.ts);
+        working.lastChild.textContent = driverName() + ' is on it · ' + since(last.received.ts);
         if (anchor.nextSibling !== working)
             anchor.after(working);
     }
@@ -863,8 +888,8 @@
         presence.className = 'presence ' + (live && !reachable ? 'down' : !l ? 'away' : l.busy ? 'working' : 'listening');
         presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !reachable ? 'computer unreachable · messages wait'
             : !l ? 'no session listening · messages wait' :
-                // the app's name above, whom you talk to here (#103: a notification opened on "Claude")
-                'Claude · ' + (l.busy ? 'working in ' : 'listening in ') + where;
+                // whom you talk to here (#103: a notification opened on "Claude"), the driver's name (#1319)
+                driverName() + ' · ' + (l.busy ? 'working in ' : 'listening in ') + where;
     }
     // ---- the connection ----
     let online = navigator.onLine, conn = null, failures = 0, retryTimer = 0, lastRx = 0, hiddenTimer = 0;

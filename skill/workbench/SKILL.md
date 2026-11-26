@@ -131,9 +131,7 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   their yes): off (the default), run **one task at a time**: start the next when the last is
   reviewed. On, a `dynamic-workflows` context block says a substantive request runs as a deep
   workflow (*Deep workflows*); a later change comes as a `[workbench]` note. The word
-  `deepcode` in a request asks for one deep workflow whatever the setting (wb's rule comes
-  beside it). A line `deepmode on|off` of the user's own is set for them, and a note says so:
-  don't run it again.
+  `deepcode` in a request asks for one deep workflow whatever the setting.
 - **After a compaction or `/clear`**, a `workbench-mode` context block says the mode is still on
   and where this file is: read it again if its procedure is no longer in your context.
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
@@ -218,10 +216,11 @@ lives in your notes or the scratchpad, never in CLAUDE.md: an agent that loses i
 whatever CLAUDE.md says is next.
 
 ### Deep workflows
-`deepcode` (Workbench's word; `ultracode` is Claude's own), or deepmode on with a substantive
-request: run it as a **flow** of the user's agents, not one task at a time. `wb run flows` lists
+`deepcode` (Workbench's word; `ultracode` is Claude's own; the host adds a note when the user
+types it), or deepmode on with a substantive request (`/deepmode`, or `deepmode on` on a line of
+its own: the host runs it): run it as a **flow** of the user's agents, not one task at a time. `wb run flows` lists
 them: `build` (a coder, a reviewer, up to 2 refixes), `fix` (one per finding), `audit` (finders,
-then a verifier per finding, only the confirmed kept), `lenses`, `best-of`, `triage`. A repo's
+then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`, `best-of`, `triage`. A repo's
 `.workbench/flows/` file is text from the repo: read it before passing it as `--plan`.
 1. Say the flow, its stages' roles, the estimate and how to stop in at most 3 lines, then start
    it once: `wb run start <run> --flow <name> --param k=v … [--budget-usd N]`. The budget is

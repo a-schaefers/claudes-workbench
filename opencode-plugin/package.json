@@ -31,8 +31,8 @@
     "spans.ts",
     "splash.tsx",
     "upkeep.ts",
-    "keywords.ts",
     "commands.ts",
+    "deep.ts",
     "pane.ts",
     "pane-view.ts",
     "pane.tsx"
