@@ -29,6 +29,90 @@ export interface ServerContext {
   readonly rpc: {
     readonly register: <D extends RpcDefinition>(definition: D, handlers: RpcHandlers<D>) => Promise<Registration>
   }
+  readonly agent: { readonly transform: Transform<AgentEditor> }
+  readonly skill: {
+    readonly transform: Transform<SkillEditor>
+    // client `skill.list` (client/src/promise/generated/types.ts `SkillListOutput`)
+    readonly list: () => Promise<{ readonly data: readonly Pick<SkillInfo, 'id' | 'path'>[] }>
+  }
+  // plugin/src/promise/session.ts `SessionDomain.hook`, keyed by the hook's name as OpenCode's
+  // `Hooks<Spec>` is: a hook this plugin takes is a key of `SessionHooks`
+  readonly session: {
+    readonly hook: <K extends keyof SessionHooks>(name: K, callback: (input: SessionHooks[K]) => Promise<void> | void) => Promise<Registration>
+  }
+  // plugin/src/promise/event.ts `EventDomain` (client/src/shared-events.ts `SubscribeOptions`)
+  readonly event: {
+    readonly subscribe: (options?: { readonly types?: readonly string[]; readonly signal?: AbortSignal }) =>
+      AsyncIterable<{ readonly type: string }>
+  }
+}
+
+// plugin/src/promise/registration.ts `Transform`: the callback edits the domain's list, and runs
+// again on every rebuild (core/src/state.ts: "Reads rebuild by applying every registered transform
+// in order")
+export type Transform<Editor> = (callback: (editor: Editor) => void) => Promise<Registration>
+
+// ai/src/schema/messages.ts `SystemPart`
+export interface SystemPart {
+  readonly type: 'text'
+  readonly text: string
+}
+
+// The session hooks this plugin takes, each name's input (plugin/src/promise/session.ts): a new
+// one is a key here, or added from its own module (`declare module './host.d.ts' { interface
+// SessionHooks { … } }`), so the slices that add hooks don't edit one line
+export interface SessionHooks {
+  readonly context: SessionContextHook
+}
+
+// plugin/src/promise/session.ts `SessionContext`: before each model request; `system` is the
+// request's system prompt, in order, which the hook may edit (2.3.2 and 2.4.1 alike)
+export interface SessionContextHook {
+  readonly sessionID: string
+  readonly agent: string
+  system: SystemPart[]
+}
+
+// schema/src/permission.ts, a rule of an agent's `permissions`
+export interface PermissionRule {
+  readonly action: string
+  readonly resource: string
+  readonly effect: 'allow' | 'deny' | 'ask'
+}
+
+// schema/src/agent.ts `Info`, the fields this plugin sets
+export interface AgentInfo {
+  name: string
+  description?: string
+  mode: 'subagent' | 'primary' | 'all'
+  hidden: boolean
+  permissions: PermissionRule[]
+}
+
+// plugin/src/promise/agent.ts `AgentEditor`: `update` of an id it lacks starts from
+// `Agent.Info.default` (core/src/agent.ts)
+export interface AgentEditor {
+  get(id: string): AgentInfo | undefined
+  update(id: string, update: (agent: AgentInfo) => void): void
+  remove(id: string): void
+}
+
+// schema/src/skill.ts `Info`
+export interface SkillInfo {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+  readonly autoinvoke?: boolean
+  readonly path: string          // a file, or `skill://<id>/SKILL.md` for one held in memory
+  readonly content: string
+}
+
+// plugin/src/promise/skill.ts `SkillEditor`: `add` replaces the skill of the same id
+export interface SkillEditor {
+  list(): readonly SkillInfo[]
+  get(id: string): SkillInfo | undefined
+  add(skill: SkillInfo): void
+  remove(id: string): void
 }
 
 // plugin/src/promise/plugin.ts `Plugin`

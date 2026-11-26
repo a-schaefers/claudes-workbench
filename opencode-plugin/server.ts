@@ -13,6 +13,7 @@ import { calls } from './calls.ts'
 import { chat } from './chat.ts'
 import { consent } from './consent.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
+import { registerAgent } from './agent.ts'
 import { startDriver, type DriverHost } from './driver.ts'
 
 export const ID = 'workbench'
@@ -33,6 +34,8 @@ const plugin: ServerPlugin = {
     const stops: (() => Promise<void>)[] = []
     const stopChat = await chat(ctx) // the web chat: in-process turns and chat_reply (#1319)
     if (stopChat) stops.push(stopChat)
+    const agent = await registerAgent(ctx).catch(() => undefined) // no skill/ to read: no agent, the rest stands
+    if (agent) stops.push(async () => agent.stop())
     stops.push(await startDriver(ctx as ServerContext & DriverHost))  // the driver's heartbeat and RPC (#1316)
     // the consent gates before the calls: their execute.before refusal comes before a call's row (#1314)
     const stopConsent = await consent(ctx)

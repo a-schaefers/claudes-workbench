@@ -18,6 +18,8 @@
     "wb.ts",
     "chat.ts",
     "driver.ts",
+    "skill.ts",
+    "agent.ts",
     "consent.ts",
     "consent-tui.ts",
     "gates.ts",
