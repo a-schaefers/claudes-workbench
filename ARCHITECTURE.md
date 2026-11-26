@@ -7122,7 +7122,13 @@ port: True; None when it can't tell), and with none wb prints the `tailscale ser
 line, which the row's `REACH_HELP` has the driver offer, run only on a yes. Every `RELOAD_EVERY` 10 s it stamps its
 `*.py` (`code_stamp`, `watch_code`); changed and then still for a look, it re-execs
 `sys.orig_argv` in the same process (an old server served the new page for a day and a half,
-2026-11-18). A `bind` with neither loopback nor a wildcard makes `wb chat url` name its first
+2026-11-18). That holds for an update in place (a clone, Claude Code's marketplace clone); on
+OpenCode's Git install a new commit is a new generation's directory beside the old, so a server
+run from the cache (`ocplugin.runs_from_cache`) also looks each time for a newer generation of its
+key (`chat.newer_generation`: the highest `<key>/<n>/node_modules/opencode-workbench` not
+`<n>.rejected`, with its `bin/wb`), and once one is the same, files and all, for a look, it
+re-execs that one's `bin/wb` (`serve_argv`) in the same process from its directory: it served the
+old generation's page and Settings until OpenCode removed it, then exited (#1525). A `bind` with neither loopback nor a wildcard makes `wb chat url` name its first
 address (#534).
 
 **The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS; `TIMEOUT` 30 s stall closes):
@@ -9089,7 +9095,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   --opencode` there; each said git's error before (#1311's third review). `wb setup` (with
   `--opencode` too) refuses there, exit 1, changing nothing: `wb setup links nothing to OpenCode's
   install at <dir>: …` (links, a service unit or options naming a generation OpenCode replaces
-  would outlive it and pin the plugin to an old wb).
+  would outlive it and pin the plugin to an old wb). The web app's server, which `chat.start`
+  detached from one generation, moves itself to the newest (*The web chat*'s `newer_generation`, #1525).
 - **Never in wb's own OpenCode calls.** `models.plugin_off` puts `"-workbench"` last in
   `OPENCODE_CONFIG_CONTENT`, after the user's own content `plugins` (kept; content that doesn't
   parse is left for OpenCode to refuse), in every one of them: through `models._opencode_env`,

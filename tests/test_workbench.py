@@ -31249,6 +31249,40 @@ class WebChat(Base):
             chat.watch_code(lambda: restarted.append(1), every=0)
         self.assertEqual(restarted, [1])
 
+    def test_a_server_from_an_older_generation_of_opencodes_install_moves_to_the_newest(self):
+        # #1525 (2026-11-26): a server started from one generation of OpenCode's Git install
+        # served its code after OpenCode installed the next beside it (a new directory: nothing
+        # in its own changed), until the old one was removed and the restart ran a missing bin/wb
+        chat = self.chat
+        from workbench import ocplugin
+        cache = Path(self.tmp.name) / "xdg"
+        key = cache / "opencode" / "npm" / "git-workbench-0123456789ab"
+
+        def gen(n: int) -> Path:
+            d = key / str(n) / "node_modules" / ocplugin.PACKAGE
+            (d / "bin").mkdir(parents=True)
+            (d / "workbench").mkdir()
+            (d / "package.json").write_text(json.dumps({"name": ocplugin.PACKAGE}))
+            (d / "bin" / "wb").write_text("#!/usr/bin/env python3\n")
+            return d
+        g1 = gen(1)
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(cache)}):
+            self.assertIsNone(chat.newer_generation(g1))                 # the newest already
+            g2 = gen(2)
+            gen(3)
+            (key / "3.rejected").touch()                                 # one OpenCode rejected
+            self.assertEqual(chat.newer_generation(g1), g2)
+            self.assertIsNone(chat.newer_generation(g2))
+            moved, stamps = [], iter([("a",)] * 4)
+            with mock.patch.object(chat, "code_stamp", lambda: next(stamps)):
+                chat.watch_code(lambda: moved.append("restarted in place"), every=0, move=moved.append, root=g1)
+            self.assertEqual(moved, [g2])                                # seen twice: settled
+            with mock.patch.object(sys, "argv", [str(g1 / "bin" / "wb"), "chat", "serve", "--port", "18571"]):
+                self.assertEqual(chat.serve_argv(g2)[-5:], [str(g2 / "bin" / "wb"), "chat", "serve", "--port", "18571"])
+        # a clone's or a marketplace clone's server is never moved: it restarts in place, as ever
+        clone = Path(self.tmp.name) / "clone"
+        self.assertIsNone(chat.newer_generation(clone))
+
     def test_the_build_changes_with_the_page_files_so_an_old_page_reloads(self):
         chat, d = self.chat, Path(self.tmp.name) / "static"
         shutil.copytree(chat.STATIC, d)

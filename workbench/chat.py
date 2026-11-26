@@ -3556,24 +3556,74 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
                 if now != set(p["binds"]):
                     restart("the addresses to listen on changed: restarting to bind them")
         threading.Thread(target=replan, daemon=True).start()
+    def move(new: Path):  # OpenCode installed a newer generation beside this one's (#1525)
+        say(f"a newer workbench is installed at {new}: restarting from it")
+        os.chdir(new)
+        os.execv(sys.executable, serve_argv(new))
     threading.Thread(target=watch_code, args=(
-        lambda: restart("the web chat's code changed: restarting with it"),), daemon=True).start()
+        lambda: restart("the web chat's code changed: restarting with it"),),
+        kwargs={"move": move}, daemon=True).start()
     threading.Thread(target=Pusher(servers[0].RequestHandlerClass.hub).run, daemon=True).start()
     servers[0].serve_forever()
 
 
+def _stamp(d: Path) -> tuple:
+    return tuple(sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in d.glob("*.py")))
+
+
 def code_stamp() -> tuple:
-    return tuple(sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size)
-                        for f in Path(__file__).parent.glob("*.py")))
+    return _stamp(Path(__file__).parent)
 
 
-def watch_code(restart, every: float = RELOAD_EVERY) -> None:
+def newer_generation(root: Path | None = None) -> Path | None:
+    """The newest generation of OpenCode's Git install when ``root`` (this package's, by default)
+    is an older one of the same key: `<cache>/<key>/<n>/node_modules/opencode-workbench`, the
+    highest `<n>` not `<n>.rejected` that holds this package and its bin/wb. None for the newest,
+    and for a root outside OpenCode's cache (a clone, Claude Code's marketplace clone: updated in
+    place, which code_stamp sees). A new commit there is a new directory beside the old, and a
+    server started from one served its page and Settings until OpenCode removed it, then exited
+    restarting into the missing bin/wb (#1525, 2026-11-26)."""
+    from . import ocplugin  # only here: the server needs it for this alone
+    root = root or Path(__file__).resolve().parent.parent
+    mine = root.parent.parent.name
+    if root.parent.name != "node_modules" or not mine.isdigit() or not ocplugin.runs_from_cache(root):
+        return None
+    key = root.parent.parent.parent
+    try:
+        names = os.listdir(key)
+    except OSError:
+        return None
+    for g in sorted((n for n in names if n.isdigit() and f"{n}.rejected" not in names), key=int, reverse=True):
+        d = key / g / "node_modules" / root.name
+        if ocplugin.is_copy(d) and (d / "bin" / "wb").is_file():
+            return d if int(g) > int(mine) else None
+    return None
+
+
+def serve_argv(root: Path) -> list[str]:
+    """This server's command run from ``root``'s bin/wb: another generation's (#1525)."""
+    return [sys.executable, "-X", "utf8", str(root / "bin" / "wb"), *sys.argv[1:]]
+
+
+def watch_code(restart, every: float = RELOAD_EVERY, move=None, root: Path | None = None) -> None:
     """Restart once the package's code has changed and settled (a pull writes files one by one):
     a server left running across an update served the new page from old code for days, and no
-    doc's `systemctl --user restart wb-chat` was ever run (2026-11-18)."""
+    doc's `systemctl --user restart wb-chat` was ever run (2026-11-18). With ``move``, a server
+    run from an older generation of OpenCode's install (newer_generation of ``root``) calls
+    ``move(<the newest's root>)`` once that one has settled too (#1525)."""
     first = prev = code_stamp()
+    seen = None
     while True:
         time.sleep(every)
+        if move is not None:
+            new = newer_generation(root)
+            try:
+                mark = (new, _stamp(new / "workbench")) if new else None
+            except OSError:  # mid-install, or collected
+                mark = None
+            if mark is not None and mark == seen:
+                return move(new)
+            seen = mark
         try:
             now = code_stamp()
         except OSError:  # a file mid-replace
