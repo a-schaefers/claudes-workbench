@@ -6,6 +6,7 @@
 declare const process: {
   readonly env: Record<string, string | undefined>
   readonly platform: string
+  readonly pid: number
   cwd(): string
 }
 
@@ -23,7 +24,7 @@ declare module 'node:url' {
 }
 
 declare module 'node:fs' {
-  export function statSync(path: string, options: { throwIfNoEntry: false }): { isFile(): boolean; mode: number } | undefined
+  export function statSync(path: string, options: { throwIfNoEntry: false }): { isFile(): boolean; mode: number; size: number } | undefined
 }
 
 declare module 'node:path' {

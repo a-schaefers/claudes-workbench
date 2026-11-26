@@ -6995,7 +6995,11 @@ def _chat_writer() -> dict:
     `claude_pid`, `claude_start`, `claude_machine`): the user's answer to the row is that
     session's, which its mod takes even while another session listens. With one listener for
     all, the answer to session B's report reached A, which leaves B's tasks alone (#1096,
-    2026-11-23). Empty outside Claude Code."""
+    2026-11-23). An OpenCode driver's (#1319): `driver: "opencode"` and its `opencode_session`,
+    which the plugin's owed-reply check reads (`chat.owed`); no `session`, which the Claude Code
+    mod would hand to a session it can't judge. Empty outside either."""
+    if (oc := store.opencode_session()) and not os.environ.get("CLAUDE_PID", "").isdigit():
+        return {"driver": "opencode", "opencode_session": oc}
     out = {"session": os.environ.get("CLAUDE_CODE_SESSION_ID", "")}
     if (pid := os.environ.get("CLAUDE_PID", "")).isdigit():
         out.update(claude_pid=int(pid), claude_start=models._started(int(pid)), claude_machine=store.machine())
@@ -7056,11 +7060,18 @@ def cmd_chat(a):
         auto = {"auto": True} if a.turn_answer else {}
         if auto:
             text = chat.turn_answer(text)
+        to = a.to
+        if a.if_owed:  # the OpenCode plugin's: only the messages its session still owes (#1340 F)
+            if not (a.turn_answer and to):
+                die("wb chat reply --if-owed goes with --turn-answer and --to")
+            if not (to := chat.owed(to, store.opencode_session())):
+                print("not owed: the session replied")
+                return
         try:  # what it answers (`re`, `to`): --to, else the messages this turn took (#1042)
-            chat.reply(text, a.to, **auto, **_chat_writer())
+            chat.reply(text, to, **auto, **_chat_writer())
         except ValueError as e:
             die(f"wb chat reply: {e}")
-        print("sent to the web chat")
+        print("sent to the web chat" + (f": {' '.join(to)}" if a.if_owed else ""))
     elif a.action == "token":  # other agents' tokens (#1042)
         chat_token(a.id, a.verdict)
     elif a.action == "ended":  # the mod: a turn of Claude's ended, having taken these messages (#1042)
@@ -7075,6 +7086,28 @@ def cmd_chat(a):
               "as a chat message")
     elif a.action == "ack":
         chat.ack(a.id, a.by or "claude", a.how)
+        if a.away:  # the OpenCode plugin's: the user's message reached the session (#1319)
+            chat.went_away(a.by or "opencode")
+    elif a.action == "listener":  # the OpenCode plugin's claim on the chat (#1319)
+        if a.drop:
+            print("dropped" if a.pid and chat.drop(a.pid) else "not this server's")
+            return
+        if not a.id:
+            lst = chat.listener()
+            print(json.dumps(lst) if lst else "none")
+            return
+        try:
+            ok, claim = chat.hold(a.id, a.pid or 0, a.busy)
+        except ValueError as e:
+            die(f"wb chat listener: {e}")
+        if not ok:
+            die(f"standing by: {(claim or {}).get('tool') or 'claude'} listens in {(claim or {}).get('cwd', '?')}")
+        print("listening")
+    elif a.action == "away":  # the OpenCode plugin's: is the user away from the terminal (#1319)
+        print("away" if chat.away(store.opencode_session() or a.by or "") else "here")
+    elif a.action == "back":  # and back at it: they typed, or answered a dialog there
+        chat.back()
+        print("back")
     elif a.action == "claim":  # the mod, before it submits a message: exit 1 if another has it
         if a.id and chat.expired(a.id):  # one threshold, wb's: the page shows it unsent (#536)
             die(f"{a.id} expired: over {chat.MESSAGE_EXPIRE // 3600} hours unread, so not passed to "
@@ -7092,16 +7125,20 @@ def cmd_chat(a):
             return
         if not a.tool or a.kind not in chat.KINDS:
             die("wb chat notice needs --tool, and --kind permission|plan|question|elicitation")
-        row = chat.notice(a.tool, a.text or "", a.kind)
+        # whose dialog: an OpenCode session's says so (#1319, labels from the driver)
+        row = chat.notice(a.tool, a.text or "", a.kind,
+                          "opencode" if store.caller_kind() == "opencode" else "")
         print(row["id"] if row else "skipped: no chat page in use in a day, and no device with push on")
     else:  # log
         for r in chat.thread()[-a.n:]:
             who = (f"agent {r['from']}" if r.get("role") == "agent"
-                   else {"user": "you", "notice": "notice"}.get(r["from"], "Claude"))
+                   else {"user": "you", "notice": "notice"}.get(
+                       r["from"], chat.DRIVER_NAMES.get(r.get("driver"), "Claude")))
             files = "".join(f" [attached: {f.get('path')}]" for f in r.get("files") or [] if isinstance(f, dict))
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}{files}")
         lst = chat.listener()
-        print(f"listening: {lst['cwd']}" if lst else "no session is listening")
+        print((f"listening: {lst.get('cwd')}" + (" (OpenCode)" if lst.get("tool") == "opencode" else ""))
+              if lst else "no session is listening")
 
 
 def chat_token(what: str | None, name: str | None) -> None:
@@ -9200,9 +9237,11 @@ def parser() -> argparse.ArgumentParser:
                        "to pick by ear (listen), "
                        "the thread (log), receipts (ack, claim), what waits (pending), the line "
                        "that a dialog waits in the terminal (notice: the mod's), other agents' tokens "
-                       "(token add|list|revoke), and a turn's end (ended: the mod's)")
+                       "(token add|list|revoke), a turn's end (ended: the mod's), and the "
+                       "OpenCode plugin's claim on it (listener), away and back")
     s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
-                                      "claim", "pending", "notice", "token", "ended"], nargs="?",
+                                      "claim", "pending", "notice", "token", "ended", "listener",
+                                      "away", "back"], nargs="?",
                    default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; listen: the clips (wb "
                    "audio's takes, up to 8); token: add, list or revoke; ended: the messages the "
@@ -9229,6 +9268,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     # into: an agent's message delivered into a running turn it didn't open (#1175, 2026-11-24)
     s.add_argument("--how", choices=["now", "into", "queued"], default="now", help=argparse.SUPPRESS)
+    # the OpenCode plugin's (#1319): its server's claim on the chat, away, and its owed replies
+    s.add_argument("--pid", type=int, help=argparse.SUPPRESS)       # listener: the server's pid
+    s.add_argument("--busy", action="store_true", help=argparse.SUPPRESS)  # listener: in a turn
+    s.add_argument("--drop", action="store_true", help=argparse.SUPPRESS)  # listener: stop listening
+    s.add_argument("--away", action="store_true", help=argparse.SUPPRESS)  # ack: the user is away now
+    s.add_argument("--if-owed", action="store_true", help=argparse.SUPPRESS)  # reply: owed ones only
     s.add_argument("--turn-answer", action="store_true", help="reply: the mod's: a turn's own answer, "
                    "posted for a web message the turn didn't reply to (an `auto` row, cut to "
                    f"{chat.TURN_ANSWER_MAX:,} characters)")

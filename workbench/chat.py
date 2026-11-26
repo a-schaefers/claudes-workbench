@@ -756,7 +756,15 @@ def caller_listens() -> bool:
     2026-11-23). Either unknown (an older mod's claim, a caller outside Claude Code): yes, as
     before; a claim of another machine's is never this process's."""
     lst = listener() or {}
-    parent, me = lst.get("parent"), os.environ.get("CLAUDE_PID", "")
+    # OpenCode's (#1319): by session id. The listening session's own call (its tool's wb child,
+    # or a shell of its) carries OPENCODE_SESSION_ID; another driver's session, either host's, is
+    # not the listener; a caller with no driver at all is, as before (a terminal's)
+    oc, me = store.opencode_session(), os.environ.get("CLAUDE_PID", "")
+    if lst.get("tool") == "opencode":
+        return oc == lst.get("session") if oc else not me.isdigit()
+    if oc and not me.isdigit():
+        return False  # an OpenCode session's report, never onto a Claude Code listener's message
+    parent = lst.get("parent")
     if not isinstance(parent, int) or isinstance(parent, bool) or not parent or not me.isdigit():
         return True
     if isinstance(lst.get("machine"), str) and lst["machine"] and lst["machine"] != store.machine():
@@ -1281,6 +1289,10 @@ PAGE_RECENT = 86400
 # granted (its own mode and rules), so most work goes on from the chat (the owner, #1350).
 WAITING = "Claude is waiting for you in the terminal."
 WAITING_GRANT = " Run it with permissions granted to work from the chat."
+# the same line from OpenCode's session (#1319, #1340: labels from the driver; a notice row
+# says `driver: "opencode"`): DRIVER_NAMES, by store.caller_kind
+WAITING_FOR = "{driver} is waiting for you in the terminal."
+DRIVER_NAMES = {"opencode": "OpenCode"}
 
 
 def active(desk: bool = False) -> float:
@@ -1303,18 +1315,20 @@ def page_used() -> float:
         return 0.0
 
 
-def notice(tool: str, what: str, kind: str = "permission") -> dict | None:
+def notice(tool: str, what: str, kind: str = "permission", driver: str = "") -> dict | None:
     """Tell the phone that a dialog waits in the terminal (#959, #1350): a `notice` row in the
     thread, one line with no buttons (only the terminal can answer it), pushed as Claude's
     messages are, until notice_done clears it. Every kind, away or not. None, and nothing
     written, for a user who doesn't use the chat: no page in use within PAGE_RECENT and no device
-    with push on."""
+    with push on. ``driver``: whose dialog (`opencode`; none: Claude Code's, as ever)."""
     if kind not in KINDS:
         raise ValueError(kind)
     if not webpush.subscriptions() and store.now() - page_used() > PAGE_RECENT:
         return None
-    return send(WAITING + (WAITING_GRANT if kind == "permission" else ""), "notice",
-                tool=tool[:200], kind=kind, what=what[:ASK_TEXT])
+    line = WAITING_FOR.format(driver=DRIVER_NAMES[driver]) if driver in DRIVER_NAMES else WAITING
+    return send(line + (WAITING_GRANT if kind == "permission" else ""), "notice",
+                tool=tool[:200], kind=kind, what=what[:ASK_TEXT],
+                **({"driver": driver} if driver in DRIVER_NAMES else {}))
 
 
 def notice_done(msg_id: str) -> bool:
@@ -1616,9 +1630,126 @@ def listener() -> dict | None:
         return None
     if isinstance(st.get("machine"), str) and st["machine"] and st["machine"] != store.machine():
         return st
+    if st.get("tool") == "opencode":
+        return st if _server_listens(st) else None
     if st.get("pid"):
         return st if _alive(st["pid"], st.get("start")) else None
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
+
+
+# ---- OpenCode's listener (#1319, #1340): the plugin's server part, in-process ----
+# On OpenCode the listener is no `wb events` child but the OpenCode server whose plugin delivers
+# the messages into a session (`session.prompt`), so its identity is that server and its
+# heartbeat (the host-shape decision, #1296, 2026-11-25): listener.json `{session, tool:
+# "opencode", pid, start, machine, cwd, busy}`, `pid` the server's, `start` as wb reads it. It
+# listens while that process runs (pid and start: a recycled pid is gone, #532) and, once the
+# server beats (store.beat_of), while the beat lists its session when it lists the whole store: a
+# session deleted in that server never listens. First live claim wins, either driver's, as two
+# Claude Code sessions' do: `hold` refuses while another's claim stands, and the Claude Code mod
+# stands by while this one's does (its `claimStands` reads the same pid and start).
+def _server_listens(st: dict) -> bool:
+    pid = st.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or not _alive(pid, st.get("start")):
+        return False
+    beat = store.beat_of(pid)
+    return not (beat and beat.get("store") and st.get("session") not in beat["sessions"])
+
+
+def hold(session: str, pid: int, busy: bool = False, cwd: str | None = None) -> tuple[bool, dict | None]:
+    """The OpenCode server ``pid`` listens for its session ``session`` (`wb chat listener`): (True,
+    the claim) when written, or kept as it was; (False, the claim that stands) when another
+    listener's live claim does: another server's, or a Claude Code session's. The same server may
+    move it to another of its sessions (the user typed there). Written only on a change: every
+    write wakes the page's streams."""
+    if not store.SESSION_RE.fullmatch(session or "") or not isinstance(pid, int) or pid <= 0:
+        raise ValueError("a session id and a server pid")
+    with store.locked(chat_dir() / "listener.lock"):
+        cur = listener()
+        if cur and not (cur.get("tool") == "opencode" and cur.get("pid") == pid
+                        and cur.get("machine") in (None, store.machine())):
+            return False, cur
+        body = {"session": session, "tool": "opencode", "cwd": cwd or os.getcwd(), "pid": pid,
+                "start": _started(pid), "machine": store.machine(), "busy": bool(busy)}
+        if store.read_json(chat_dir() / "listener.json", None) != body:
+            store.write_json(chat_dir() / "listener.json", body)
+        return True, body
+
+
+def drop(pid: int) -> bool:
+    """The OpenCode server ``pid`` stops listening (its plugin unloads): listener.json emptied
+    when the claim is that server's, as the mod's quit does. Whether it was."""
+    with store.locked(chat_dir() / "listener.lock"):
+        cur = store.read_json(chat_dir() / "listener.json", None) or {}
+        if not (isinstance(cur, dict) and cur.get("tool") == "opencode" and cur.get("pid") == pid):
+            return False
+        store.write_json(chat_dir() / "listener.json", {})
+        return True
+
+
+# Away, as the Claude Code mod reads it (`awayNow`, #110, #959, #1402), for the OpenCode plugin:
+# the user last used the chat (chat/away.json's `at`, a web message delivered or a page in use)
+# under AWAY_FOR ago, or longer while one of the session's tasks is open (active, or waiting on
+# its driver and not parked). With the chat off, never. `back`: the user typed in the terminal,
+# or answered a dialog there.
+AWAY_FOR = 6 * 3600
+
+
+def away_at() -> float:
+    try:
+        return float((store.read_json(chat_dir() / "away.json", None) or {}).get("at") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def away(session: str = "") -> bool:
+    """Whether the user is away from the terminal (above), for the driver session ``session``."""
+    at = away_at()
+    if not at or not is_on():
+        return False
+    if store.now() - at < AWAY_FOR:
+        return True
+    return bool(session) and any(
+        t.spec.get("session") == session and (
+            t.status.get("phase") in store.ACTIVE
+            or (t.status.get("phase") in store.NEEDS_CLAUDE and not store.parked(t.status)))
+        for t in store.all_tasks())
+
+
+def went_away(by: str) -> None:
+    """A user's web message reached the driver: away from now (the mod writes the same)."""
+    store.write_json(chat_dir() / "away.json", {"at": store.now(), "by": by})
+
+
+def back() -> None:
+    """The user is back at the terminal: away.json `{at: 0}`, as the mod's `back` writes it."""
+    if away_at():
+        store.write_json(chat_dir() / "away.json", {"at": 0})
+
+
+def owed(ids, session: str) -> list[str]:
+    """Which of the messages ``ids`` the OpenCode session ``session`` still owes a reply (#1340
+    F, the mod's `owedAtTurnEnd`): none of Claude's rows since the message was given (its newest
+    receipt) answers it, by `re`, or was this session's own (`opencode_session`, not the
+    plugin's `auto` post) to the message's sender (`to`, none: the user's). An agent's is
+    settled only by a row to it (#1273)."""
+    rows = [r for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES) if isinstance(r, dict)]
+    msgs = {r.get("id"): r for r in rows if _inbound(r)}
+    given = {r["id"]: r.get("ts", 0) for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)
+             if isinstance(r, dict) and isinstance(r.get("id"), str)}
+    out = []
+    for i in dict.fromkeys(ids):
+        m = msgs.get(i)
+        if not m:
+            continue
+        sender = "user" if m.get("from") == "user" else str(m.get("from"))
+        since = given.get(i, m.get("ts", 0))
+        if not any(r.get("from") == "claude" and r.get("ts", 0) >= since and (
+                i in (r.get("re") or [])
+                or (not r.get("auto") and r.get("opencode_session") == session
+                    and sender in (r.get("to") or ["user"])))
+                for r in rows):
+            out.append(i)
+    return out
 
 
 IDLE_BUMP_S = 60  # without inotify, nothing changed: the streams wake this often all the same (#841)

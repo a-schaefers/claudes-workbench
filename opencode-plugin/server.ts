@@ -9,6 +9,7 @@
 // second fence: set in every agent's environment, setup does nothing (#1363).
 import type { ServerContext, ServerPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
+import { chat } from './chat.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
 
 export const ID = 'workbench'
@@ -24,6 +25,7 @@ const plugin: ServerPlugin = {
   async setup(ctx) {
     if (process.env.WB_TASK) return
     await ctx.rpc.register(Workbench, { status: async () => status(ctx.options) })
+    return await chat(ctx) // the web chat: in-process turns and chat_reply (#1319)
   },
 }
 
