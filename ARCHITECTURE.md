@@ -8928,7 +8928,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     (`session.switchAgent`, `AGENT`; one that isn't there throws
     `the Workbench agent isn't there (…): wb doctor says why`) and sends what was typed after it, untrimmed,
     with what the TUI attached (`files`, `agents`, `skills`, as OpenCode's `/goal` forwards them),
-    if anything, as the session's prompt with the invocation's delivery. Nothing in the pane hands
+    if anything, as the session's prompt with the invocation's delivery. Once the switch took, it
+    emits the RPC's `open` event (`{sessionID}`): a switch to the agent the session already has
+    publishes no selection, so `/workbench` after the panel closed opened nothing (#1517). Nothing in the pane hands
     OpenCode a task's worktree: no `location`, no `/diff` and no `vcs` call (the host-shape
     decision's critic 1; the source scan in `pane.test.ts`). `startPane(host, run)` registers the
     RPC, then the command where `command.transform` is there, and returns the cleanup.
@@ -8969,7 +8971,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     the splash again (`replaySplash`). Coming to a session already on Workbench (`opencode -s`, a
     new TUI: OpenCode publishes no selection, and the panel, the TUI's own state, starts closed)
     opens it too, once an arrival (`Landing`, an effect on the route and the session's agent;
-    once the panel was opened nowhere then, #1517). `Feed` polls `tasks` (one `Poll`) every `POLL_MS` 2 s while a task is open
+    once the panel was opened nowhere then, #1517), and so does `/workbench` in the session on screen
+    (`WorkbenchPane`'s `open` event, `SETTLE_MS` after it, so a selection's own open comes first), as
+    after the panel closed. `Feed` polls `tasks` (one `Poll`) every `POLL_MS` 2 s while a task is open
     or the panel shows, else `IDLE_MS` 10 s, and `link` while the panel shows (`LinkPoll`, below). The page (the
     panel's width at 108 columns or more beside the session, fullscreen narrower): the driver row
     (`driverRow`; its press opens `/models`, *The driver*), the task rows (a press on a task's first line follows it, the mod's
@@ -9400,7 +9404,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   the scan, a closed task never read again, bench tasks out; a stopped task's transcript read again
   once it moved, a running one's every `LIVE_MS`; one tasks loop however often a press asks (`Poll`);
   the cap only while an API task works; the diff's styles, the cap, the link;
-  `/workbench`'s pin, agent and prompt in that order (with what the TUI attached), and its error without the agent; the driver
+  `/workbench`'s pin, agent and prompt in that order (with what the TUI attached), and its error without the agent;
+  its `open` event once the switch took, none on a refused one (#1517); the driver
   row (its side, another pin, `not known yet`, cut from the pin first, `change` kept); the registrations with and
   without commands; ownership through the kernel; the footer, the sidebar (its head cut to its
   width), the panel's rows (a press on each first line, the followed name underlined, the compact
