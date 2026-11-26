@@ -19,6 +19,8 @@
     "chat.ts",
     "driver.ts",
     "skill.ts",
-    "agent.ts"
+    "agent.ts",
+    "spans.ts",
+    "splash.tsx"
   ]
 }

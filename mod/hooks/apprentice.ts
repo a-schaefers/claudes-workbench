@@ -19,7 +19,9 @@ const PALETTE: Record<string, number> = {
   W: 0x8e9aa6, // wrench
 }
 
-const LAMP: Record<Pose, number> = {
+// the chest lamp's colour by pose; the OpenCode plugin paints these in its theme's colours
+// (opencode-plugin/spans.ts, #1333)
+export const LAMP: Record<Pose, number> = {
   rest: 0xd97757, blink: 0xd97757, think: 0xd97757, work: 0xd97757, swing: 0xd97757,
   tada: 0x5fbf6a, ask: 0xffa630, slump: 0xe5484d, sleep: 0x34404b,
 }
@@ -64,7 +66,7 @@ const POSES: Record<Pose, Record<number, string>> = {
   sleep: { 5: EYES_OFF },
 }
 
-export const COLUMNS = REST[0].length
+export const COLUMNS = REST[0]!.length
 export const ROWS = REST.length / 2
 // The cell row the speech bubble's tail meets: the jaw.
 export const MOUTH = 3
@@ -78,9 +80,9 @@ const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 export const base64 = (bytes: Uint8Array) => {
   let out = ''
   for (let i = 0; i < bytes.length; i += 3) {
-    const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0)
-    out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] +
-      (i + 1 < bytes.length ? B64[(n >> 6) & 63] : '=') + (i + 2 < bytes.length ? B64[n & 63] : '=')
+    const n = (bytes[i]! << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0)
+    out += B64[(n >> 18) & 63]! + B64[(n >> 12) & 63]! +
+      (i + 1 < bytes.length ? B64[(n >> 6) & 63]! : '=') + (i + 2 < bytes.length ? B64[n & 63]! : '=')
   }
   return out
 }
@@ -104,8 +106,8 @@ export function cells(pose: Pose): string {
   const put = (word: number) => { view.setUint32(at, word, true); at += 4 }
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLUMNS; col++) {
-      const top = grid[row * 2][col]
-      const bottom = grid[row * 2 + 1][col]
+      const top = grid[row * 2]![col]!
+      const bottom = grid[row * 2 + 1]![col]!
       if (top === null && bottom === null) [SPACE, DEFAULT_COLOR, DEFAULT_COLOR].forEach(put)
       else if (top === null) [LOWER_HALF, bottom!, DEFAULT_COLOR].forEach(put)
       else [UPPER_HALF, top, bottom ?? DEFAULT_COLOR].forEach(put)
