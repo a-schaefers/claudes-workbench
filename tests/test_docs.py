@@ -213,7 +213,9 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn("never pass `--model <api id>` unless the user named that id for this task (the mod's "
                       'dialog then asks them, and a "not changed" means no)', choosing)
         self.assertTrue(callable(cli.start_gate))
-        self.assertIn("calls.push(['--start'", (ROOT / "mod/hooks/register.tsx").read_text())
+        # the dry run the dialog reads: the kernel's gate `start` builds its arguments (#1325)
+        self.assertIn('{ gate: "start", args: [ "--start" ]', (ROOT / "kernel/src/Kernel/Gate.purs").read_text())
+        self.assertIn("g.gate !== 'start'", (ROOT / "mod/hooks/register.tsx").read_text())
 
     def test_the_skill_changes_a_setting_only_on_the_users_clear_ask_and_yes(self):
         # #1287 (the owner, 2026-11-24: "it should just require a clear ask and yes from the
@@ -226,7 +228,9 @@ class DocsMatchTheCode(unittest.TestCase):
                      "installing nothing without their yes", "A role moved to API still goes through the mod's dialog",
                      "The same holds from the web chat: answer there and run the same command."):
             self.assertIn(said, skill)
-        self.assertIn("calls.push(['--settings'", (ROOT / "mod/hooks/register.tsx").read_text())
+        # the dry run the dialog reads: the kernel's gate `settings` builds its arguments (#1325)
+        self.assertIn('{ gate: "settings", args: [ "--settings" ]', (ROOT / "kernel/src/Kernel/Gate.purs").read_text())
+        self.assertIn("g.gate !== 'settings'", (ROOT / "mod/hooks/register.tsx").read_text())
 
     def test_the_skills_question_bullet_sends_a_files_text_never_a_path_outside_the_lane(self):
         # #1133 (2026-11-23): an answer naming ~/.claude/plans/x.md (hidden from the lane whole)
