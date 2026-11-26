@@ -3866,6 +3866,14 @@ def cmd_settings(a):
     (a role to API, the cap) still waits for the mod's dialog. A change that went through is a
     settings-changes.jsonl row, by claude (terminal outside Claude Code)."""
     from . import settings  # it imports this module
+    if a.action == "offers":  # the web's changes due a word to the driver (#1334)
+        got = settings.offers(spend=a.if_due)
+        if a.json:
+            print(json.dumps(got))
+        else:
+            for r in got["offers"] + got["notes"]:
+                print(r["text"])
+        return
     if a.action is None:
         rows = settings.rows(fresh=True)
         print(json.dumps(rows) if a.json else "\n".join(settings_lines(rows)))
@@ -6072,6 +6080,21 @@ def scout_state() -> dict:
     return store.read_json(store.home() / "scout.json", {}) or {}
 
 
+# wb scout --if-due's line, which the OpenCode plugin toasts (#1334); the mod says its own
+# SCOUT_DUE, naming /workbench-models
+SCOUT_OFFER = "the weekly model check is due: ask your driver to run it (wb scout lists what to check)"
+
+
+def scout_offer_due(st: dict, now: float) -> bool:
+    """Whether the weekly model check is due an offer (wb scout --if-due, #1334): its last check
+    (`done_at`) SCOUT_EVERY_DAYS old, and no offer since it fell due (`offered_at`, which either
+    host writes: the mod's scoutIfDue keeps the same rule in register.tsx, so a toast by one
+    spends the period's offer for both)."""
+    every = SCOUT_EVERY_DAYS * 86400
+    done = float(st.get("done_at") or 0)
+    return now - done >= every and float(st.get("offered_at") or 0) < done + every
+
+
 def cmd_scout(a):
     """The weekly model check's facts: this machine, what is installed, how each model does.
     Claude reads it, looks up what is newest and best for this hardware, and recommends."""
@@ -6099,6 +6122,15 @@ def cmd_scout(a):
         due = store.now() - st.get("done_at", 0) > SCOUT_EVERY_DAYS * 86400
         print("due" if due else "not due")
         sys.exit(0 if due else 1)
+    if a.if_due:  # the OpenCode plugin's idle check (#1334): the offer, once a due period
+        with store.locked(store.home() / "locks" / "scout.lock"):
+            st = scout_state()
+            if not scout_offer_due(st, store.now()):
+                print("not due")
+                sys.exit(1)
+            store.write_json(path, {**st, "offered_at": store.now()})
+        print(SCOUT_OFFER)
+        return
     when = st.get("done_at")
     print("last model check: " + (f"{time.strftime('%Y-%m-%d', time.localtime(when))}, "
                                   f"{(store.now() - when) / 86400:.0f} days ago"
@@ -9533,8 +9565,13 @@ def parser() -> argparse.ArgumentParser:
                        "`set` one on the user's clear ask and yes")
     s.add_argument("--json", action="store_true", help="the rows as JSON (the web app's)")
     s.set_defaults(f=cmd_settings, action=None, dry_run=False)
-    x = s.add_subparsers(dest="action", metavar="set").add_parser(
-        "set", help="change one row, on the user's clear ask and yes")
+    sp = s.add_subparsers(dest="action", metavar="set|offers")
+    x = sp.add_parser("offers", help="the web app's changes due a word to the driver: a turn "
+                      "offering help for each with help, a note for the rest (the OpenCode plugin's)")
+    x.add_argument("--if-due", action="store_true", help="record them as said, so none is said twice "
+                   "(settings-offered.json)")
+    x.add_argument("--json", action="store_true", help='{"offers": [...], "notes": [...]}')
+    x = sp.add_parser("set", help="change one row, on the user's clear ask and yes")
     x.add_argument("key", metavar="KEY", help="a row's key, as wb settings lists it")
     x.add_argument("value", metavar="VALUE", help="one of its choices; a number or off for a number "
                    "row; any exact API model id where the row says so")
@@ -9632,6 +9669,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--done", action="store_true", help="record that the check was done")
     s.add_argument("--notes", help="with --done: what was recommended or changed")
     s.add_argument("--due", action="store_true", help="exit 0 if a check is due, else 1")
+    s.add_argument("--if-due", action="store_true",
+                   help="offer the check when it is due and wasn't offered since: print the offer "
+                   "and record it (scout.json offered_at), else `not due`, exit 1 (the OpenCode "
+                   "plugin's idle check)")
     s.add_argument("--watch", metavar="TEXT", help="add what would reopen a decision (a model "
                                                    "set aside, and what it needs to return)")
     s.add_argument("--unwatch", type=int, metavar="N", help="drop watch-list item N, once settled")

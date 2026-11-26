@@ -3,9 +3,11 @@
 // off with the server part. The pane, the footer and /workbench come in #1312; the skeleton
 // (#1311, 2026-11-25) asks the server part which wb it runs and says so only when it finds none:
 // every later piece needs it, and a service started without the user's PATH is the likely cause.
-import type { TuiPlugin } from './host.d.ts'
+import type { TuiContext, TuiPlugin } from './host.d.ts'
+import type { SplashHost } from './splash.tsx'
 import { Workbench, type Status } from './rpc.ts'
 import { consentTui } from './consent-tui.ts'
+import { noticesTui } from './notices-tui.ts'
 
 // where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
 // install of the whole repository does (#1311's review, 2026-11-25)
@@ -15,12 +17,14 @@ const plugin: TuiPlugin = {
   id: 'workbench',
   async setup(ctx) {
     if (process.env.WB_TASK) return
-    const stop = consentTui(ctx) // the consent gates' forms (#1314)
+    const stopConsent = consentTui(ctx) // the consent gates' forms (#1314)
+    const stopNotices = noticesTui(ctx) // the notices' toasts and desktop notifications (#1313)
+    const stopAll = () => { stopConsent?.(); stopNotices() }
     let st: Status
     try {
       st = (await ctx.client.rpc(Workbench).status({})) as Status
     } catch {
-      return stop // the server part isn't there (a server older than this TUI): nothing to say yet
+      return stopAll // the server part isn't there (a server older than this TUI): nothing to say yet
     }
     if (!st.found) {
       ctx.ui.toast.show({
@@ -33,7 +37,16 @@ const plugin: TuiPlugin = {
           : `this install of the plugin brings no wb, and OpenCode's PATH has none: ${GET_WB}`,
       })
     }
-    return stop
+    // the apprentice and the opening animation in Workbench's panel (#1333): imported here, not at
+    // load, as OpenTUI and Solid are only the TUI's; the context has what SplashHost names
+    // (plugin/src/tui/context.ts), which host.d.ts leaves out
+    try {
+      const { mountSplash } = await import('./splash.tsx')
+      const stopSplash = mountSplash(ctx as TuiContext & SplashHost, st.home)
+      return () => { stopSplash(); stopAll() }
+    } catch {
+      return stopAll // a TUI that can't load a plugin's OpenTUI views: the rest works without them
+    }
   },
 }
 

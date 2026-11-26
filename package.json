@@ -13,6 +13,7 @@
   "bin": {
     "wb": "bin/wb"
   },
-  "files": ["bin/", "workbench/", "agent/", "skill/", "opencode-plugin/*.ts", "mod/hooks/core.ts",
-            "mod/hooks/kernel.js", "LICENSE"]
+  "files": ["bin/", "workbench/", "agent/", "skill/", "opencode-plugin/*.ts", "opencode-plugin/*.tsx",
+            "mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/kernel.js",
+            "LICENSE"]
 }

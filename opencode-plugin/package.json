@@ -24,6 +24,13 @@
     "consent-tui.ts",
     "gates.ts",
     "words.ts",
-    "calls.ts"
+    "calls.ts",
+    "notices.ts",
+    "notices-tui.ts",
+    "jobs.ts",
+    "spans.ts",
+    "splash.tsx",
+    "upkeep.ts",
+    "commands.ts"
   ]
 }

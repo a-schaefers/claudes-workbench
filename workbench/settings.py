@@ -33,6 +33,7 @@ import copy
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -607,3 +608,64 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict:
              "to": value, "said": done["said"], **({"help": done["help"]} if done.get("help") else {}), "by": by}
     store.append_jsonl(chat.changes_path(), entry)
     return entry
+
+
+# The settings offer (#1334, the OpenCode plugin's idle check; kernel/BOUNDARY.md: it stays in
+# wb): each change the user made in the web app's Settings reaches the driver once. One with
+# `help` (the value just chosen is on but can't work yet) is a turn that asks the driver to offer
+# to set it up; any other a row the conversation reads, starting no turn, but the rows whose own
+# notes say every change (SAID_ELSEWHERE). The Claude Code mod's settingsTurns keeps the same rule
+# and words in register.tsx with its mark in its own store, so each host offers a row once.
+OFFERED = "settings-offered.json"  # under $WB_HOME: {ts}, the newest row `wb settings offers --if-due` gave
+OFFER_TAIL = 64 << 10  # the mod's SETTINGS_TAIL
+OFFER_MAX_AGE_S = 3600  # the mod's OLDEST_WAKE_MS: a row older is no news
+SAID_ELSEWHERE = re.compile(r"(?:agents|busy|cap|coding|workflows|(?:role|gpu|api|think)-[a-z]+)")
+
+
+def _one(v, n: int) -> str:
+    return " ".join(str("" if v is None else v).split())[:n]
+
+
+def _value_word(v) -> str:
+    return "off" if v is None or v == "" else _one(v, 120)
+
+
+def change_said(r: dict) -> str:
+    """A web change as the driver is told it (the mod's settingSaid)."""
+    said = _one(r.get("said"), 300)
+    return (f"The user changed {_one(r.get('label'), 80) or _one(r.get('key'), 80)} from "
+            f"{_value_word(r.get('from'))} to {_value_word(r.get('to'))} on the web app."
+            + (f" wb said: {said}" if said else ""))
+
+
+def offers(spend: bool, now: float | None = None) -> dict:
+    """The web changes due a word (`wb settings offers`): {"offers": [{ts, key, label, text,
+    toast}], "notes": [{ts, key, text}]}, from settings-changes.jsonl's rows `by: "web"` newer
+    than settings-offered.json's mark and under OFFER_MAX_AGE_S old. ``spend`` (--if-due) moves
+    the mark past them under its lock, so one host's servers say each once."""
+    now = store.now() if now is None else now
+    mark_path = store.home() / OFFERED
+    with store.locked(store.home() / "locks" / "settings-offered.lock"):
+        mark = float((store.read_json(mark_path, {}) or {}).get("ts") or 0)
+        got: dict = {"offers": [], "notes": []}
+        newest = mark
+        for r in store.read_jsonl_tail(chat.changes_path(), OFFER_TAIL):
+            if not isinstance(r, dict) or r.get("by") != "web":
+                continue
+            ts = r.get("ts")
+            if not isinstance(ts, (int, float)) or ts <= mark or ts < now - OFFER_MAX_AGE_S:
+                continue
+            newest = max(newest, float(ts))
+            key, label = _one(r.get("key"), 80), _one(r.get("label"), 80) or _one(r.get("key"), 80)
+            help = r.get("help").strip() if isinstance(r.get("help"), str) else ""
+            if help:
+                got["offers"].append({
+                    "ts": ts, "key": key, "label": label,
+                    "text": f"[workbench] {change_said(r)}\n{help[:4000]}\n"
+                            "Offer to help with it, and install or change nothing without their yes.",
+                    "toast": f"{label} changed on the web app: the driver will offer to set it up"})
+            elif not SAID_ELSEWHERE.fullmatch(key):
+                got["notes"].append({"ts": ts, "key": key, "text": change_said(r)})
+        if spend and newest > mark:
+            store.write_json(mark_path, {"ts": newest})
+    return got

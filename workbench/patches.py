@@ -268,7 +268,8 @@ def is_test(path) -> bool:
 # *.test.ts as the mod's suite (an OpenCode plugin test passed "upstream" unrun), and `wb patch
 # upstream` named only the mod's commands (#1321, finding 18). PLUGIN_SHARED is what
 # opencode-plugin/ imports from mod/ (tests/test_workbench.py checks it against the imports).
-PLUGIN_SHARED = ("mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/kernel.d.ts", "mod/hooks/golden/")
+PLUGIN_SHARED = ("mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/kernel.d.ts", "mod/hooks/golden/",
+                 "mod/hooks/splash.ts", "mod/hooks/apprentice.ts")  # the splash, one for both hosts (#1333)
 KERNEL_CHECK = "python3 scripts/kernel.py check"
 MOD_TESTS = "claude plugin validate mod && claude plugin test mod"
 PLUGIN_TESTS = "BUN_BE_BUN=1 opencode test opencode-plugin/test && BUN_BE_BUN=1 opencode check -p opencode-plugin"

@@ -365,3 +365,45 @@ class ClaudeSets(Rows):
                                                 for r in context.denied_shell())]
         for cmd in ("wb settings set coding ask", "wb settings", "wb settings set role-trivial api"):
             self.assertEqual(tw.Permission.verdict(rules, cmd), "deny", cmd)
+
+
+class SettingsOffers(tw.Base):
+    """wb settings offers (#1334): the web app's changes due a word to the driver, which the
+    OpenCode plugin asks for when a session goes idle; the mod's settingsTurns keeps the same rule."""
+
+    def change(self, key: str, ts: float, help: str = "", by: str = "web", **row):
+        from workbench import chat
+        store.append_jsonl(chat.changes_path(), {"ts": ts, "key": key, "label": row.pop("label", key.title()),
+                                                 "from": "off", "to": "on", "said": f"{key}: on",
+                                                 **({"help": help} if help else {}), "by": by, **row})
+
+    def offers(self, *flags: str) -> dict:
+        return json.loads(tw.run_wb("settings", "offers", "--json", *flags))
+
+    def test_each_web_change_is_offered_once_with_its_help_and_the_rest_are_notes(self):
+        now = store.now()
+        self.change("probe", now - 5, help="It can't work yet: offer to set it up.", label="Agent code navigation")
+        self.change("splash", now - 4)
+        self.change("coding", now - 3)          # its own rows say every change: not said twice
+        self.change("role-trivial", now - 2)
+        self.change("progress", now - 1, by="claude")  # Claude's own: it made it
+        self.change("busy", now - 7200)         # over an hour old: no news
+        got = self.offers("--if-due")
+        [offer] = got["offers"]
+        self.assertEqual(offer["key"], "probe")
+        self.assertEqual(offer["text"], "[workbench] The user changed Agent code navigation from off to on on the web "
+                         "app. wb said: probe: on\nIt can't work yet: offer to set it up.\nOffer to help with it, "
+                         "and install or change nothing without their yes.")
+        self.assertEqual(offer["toast"], "Agent code navigation changed on the web app: the driver will offer to set it up")
+        self.assertEqual([n["key"] for n in got["notes"]], ["splash"])
+        self.assertEqual(got["notes"][0]["text"], "The user changed Splash from off to on on the web app. wb said: splash: on")
+        # said: never again, to this server or another
+        self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})
+        self.change("splash", store.now())
+        self.assertEqual([n["key"] for n in self.offers()["notes"]], ["splash"])
+        # without --if-due nothing is spent
+        self.assertEqual([n["key"] for n in self.offers("--if-due")["notes"]], ["splash"])
+
+    def test_with_nothing_changed_there_is_nothing_to_offer(self):
+        self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})
+        self.assertEqual(tw.run_wb("settings", "offers"), "")

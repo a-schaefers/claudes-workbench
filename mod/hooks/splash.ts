@@ -183,7 +183,10 @@ const SMALL: Record<string, string[]> = {
   B: ['XX.', 'X.X', 'XX.', 'X.X', 'XX.'], N: ['X..X', 'XX.X', 'X.XX', 'X..X', 'X..X'],
   H: ['X.X', 'X.X', 'XXX', 'X.X', 'X.X'],
 }
-const LINES = ["CLAUDE'S", 'WORKBENCH']
+// The words it forges: Claude Code's. OpenCode's plugin forges its own name alone (#1333: the owner,
+// 2026-11-24, the pane there "would just only be called workbench"); its colours by line, the last
+// line's cool (WORKBENCH), any above it warm (CLAUDE'S).
+export const LINES: readonly string[] = ["CLAUDE'S", 'WORKBENCH']
 const glyphOf = (font: Record<string, string[]>, ch: string) =>
   font === SMALL ? [...SMALL[ch]!, '.'.repeat(SMALL[ch]![0]!.length)] : BIG[ch]!
 const lineWidth = (font: Record<string, string[]>, text: string) =>
@@ -272,9 +275,10 @@ export function splashFont(cols: number, rows: number): 'big' | 'small' | null {
 /**
  * Lays the splash out for a Raster of cols x rows: forge's design in the rows above the bottom
  * one (forge's last row, under its floor, is where the Tasks page's tabs are), and the bottom row
- * for the bar. Null where the pane is too small.
+ * for the bar. Null where the pane is too small. `lines`, the words (no wider than the font's
+ * pane: WORKBENCH alone fits either).
  */
-export function plan(cols: number, rows: number, target: Target): Plan | null {
+export function plan(cols: number, rows: number, target: Target, lines: readonly string[] = LINES): Plan | null {
   const font = splashFont(cols, rows)
   if (!font) return null
   const F = font === 'big' ? BIG : SMALL
@@ -283,10 +287,10 @@ export function plan(cols: number, rows: number, target: Target): Plan | null {
   const floorY = 2 * (H - 2) // the floor's pixel row: the upper half of row H-2
   const Y0 = floorY - 18 // the apprentice on its crate (6 px tall)
   const X0 = Math.floor((cols - 28) / 2) // the apprentice, crate and anvil centred (28 px)
-  const titleRows = Math.floor(gh / 2) * 2 + 1
+  const titleRows = lines.length * Math.floor(gh / 2) + lines.length - 1 // the lines and a row between each
   const top = Math.max(1, Math.floor((Math.floor(Y0 / 2) - 1 - titleRows) / 2) + 1)
   const glyphs: Glyph[] = []
-  LINES.forEach((text, li) => {
+  lines.forEach((text, li) => {
     const ul = lineWidth(F, text)
     let x = Math.floor((cols - ul) / 2)
     const y = 2 * (top + li * (Math.floor(gh / 2) + 1))
@@ -309,7 +313,7 @@ export function plan(cols: number, rows: number, target: Target): Plan | null {
     g.tx = g.x + Math.floor(g.w / 2)
     g.ty = g.y + Math.floor(g.h / 2)
     // each pixel's final colour, once: lit from above, like metal
-    const stops = g.line === 0 ? WARM : COOL
+    const stops = g.line === lines.length - 1 ? COOL : WARM
     g.fin = g.px.map(([x, y]) => atLum(ramp(stops, (x - g.u0) / Math.max(1, g.ul - 1)),
       0.275 - 0.13 * ((y - g.y) / Math.max(1, g.h - 1))))
   })
