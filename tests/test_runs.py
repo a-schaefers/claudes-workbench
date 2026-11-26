@@ -397,6 +397,27 @@ class Flows(Base):
         self.assertIn("{diff} needs from a code stage", said)
         self.assertIn("refix is {path, max: 1 to 2}", said)
 
+    def test_the_coders_report_is_a_place_over_a_code_stage_only(self):
+        st = json.loads(json.dumps(AUDIT["stages"]))
+        st[1]["prompt"] = "{report}"
+        self.assertIn("{report} needs from a code stage", self.errs(stages=st))
+        st = [{"id": "code", "kind": "code", "items": ["x"]},
+              {"id": "review", "card": "review", "from": "code", "prompt": "{report}\n{diff}"},
+              {"id": "claude", "final": True, "from": "review"}]
+        self.assertEqual(self.errs(stages=st), "")
+
+    def test_a_batch_member_carries_its_key_as_id_and_its_schema_answers_exactly_the_batch(self):
+        self.assertEqual(runs.member("1.2", {"id": "F9", "claim": "c"}), {"id": "1.2", "claim": "c"})
+        self.assertEqual(runs.member("3", "issue #12: crash"), {"id": "3", "item": "issue #12: crash"})
+        doc = runs.batch_schema({"card": "judge"}, ["1.1", "1.2"])
+        arr = doc["properties"]["judgments"]
+        self.assertEqual((arr["minItems"], arr["maxItems"]), (2, 2))
+        self.assertEqual(arr["items"]["properties"]["id"]["enum"], ["1.1", "1.2"])
+        self.assertEqual(schema.valid(doc), [])
+        self.assertEqual(runs.batch_schema({"card": "judge", "schema": "triage"}, ["1"])["properties"]["items"]
+                         ["items"]["properties"]["id"]["enum"], ["1"])
+        self.assertIsNone(runs.batch_schema({"card": "verify"}, ["1"]))  # a verdict answers by no id
+
     def test_a_template_fills_each_place_and_says_what_it_cut(self):
         out = runs.render("{item.id}: {item} {{literal}} {params.p} {run}/{stage}",
                           {"item": {"id": "F1", "x": "y" * 20_000}, "params": {"p": "P"}, "run": "r", "stage": "s"})
@@ -525,6 +546,11 @@ class Runs(Base):
         code = store.Task("bld-code-1")
         self.assertEqual(code.status["round"], 2)
         self.assertIn("name the answer file in the README", code.round_dir(2).joinpath("prompt.md").read_text())
+        # each review reads the round it reviews' report: the coder's answer to a refix (#1134's study)
+        for review, rnd in (("bld-review-1", 1), ("bld-review-2", 2)):
+            said = store.Task(review).round_dir(1).joinpath("prompt.md").read_text()
+            self.assertIn(f"The coder's report:\ntask bld-code-1 · ", said)
+            self.assertIn(f" · round {rnd} · ", said.split("The coder's report:")[1].split("The change:")[0])
         self.assertIn("1 change(s) at review", self.run_notices("bld")[-1]["text"])
         # the driver took each item's notice (_ack_items): the code at review is no news for the
         # mod's idle net, which reads `acked` against `noticed` (the review of #1278, 2026-11-25)
@@ -693,6 +719,36 @@ class Runs(Base):
         self.assertEqual(sorted(runs.run_tasks(runs.Run("ab"))), ["ab-find-1", "ab-find-2", "ab-judge-1"])
         self.assertIn("A1", store.Task("ab-judge-1").round_dir(1).joinpath("prompt.md").read_text())
         self.assertEqual(len(runs.report_of("ab")["final"]), 1)
+
+    def test_a_batchs_judge_answers_by_its_members_ids_its_trail_lists_them_and_an_unjudged_one_is_named(self):
+        # lenses and triage handed Claude judgments with no trail and without the findings they
+        # judged, ids the judge had to invent, and a skipped finding vanished (#1134's study, #1278)
+        j = lambda fid: {"id": fid, "meets_bar": True, "class": "false result", "why": "w"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Audit area alpha": {"findings": [finding("A1", "claim-one"), finding("A2", "claim-two"),
+                                              finding("A3", "claim-three")], "covered": ["README.md"]},
+            "claim-one": {"judgments": [j("1.1"), j("1.1")]},  # a duplicate in 1.2's place
+            "claim-three": {"judgments": [j("1.3")]}})
+        flow = {"v": 1, "name": "bj", "params": {}, "stages": [
+            {"id": "find", "card": "find", "items": ["alpha"], "prompt": "Audit area {item} now."},
+            {"id": "judge", "card": "judge", "from": "find", "split": "findings", "flow": "barrier",
+             "batch": 2, "prompt": "Judge these:\n{item}"},
+            {"id": "claude", "final": True, "from": "judge"}]}
+        run_wb("run", "start", "bj", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("bj", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        prompt = store.Task("bj-judge-1").round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn('"id": "1.1"', prompt)
+        self.assertIn('"id": "1.2"', prompt)
+        self.assertNotIn('"A1"', prompt)  # the member's key, never the finder's own
+        self.assertEqual(store.Task("bj-judge-1").spec["schema"], str(runs.run_dir("bj") / "schemas" / "judge-1.json"))
+        sch = json.loads((runs.run_dir("bj") / "schemas" / "judge-1.json").read_text())
+        self.assertEqual(sch["properties"]["judgments"]["items"]["properties"]["id"]["enum"], ["1.1", "1.2"])
+        rep = runs.report_of("bj")
+        b1 = next(f for f in rep["final"] if f["key"] == "judge:b1")
+        self.assertEqual([(t["stage"], t["key"], t["result"]["claim"]) for t in b1["trail"]],
+                         [("find", "1.1", "claim-one"), ("find", "1.2", "claim-two")])
+        self.assertEqual(rep["not_run"], [{"key": "judge:1.2", "why": "unjudged: judge:b1 returned nothing for it"}])
+        self.assertIn("judge:1.2: unjudged", run_wb("run", "report", "bj"))
 
     def test_a_skipped_stage_and_items_past_max_items_are_not_run_and_named(self):
         flow = {"v": 1, "name": "cap", "params": {"areas": "list"}, "stages": [

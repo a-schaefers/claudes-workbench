@@ -20,7 +20,7 @@ Files, in $WB_HOME/runs/<run>/: run.json (who started it, the flow whole, its pa
 budgets), status.json (the phase and each stage's counts), journal.jsonl (each item started,
 its output, its null, its not-run, each refix and notice: resume replays it by stage and item),
 inbox/ (Claude's feeds for a `claude` stage), outputs/ (each item's object), specs/ (each item's
-spec), notify.jsonl (the items' notices, the driver's alone), result.json (the end's report),
+spec), schemas/ (each batch's schema), notify.jsonl (the items' notices, the driver's alone), result.json (the end's report),
 acked (the run's notices taken), driver.log.
 """
 import hashlib
@@ -52,8 +52,9 @@ ATTEMPTS_MAX = 5
 REFIX_MAX = 2
 IN_FLIGHT = 6          # a run's items started and not yet done: each is a worktree, and its setup
 TEMPLATE = re.compile(r"\{\{|\}\}|\{([a-z]+)(?:\.([A-Za-z0-9_-]+))?\}")
-PLACES = ("item", "params", "context", "diff", "run", "stage", "base")
-CUTS = {"item": 16_000, "context": 4_000, "diff": 40_000}  # characters of each a spec carries
+PLACES = ("item", "params", "context", "diff", "report", "run", "stage", "base")
+CODE_PLACES = ("diff", "report")  # over a code stage only: its change, its coder's round report
+CUTS = {"item": 16_000, "context": 4_000, "diff": 40_000, "report": 6_000}  # characters a spec carries
 DEFAULT_PROMPT = "{item}"
 WAITING = object()     # a refix's next review, held until the coder's next round is in
 OPEN = ("running", "checkpoint", "paused")  # the phases a driver runs in: its items' notices are its
@@ -293,8 +294,8 @@ def validate(flow) -> list[str]:
                 errs.append(f"{where}: unknown placeholder {{{place}}} (known: {', '.join(PLACES)})")
             elif place == "params" and (not sub or sub not in params):
                 errs.append(f"{where}: {{params.{sub}}} isn't a declared param")
-            elif place == "diff" and not over_code:
-                errs.append(f"{where}: {{diff}} needs from a code stage")
+            elif place in CODE_PLACES and not over_code:
+                errs.append(f"{where}: {{{place}}} needs from a code stage")
             elif place != "item" and place != "params" and sub:
                 errs.append(f"{where}: {{{place}.{sub}}}: only item and params take a key")
         items = s.get("items")
@@ -381,6 +382,60 @@ def get_path(obj, path: str):
     return obj
 
 
+def stage_schema(stage: dict) -> dict | None:
+    """A report stage's schema, its own or its card's; None when it can't be read now."""
+    name = stage.get("schema")
+    if not name and stage.get("card"):
+        try:
+            name = cards.load(stage["card"]).schema
+        except RuntimeError:
+            return None
+    try:
+        return cards.load_schema(name) if name else None
+    except RuntimeError:
+        return None
+
+
+def answers_key(doc: dict | None) -> str | None:
+    """The key of a schema's answer list, one entry per input by `id` (judgments' `judgments`,
+    triage's `items`): its first top-level array of objects that require an `id`. None: no list
+    answers by id, and a batch's coverage isn't checked."""
+    props = (doc or {}).get("properties")
+    for k, sub in (props.items() if isinstance(props, dict) else ()):
+        items = sub.get("items") if isinstance(sub, dict) and sub.get("type") == "array" else None
+        if isinstance(items, dict) and "id" in (items.get("required") or ()):
+            return k
+    return None
+
+
+def batch_schema(stage: dict, ids: list[str]) -> dict | None:
+    """The stage's schema for one batch: its answer list exactly ``ids`` long, each `id` one of
+    them, so an invented, missing or extra id gets the runner's one repair round (SCHEMA_FIX). None
+    when the schema answers by no id."""
+    doc = stage_schema(stage)
+    key = answers_key(doc)
+    if key is None:
+        return None
+    doc = json.loads(json.dumps(doc))
+    arr = doc["properties"][key]
+    arr["minItems"] = arr["maxItems"] = len(ids)
+    arr["items"].setdefault("properties", {})["id"] = {"type": "string", "enum": list(ids)}
+    return doc
+
+
+def unanswered(stage: dict, it: "Item") -> list[str]:
+    """A batch item's member ids its result answered nothing for (a duplicate took a place, or the
+    schema answers by no `id`-enum of the batch's): each goes under not_run as unjudged, never
+    dropped (#1278's no silent caps; the lenses and triage flows lost them, #1134's study)."""
+    if not it.members or it.state != "done" or not isinstance(it.output, dict):
+        return []
+    key = answers_key(stage_schema(stage))
+    if key is None:
+        return []
+    got = {a.get("id") for a in it.output.get(key) or () if isinstance(a, dict)}
+    return [k for k, _ in it.members if k not in got]
+
+
 # --- a run -------------------------------------------------------------------------------------
 
 def runs_dir() -> Path:
@@ -417,6 +472,16 @@ class Item:
     why: str = ""
     output: object = None
     src: str | None = None  # the key of the item it came from (the trail)
+    members: list | None = None  # a batch's [(key, value)], each value carrying its key as `id`
+
+
+def member(key: str, v) -> dict:
+    """A batch member as its batch item carries it: its key as `id`, which the judge answers by
+    (the finder's card asks for no id, so a judge given none invented them), an object's own keys
+    after it, anything else under `item`."""
+    if isinstance(v, dict):
+        return {"id": key, **{k: x for k, x in v.items() if k != "id"}}
+    return {"id": key, "item": v}
 
 
 class Run:
@@ -614,13 +679,15 @@ def state(run: Run) -> dict:
         if attempts > 1:
             inputs = [(f"{k}#a{a}", v, src) for k, v, src in inputs for a in range(1, attempts + 1)]
         batch = int(s.get("batch") or 1)
+        groups: dict = {}
         if batch > 1:
-            inputs = [(f"b{i // batch + 1}", [v for _, v, _ in inputs[i:i + batch]], None)
-                      for i in range(0, len(inputs), batch)]
+            for i in range(0, len(inputs), batch):
+                groups[f"b{i // batch + 1}"] = [(k, member(k, v)) for k, v, _ in inputs[i:i + batch]]
+            inputs = [(key, [v for _, v in ms], None) for key, ms in groups.items()]
         cap = int(s.get("max_items") or MAX_ITEMS)
         items = []
         for idx, (key, v, src) in enumerate(inputs):
-            it = Item(sid, key, v, src=src)
+            it = Item(sid, key, v, src=src, members=groups.get(key))
             row = started.get((sid, key))
             if row:
                 it.n, it.task = row.get("n"), row.get("task")
@@ -748,19 +815,35 @@ def _counts(items) -> dict:
 
 def _spec_of(run: Run, stage: dict, it: Item) -> str:
     spec = run.spec
-    diff = ""
-    if "{diff}" in (stage.get("prompt") or "") and isinstance(it.input, dict) and it.input.get("task"):
+    prompt = stage.get("prompt") or DEFAULT_PROMPT
+    diff = report = ""
+    over_code = isinstance(it.input, dict) and bool(it.input.get("task")) and any(
+        f"{{{p}}}" in prompt for p in CODE_PLACES)
+    if over_code:
         t = store.Task(it.input["task"])
-        try:
-            diff = gitops.diff(t.worktree, t.spec["base"]) if t.exists and t.worktree.is_dir() else ""
-        except (gitops.GitError, KeyError) as e:
-            diff = f"(no diff: {e})"
-        diff = f"```diff\n{diff}\n```" if diff else "(no changes)"
-    item = it.input.get("item") if isinstance(it.input, dict) and "task" in it.input and "{diff}" in (
-        stage.get("prompt") or "") else it.input
-    return render(stage.get("prompt") or DEFAULT_PROMPT, {
+        if "{diff}" in prompt:
+            try:
+                diff = gitops.diff(t.worktree, t.spec["base"]) if t.exists and t.worktree.is_dir() else ""
+            except (gitops.GitError, KeyError) as e:
+                diff = f"(no diff: {e})"
+            diff = f"```diff\n{diff}\n```" if diff else "(no changes)"
+        if "{report}" in prompt:
+            report = _code_report(t, it.input.get("round"))
+    item = it.input.get("item") if over_code else it.input
+    return render(prompt, {
         "item": item, "params": spec.get("params") or {}, "context": spec.get("context") or "",
-        "diff": diff, "run": run.name, "stage": stage["id"], "base": spec.get("base", "")})
+        "diff": diff, "report": report, "run": run.name, "stage": stage["id"], "base": spec.get("base", "")})
+
+
+def _code_report(t: store.Task, n) -> str:
+    """{report}: the reviewed round's report (summary.md: the coder's summary, its test line), so
+    a review after a refix reads the coder's answer to each ask. The refix asked "done, or declined
+    with why" while the next review saw only the item and the diff: a reasoned decline was asked
+    again until `max` ran out, paid rounds burned (#1134's study, on #1278, 2026-11-25)."""
+    if not t.exists:
+        return "(no report: the task is gone)"
+    n = n if isinstance(n, int) and n > 0 else t.status.get("round") or 1
+    return t.report(n).strip() or f"(round {n}'s report is empty)"
 
 
 def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
@@ -792,7 +875,12 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     else:
         argv += ["--report", "--ask-budget", str(stage.get("ask") or 0), "--no-self-review",
                  "--no-base-check", "--setup", ""]
-        if stage.get("schema"):
+        if it.members and (doc := batch_schema(stage, [k for k, _ in it.members])) is not None:
+            path = run.dir / "schemas" / f"{stage['id']}-{n}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            store.write_json(path, doc)
+            argv += ["--schema", str(path)]
+        elif stage.get("schema"):
             argv += ["--schema", stage["schema"]]
         if stage.get("tools"):
             argv += ["--tools", stage["tools"]]
@@ -1226,10 +1314,18 @@ def report_of(name: str) -> dict:
     feeds = last.get("from") or next((s["id"] for s in reversed(sts[:-1])), None)
 
     def trail(it):
+        """What ``it`` came from, nearest first: each item up the `from` chain; a batch's
+        members, each as its judge was given it (with its `id`), where a batch's trail stopped
+        at None: lenses' and triage's judgments reached Claude without what they judged (#1134)."""
         out, cur, seen = [], it, set()
-        while cur is not None and cur.src is not None and (cur.stage, cur.key) not in seen:
+        while cur is not None and (cur.stage, cur.key) not in seen:
             seen.add((cur.stage, cur.key))
             src_stage = (stage_by(flow, cur.stage) or {}).get("from")
+            if cur.members is not None:
+                out += [{"stage": src_stage or cur.stage, "key": k, "result": v} for k, v in cur.members]
+                break
+            if cur.src is None:
+                break
             cur = by.get((src_stage, cur.src))
             if cur is not None:
                 out.append({"stage": cur.stage, "key": cur.key, "result": cur.output})
@@ -1252,11 +1348,14 @@ def report_of(name: str) -> dict:
             elif it.state == "superseded":
                 rep["superseded"].append({"key": k, "why": it.why, "result": it.output})
             elif it.state == "null":
-                rep["null"].append({"key": k, "why": it.why})
+                rep["null"].append({"key": k, "why": it.why,
+                                    **({"members": [mk for mk, _ in it.members]} if it.members else {})})
             elif it.state == "not_run":
                 rep["not_run"].append({"key": k, "why": it.why})
             elif it.state in ("pending", "running", "waiting"):
                 rep["pending"].append({"key": k, "task": it.task})
+            for mk in unanswered(s, it):
+                rep["not_run"].append({"key": f"{s['id']}:{mk}", "why": f"unjudged: {k} returned nothing for it"})
     used = spent(run)
     rep["spend"] = {"usd": used["usd"], "budget_usd": run.spec.get("budget_usd"), "gpu_min": used["gpu_min"],
                     "budget_min": run.spec.get("budget_min")}
@@ -1285,7 +1384,8 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
             elif what == "pending":
                 out.append(f"  {r.get('key') or r.get('stage')}: {r.get('task') or r.get('why')}")
             else:
-                out.append(f"  {r['key']}: {r['why']}")
+                out.append(f"  {r['key']}: {r['why']}" + (f" (its items: {', '.join(r['members'])})"
+                                                         if r.get("members") else ""))
     if stage is not None:  # a checkpoint's look at one stage: its every done item
         st = state(Run(rep["run"]))
         for it in st.get(stage) or ():

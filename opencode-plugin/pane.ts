@@ -13,8 +13,8 @@
 // (never a `location` or `/diff` on the agent's worktree, whose `.git` the agent can rewrite:
 // the decision's critic 1). `link`: the web app's (`wb chat url --json`), for the modeline.
 //
-// `/workbench [request]`: the Workbench agent (`session.switchAgent`, the mode, #1315's agent),
-// the standing driver pin applied (driver.ts `applyPin`, #1316), and the request, when one was
+// `/workbench [request]`: the standing driver pin applied (driver.ts `applyPin`, #1316), the
+// Workbench agent (`session.switchAgent`, the mode, #1315's agent), and the request, when one was
 // typed after it, sent on to that agent. The TUI opens the panel when the session's agent
 // becomes Workbench, whichever way it did (pane.tsx). Nothing runs at import time.
 import { readdirSync, readFileSync } from 'node:fs'
@@ -259,17 +259,20 @@ export interface PaneHost {
 
 export const DESCRIPTION = 'Workbench mode: hand coding to OpenCode agents through wb (the Workbench agent and its panel)'
 
-/** /workbench, run: the Workbench agent, the pin, then the request typed after it, if any. */
+/** /workbench, run: the pin, the Workbench agent, then the request typed after it, if any. */
 export async function workbench(host: PaneHost, input: CommandInvocation, run: Run): Promise<void> {
   const session = host.session
   if (!session?.switchAgent) throw new Error("this OpenCode can't switch a session's agent")
+  // the pin before the agent: the agent's selection is what the TUI says the driver's notes at
+  // (pane.tsx, `wb driver --once`), so they are the pinned model's, never the one it replaced
+  // (switchAgent leaves the session's model as it is: core/src/session/session.ts)
+  await applyPin(host as DriverHost, input.sessionID, run, new Map()).catch(() => undefined)
   try {
     await session.switchAgent({ sessionID: input.sessionID, agent: AGENT })
   } catch (e) {
     // no Workbench agent: the plugin's skill/ wasn't found to make it (agent.ts registerAgent)
     throw new Error(`the Workbench agent isn't there (${String(e)}): wb doctor says why`)
   }
-  await applyPin(host as DriverHost, input.sessionID, run, new Map()).catch(() => undefined)
   // the text as typed, untrimmed, so a mention's offsets into it still hold
   const prompt = input.prompt ?? {}, text = prompt.text ?? ''
   const attached = [prompt.files, prompt.agents, prompt.skills].some(x => x !== undefined && x.length > 0)

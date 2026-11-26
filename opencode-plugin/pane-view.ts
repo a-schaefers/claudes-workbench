@@ -183,3 +183,34 @@ export function wrap(text: string, width: number, max = Infinity): string[] {
   if (line) out.push(line)
   return out.length > max ? [...out.slice(0, max - 1), clip(out.slice(max - 1).join(' '), width)] : out
 }
+
+// ---------------------------------------------------------------- the driver
+
+/** What `wb driver --session <id> --json` says (driver.info, over the `workbench-driver` RPC):
+ * the parts the panel's driver row reads. */
+export interface DriverInfo {
+  readonly model?: string; readonly label?: string; readonly kind?: string; readonly pin?: string; readonly error?: string
+}
+/** The TUI's own model picker, `/models` (tui/src/app.tsx's `model.list`), which the row opens. */
+export const MODELS = 'model.list'
+export const CHANGE = 'change'
+
+/** The panel's driver row (#1316): `driver: <provider/id#variant> (GPU|API)`, the pin when it
+ * names another model (routes.json's `driver`, applied at the next /workbench), and "change": the
+ * row's press opens OpenCode's own /models (pane.tsx), as the session's model is OpenCode's
+ * choice and wb never makes it. Cut to ``cols`` from the pin first, then the model, "change"
+ * always shown. None before wb answers, or when it failed (the handler's `error`). */
+export function driverRow(d: DriverInfo | null | undefined, cols: number): Run[] | null {
+  if (!d?.label) return null
+  const side = d.model ? ({ gpu: ' (GPU)', api: ' (API)' } as Record<string, string>)[d.kind ?? ''] ?? '' : ''
+  const head = `driver: ${d.model ? d.label : 'not known yet'}${side}`
+  const tail = ` · ${CHANGE}`
+  const pinned = d.pin && d.pin !== 'session' && d.pin !== d.label ? ` · pin ${d.pin}` : ''
+  const pin = head.length + pinned.length + tail.length <= cols ? pinned : ''
+  return [
+    { text: clip(head, Math.max(1, cols - tail.length)), fg: 'muted' },
+    ...(pin ? [{ text: pin, fg: 'muted' as const }] : []),
+    { text: ' · ', fg: 'muted' },
+    { text: CHANGE, fg: 'interactive', underline: true },
+  ]
+}

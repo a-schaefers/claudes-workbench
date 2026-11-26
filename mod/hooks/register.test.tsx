@@ -5495,6 +5495,10 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
     await clock.advance(31_000)
     expect([bad, rows.at(-1)]).toEqual([bad, expect.stringContaining('The roles changed: routes.json can\'t be read (wb route says why)')])
   }
+  // the OpenCode path's driver pin, even one that isn't an id, reads as wb reads it: the roles (#1316)
+  files[at] = JSON.stringify({ v: 1, day_usd: 7, roles: {}, driver: 'not an id' })
+  await clock.advance(31_000)
+  expect(rows.at(-1)).toContain('The roles changed: significant GPU (the router picks)')
 })
 
 test('#1014: with no role on an API model the conversation gets no roles block', async ($, on) => {
