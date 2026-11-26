@@ -21,7 +21,7 @@ import { Apprentice, mountSplash, PANEL, replaySplash, type Panel, type SplashHo
 import { AGENT, WorkbenchPane, type Link, type Live, type PaneTask, type Tasks } from './pane.ts'
 import { WorkbenchDriver } from './driver.ts'
 import {
-  footer, lineRun, modelineOf, panelRows, pixels, runOf, scoped, separator, sidebar, spinAt, target, TOKEN, WHO, wrap,
+  footer, lineRun, modelineOf, panelRows, pixels, Poll, runOf, scoped, separator, sidebar, spinAt, target, TOKEN, WHO, wrap,
   type Here, type Run, type Token,
 } from './pane-view.ts'
 import { capRow, focusOf, frameOf, speechOf } from '../mod/hooks/tasks.ts'
@@ -104,19 +104,17 @@ class Feed {
   readonly state = createSignal<Tasks | null>(null)
   readonly link = createSignal<Link>({ state: 'checking' })
   private linkAt = -Infinity
-  private timer: ReturnType<typeof setTimeout> | undefined
-  private stopped = false
-  constructor(private readonly rpc: Record<string, (input?: unknown) => Promise<unknown>>, private readonly busy: () => boolean) {}
-  start() { void this.poll() }
-  stop() { this.stopped = true; if (this.timer) clearTimeout(this.timer) }
-  async poll() {
-    try {
-      this.state[1](await this.rpc.tasks!({}) as Tasks)
-    } catch { /* the server part is restarting: the last read stays */ }
-    if (this.stopped) return
-    const open = (this.state[0]()?.tasks ?? []).some(t => t.phase !== 'accepted' && t.phase !== 'discarded')
-    this.timer = setTimeout(() => void this.poll(), open || this.busy() ? POLL_MS : IDLE_MS)
+  private readonly loop: Poll<Tasks>
+  constructor(private readonly rpc: Record<string, (input?: unknown) => Promise<unknown>>, private readonly busy: () => boolean) {
+    this.loop = new Poll(() => this.rpc.tasks!({}) as Promise<Tasks>, t => this.state[1](t), () => {
+      const open = (this.state[0]()?.tasks ?? []).some(t => t.phase !== 'accepted' && t.phase !== 'discarded')
+      return open || this.busy() ? POLL_MS : IDLE_MS
+    })
   }
+  start() { void this.loop.now() }
+  stop() { this.loop.stop() }
+  /** Read now (a press that opens the panel): still the one loop. */
+  poll() { return this.loop.now() }
   // the web app's link, for the modeline: asked when the panel draws, kept a minute (pane.ts LINK_MS)
   wantLink() {
     const now = Date.now()
@@ -212,7 +210,7 @@ function Page(props: { readonly host: Host; readonly feed: Feed; readonly panel:
   }
   const cap = () => {
     const c = state()?.cap
-    return c ? capRow(tasks(), c.spent, c.cap, cols()) : null
+    return c ? capRow(tasks(), c.spent, c.cap, cols(), undefined, c.est) : null
   }
   const ml = () => modelineOf(props.feed.link[0](), cols())
 

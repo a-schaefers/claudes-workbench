@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { capOf, COMMAND, diffLines, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
   WorkbenchPane, type Files, type PaneTask } from '../pane.ts'
-import { footer, mine, modelineOf, panelRows, runOf, scoped, separator, sidebar, target, type Here } from '../pane-view.ts'
+import { footer, mine, modelineOf, panelRows, Poll, runOf, scoped, separator, sidebar, target, type Here } from '../pane-view.ts'
 import { ROWS } from '../../mod/hooks/apprentice.ts'
 import type { Run } from '../driver.ts'
 
@@ -48,7 +48,7 @@ test('the scan lists each open task with its view facts and owner keys, a closed
   expect(reads.some(p => p.includes('/old-one/'))).toBe(false)
 })
 
-test('the panel\'s data reads a transcript again only once its task moved, a running one no sooner than LIVE_MS', async () => {
+test('the panel\'s data reads a stopped task\'s transcript again once it moved, a running one every LIVE_MS, moved or not', async () => {
   let now = NOW
   const calls: string[][] = []
   const tasks: Record<string, [object, object]> = { 'fix-it': [spec('fix-it'), status('running')] }
@@ -67,11 +67,23 @@ test('the panel\'s data reads a transcript again only once its task moved, a run
   await data.transcript('fix-it')
   expect(calls.length).toBe(2)
   await data.transcript('fix-it')
-  expect(calls.length).toBe(2)          // unchanged since
+  expect(calls.length).toBe(2)          // read under LIVE_MS ago
+  // a long step writes no status, but its session moves: read again (the mod's #691 rule)
+  now += LIVE_MS
+  await data.transcript('fix-it')
+  expect(calls.length).toBe(3)
+  // stopped: read once it moved, then not until it moves again
+  now += LIVE_MS
+  tasks['fix-it']![1] = status('review', { updated_at: NOW / 1000 })
+  await data.transcript('fix-it')
+  expect(calls.length).toBe(4)
+  now += LIVE_MS
+  await data.transcript('fix-it')
+  expect(calls.length).toBe(4)          // unchanged since
   // a name wb would never give runs nothing: never an option or a path
   expect((await data.transcript('--all')).why).toBe("--all isn't a task's name")
   expect((await data.diff('../x')).why).toBe("../x isn't a task's name")
-  expect(calls.length).toBe(2)
+  expect(calls.length).toBe(4)
 })
 
 test('the day cap is read only while an API task works, and kept ROLES_MS', async () => {
@@ -119,11 +131,16 @@ test('/workbench switches the session to the Workbench agent, applies the pin, t
   expect(did).toEqual([
     ['agent', { sessionID: 'ses_1', agent: 'workbench' }],
     ['model', { sessionID: 'ses_1', model: { providerID: 'deepinfra', id: 'm' } }],
-    ['prompt', { sessionID: 'ses_1', text: 'add a flag', delivery: 'steer' }],
+    ['prompt', { sessionID: 'ses_1', text: '  add a flag  ', delivery: 'steer' }],
   ])
   did.length = 0
   await workbench(host, { sessionID: 'ses_1', prompt: { text: '' }, delivery: 'steer' }, run)
   expect(did.map(d => (d as unknown[])[0])).toEqual(['agent', 'model'])
+  // what the TUI attached goes with the request, even with nothing typed (the review of #1312)
+  did.length = 0
+  const files = [{ type: 'file', url: 'file:///p/a.ts' }]
+  await workbench(host, { sessionID: 'ses_1', prompt: { text: '', files, agents: [] }, delivery: 'queue' }, run)
+  expect(did.at(-1)).toEqual(['prompt', { sessionID: 'ses_1', text: '', files, agents: [], delivery: 'queue' }])
   // no Workbench agent: said, and nothing sent
   did.length = 0
   const refused = { ...host, session: { ...host.session, switchAgent: async () => { throw new Error('agent not found') } } }
@@ -155,6 +172,31 @@ test('the server part registers the panel\'s RPC and /workbench, and the RPC alo
 })
 
 // ---------------------------------------------------------------- pane-view.ts
+
+test('the tasks are read by one loop however often a press asks for a read at once, and an older read in flight never draws', async () => {
+  const pending = new Map<number, () => void>()
+  let next = 0
+  const timers = { set: (f: () => void) => { pending.set(++next, f); return next }, clear: (h: unknown) => { pending.delete(h as number) } }
+  const answers: Array<(n: number) => void> = []
+  const drawn: number[] = []
+  const loop = new Poll(() => new Promise<number>(r => answers.push(r)), n => drawn.push(n), () => 2000, timers)
+  const first = loop.now()
+  answers[0]!(1); await first
+  expect([drawn, pending.size]).toEqual([[1], 1])
+  // three presses: still one timer, and the reads they overtook draw nothing
+  const presses = [loop.now(), loop.now(), loop.now()]
+  answers[3]!(4); answers[1]!(2); answers[2]!(3)
+  await Promise.all(presses)
+  expect([drawn, pending.size]).toEqual([[1, 4], 1])
+  // the timer's own read is the same loop, and a stop ends it
+  const tick = [...pending.values()][0]!
+  tick(); answers[4]!(5); await Promise.resolve(); await Promise.resolve()
+  expect([drawn, pending.size]).toEqual([[1, 4, 5], 1])
+  loop.stop()
+  expect(pending.size).toBe(0)
+  await loop.now()
+  expect(answers.length).toBe(5)
+})
 
 const task = (name: string, phase: string, more: Partial<PaneTask> = {}): PaneTask => ({
   name, phase, round: 1, model: 'gpu/m', label: 'm', via: 'gpu', role: 'trivial', provider: '', tests: null,

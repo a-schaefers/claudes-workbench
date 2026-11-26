@@ -202,14 +202,16 @@ export class PaneData {
     return { now, home: this.home, tasks, cap }
   }
 
-  // The transcript of `task`: read again when its status moved, a running one no sooner than LIVE_MS
+  // The transcript of `task`: a stopped one read again when its status moved; a running one every
+  // LIVE_MS, moved or not, as its session moves between status writes (a long step, the model
+  // streaming, the tests) and no sooner, as each read is an OpenCode export (the mod's rule, #691)
   async transcript(task: string): Promise<Live> {
     if (!NAME.test(task)) return { task, lines: [], why: `${task} isn't a task's name` }
     const now = this.now()
     const st = json(this.files.read(join(this.home, 'tasks', task, 'status.json')))
     const key = `${st.updated_at ?? ''}`
     const had = this.live.get(task)
-    if (had && (had.key === key || (ACTIVE.has(String(st.phase)) && now - had.at < LIVE_MS))) return had.live
+    if (had && (ACTIVE.has(String(st.phase)) ? now - had.at < LIVE_MS : had.key === key)) return had.live
     const r = await this.run(['watch', task, '--json', '--last', String(LIVE_LINES)])
     const live: Live = r.code === 0 ? { task, lines: parseLines(r.stdout) }
       : { task, lines: had?.live.lines ?? [], why: (r.stderr || r.stdout).trim().split('\n').at(-1) || `wb watch ${task} failed` }
@@ -239,7 +241,8 @@ export class PaneData {
 // `prompt` (client types.ts `SessionSwitchAgentInput`, `SessionPromptInput`)
 export interface CommandInvocation {
   readonly sessionID: string
-  readonly prompt: { readonly text?: string }
+  // what the TUI attached to the request goes with it (OpenCode's own /goal forwards them too)
+  readonly prompt: { readonly text?: string; readonly files?: readonly unknown[]; readonly agents?: readonly unknown[]; readonly skills?: readonly unknown[] }
   readonly delivery: 'steer' | 'queue'
 }
 export interface PaneHost {
@@ -250,7 +253,7 @@ export interface PaneHost {
   }
   readonly session?: DriverHost['session'] & {
     readonly switchAgent?: (input: { readonly sessionID: string; readonly agent: string }) => Promise<unknown>
-    readonly prompt?: (input: { readonly sessionID: string; readonly text: string; readonly delivery?: 'steer' | 'queue' }) => Promise<unknown>
+    readonly prompt?: (input: CommandInvocation['prompt'] & { readonly sessionID: string; readonly text: string; readonly delivery?: 'steer' | 'queue' }) => Promise<unknown>
   }
 }
 
@@ -267,8 +270,11 @@ export async function workbench(host: PaneHost, input: CommandInvocation, run: R
     throw new Error(`the Workbench agent isn't there (${String(e)}): wb doctor says why`)
   }
   await applyPin(host as DriverHost, input.sessionID, run, new Map()).catch(() => undefined)
-  const text = (input.prompt?.text ?? '').trim()
-  if (text && session.prompt) await session.prompt({ sessionID: input.sessionID, text, delivery: input.delivery })
+  // the text as typed, untrimmed, so a mention's offsets into it still hold
+  const prompt = input.prompt ?? {}, text = prompt.text ?? ''
+  const attached = [prompt.files, prompt.agents, prompt.skills].some(x => x !== undefined && x.length > 0)
+  if ((text.trim() || attached) && session.prompt)
+    await session.prompt({ ...prompt, sessionID: input.sessionID, text, delivery: input.delivery })
 }
 
 /** The server part's pane piece: the RPC and /workbench. Returns its cleanup. */

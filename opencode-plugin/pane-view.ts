@@ -17,6 +17,32 @@ export const NAME = 'Workbench'
 export const WHO = 'Workbench'
 export const MARK = '⚒'
 
+/** A read on a timer, one loop however often it's asked to read at once (`now`: each press that
+ * opens the panel): the pending timer goes, and an older read still in flight neither draws nor
+ * schedules. The review of #1332: every press started another loop that ran for the life of the
+ * TUI, each one a scan of every task every 2 s. A failed read keeps the last one drawn. */
+export class Poll<T> {
+  private timer: unknown
+  private gen = 0
+  private stopped = false
+  constructor(private readonly read: () => Promise<T>, private readonly draw: (t: T) => void,
+    private readonly delay: () => number,
+    private readonly timers: { set(f: () => void, ms: number): unknown; clear(h: unknown): void } =
+      { set: (f, ms) => setTimeout(f, ms), clear: h => clearTimeout(h as ReturnType<typeof setTimeout>) }) {}
+  async now(): Promise<void> {
+    if (this.stopped) return
+    if (this.timer !== undefined) this.timers.clear(this.timer)
+    this.timer = undefined
+    const gen = ++this.gen
+    let got: { t: T } | undefined
+    try { got = { t: await this.read() } } catch { /* the server part is restarting */ }
+    if (this.stopped || gen !== this.gen) return
+    if (got) this.draw(got.t)
+    this.timer = this.timers.set(() => void this.now(), this.delay())
+  }
+  stop() { this.stopped = true; if (this.timer !== undefined) this.timers.clear(this.timer) }
+}
+
 // ---------------------------------------------------------------- colours
 
 /** What a style resolves to: a theme token's path, or none (the text's own colour). */

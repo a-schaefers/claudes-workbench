@@ -8217,15 +8217,17 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     adoption steps (bench tasks left out; a task closed for over `KEEP_CLOSED_MS` 30 minutes is
     never read again, `gone`), and the day cap (`capOf` of `wb route --json`) only while an API
     task works, kept `ROLES_MS` 10 s; `live {task}` → `{task, lines, why?}`, `wb watch <task>
-    --json --last 600` (`LIVE_LINES`) read again only once the task's status moved, a running one
-    no sooner than `LIVE_MS` 5 s; `diff {task}` → `wb diff <task>` as lines styled `head`, `add`,
+    --json --last 600` (`LIVE_LINES`) read again once a stopped task's status moved, and a running
+    one's every `LIVE_MS` 5 s, moved or not (its session moves between status writes: a long step,
+    the tests), never sooner (the mod's `LIVE_EVERY_MS` rule, #691); `diff {task}` → `wb diff <task>` as lines styled `head`, `add`,
     `del`, `out` (`diffLines`, cut at `DIFF_CHARS`); `link` → `wb chat url --json` (`linkOf`), kept
     `LINK_MS` 60 s. A task name is checked against `store.NAME_RE`'s shape before any wb call.
     `/workbench` is a server command (`command.transform`'s `add`, `COMMAND`): it switches the
     session to the `workbench` agent (`session.switchAgent`, `AGENT`; one that isn't there throws
     `the Workbench agent isn't there (…): wb doctor says why`), applies the driver pin
-    (`driver.ts`'s `applyPin`, its failure ignored) and sends what was typed after it, if
-    anything, as the session's prompt with the invocation's delivery. Nothing in the pane hands
+    (`driver.ts`'s `applyPin`, its failure ignored) and sends what was typed after it, untrimmed,
+    with what the TUI attached (`files`, `agents`, `skills`, as OpenCode's `/goal` forwards them),
+    if anything, as the session's prompt with the invocation's delivery. Nothing in the pane hands
     OpenCode a task's worktree: no `location`, no `/diff` and no `vcs` call (the host-shape
     decision's critic 1; the source scan in `pane.test.ts`). `startPane(host, run)` registers the
     RPC, then the command where `command.transform` is there, and returns the cleanup.
@@ -8244,12 +8246,15 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     whether it is its first line. `modelineOf`: the mod's `modeline` named `Workbench`. `target(rows,
     cols, link, cap)`: where the splash ends, the stage's first row and the modeline's (`pixels`:
     the apprentice as art at 20 rows by 40 columns or more, else its face). `separator`, `wrap`.
+    `Poll`: a read on a timer that stays one loop however often `now()` is asked (each press that
+    opens the panel): the pending timer is cleared and an older read still in flight neither draws
+    nor schedules (once every press started another loop for the life of the TUI).
   - `pane.tsx` (the OpenTUI views): `mountPane(host, home)` mounts the page on the panel through
     `mountSplash`, adds the `sidebar.content` and `prompt.footer.status` slots and a palette entry
     `workbench.panel` (`Workbench: show or hide its panel`, a global layer). Selecting the
     `workbench` agent in the route's session (`session.agent.selected`) opens the panel and toasts
     the driver's notes (`WorkbenchDriver.driver` with `once`); leaving it closes the panel and arms
-    the splash again (`replaySplash`). `Feed` polls `tasks` every `POLL_MS` 2 s while a task is open
+    the splash again (`replaySplash`). `Feed` polls `tasks` (one `Poll`) every `POLL_MS` 2 s while a task is open
     or the panel shows, else `IDLE_MS` 10 s, and `link` while the panel shows. The page (the
     panel's width at 108 columns or more beside the session, fullscreen narrower): a driver line
     when the driver is known, the task rows (a press on a task's first line follows it, the mod's
@@ -8257,7 +8262,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     the meta and routed lines, the history in a `scrollbox` with sticky scroll at the bottom (it
     follows the end, stops while scrolled up and follows again at the bottom, #1332), the stage
     (`Apprentice` in its pose, `frameOf`, the bubble from tasks.ts's `speechOf` with `WHO`), the cap
-    row (`capRow`) and the modeline on the accent. The tail (`live`, or `diff`) runs every `TAIL_MS`
+    row (`capRow`, `≈` on a catalog estimate as in the mod) and the modeline on the accent. The tail (`live`, or `diff`) runs every `TAIL_MS`
     2 s only while the page is drawn (closing the panel stops it, #1332); one loop, a press starts
     it again at once and drops an answer to an earlier one, so a transcript still on its way never
     covers the diff asked for after it (the live check, 2026-11-26). Escape closes the panel while
