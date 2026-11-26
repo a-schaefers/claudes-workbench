@@ -482,13 +482,16 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
             " that fits the GPU" if top.fits and any(s.fits is False for s in usable) else "")
     elif size == "trivial" and top.weights == min(sizes):
         pick = "the smallest model allowed trivial work"
+    else:
+        kind = f"{work} {'/'.join(stack)}" if top.like_tries else work
+        pick = f"the best record on {kind} work"
+    # after the whole chain, never inside it: its else once took the chain's last one, so every
+    # line without a driver read "the best record" and a driver's with a smaller best left pick
+    # unset (the review of #1476, 2026-11-26)
     if passed and pick.startswith(("the largest", "the smallest", "the best record")):
         waiting = [s.model.id for s in usable if s.waits_on]
         pick += (f"{' and' if pick.endswith('fits the GPU') else ' that'} runs beside the driver's {', '.join(passed)} now "
                  f"({', '.join(waiting[:3])} would wait for it)")
-    else:
-        kind = f"{work} {'/'.join(stack)}" if top.like_tries else work
-        pick = f"the best record on {kind} work"
     if top.guessed and pick.startswith(("the largest", "the smallest")):
         pick += " (its size guessed from its name)"
     if unknown and top.weights and size in ("significant", "trivial"):

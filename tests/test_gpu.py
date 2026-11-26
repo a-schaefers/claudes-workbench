@@ -1018,7 +1018,12 @@ class DriverLease(Base):
             BIG: {"weights_gb": 20}, mid: {"weights_gb": 12}, SMALL: {"weights_gb": 5},
             "strata/strata": {"weights_gb": 10}}))                  # a server: shares with nothing
         os.environ["WB_FAKE_GPU_GB"] = "24"
-        self.assertEqual(router.choose("significant")[0].model.id, BIG)  # no driver: the largest
+        top, why = router.choose("significant")                # no driver: the largest, and says so
+        self.assertEqual(top.model.id, BIG)
+        # the review of #1476 (2026-11-26): the suffix's if took the chain's else, so every line
+        # without a driver read "the best record"
+        self.assertIn("the largest model allowed significant work", why)
+        self.assertNotIn("runs beside", why)
         self.drive(model=mid)
         found = models.discover()
         self.assertFalse(models.admits(found[BIG], models.driver_holders(found[BIG])))
@@ -1039,6 +1044,17 @@ class DriverLease(Base):
         self.assertIn("; the driver's model stays loaded on its server (it never unloads) until its session "
                       f"is idle {store.DRIVER_HOLD // 60} min: the driver's own model (strata/strata)", out)
         self.assertNotIn("a smaller model", out)
+        # the review of #1476: a record that ranks the smallest first while a driver is live left
+        # no branch of the chain to set the line, and choose raised UnboundLocalError
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        self.drive(model=mid)
+        for model, outcome in [(SMALL, "accepted")] * 4 + [(mid, "discarded")] * 4 + [(BIG, "discarded")] * 4:
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "significant", "outcome": outcome, "minutes": 2.0,
+                "active_minutes": 2.0})
+        top, why = router.choose("significant")
+        self.assertEqual(top.model.id, SMALL, why)
+        self.assertIn(f"the best record on significant work that runs beside the driver's {mid} now", why)
 
     def test_a_job_that_takes_the_gpu_to_itself_unloads_a_drivers_model_as_before(self):
         # the review of #1317 (2026-11-25): wb image, wb audio, --unload-for-tests and wb optimize
