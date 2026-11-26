@@ -596,12 +596,9 @@ export const WorkbenchChat = {
   events: {},
 } as const
 
-// Whether a TUI shows ``sid`` on this server, now or within ``ms`` (notices.ts and upkeep.ts ask
-// it of a prompt with no metadata, #1492); true with no chat lane here (nothing to tell it by)
-export function shownHere(sid: string): boolean {
-  const s = (globalThis as Record<string, unknown>)[KEY] as Shared | undefined
-  return !s || s.lane.shownAt.has(sid)
-}
+// Whether a TUI shows ``sid`` on this server, now or within ``ms`` (notices.ts asks it of a prompt
+// with no metadata, #1492); true with no chat lane here (nothing to tell it by). upkeep.ts's `back`
+// never asks: it would always be false for a new session's first prompt (#1492, 2026-11-26)
 export function whenShownHere(sid: string, ms?: number): Promise<boolean> {
   const s = (globalThis as Record<string, unknown>)[KEY] as Shared | undefined
   return s ? s.lane.whenShown(sid, ms) : Promise.resolve(true)

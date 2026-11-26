@@ -8977,10 +8977,12 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       once, then puts each block whose text differs and removes each of `OURS` it shouldn't have
       (another plugin's keys are never touched), one refresh at a time per session. Unlike the
       mod's once-per-conversation `web-chat` block, the entry follows away: a prompt the user typed
-      (chat.ts's `typedByUser`) in a session a TUI shows (chat.ts's `shownHere`, asked at the away
-      check, never of a script's `opencode run`: #1492) is them back, so that prompt's refresh skips
-      the away check (`refresh(…, back)`: chat.ts's `wb chat back` for it runs beside this part's
-      `prompt` hook, not before) and the entry goes before that turn ("… no longer applies").
+      (chat.ts's `typedByUser`) is them back, so that prompt's refresh skips the away check
+      (`refresh(…, back)`: chat.ts's `wb chat back` for it runs beside this part's `prompt` hook, not
+      before) and the entry goes before that turn ("… no longer applies"). Never gated on a TUI
+      showing the session, as the chat's `wb chat back` and listener are: the TUI shows a new session
+      only after its first prompt, which then got the false away block (#1492); a script's `opencode
+      run` skipping it only spares its own turn the block, and writes nothing.
       A server without the entries API gets the same blocks appended to the session's own
       requests' system prompt by the `context` hook, as `<context key="…">` text (the fallback).
     - **What a compaction keeps**: the `compaction` hook adds `KEEP_ON_COMPACT` (the mod's words,
@@ -9434,8 +9436,8 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   the `workbench-chat` RPC (`WorkbenchChat`, `shown {sessionID}` → `ChatLane.shown`), and a prompt
   waits up to `SHOWN_WAIT_MS` 30 s for its session to be shown (`whenShown`: the TUI moves to a new
   session only after its first prompt); one never shown moves nothing. notices.ts's offer target
-  (`prompted`) and upkeep.ts's `back` ask the same (`whenShownHere`, `shownHere`; true with no chat
-  lane). The listener: `wb chat url --json` (on or off, every `CHECK_MS` 60 s, which brings
+  (`prompted`) asks the same (`whenShownHere`; true with no chat lane); upkeep.ts's `back` never
+  does (upkeep.ts, above: a new session's first prompt is shown only after it). The listener: `wb chat url --json` (on or off, every `CHECK_MS` 60 s, which brings
   the server up as the mod's link does), `wb chat back`, and `wb chat listener <session> --pid
   <server pid>` (`chat.hold`: refused while another live claim stands, a Claude Code session's or
   another server's; the same server moves it between its sessions). `busy` follows the session's

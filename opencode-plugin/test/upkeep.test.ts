@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import * as core from '../../mod/hooks/core.ts'
+import { ChatLane, lane } from '../chat.ts'
 import { autoCeiling, AWAY_NOTE, blocksOf, CODING_RULES, KEEP_ON_COMPACT, MODE_NOTE, openTasks, promptTokens, routesSaid, Upkeep,
   upkeep, WAKE_OFF_NOTE, WORKFLOWS_RULE, type Io, type UpkeepHost } from '../upkeep.ts'
 
@@ -195,6 +196,31 @@ test('a prompt the user typed is them back at the terminal: that turn gets no we
   await hooks.get('prompt')!({ sessionID: 's1', prompt: { text: 'carry on' } })
   expect(calls).toEqual(['remove web-chat'])
   await stop!()
+})
+
+// #1492 (2026-11-26): `back` asked whether a TUI showed the session, but the TUI shows a new
+// session only after its first prompt, so a user back from the phone typing in a new session got
+// the away block telling the driver to answer on the phone
+test('a prompt typed in a new session no TUI has shown yet, with the chat lane up, gets no web-chat block', async () => {
+  const w = world({ [`${HOME}/chat/away.json`]: JSON.stringify({ at: 999 }) }, { 'chat away': 'away' })
+  const { host, calls } = entriesHost()
+  const hooks = new Map<string, (e: unknown) => unknown>()
+  ;(host.session as { hook: unknown }).hook = async (name: string, cb: (e: unknown) => unknown) => {
+    hooks.set(name, cb)
+    return { dispose: async () => {} }
+  }
+  ;(host.session as { get: unknown }).get = async () => ({ data: { agent: 'workbench', location: { directory: '/r' } } })
+  ;(host as { options: unknown }).options = { env: { WB_HOME: HOME } }
+  // the lane chat() always makes on this server, which no TUI has told of ses_new
+  lane(() => new ChatLane({ run: async () => ({ ok: true, out: '' }), read: () => undefined, size: () => -1, now: () => 1, pid: 1, home: HOME }))
+  try {
+    const stop = await upkeep(host, core, w.io)
+    await hooks.get('prompt')!({ sessionID: 'ses_new', prompt: { text: 'carry on' } })
+    expect(calls.filter(c => c.startsWith('put ')).map(c => c.slice(0, c.indexOf(':')))).toEqual(['put workbench-mode'])
+    await stop!()
+  } finally {
+    delete (globalThis as Record<string, unknown>).__workbenchChatLane
+  }
 })
 
 test("the workbench-wake block says wakes are off while the plugin's wake option is off, in the mode or with a task open", async () => {
