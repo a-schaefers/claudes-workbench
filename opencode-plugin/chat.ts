@@ -20,6 +20,7 @@ import { join } from 'node:path'
 import type { ServerContext } from './host.d.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv, wbHome } from './wb.ts'
 import type { ChatMsg, ChatOpen, ListenerClaim } from '../mod/types/wire.d.ts'
+import { sameWait, waitingFact, type Waiting } from '../mod/hooks/waiting.ts'
 
 export const POLL_MS = 2_000          // a look at chat/open.json (a file read, no wb run)
 export const CHECK_MS = 60_000        // `wb chat url --json`: on or off, as the mod's CHAT_CHECK_MS
@@ -169,6 +170,7 @@ export class ChatLane {
   holding = false     // and listener.json says so (wb chat listener): else another listener's claim stands
   reverting = false   // a revert staged in it: a prompt would commit it, so delivery waits (#1340)
   busy = false        // the listening session is in an execution
+  waitSaid: Waiting | null = null // the dialog the claim last said is up in the terminal (#1355)
   readonly sent = new Set<string>()
   readonly expired = new Set<string>()
   readonly retry = new Map<string, number>()
@@ -232,9 +234,13 @@ export class ChatLane {
     if (!this.listening) this.activate?.() // the poll and the event feed start with the first
     this.listening = sid
     if (!this.on) return
+    // the page's state line: the oldest dialog up two seconds or more (mod/hooks/waiting.ts, the mod's too)
+    const waiting = waitingFact([...this.dialogs.values()], this.deps.now())
     const { ok } = await this.deps.run(['chat', 'listener', sid, '--pid', String(this.deps.pid),
-      ...(this.busy ? ['--busy'] : [])], { session: sid, cwd: await this.dir(sid) })
+      ...(this.busy ? ['--busy'] : []), ...(waiting ? ['--waiting', JSON.stringify(waiting)] : [])],
+      { session: sid, cwd: await this.dir(sid) })
     this.holding = ok
+    if (ok) this.waitSaid = waiting
     if (ok && this.sessions) {
       const info = await this.sessions.get({ sessionID: sid }).catch(() => undefined)
       this.reverting = !!info?.revert
@@ -274,6 +280,8 @@ export class ChatLane {
       if (!claim.session) await this.hold(this.listening)
       if (!this.holding) return
     }
+    // a dialog up two seconds, or one settled: the claim says so (#1355)
+    if (!sameWait(waitingFact([...this.dialogs.values()], this.deps.now()), this.waitSaid)) await this.hold(this.listening)
     await this.notices()
     if (this.reverting || !this.sessions) return
     let work: ChatOpen = {}

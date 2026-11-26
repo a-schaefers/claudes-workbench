@@ -1,6 +1,6 @@
 /* The Settings view (#1286): the admin rows' cards, one per group, above the device cards; after
    app.css, whose .card, .seg, .plain and .small these build on */
-#settings-rows .set-card { display: flex; flex-direction: column; }
+#settings-rows .set-card, #settings-rows .set-changes { display: flex; flex-direction: column; }
 /* overflow clipped: WebKit counted a select's longest option past the view, though the select fit */
 .set-row { padding: 10px 0; min-width: 0; overflow-x: clip; }
 .set-row + .set-row { border-top: 1px solid var(--line); }
@@ -29,4 +29,9 @@
 .view-in .set-actions .plain:disabled { opacity: .55; cursor: default; }
 .view-in .set-retry { align-self: flex-start; margin-top: 8px; }
 /* a group's name over its rows' names: the serif of the page's own title */
-.view-in .set-card > h3 { margin-bottom: 2px; font: 600 16px/1.3 var(--serif); letter-spacing: .01em; }
+.view-in .set-card > h3, .view-in .set-changes > h3 { margin-bottom: 2px; font: 600 16px/1.3 var(--serif); letter-spacing: .01em; }
+
+/* who changed a row, and the newest changes (#1355) */
+.view-in .set-changed { margin: 4px 0 0; color: var(--faint); }
+.view-in .set-change-list { margin: 0; padding-left: 18px; }
+.view-in .set-change-list li { margin: 2px 0; overflow-wrap: anywhere; }

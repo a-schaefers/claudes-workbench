@@ -1,0 +1,15 @@
+{
+  "//": "story.fill and the page's storyFill (story.ts) give these same answers (#1355): `{name}` from the fields, `{Name}` capitalized, a missing name kept with partial, else an error",
+  "cases": [
+    {"t": "{who} lives in {where}.", "fields": {"who": "Claude", "where": "~/p"}, "out": "Claude lives in ~/p."},
+    {"t": "{Who} waits.", "fields": {"who": "your driver"}, "out": "Your driver waits."},
+    {"t": "{who} and {Who}", "fields": {"who": "openCode"}, "out": "openCode and OpenCode"},
+    {"t": "no fields here", "fields": {}, "out": "no fields here"},
+    {"t": "{who} at {where}", "fields": {"who": "Claude"}, "partial": true, "out": "Claude at {where}"},
+    {"t": "{who} at {where}", "fields": {"who": "Claude"}, "error": true},
+    {"t": "{ who } and {1x} stay", "fields": {"who": "x"}, "out": "{ who } and {1x} stay"},
+    {"t": "`{grant}`", "fields": {"grant": "opencode --auto"}, "out": "`opencode --auto`"},
+    {"t": "{a}{b}", "fields": {"a": "{b}", "b": "B"}, "out": "{b}B"},
+    {"t": "{Who}", "fields": {"who": ""}, "out": ""}
+  ]
+}

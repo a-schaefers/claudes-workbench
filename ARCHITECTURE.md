@@ -59,6 +59,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   `settings.py`, the admin table its Settings are drawn from (*The admin table (settings.py)*).
   Its scripts are TypeScript (`chat_static/src/`), built by `scripts/web.py` into the committed
   plain scripts the page loads (*The page's TypeScript*); users need no Node or compiler.
+  `story.py` holds every sentence it and the docs tell of the driver, `scripts/gen_story.py`
+  their copies (*The story*).
 - **The kernel** (`kernel/`, `scripts/kernel.py`; *The kernel*): the pure decisions the mod and
   the OpenCode plugin must make the same way, in PureScript, compiled into the committed
   `mod/hooks/kernel.js`. Users install nothing for it; wb never imports it.
@@ -6487,9 +6489,57 @@ why it is down (*Seeing what the agent does*).
 **What it's for** (#1341; the owner, 2026-11-24): message the driver from anywhere, and most work
 can run from here; a prompt the driver raises waits in its terminal (ssh + tmux) unless the driver
 runs with permissions granted, and the settings live here too. The empty state (`#intro`) says so,
-and over a thread the same words are a hint (`#hint`, copied from the intro's) until dismissed on
-that device (`localStorage` `wb-chat-hint`, read and written in try/catch: a storage that throws
-shows it on each open). It says "the driver", not Claude, for the OpenCode path too.
+and over a thread the same words are a hint (`#hint`) until dismissed on that device
+(`localStorage` `wb-chat-hint`, read and written in try/catch: a storage that throws shows it on
+each open). Both are the story's `purpose` (*The story*), naming the driver that listens (else the
+last that wrote, else "your driver").
+
+### The story
+
+One source for every sentence the chat, the web app and the docs tell the user about where the
+driver lives and what the chat is for (#1355; the owner's rule, 2026-11-24: the terminal is where
+the driver lives and a prompt it raises is answered there; most work can still run from the chat,
+more so with permissions granted; the web app's Settings are the source of truth). They had
+drifted: the page said "Run Claude" to an OpenCode user, and the docs called the chat off by
+default after 2.0 turned it on.
+- **`workbench/story.py`**: `DRIVERS` (`claude-code`, `opencode`, `any`: each one's `who`, `app`,
+  `listen`, `grant`), `TEXTS` (each sentence once, a template: `{field}` from the driver and the
+  caller, `{Field}` capitalized), `ONLY` (the drivers a key is said for: `next.grant` names a
+  command only Claude Code and OpenCode have), `PAGE` (the keys the web app reads), `DOCS` (the doc
+  blocks). `text(key, driver, **fields)`, `fill(t, fields, partial)`, `driver_of(tool)`. Keys:
+  `purpose`, `rule.terminal`, `rule.chat`, `rule.settings`, `state.*` and `next.*` (`none`, `idle`,
+  `working`, `waiting`, `next.grant`), `wait.*` (`permission`, `question`, `plan`, `elicitation`,
+  `consent`: what `state.waiting`'s `{what}` is), `note.waiting` and `note.grant` (the notice row's
+  bytes, `chat.WAITING`, `WAITING_GRANT`), `receipt.blocked`, `prompts` and `lane` (Settings cards), `doc.rule`.
+- **`scripts/gen_story.py`** writes `chat_static/src/story.ts` (`STORY_DRIVERS`, `STORY_TEXTS` for
+  `PAGE`'s keys, `storyFill`, `storyText`; a plain script, loaded before app.js, built into
+  `story.js` by `scripts/web.py`) and fills each doc block, `<!-- story:KEY[:driver] -->` …
+  `<!-- /story -->` (README.md's `doc.rule`); `--check` writes nothing and names each copy that
+  differs. `tests/test_story.py` runs the check, so CI holds the copies to the source.
+- **The page**: an element with `data-story="<key>"` (the intro and hint, the Settings cards *How
+  the chat works* and *While away*) says that sentence for the driver (`drawStory`), its backticks as
+  `code`; the HTML's own text is `any`'s, so the page reads right before a state arrives
+  (`test_story` checks it). `receipt.blocked` is a message's line while the driver waits on a prompt.
+- **No words in the kernel** (amends #1356's draft): a decision returns a key and facts, and a
+  wording patch needs no PureScript toolchain; `test_story` fails on a string of four or more words
+  in hand-written `kernel/src`.
+
+### The driver's state line
+
+`chat.driver_state(lst, rows)`, the snapshot's `driver` (#1355): `{state, driver, who, where?,
+waiting?, line, next, grant?}`, from the facts the hosts already write. Waiting beats working beats
+idle; no live listener is `none` (named by the newest driver that wrote, else `any`). The wait is
+the listener claim's own `waiting` (`{kind, tool, since, what?}`, `chat.WAIT_KINDS`), else the
+oldest open notice row under `ASK_STALE` (the one the turn is stuck on). `line` and `next` are the
+story's `state.*` and `next.*`, `{what}` its `wait.<kind>`; `grant` (`next.grant` and the command)
+only for a permission, on a known driver (`claude --permission-mode auto`, `opencode --auto`): a
+question or a plan waits however the driver runs. The page (`drawState`, `#driver-state`,
+`role="status"`) shows it under the header while it asks something of the user, waiting or none:
+the line, the command waiting, what to do, and for a permission the grant with Copy, its one
+button (nothing answers a prompt from the phone, #1350); the header's presence says `waiting for
+you in the terminal`. A notice is no thread row any more: the state line says it, and its push
+still goes as before. `WAITING_AFTER` (2 s) is the hosts' filter for the claim's `waiting`: a
+dialog answered sooner (an auto-accept) is never written.
 
 **Keeping it up.** One `chat._Server` per bound address, binding without HTTPServer's host-name
 lookup (it stalled macOS, #236). `systemd/wb-chat.service`: a user unit, `Restart=always`, no start
@@ -6644,7 +6694,8 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   in the terminal, and the page shows one line while it does, a `notice` (`wb chat notice`): `Claude
   is waiting for you in the terminal.` (OpenCode's: `OpenCode is waiting for you in the terminal.`,
   #1319), a permission's adding `Run it with permissions granted to
-  work from the chat.` (`chat.WAITING`, `WAITING_GRANT`): the driver's own permission modes and
+  work from the chat.` (`chat.WAITING`, `WAITING_GRANT`, the story's `note.*`); the page draws it as
+  the driver's state line (*The driver's state line*), not a thread row: the driver's own permission modes and
   rules are the one permission policy, and run with them granted most work goes on from the chat
   (#1350's comment). No buttons; every kind, away or not, an agent's turn too; pushed as Claude's
   messages; at the terminal only for one still up after `NOTICE_AFTER_MS` 30 s, while away at once;
@@ -6877,7 +6928,7 @@ client; the server needs no browser.
   never hands a message to a session it can't judge). A `notice` (`wb chat notice`) has `text: "Claude is waiting for you in the
   terminal."` (a permission's adds `Run it with permissions granted to work from the chat.`; from an
   OpenCode session, `store.caller_kind`, `OpenCode is waiting for you in the terminal.`,
-  `chat.WAITING_FOR` with `chat.DRIVER_NAMES`, and `driver: {tool: "opencode"}`) and adds
+  the story's `note.waiting` for `chat.DRIVER_NAMES`' driver, and `driver: {tool: "opencode"}`) and adds
   `tool, kind: "permission"|"plan"|"question"|"elicitation", what?` (2000 characters): news like
   Claude's (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only
   `from: claude`; `chat.thread` leaves it out once settled (the page's line clears, #1350). `files`: `[{id, name, size, type, path}]`.
@@ -6906,7 +6957,9 @@ client; the server needs no browser.
   Host, #1374); `{at: 0}` on a prompt typed in any session, a terminal
   dialog settled there (on OpenCode `wb chat back`, `chat.back`), or the chat off.
 - `page.json`: `{at}`, the last page use, chat on or not (for `PAGE_RECENT`).
-- `listener.json`: `{session, cwd, pid, start, machine, parent, busy}` (from the `wb events` hello;
+- `listener.json`: `{session, cwd, pid, start, machine, parent, busy, waiting?}` (from the `wb events` hello;
+  `waiting`, either host's: the oldest dialog up in its terminal 2 s or more, `{kind, tool, since,
+  what?}`, `mod/hooks/waiting.ts`'s `waitingFact`, which `chat.driver_state` reads, #1355;
   `parent` its parent, the listening Claude Code, which `chat.caller_listens` checks against a
   `wb chat reply`'s `CLAUDE_PID`, #1129). An OpenCode session's claim (#1319's) names the
   listening OpenCode session's id as `session`, which `chat._listens_across` checks against a
@@ -7097,9 +7150,10 @@ in `nearLater`, judged again by `nearAgain` where that thread put them (a photo 
 in a secure context `MediaRecorder` (a tap starts, a tap stops, `RECORD_MS` 5 min at most; webm, else mp4 or ogg, as the
 browser has), over plain http `#pick-voice` (`accept="audio/*" capture`: the phone's recorder or a voice memo); clips
 waiting for their words in `wb-chat-dictate`, bytes in IndexedDB beside the draft's, sent by `hearAll` (from `flush`,
-so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts, notices
-(`makeNotice`: the waiting line, no buttons, and no dialog cards since #1350) and the Settings and Stats cards (`#away-when` states the away rule
-above, `#away-prompts` that prompts are answered in the terminal and the line says one waits; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
+so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts
+(`receipt.blocked` while the driver waits on a prompt), the state line (`drawState`, *The driver's state line*: a notice is no thread row since
+#1355, and no dialog cards since #1350) and the Settings and Stats cards (*How the chat works*: the story's `rule.*`; `#away-when` states the away rule
+above, `#away-prompts` (the story's `prompts`) that prompts are answered in the terminal and the line at the top says one waits; *This chat*, `lane`; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43).`, or that alone, #1022, #1135; the saving is the badge's
 one line, `~3K Claude tokens saved this week`, #1322) are in `app.ts`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
@@ -7229,7 +7283,9 @@ javascript"). `chat_static/src/` holds the sources: `app.ts`, `stats.ts`, `setti
 `src/tsconfig.json`: lib dom) and `sw.ts` (the service worker, `src/tsconfig.sw.json`: lib
 webworker, its `sw.d.ts` giving lib.webworker's `WorkerGlobalScope` the `ServiceWorkerGlobalScope`
 members it uses). Each is still a plain script, an IIFE (the worker's at its top), never a module: the pages share
-`window.WB` and load as `index.html` names them, and a module's `export {}` would change that. Their
+`window.WB` and load as `index.html` names them, and a module's `export {}` would change that.
+`story.ts` (the story's tables and fill, *The story*) is written by `scripts/gen_story.py`, never by
+hand, and loads first: its `STORY_*` names and `storyText` are the pages' globals. Their
 types are global, `src/types.d.ts`: the server's shapes (`ChatState`, `Snapshot`, `Patch`, `Msg`,
 `OpenTask`, `TaskPart`, `Savings`, `SettingRow`), each an `import()` type of *wb's shapes in one module*
 (below), which keeps the file global; the page's own (`Outgoing`, `DraftFile`), `WbApi` (`window.WB`, `declare var WB`),
@@ -7301,7 +7357,11 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   call's `wb route --dry-run --json` (as Claude); for any other `{"change": "", "gate": false}`.
   `wb settings set --dry-run` prints it, for the mod's dialog.
 - `record(before, key, value, done, by)`: the change's row of `settings-changes.jsonl` (`chat.admin_set`'s
-  with `by` `web`, `wb settings set`'s with `claude`, or `terminal` outside Claude Code).
+  with `by` `web`, `wb settings set`'s with `store.caller_kind`'s), and chat/settings-rev.json's
+  stamp of it; None, nothing written, for a `choice` or `number` set to the value it had (#1355).
+- `changes(n)`, `changed()`, `rev()`: the newest changes (`{ts, key, label, from, to, by}`, newest
+  first, never `said`), each key's newest within `CHANGED_FOR` (7 days; `rows()` puts it on its row as
+  `changed`), and the stamp (*The Settings view (settings.ts)*, who changed what).
 
 **A row** is JSON-safe: `key`, `group`, `label`, `kind` and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
@@ -7427,6 +7487,14 @@ alone, and a generic renderer: a new setting touches only Python.
   (`.set-retry`); the view shown is read again once the line is back (`reshowView`, *The views'
   API*), so one opened before it was, as a phone waking, no longer waits for a tab switch (#1412). A read that left
   before a write ended is dropped (`reads`, `wrote`), since the write's own rows are newer.
+- **Who changed what** (#1355): a row with `changed` says `Changed by <who> · <when>`
+  (`.set-changed`; who from its `by`: the web app, Claude, OpenCode, the terminal, an agent), and a
+  *Recent changes* card (`.set-changes`, no group's `.set-card`) lists GET's `changes`, `label: from → to, by <who>`. A
+  change made anywhere moves the chat state's `settings` (chat/settings-rev.json, *The driver's
+  state line*): the view shown reads its rows again with no reload (a draft being typed kept, as any
+  redraw keeps it), and any view toasts `<label> set to <value> by <who>`, unless it is this page's
+  own write (`by: "web"` while a POST waits or within 5 s of one). The first state only sets the
+  mark. Last writer wins: no lock.
 - **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
   order with their names: `shared` "Agents and roles", `gpu` "GPU", `api` "API", `terminal`
   "Terminal", `experimental` "Experimental"; a group the table adds later follows, under its key. A
@@ -7497,7 +7565,7 @@ mode and close the pane (`/workbench` turns it back on).
 setting `userConfig.wake` `on`|`off`, default `on`, changed with `claude plugin configure
 workbench@workbench`, which reloads the module), `hooks/hooks.json` (`{"modules":
 ["./register.tsx"]}`), `hooks/register.tsx` (everything), `hooks/apprentice.ts`, `hooks/splash.ts`
-(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/keywords.ts` (#1278: deepcode and deepmode in what the user typed, the OpenCode plugin's too), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
+(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/keywords.ts` (#1278: deepcode and deepmode in what the user typed, the OpenCode plugin's too), `hooks/waiting.ts` (#1355: the driver's wait for the page's state line, both hosts'; its `waiting.test.ts`), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
 (the atom types), `types/wire.d.ts` (wb's shapes, #1323: *wb's shapes in one module*), `.claude-plugin/icon.png` (the `work` pose), `bin/wb` (#1190: the launcher
 Claude Code puts on its Bash tool's PATH, *Installing*).
 The root's `.claude-plugin/marketplace.json` (source `./mod`) makes the id `workbench@workbench`,
@@ -7831,7 +7899,12 @@ rule finishing beside one asking cleared an away user's line and marked them bac
 `classic.ElicitationResult` an elicitation's, and `turn.complete` any left (an interrupt drops a
 waiting hook): `termDialogDone` drops it, runs `back` (settling is the user at the terminal, #1350)
 and `wb chat notice --done <id>`. In an agent's turn the same (#1042's cards are gone). The relay it
-replaced answered the dialog from the page.
+replaced answered the dialog from the page. **The state line** (#1355): `listen` puts
+`waitingFact(mem.termDialogs, now)` (`mod/hooks/waiting.ts`: the oldest up `WAITING_AFTER_MS` 2 s or
+more) in the claim as `waiting`, left out when none (`mem.waitSaid`, what it last said); the
+tick (`POLL_MS`) polls when the fact moved, so the page has it within a tick and not the idle
+poll's 30 s. A consent dialog (`consent`: a send, a role change, a coding edit) is one too,
+`kind: "consent"`, `tool: "workbench"`, for as long as `$.ui.ask` is up, never a notice row.
 
 **The weekly model check** (`scoutIfDue`): in a session delegating now or in this load, with wakes
 on (another project's session spent the offer, #919; such a session leaves scout.json alone), once
@@ -8220,7 +8293,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   `mod/hooks/core.ts` and the `kernel.js` it imports (which `upkeep.ts`, the notices and the panel
   import, #1315, #1313, #1312; not `kernel.d.ts`, types only), `mod/hooks/tasks.ts` and
   `mod/hooks/modeline.ts` (the panel's: one Tasks view for both hosts, #1312), `mod/hooks/keywords.ts` (`deep.ts`'s,
-  #1278) and `LICENSE` (the plugin and
+  #1278), `mod/hooks/waiting.ts` (`chat.ts`'s, #1355) and `LICENSE` (the plugin and
   the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
   executable); no `type` field, so nothing else in the repository changes how it loads. Each
   `mod/` entry is a file the plugin imports, itself or through another mod file, and each file a
@@ -9053,6 +9126,9 @@ system of record: every write is a `wb chat` command (`runner`: the options' wb 
   dialog answered within `BACK_AFTER_MS` 2 s of asking was answered by OpenCode itself (the TUI's
   autoaccept, `--auto`), so it clears without `back`. No
   dialog is answered from the phone (#1340: the relay through `permission.list`/`reply` is struck).
+  The page's state line (#1355): `hold` passes `--waiting <json>` (`mod/hooks/waiting.ts`'s
+  `waitingFact` over `dialogs`, the mod's one), and the poll (`POLL_MS` 2 s) holds again when that
+  moved (`waitSaid`), so a dialog up 2 s shows within a poll and one answered sooner never does.
 - **A question while away** (#1340 B): `execute.before` refuses the `question` tool in the listening
   session's tree with `AWAY_QUESTION` while `wb chat away` says `away`.
 
@@ -9406,7 +9482,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--default NAME`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. `--default NAME` (no prompt) sets images.json's `"default"` (*The default engines*). |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy]` (`chat.hold`: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (`chat.WAITING_FOR`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and its listener `(OpenCode)` | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy] [--waiting <json>]` (`chat.hold`, `waiting` the dialog up in its terminal, `{kind, tool, since, what?}`, #1355, exit 1 for another shape: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (the story's `note.waiting`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and its listener `(OpenCode)` | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
 | `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one), `--queue` (accepted, a no-op: the sample queues behind the GPU's holders as any start does, #1251, #1322), `--force` (passed to wb start: the sample waits for a model whose server isn't up yet, else exit 3 with wb start's can't-run refusal, whose `--force` advice wb try once rejected as an unknown argument, #1297) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016) and `--no-sign`, set up by `wb init --no-sign` (a locked key failed it or hung it on a prompt, #1226), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) says so in wb start's model line (#1322: its own line went). |
 | `wb chat reply --turn-answer` | `--text`, `--to <id>` (again for more), `--if-owed` (the OpenCode plugin's: only the `--to` messages its session still owes, `chat.owed`; none: `not owed: the session replied`, exit 0; a post says `sent to the web chat: <ids>`; without `--turn-answer` and `--to`, exit 1) | The mod's: a turn's own answer for a web message it didn't reply to (*The web chat listener*, #1352): an `auto` row, cut to `chat.TURN_ANSWER_MAX` 4,000 characters (`chat.turn_answer`). The OpenCode plugin's the same, with `--if-owed` (*The web chat on OpenCode*). |
 | `wb init <dir>` | `--no-sign` (its commits unsigned, whatever `commit.gpgsign` says; else signed as accept's, `UNLOCK` at once for a locked key, #1226) | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`), no hooks run (#1254). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
@@ -9533,6 +9609,7 @@ $WB_HOME (~/.local/state/workbench)
                                  audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json, .transcript.txt) uploads.lock
                                  turns.jsonl ({ids, ended, by}: the mod's turn ends, wb chat ended; #1042)
                                  idempotency.json idempotency.lock (POST /api/send's Idempotency-Key: caller and key's sha256 → {ts, req, id}; #1138)
+                                 settings-rev.json ({ts, key, label, to, by}: the newest Settings change, settings.record's stamp, the state's `settings`; #1355)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, AGENTS.md (the user's ~/.config/workbench/AGENTS.md, copied: #1061),
                                  project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
                                  imports/<n>/<name> (an import from outside the repo: context.import_files),
@@ -10194,6 +10271,15 @@ round-tripping a `coding` change and its settings-changes.jsonl row, probe turne
 415 without the JSON type, /api/stats' feed, an agent token 403 on the four and on every path and method outside
 `AGENT_MAY`, /api/top's `top` event and its child gone within `TOP_LINGER_S`+5 s of the viewer hanging up; a refusal's
 409 with `settings.apply` stood in for);
+`test_story.py` (*The story*: `gen_story.py --check` clean, a one-byte edit to `story.ts` or README.md's block failing it,
+`tests/fixtures/story/fill.json` through Python's `fill` and, with node, the page's `storyFill`, every key rendered for
+each driver it is said for (no "Claude" on OpenCode's), unknown keys and fields raising, the notice rows' bytes, every key
+read somewhere, the HTML's `data-story` text being `any`'s, no string of four words in hand-written `kernel/src`);
+`test_chat_driver.py` (*The driver's state line*: none named by the last driver that wrote, idle and working where it runs,
+waiting beating working and naming the oldest open notice until settled, a stale notice no wait, the claim's own `waiting`
+for each kind with the grant only for a permission and never for `any`, odd facts ignored, the snapshot's `driver` and
+`settings`; `SettingsProvenance`: a choice or number set to its value logs nothing, an action always, `changes` newest first
+without `said`, each row's `changed` within a week, the stamp the state reads);
 `test_sizing.py` (the slice guess, corrected from real steps); `test_kernel.py` (*The kernel*, offline: `Contract`,
 `Bundle`, `Tables`, `Imports`, `Build` (the wire types), `Toolchain` (a bad hash, a link, a path escape refused by name),
 `Props` (`kernel.py props`: Bun, else OpenCode's, else refused by name; `check` runs them), `Twins` (each golden's
@@ -10909,7 +10995,7 @@ doc needs its own `!/` line).
   `reference/patching.md`. **`patches.SUITES`** (`KERNEL_CHECK`, `MOD_TESTS`, `PLUGIN_TESTS`, #1328) → `check.yml`'s
   `kernel`, `mod` and `opencode-plugin` jobs (`tests/test_workflows.py` holds the plugin's to `PLUGIN_TESTS`), and
   `_own_runs`' runners; **`patches.PLUGIN_SHARED`** → what `opencode-plugin/` imports from `mod/` (the kernel's core, the splash's
-  `splash.ts` and `apprentice.ts`, the panel's `tasks.ts` and `modeline.ts`, `deep.ts`'s `keywords.ts`, the readers' `types/wire.d.ts`, #1323; a LocalPatches test reads the imports). **`Workbench-Driver`** (`patches.DRIVER_TRAILER`) → `stamp_driver`, the pull request
+  `splash.ts` and `apprentice.ts`, the panel's `tasks.ts` and `modeline.ts`, `deep.ts`'s `keywords.ts`, `chat.ts`'s `waiting.ts` (#1355), the readers' `types/wire.d.ts`, #1323; a LocalPatches test reads the imports). **`Workbench-Driver`** (`patches.DRIVER_TRAILER`) → `stamp_driver`, the pull request
   template's `Written by:` line. **The crash hint's `CONTRIBUTING.md`** → that file at the root. **`patches.CARRIED`, the
   `Scope:` trailer** (`%(trailers:key=Scope)`, `me`) → `wb patch list`, `upstream`, `_refuse_send`, `doctor_lines`,
   CONTRIBUTING.md, the skill's `reference/patching.md`. **`PATCH_BRANCH`** → `cmd_update`, `doctor_lines`, the docs.
@@ -11095,8 +11181,15 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   parses (`url --json`'s `state`, `notice`'s id, `away`'s `away`, `claim`'s ` expired: `) → `chat.ts`.
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
-- **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`) → `e2e_chat.mts`, the WebChat tests, reference/driving.md
-  and SKILL.md's *the web chat*, `chat.WAITING_FOR` beside it (OpenCode's, `DRIVER_NAMES`); **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
+- **A sentence of the story** (`workbench/story.py`'s `TEXTS`, `DRIVERS`) → `python3 scripts/gen_story.py` (its copies:
+  `chat_static/src/story.ts`, then `scripts/web.py build`'s `story.js`; README.md's block), `tests/test_story.py` (a key
+  with no reader fails), `e2e_chat.mts` and `e2e_settings.mts` where they read it, and the HTML's own text of a
+  `data-story` element (`any`'s words). A new key read by a computed name (`state.*`, `next.*`, `wait.*`) → its family
+  in `chat.driver_state` (`WAIT_KINDS`). **The driver's state** (`chat.driver_state`) → wire.d.ts's `DriverState`,
+  app.ts's `drawState`, docs/chat-api.md and chat-api.yaml's `driver`. **The Settings stamp** (`settings.record`,
+  chat/settings-rev.json, `chat.settings_rev`) → the state's `settings`, settings.ts's refresh and toast.
+- **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`: the story's `note.*`) → `e2e_chat.mts`, the WebChat tests, reference/driving.md
+  and SKILL.md's *the web chat*, OpenCode's beside it (`DRIVER_NAMES`); **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
   once #1296's core exists (`texts.ts`), `chat.ts`'s `AWAY_QUESTION` (#1319's `execute.before`, naming `REPLY_ID`, `workbench_chat_reply`), reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
 - **A message's `about`** (`{task, n, step, round}`, `{audio, n, name, path}`) → `listen`'s prefix, `aboutTag`,
   `aboutBody`, `/api/send`'s check.

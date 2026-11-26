@@ -1048,6 +1048,14 @@ components:
         dictate:
           type: boolean
           description: the computer has a listener for /transcribe
+        driver:
+          type: object
+          description: >-
+            the driver's state (none, idle, working, waiting), in the story's words: {state, driver,
+            who, where?, waiting?, line, next, grant?}
+        settings:
+          type: [object, "null"]
+          description: the newest Settings change, {ts, key, label, to, by}
         expire:
           type: number
           description: seconds a message waits before it is never passed on (21600)

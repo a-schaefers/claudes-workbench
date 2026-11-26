@@ -4,6 +4,10 @@
 // trust Claude"): the choice lights at once and the POST goes, with no confirm step and no
 // warning, since the server runs wb ungated, as at the terminal; the answer's rows are drawn
 // again, so a refusal puts the control back. One request at a time, clicks made meanwhile wait.
+// Who changed what (#1355): a row changed within a week says by whom and when, "Recent changes"
+// lists the newest, and a change made anywhere (Claude's `wb settings set`, another device) reaches
+// an open page through the chat's state (`settings`, chat/settings-rev.json): the rows are read
+// again with no reload, a draft kept, and a change this page didn't make is toasted on any view.
 (() => {
   'use strict'
   const GROUPS = [['shared', 'Agents and roles'], ['gpu', 'GPU'], ['api', 'API'], ['terminal', 'Terminal'],
@@ -21,6 +25,16 @@
   const queue: { key: string; value: string | null }[] = []  // [{key, value}] waiting; queue[0] is in flight while busy
   let busy = false
   let drawing = false                   // a redraw takes the focused input away: its blur sends nothing
+  let changes: SettingChange[] = []     // the newest changes, newest first (GET /api/settings's `changes`)
+  let lastWrite = 0                     // when this page's last write was answered (ms): its own change isn't news
+  // who made a change, as settings-changes.jsonl's `by` says (store.caller_kind, or the web's click)
+  const BY: Record<string, string> = { web: 'the web app', claude: 'Claude', opencode: 'OpenCode', terminal: 'the terminal', agent: 'an agent' }
+  const byWord = (by: string) => BY[by] || by || 'someone'
+  const valueWord = (v: unknown) => v == null || v === '' ? 'off' : String(v)
+  const ago = (ts: number) => {
+    const s = Math.max(0, Date.now() / 1000 - ts)
+    return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} d ago`
+  }
 
   const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: unknown) => {
     const e = document.createElement(tag)
@@ -39,6 +53,7 @@
       const body = await r.json().catch(() => ({}))
       if (n < wrote) return              // a write's rows came after it left: they are newer
       if (r.ok && Array.isArray(body.rows)) { rows = body.rows; why = '' }
+      if (r.ok && Array.isArray(body.changes)) changes = body.changes
       else why = body.error || `the server said ${r.status}`
     } catch { if (n >= wrote) why = "the computer can't be reached" }
     draw()
@@ -62,10 +77,12 @@
       const r = await WB.post('/api/settings', { key, value })
       const body = await r.json().catch(() => ({}))
       if (Array.isArray(body.rows)) rows = body.rows
+      if (Array.isArray(body.changes)) changes = body.changes
       said = r.ok && body.ok ? body.said || 'Done.' : body.error || body.said || `the server said ${r.status}`
       if (r.ok && body.ok && body.help) said = `${/[.!?]$/.test(said) ? said : said + '.'} ${HELP_SAID}`
     } catch { said = "The computer didn't answer: Settings shows what it says now."; lost = true }
     wrote = reads + 1
+    lastWrite = Date.now()
     queue.shift()
     busy = false
     WB.toast(said)
@@ -192,6 +209,7 @@
     else if (row.kind === 'number') number(row, box)
     else if (row.kind === 'action') action(row, box)
     else if (row.text) box.append(el('p', 'small', row.text))
+    if (row.changed) box.append(el('p', 'small set-changed', `Changed by ${byWord(row.changed.by)} · ${ago(row.changed.ts)}`))
     return box
   }
 
@@ -230,6 +248,15 @@
         for (const r of mine) card.append(drawRow(r))
         out.append(card)
       }
+      if (changes.length) {
+        const card = el('section', 'card set-changes')
+        card.append(el('h3', '', 'Recent changes'))
+        const list = el('ul', 'set-change-list')
+        for (const c of changes) list.append(el('li', 'small',
+          `${c.label || c.key}: ${valueWord(c.from)} → ${valueWord(c.to)}, by ${byWord(c.by)} · ${ago(c.ts)}`))
+        card.append(list)
+        out.append(card)
+      }
     }
     drawing = true
     try { root.replaceChildren(out) } finally { drawing = false }
@@ -254,6 +281,17 @@
   // made there (by the user or Claude) was never drawn (#1392, 2026-11-25)
   let showing = false
   addEventListener('focus', () => { if (showing) load() })
+  // a change made anywhere: the state's `settings` moved (the first state only sets the mark)
+  let rev: number | null = null
+  WB.on('state', (s: ChatState) => {
+    const r = s.settings, ts = r ? r.ts : 0
+    if (rev === null) { rev = ts; return }
+    if (ts === rev) return
+    rev = ts
+    if (showing) load()
+    const mine = r && r.by === 'web' && (busy || Date.now() - lastWrite < 5000)
+    if (r && !mine) WB.toast(`${r.label || r.key} set to ${valueWord(r.to)} by ${byWord(r.by)}`)
+  })
   WB.view('settings', {
     mount(r: HTMLElement) { root = r },
     show() { showing = true; load() },

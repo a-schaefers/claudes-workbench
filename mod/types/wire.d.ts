@@ -133,9 +133,20 @@ export type ApiWeek = ApiCost & { by_provider?: Record<string, ApiCost>; names?:
 /** chat.week_saved */
 export type Savings = { score?: { score: number; color: string } | null; saved: number; tasks?: number; wh?: number; cost?: number | null; api?: ApiWeek | null }
 export type Limits = { file: number; message: number; files: number }
+/** chat.driver_state (#1355): the driver's state line, in the story's words. `driver` the story's
+ * name (claude-code, opencode, any); `waiting` the dialog up in the terminal; `grant` only for a
+ * permission, the driver's way to run with permissions granted */
+export type DriverState = {
+  state: 'none' | 'idle' | 'working' | 'waiting'; driver: string; who: string; where?: string
+  waiting?: { kind: string; tool: string; since: number; what?: string }
+  line: string; next: string; grant?: { line: string; command: string }
+}
+/** chat/settings-rev.json (settings.record, #1355): the newest Settings change */
+export type SettingsRev = { ts: number; key: string; label: string; to?: unknown; by: string }
 export type ChatState = {
   messages: ChatMsg[]; push: { key?: string; test?: number }; listener: Listener | null; savings?: Savings | null
   expire?: number; uploads?: Limits | null; tasks?: OpenTask[]; dictate?: boolean
+  driver?: DriverState | null; settings?: SettingsRev | null
   /** chat.API_VERSION */
   api?: number
 }
@@ -161,7 +172,11 @@ export type SettingChoice = { value: string; label: string; says?: string }
 export type SettingRow = {
   key: string; group: string; kind: string; label: string; value?: string | number | null; text?: string
   says?: string; choices?: SettingChoice[]; other?: boolean; unit?: string
+  /** its newest change within a week (settings.changed, #1355): when, and who (web, claude, opencode, terminal, agent) */
+  changed?: { ts: number; by: string }
 }
+/** one of settings.changes() (GET /api/settings's `changes`, newest first) */
+export type SettingChange = { ts: number; key: string; label: string; from?: unknown; to?: unknown; by: string }
 /** `wb settings offers --json` (settings.offers): the web's changes due a word, with help (offers)
  * or without (notes) */
 export type SettingsOffers = {

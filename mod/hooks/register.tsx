@@ -74,6 +74,8 @@ import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import { keywords, onlyToggles } from './keywords'
+import { sameWait, waitingFact } from './waiting'
+import type { Waiting } from './waiting'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, focusOf as focusOfTasks, frameOf, isEst, speechOf, taskLines, viewFacts } from './tasks'
 // moved to tasks.ts, shared with the OpenCode plugin's panel (#1312); still exported from here
@@ -1200,7 +1202,17 @@ async function askToSend($: any, question: string): Promise<string> {
 const CONSENT_WAITING = 'Claude is waiting on a workbench dialog in the terminal: answer it there.'
 async function consent($: any, question: string, yes: string, no: string, outcome: string): Promise<boolean> {
   if (await away($, await read($, chat))) await runWb($, ['chat', 'reply', `--text=${CONSENT_WAITING}`, '--to=user'], 15_000)
-  return (await askOrNo($, question, [yes, no], outcome)) === yes
+  // the page's state line says this one waits too (#1355); it is never a notice row (due never:
+  // the reply above says it while away), and its answer, whatever it is, ends it
+  const d: TermDialog = { tool: 'workbench', agent: '', input: {}, at: await $.clock.now(), due: Infinity, kind: 'consent',
+    text: '', id: '', sending: false, done: false }
+  mem.termDialogs.push(d)
+  try {
+    return (await askOrNo($, question, [yes, no], outcome)) === yes
+  } finally {
+    d.done = true
+    mem.termDialogs = mem.termDialogs.filter(x => x !== d)
+  }
 }
 
 const realPath = async ($: any, p: string): Promise<string> =>
@@ -1909,6 +1921,7 @@ const mem = {
   hasActive: false, // a task is running: the clock redraws
   lastPoll: 0,
   listenerBody: '', // what this session last wrote to chat/listener.json
+  waitSaid: null as Waiting | null, // the wait the claim last said (listen): a change wakes the poll (#1355)
   tick: 0, // the apprentice's frame count
   // the opening animation while it plays (#963): its plan once the pane drew it, the frame on
   // screen, the ticks it waited for a first draw, its timer
@@ -2862,6 +2875,8 @@ async function claimStands($: any, claim: ListenerClaim, self: string, now: numb
 
 async function listen($: any, now: number) {
   const st = await read($, chat)
+  const waiting = waitingFact(mem.termDialogs, now) // the dialog the page says Claude waits on (#1355)
+  mem.waitSaid = waiting // said, or not this session's to say: either way the tick needn't poll again for it
   if (!st.delegating || !webOn(st)) return
   const dir = `${mem.root}/chat`
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
@@ -2876,7 +2891,7 @@ async function listen($: any, now: number) {
     // one was answering, pushed to no phone (#1129, 2026-11-23)
     const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
       ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}),
-      ...(mem.claudePid ? { parent: mem.claudePid } : {}), busy: mem.busy })
+      ...(mem.claudePid ? { parent: mem.claudePid } : {}), busy: mem.busy, ...(waiting ? { waiting } : {}) })
     if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
       mem.listenerBody = body
       await $.fs.write(`${dir}/listener.json`, body)
@@ -3346,7 +3361,10 @@ function startEars($: any) {
   $.clock.every(POLL_MS, async () => {
     const now = await $.clock.now()
     if (mem.termDialogs.length) void termNotices($, now)
-    if (!mem.eventsPid || mem.hasActive || mem.queued.length || now - mem.lastPoll > SAFETY_MS) void poll($)
+    // the page's state line within a tick of a dialog's two seconds (#1355): the claim says the
+    // wait, and the idle poll is 30 s apart
+    const waitMoved = !sameWait(waitingFact(mem.termDialogs, now), mem.waitSaid)
+    if (!mem.eventsPid || mem.hasActive || mem.queued.length || waitMoved || now - mem.lastPoll > SAFETY_MS) void poll($)
   })
   $.clock.every(CHAT_CHECK_MS, () => { void chatLink($) }) // the web app's link (#1283)
   $.clock.every(FRAME_MS, async () => {

@@ -33,6 +33,7 @@ type TaskPart = import('../../../mod/types/wire.js').TaskPart
 // ---- GET /api/settings: settings.py's rows ----
 type SettingChoice = import('../../../mod/types/wire.js').SettingChoice
 type SettingRow = import('../../../mod/types/wire.js').SettingRow
+type SettingChange = import('../../../mod/types/wire.js').SettingChange
 
 // ---- the views' API (app.ts's window.WB, frozen) ----
 // a POST under app.ts's deadline (`post`): the reply read whole, its JSON on asking

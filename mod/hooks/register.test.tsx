@@ -2756,6 +2756,56 @@ test('#1350: a dialog in the terminal is one waiting line on the web chat, never
   await clock.settle()
 })
 
+test('#1355: a dialog up two seconds is in the listener claim within a tick, the oldest named, and its settling takes it out; a quicker one never is', async ($, on) => {
+  // the web app's state line reads it (chat.driver_state): "Claude is waiting for you in the
+  // terminal: a permission for Bash." The idle poll is 30 s apart, so the tick writes it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))
+  on('process.run', (_: any, e: any) => {
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'url') return chatUrl(files)
+    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: '1800000000000-abc121\n', stderr: '' } }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  on('classic.PermissionRequest', () => ({}))
+  const ask = (tool_name: string, tool_input: unknown) => $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
+  const answered = (tool: string, input: Record<string, unknown> = {}) => $.tool.call({ tool, ...input } as any)
+  const claim = () => JSON.parse(files['/wb/chat/listener.json'] ?? '{}')
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(31_000)
+  expect(claim().session).toBeTruthy()
+  expect('waiting' in claim()).toBe(false)
+
+  // answered within two seconds (an auto-accept would be): never in the claim
+  await ask('Bash', { command: 'ls' })
+  await clock.advance(1500)
+  await answered('Bash', { command: 'ls' })
+  await clock.advance(3000)
+  expect('waiting' in claim()).toBe(false)
+
+  // up past two seconds: in the claim by the next tick, no poll due; a later one doesn't take its place
+  const at = clock.now()
+  await ask('Bash', { command: 'rm -rf runs/*' })
+  await clock.advance(1000)
+  await ask('Read', { file_path: '/etc/hosts' })
+  await clock.advance(3000)
+  expect(claim().waiting).toEqual({ kind: 'permission', tool: 'Bash', since: at / 1000, what: 'rm -rf runs/*' })
+  await answered('Bash', { command: 'rm -rf runs/*' })
+  await clock.advance(1500)
+  expect(claim().waiting?.tool).toBe('Read')                      // the one still up
+  await answered('Read', { file_path: '/etc/hosts' })
+  await clock.advance(1500)
+  expect('waiting' in claim()).toBe(false)
+})
+
 test('#1350 review: an away user\'s waiting line is cleared only by its own call, not by another call of the same tool finishing beside it', async ($, on) => {
   // #1350 dropped sameCall with the cards, and matched by tool and loop alone: a Read allowed by a
   // rule finishing beside one asking cleared the phone's line and marked the user back, so the

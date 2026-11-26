@@ -15,5 +15,6 @@
   },
   "files": ["bin/", "workbench/", "agent/", "skill/", "opencode-plugin/*.ts", "opencode-plugin/*.tsx",
             "mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts", "mod/hooks/core.ts",
-            "mod/hooks/kernel.js", "mod/hooks/modeline.ts", "mod/hooks/keywords.ts", "LICENSE"]
+            "mod/hooks/kernel.js", "mod/hooks/modeline.ts", "mod/hooks/keywords.ts", "mod/hooks/waiting.ts",
+            "LICENSE"]
 }

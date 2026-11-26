@@ -115,8 +115,9 @@ async function run(engine: string, device?: string) {
     listen(false)
     await until(async () => (await page.textContent('#presence-text')).includes('listening in ~/project'))
   })
-  // #1341: the chat says what it is for, in the empty state, and over a thread as a hint until dismissed
-  const PURPOSE = 'Message your driver from anywhere: most work can run from here.'
+  // #1341: the chat says what it is for, in the empty state, and over a thread as a hint until
+  // dismissed, naming the driver that listens (#1355: the story's `purpose`, story.ts)
+  const PURPOSE = 'Message Claude from anywhere: most work can run from here.'
   await check('the empty state says what the chat is for, and no hint repeats it', async () => {
     if (!(await page.textContent('#intro p')).replace(/\s+/g, ' ').includes(PURPOSE)) throw new Error(await page.textContent('#intro p'))
     if (await page.locator('#hint').isVisible()) throw new Error('the hint shows over the empty state')
@@ -328,7 +329,7 @@ async function run(engine: string, device?: string) {
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
     const heads = await page.$$eval('#settings .card h3', (h: Element[]) => h.map(x => x.textContent).join(' | '))
-    if (heads !== 'While away | Notifications | Install the app | This chat | This device') throw new Error(heads)
+    if (heads !== 'How the chat works | While away | Notifications | Install the app | This chat | This device') throw new Error(heads)
     if (await page.locator('[data-away]').count()) throw new Error('"Let Claude go ahead" is back')
     const r = await fetch(base + 'api/prefs', { method: 'POST', headers: { Authorization: 'Bearer ' + token,
       'Content-Type': 'application/json' }, body: '{"away":"allow"}' })
@@ -345,6 +346,11 @@ async function run(engine: string, device?: string) {
     const prompts = await page.textContent('#away-prompts')
     for (const want of ['are answered in the terminal, never here', 'Run Claude with permissions granted to work from the chat.'])
       if (!prompts.includes(want)) throw new Error(prompts)
+    // the three rules, the story's words for the driver listening (#1355)
+    const how = (await page.textContent('#how')).replace(/\s+/g, ' ')
+    for (const want of ['The terminal is where Claude lives', 'a prompt Claude raises is answered there, never in the chat',
+                        'more so with Claude run with permissions granted', "Settings are the source of truth: Claude changes one only when you ask and say yes"])
+      if (!how.includes(want)) throw new Error(how)
     await goTo('chat')
     await until(async () => await page.locator('#settings').isHidden())
   })
@@ -437,21 +443,30 @@ async function run(engine: string, device?: string) {
       await page.evaluate(() => { window.fetch = window._fetch })
     }
   })
-  await check('a prompt waiting in the terminal is one line with no buttons and no answer card, and its settling clears it (#959, #1350)', async () => {
+  await check('a prompt waiting in the terminal is the state line at the top, Copy its one button, no thread row and no answer card, and its settling clears it (#959, #1350, #1355)', async () => {
     const id = wb('chat', 'notice', '--tool', 'Bash', '--text', 'rm -rf runs/*').trim()
     if (id.startsWith('skipped')) throw new Error(id)
-    const row = page.locator('.row.notice').last()
-    await until(async () => (await row.textContent()).includes('Claude is waiting for you in the terminal. Run it with permissions granted to work from the chat.'))
-    if ((await row.locator('.notice-what').textContent()) !== 'rm -rf runs/*') throw new Error(await row.textContent())
-    if (await row.locator('button').count()) throw new Error('a notice with buttons')
+    const line = page.locator('#driver-state')
+    await until(async () => (await line.isVisible()) && (await line.textContent()).includes('Claude is waiting for you in the terminal: a permission for Bash.'))
+    if ((await line.locator('.dstate-what').textContent()) !== 'rm -rf runs/*') throw new Error(await line.textContent())
+    if (!(await line.locator('.dstate-grant').textContent()).includes('claude --permission-mode auto')) throw new Error(await line.textContent())
+    if ((await line.locator('button').count()) !== 1 || (await line.locator('button').textContent()) !== 'Copy') throw new Error('a button besides Copy')
+    if ((await line.getAttribute('role')) !== 'status') throw new Error('not a status')
+    if (!(await page.textContent('#presence-text')).includes('waiting for you in the terminal')) throw new Error(await page.textContent('#presence-text'))
+    if (await page.locator('.row.notice').count()) throw new Error('a thread row for a wait')
     if (await page.locator('.row.ask, .card .choices').count()) throw new Error('an answer card on the page')
+    // a message sent meanwhile waits behind the prompt
+    await page.fill('#input', 'sent while it waits')
+    await page.click('#send')
+    await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Waiting behind the prompt in the terminal'))
     const plan = wb('chat', 'notice', '--tool', 'ExitPlanMode', '--kind', 'plan').trim()
-    await until(async () => (await page.locator('.row.notice').count()) === 2)
-    if ((await page.locator('.row.notice').last().textContent()).includes('permissions granted')) throw new Error('a plan names permissions')
-    // settled there: the line clears
     if (!wb('chat', 'notice', '--done', id).startsWith('answered')) throw new Error('not settled')
+    // the oldest open prompt is the one named: now the plan's, which names no permissions
+    await until(async () => (await line.textContent()).includes('a plan to approve'))
+    if ((await line.textContent()).includes('permissions granted') || (await line.locator('button').count())) throw new Error('a plan names permissions')
+    // settled there: the line clears
     if (!wb('chat', 'notice', '--done', plan).startsWith('answered')) throw new Error('not settled')
-    await until(async () => (await page.locator('.row.notice').count()) === 0)
+    await until(async () => await line.isHidden())
   })
   await check('Stats shows what the week\'s tasks saved Claude, once: the badge and its one line', async () => {
     const usage = { turns: 2, calls: 5, input: 1000, cache_write_5m: 0, cache_write_1h: 10000, cache_read: 200000, output: 3000 }
@@ -1549,7 +1564,7 @@ async function run(engine: string, device?: string) {
       await until(async () => (await badge()).n === '' && (await badge()).label === 'Chat')
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Badge two.'))
       wb('chat', 'notice', '--done', id)                    // settled in the terminal: the line clears
-      await until(async () => (await page.locator('.row.notice').count()) === 0)
+      await until(async () => await page.locator('#driver-state').isHidden())
       wb('chat', 'reply', '--text', 'Seen on Chat.')       // shown: no count
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Seen on Chat.'))
       if ((await badge()).n !== '') throw new Error('counted on Chat: ' + JSON.stringify(await badge()))
