@@ -378,6 +378,10 @@ class Base(unittest.TestCase):
         # asking for a yes
         for k in runner.DRIVER_ENV + ("WB_TASK",):
             os.environ.pop(k, None)
+        # nor the user's GitHub token: git was kept off github.com, gh not, so a gh the tests ran
+        # acted as the user (#1321, finding 22; LocalPatches moves gh's own login away too)
+        for k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST"):
+            os.environ.pop(k, None)
         # the state directory before WB_HOME names it: a thread the last test left running (its
         # chat server) wrote there in between, and mkdir found it made (seen on WSL, 2026-11-20)
         (tmp / "state").mkdir()
@@ -25671,6 +25675,9 @@ class LocalPatches(Base):
                           FAKE_GH_FORK=str(self.fork), FAKE_GH_API=str(tmp / "gh-api.json"))
         for k in ("FAKE_GH_FAIL", "FAKE_GH_PR_STATE", "FAKE_GH_PR_MERGE"):
             os.environ.pop(k, None)
+        # and gh's stored login, should a real gh run in place of the fake (#1321, finding 22): its
+        # config directory is the test's own (not in Base: a lane hides GH_CONFIG_DIR, SECRET_VARS)
+        os.environ["GH_CONFIG_DIR"] = str(tmp / "gh-config")
         self.gh_auth()
         # every github.com URL leads nowhere unless a test maps it (the longest insteadOf wins):
         # a wrong push URL fails here, never reaching GitHub
@@ -26084,18 +26091,37 @@ class LocalPatches(Base):
         self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "fix-thing"))
         self.assertIn("lowercase letters", self.wb("patch", "upstream", fix, "--name", "Fix_It"))
 
-    def test_patch_upstream_names_the_kernels_check_for_a_patch_that_touches_kernel(self):
+    def test_patch_upstream_names_each_touched_directorys_suite_and_the_plugins_for_the_shared_core(self):
         # #1356: python3 -m unittest holds the committed bundle offline, but only kernel.py check
-        # rebuilds it from kernel/src and runs the props, so a kernel patch's next step names it
+        # rebuilds it from kernel/src and runs the props, so a kernel patch's next step names it.
+        # #1328: only the mod's commands were named, so a patch to the OpenCode plugin, or to the
+        # mod's core it imports, went out with the plugin's tests unnamed
         self.as_clone()
-        (self.copy / "kernel/src").mkdir(parents=True)
-        fix = self.commit(self.copy, "kernel/src/Kernel.purs", "module Kernel where\n", "a kernel fix")
-        out = self.wb("patch", "upstream", fix, "--name", "kernel-fix")
-        wt = store.home() / "upstream/kernel-fix"
-        self.assertIn(f"cd {wt} && python3 -m unittest && python3 scripts/kernel.py check\n", out)
-        other = self.commit(self.copy, "mine.txt", "mine\n", "not the kernel")
-        self.assertIn(f"cd {store.home() / 'upstream/plain'} && python3 -m unittest\n",
-                      self.wb("patch", "upstream", other, "--name", "plain"))
+        kernel, mod, plugin = patches.KERNEL_CHECK, patches.MOD_TESTS, patches.PLUGIN_TESTS
+        cases = [("kernel/src/Kernel.purs", [kernel, mod, plugin]), ("mod/hooks/tasks.ts", [mod]),
+                 ("mod/hooks/core.ts", [mod, plugin]), ("mod/hooks/golden/index.ts", [mod, plugin]),
+                 ("opencode-plugin/server.ts", [plugin]), ("package.json", [plugin]), ("mine.txt", [])]
+        for i, (path, want) in enumerate(cases):
+            with self.subTest(path):
+                (self.copy / path).parent.mkdir(parents=True, exist_ok=True)
+                fix = self.commit(self.copy, path, f"{i}\n", f"a fix to {path}")
+                out = self.wb("patch", "upstream", fix, "--name", f"fix-{i}")
+                wt = store.home() / f"upstream/fix-{i}"
+                self.assertIn(f"cd {wt} && " + " && ".join(["python3 -m unittest", *want]) + "\n", out)
+
+    def test_the_plugins_shared_core_is_everything_opencode_plugin_imports_from_mod(self):
+        # #1328: a change to what the plugin imports from mod/ is the plugin's too (SUITES); a new
+        # import outside PLUGIN_SHARED would leave its tests unnamed for such a patch
+        imports = set()
+        for f in (ROOT / "opencode-plugin").rglob("*.ts"):
+            for spec in re.findall(r"""(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]""", f.read_text()):
+                rel = os.path.relpath((f.parent / spec).resolve(), ROOT)
+                if rel.startswith("mod/"):
+                    imports.add(rel)
+        self.assertTrue(imports)                                # the goldens and the core, today
+        for rel in imports:
+            self.assertTrue(rel.startswith(patches.PLUGIN_SHARED), rel)
+            self.assertIn(patches.PLUGIN_TESTS, patches.suites([rel]))
 
     def test_patch_upstream_off_github_prints_no_url_for_gh_and_flags_a_personal_patch(self):
         # #1005 (2026-11-22): `gh repo fork <the origin's URL>` was printed for an origin off
@@ -26605,6 +26631,33 @@ class LocalPatches(Base):
         with mock.patch.object(patches, "OS_RELEASE", (str(Path(self.tmp.name) / "os-release"),)):
             (Path(self.tmp.name) / "os-release").write_text('NAME="Alpine Linux"\nID=alpine\n')
             self.assertEqual(patches._os_release()["ID"], "alpine")
+
+    def test_from_an_opencode_driver_a_prompting_step_goes_to_a_terminal_and_names_opencodes_model(self):
+        # #1321 (findings 17, 27): the hints said `! cmd` and "Claude", Claude Code's; OpenCode's `!`
+        # had no terminal for sudo's password or gh's login, and no Claude drove it
+        real = shutil.which
+        with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"), \
+                mock.patch.object(patches, "_os_release", lambda: {"ID": "arch"}), \
+                mock.patch.object(patches.platform, "system", lambda: "Linux"), \
+                mock.patch.object(patches.hardware, "system", lambda: "linux"), \
+                mock.patch.object(patches.shutil, "which", lambda n: None if n != "git" else real(n)):
+            missing = patches.gh_state()["hint"]
+        self.assertIn("OpenCode's model asks first, then the user runs, in a terminal of their own: sudo pacman "
+                      "-S github-cli", missing)
+        self.gh_auth(hosts=False)
+        https = mock.patch.object(patches, "_guess_protocol", lambda root=None: "https")
+        https.start(); self.addCleanup(https.stop)
+        with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"):
+            login = patches.gh_state()["hint"]
+            crash = patches.driver_name()
+        self.assertIn("the user runs, in a terminal of their own: gh auth login --hostname github.com "
+                      "--git-protocol https (a browser or one-time code; OpenCode's model never handles the token)",
+                      login)
+        self.assertIn("then, in a terminal of their own: gh auth setup-git, so git pushes", login)
+        self.assertNotIn("! ", missing + login)
+        self.assertEqual(crash, "OpenCode's model")
+        self.assertIn("the user runs: ! gh auth login", patches.gh_state()["hint"])  # Claude Code's, as it was
+        self.assertEqual(patches.driver_name(), "Claude")
 
     def test_doctor_says_the_install_its_local_patches_and_gh(self):
         # #1005: which install runs (a marketplace clone re-clones away a patch), the patches it
@@ -27141,6 +27194,157 @@ class LocalPatches(Base):
                 with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
                     cli.main(["patch", "check", bad])
                 self.assertEqual(e.exception.code, 1)
+
+    def test_patch_check_runs_each_test_by_its_directorys_runner_and_names_one_with_none(self):
+        # #1328 (#1321's finding 18): every *.test.ts ran as the mod's suite, so a patch to the
+        # OpenCode plugin read "upstream already passes" with its own test never run
+        self.as_clone()
+        bindir = Path(self.tmp.name) / "fakebin"
+        (bindir / "opencode").write_text(f'#!/bin/sh\necho "opencode BUN_BE_BUN=$BUN_BE_BUN $*" >> '
+                                         f'{shlex.quote(str(self.calls))}\n')
+        (bindir / "opencode").chmod(0o755)
+        (self.origin / "scripts").mkdir()                     # upstream's kernel.py: it records its call
+        self.upstream_commits("scripts/kernel.py", f"import sys\nopen({str(self.calls)!r}, 'a').write("
+                              "'kernel.py ' + ' '.join(sys.argv[1:]) + '\\n')\n", "the kernel's script")
+        self.g(self.copy, "reset", "-q", "--hard", "origin/main")
+        for d in ("opencode-plugin/test", "kernel/test", "web"):
+            (self.copy / d).mkdir(parents=True)
+        plugin = self.commit(self.copy, "opencode-plugin/test/x.test.ts", "test('x', () => {})\n", "a plugin fix")
+        kernel = self.commit(self.copy, "kernel/test/Props.purs", "module Props where\n", "a kernel prop")
+        stray = self.commit(self.copy, "web/x.test.ts", "test('x', () => {})\n", "a web fix")
+        real_which = shutil.which
+        for sha, subject, ran in ((plugin, "a plugin fix", "opencode BUN_BE_BUN=1 test opencode-plugin/test"),
+                                  (kernel, "a kernel prop", "kernel.py props")):
+            with self.subTest(subject):
+                self.calls.unlink(missing_ok=True)
+                self.assertIn(f"upstream already passes this patch's tests ({subject})", self.check(sha))
+                self.assertEqual(self.calls.read_text().splitlines(), [ran])       # never claude's suite
+        gone = lambda n, *a, **k: None if n in ("opencode", "bun") else real_which(n, *a, **k)  # noqa
+        with mock.patch.object(patches.shutil, "which", gone):
+            self.assertEqual(self.check(plugin), "a plugin fix's tests didn't all run here (neither opencode nor bun "
+                                                 "is on PATH for the OpenCode plugin's tests), so wb patch check "
+                                                 "can't tell: run them where they can (a skip is not a pass)\n")
+            # the #1329 review (2026-11-25): kernel.py props refuses with neither (exit 1), which
+            # read as upstream failing the patch
+            self.calls.unlink(missing_ok=True)
+            self.assertEqual(self.check(kernel), "a kernel prop's tests didn't all run here (neither bun nor opencode "
+                                                 "is on PATH for the kernel's props), so wb patch check can't tell: "
+                                                 "run them where they can (a skip is not a pass)\n")
+            self.assertFalse(self.calls.exists())
+        self.assertEqual(self.check(stray), "a web fix's tests didn't all run here (no runner for web/x.test.ts "
+                                            "(only mod/, opencode-plugin/ and kernel/ have one)), so wb patch "
+                                            "check can't tell: run them where they can (a skip is not a pass)\n")
+
+    TEMPLATE = ("<!-- Fill every section. -->\n\n## What and why\n\n<!-- what -->\n\nCloses #\n\n## Tests run\n\n"
+                "<!-- each command -->\n\n## Docs\n\n- [ ] grepped\n")
+
+    def on_github(self):
+        """calc()'s clone with its origin on GitHub (mapped to the stand-in), and upstream's
+        template; returns the patch."""
+        fix = self.calc()
+        (self.origin / ".github").mkdir(exist_ok=True)
+        self.commit(self.origin, ".github/pull_request_template.md", self.TEMPLATE, "the template")
+        self.g(self.copy, "remote", "set-url", "origin", self.URL)
+        self.g(self.copy, "config", f"url.{self.origin}.insteadOf", self.URL)
+        return fix
+
+    def test_patch_upstream_runs_the_patchs_own_tests_and_writes_what_they_printed_into_the_body(self):
+        # #1329 (#1321's finding 20): a weak driver's patch went upstream with no Scope trailer, a
+        # near-empty body and no test run, none of it said
+        fix = self.on_github()
+        out = self.wb("patch", "upstream", fix, "--name", "add")
+        line = "Tests run by wb: `python3 -m unittest tests.test_calc.Calc.test_add_adds` → OK"
+        self.assertIn(f"\n{line}\n", out)
+        self.assertIn("\nno Scope trailer: decide first whether it is for everybody (Scope: everybody)", out)
+        self.assertIn("\nnext (wb ran only the patch's own tests, above):\n", out)
+        body = patches.body_path("add")
+        self.assertIn(f"## Tests run\n\n{line}\n\n<!-- each command -->\n", body.read_text())
+        self.assertIn(f"  fill in {body} (a copy of .github/pull_request_template.md; unfilled: What and why, "
+                      "Tests run, Docs)\n", out)
+        # the template with wb's line in it is still the template as it came; filled, it goes,
+        # what's left unfilled said, never refused
+        send = ["patch", "send", "add", "--title", "add adds", "--body-file", str(body)]
+        self.assertIn("is the template as it came", self.wb(*send))
+        body.write_text(body.read_text().replace("Closes #", "It adds. Closes #1"))
+        self.gh_auth(login="a-schaefers")                       # the owner's own: pushed to origin
+        out = self.wb(*send)
+        self.assertIn("note: the body leaves Tests run, Docs unfilled\n", out)
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/", out)
+        self.assertIn(line, body.read_text())                   # the body sent carries the evidence
+        # a test that fails on the branch says so, and a patch with no test says it ran none
+        self.g(self.copy, "switch", "-q", "local")
+        bad = self.commit(self.copy, "tests/test_wrong.py", "import unittest\n\n\nclass Wrong(unittest.TestCase):\n"
+                          "    def test_two_and_two(self):\n        open('left.txt', 'w').close()\n"
+                          "        self.assertEqual(2 + 2, 5)\n", "a wrong test\n\nScope: everybody")
+        out = self.wb("patch", "upstream", bad, "--name", "bad")
+        self.assertIn("Tests run by wb: `python3 -m unittest tests.test_wrong.Wrong.test_two_and_two` → "
+                      "FAILED (failures=1) (fail)\n", out)
+        self.assertEqual(self.g(store.home() / "upstream/bad", "status", "--porcelain"), "")  # what it left, gone
+        self.assertNotIn("no Scope trailer", out)
+        plain = self.commit(self.copy, "mine.txt", "mine\n", "no test\n\nScope: everybody")
+        out = self.wb("patch", "upstream", plain, "--name", "plain")
+        self.assertIn("Tests run by wb: not run (the patch has no test of its own)\n", out)
+        self.assertIn("\nnext (none of this has run):\n", out)
+        self.assertIn("Tests run by wb: not run (the patch has no test of its own)\n",
+                      patches.body_path("plain").read_text())
+        clash = self.commit(self.copy, "calc.py", "def add(a, b):\n    return b + a\n", "commuted\n\nScope: me")
+        self.assertIn("Tests run by wb: not run (the patch conflicted on upstream: run its tests once it's "
+                      "resolved)\n", self.wb("patch", "upstream", clash, "--name", "clash"))
+
+    def test_patch_upstream_records_the_prepared_patch_and_its_body_before_its_tests_run(self):
+        # the #1329 review (2026-11-25): the tests can take minutes, and a run killed in them
+        # (Claude's Bash stops at 2) left pr/<slug>, which a rerun refuses, with no prepared row
+        # for wb update to drop the local patch by and no body file to send
+        fix = self.on_github()
+        with mock.patch.object(patches, "evidence", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            cli.main(["patch", "upstream", fix, "--name", "add"])
+        noted = store.read_json(store.home() / "patches.json")
+        self.assertEqual(list(noted["prepared"]), ["add"])
+        self.assertEqual(patches.body_path("add").read_text(), self.TEMPLATE)
+        self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "add"))
+
+    def test_patch_upstream_stamps_the_pr_commit_with_its_driver_and_keeps_what_wb_update_matches(self):
+        # #1329 (#1321's finding 21): upstream couldn't tell which driver prepared a patch
+        self.as_clone()
+        self.commit(self.copy, "mine.txt", "mine\n", "fix the thing\n\nScope: everybody")
+        self.g(self.copy, "commit", "-q", "--amend", "--no-edit", "--author=A <a@a>",
+               "--date=2020-01-01T00:00:00+0000")                # an author and a date the amend must keep
+        fix = self.g(self.copy, "rev-parse", "HEAD")
+        sid = "0b5e7c1e-0000-4000-8000-000000000001"
+        log = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects/-repo" / f"{sid}.jsonl"
+        log.parent.mkdir(parents=True)
+        rows = [{"type": "assistant", "message": {"model": "test-model-a"}},
+                {"type": "assistant", "message": {"model": "test-model-b"}},
+                {"type": "assistant", "message": {"model": "<synthetic>"}}, {"type": "user"}]
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows) + "{not json\n")
+        with mock.patch.dict(os.environ, CLAUDECODE="1", CLAUDE_CODE_SESSION_ID=sid):
+            out = self.wb("patch", "upstream", fix, "--name", "fix-thing")
+        wt = store.home() / "upstream/fix-thing"
+        self.assertIn("Workbench-Driver: claude-code test-model-b (a trailer on pr/fix-thing's commit, not "
+                      "the local one)\n", out)
+        trailer = "--format=%(trailers:key=Workbench-Driver,valueonly)"
+        self.assertEqual(self.g(wt, "log", "-1", trailer), "claude-code test-model-b")
+        self.assertEqual(self.g(self.copy, "log", "-1", trailer, fix), "")           # the local one untouched
+        self.assertIn("Scope: everybody", self.g(wt, "log", "-1", "--format=%B"))
+        for fmt in ("%an %ae %at", "%s"):
+            self.assertEqual(self.g(wt, "log", "-1", f"--format={fmt}"),
+                             self.g(self.copy, "log", "-1", f"--format={fmt}", fix))
+
+        def patch_id(d, rev):
+            diff = subprocess.run(["git", "-C", str(d), "show", rev], capture_output=True, check=True).stdout
+            return subprocess.run(["git", "patch-id", "--stable"], input=diff, capture_output=True,
+                                  check=True).stdout.split()[0]
+        self.assertEqual(patch_id(wt, "HEAD"), patch_id(self.copy, fix))
+        # merged upstream as it was sent, wb update's match still finds it landed
+        self.g(self.origin, "fetch", "-q", str(self.copy), "pr/fix-thing")
+        self.g(self.origin, "merge", "-q", "--ff-only", "FETCH_HEAD")
+        self.g(self.copy, "fetch", "-q", "origin")
+        self.assertTrue(patches._landed_pr(self.copy, "fix-thing", "origin/main"))
+        # an OpenCode driver with no heartbeat names only its tool; a terminal, itself
+        with mock.patch.dict(os.environ, OPENCODE_SESSION_ID="ses_abc"):
+            self.assertEqual(patches.driver_line(), "opencode")
+        self.assertEqual(patches.driver_line(), "terminal")
 
     def test_patch_upstream_of_a_commit_with_no_test_asks_for_one(self):
         self.as_clone()

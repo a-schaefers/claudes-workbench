@@ -732,7 +732,7 @@ pull request or a conflict, `wb patch check <sha>` says whether upstream fixed i
 `wb patch drop` only on the user's yes. Then weigh it seriously: a bug, a false result or a change every user would want
 on any hardware and model is for everybody; a preference, a path or a taste is the user's alone.
 Tell them which and why, and only for everybody ask "want me to PR it upstream for everybody?".
-On a yes: `wb patch upstream <commit> --name <slug>`, the tests it prints, the body file it names
+On a yes: `wb patch upstream <commit> --name <slug>` (it runs the patch's tests: in the background or a 10-minute timeout), the tests it prints, the body file it names
 filled from the template; then show the user exactly what goes public (the title and the whole
 body) and offer to redact paths, hostnames and project names; then the one `wb patch send` it
 printed, as a command of its own, `--title` and `--body-file` written out. The mod asks the user
