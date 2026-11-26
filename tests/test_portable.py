@@ -3329,6 +3329,33 @@ class Optimize(unittest.TestCase):
             self.assertIn("a task you start goes first", out[0])
             self.assertNotIn("--all", detach.call_args[0][0])
 
+    def test_the_unasked_run_waits_while_a_local_driver_drives_on_the_gpu_and_a_plain_start_still_runs(self):
+        # #1501: --if-due read only gpu.json, so a local OpenCode driver's model was unloaded and
+        # reloaded by every probe, mid-turn, on the first session or right after its wb model add
+        self.ollama(32768)
+        from workbench import cli, optimize
+
+        def beat(used_ago):
+            now = time.time()
+            store.write_json(store.beat_path(os.getpid()), {
+                "tool": "opencode", "pid": os.getpid(), "ts": now,
+                "sessions": {"ses_d": {"model": "ollama/m", "used": now - used_ago}}})
+        with mock.patch.object(cli, "detach") as detach, \
+                mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
+            detach.return_value.pid = os.getpid()
+            beat(0)
+            self.assertEqual(optimize.due(), "never measured")
+            self.assertEqual(optimize.start(if_due=True), [])           # the driver's: next session
+            detach.assert_not_called()
+            beat(store.DRIVER_HOLD + 60)                                 # idle past the hold
+            self.assertIn("measuring the GPU for 1 local model(s) (never measured)",
+                          optimize.start(if_due=True)[0])
+            self.assertEqual(detach.call_count, 1)
+            store.write_json(optimize.path(), {**optimize.state(), "pid": None})
+            beat(0)
+            self.assertTrue(optimize.start())                            # asked for: it runs
+            self.assertEqual(detach.call_count, 2)
+
     def test_an_ollama_model_add_starts_measuring_its_window_when_due_and_quietly_waits_for_a_task(self):
         # #1195: pull, register and measure were three yeses on a first run; wb model add now
         # starts wb optimize itself, as wb setup does, and stays quiet while a task holds the GPU

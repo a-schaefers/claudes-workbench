@@ -3948,7 +3948,10 @@ the agent's. Only against coding loads: a job that takes the GPU to itself (`wb 
 `--unload-for-tests`, `wb optimize`: `free_gpu` with no `of`, `media.settle`'s `models.freed`, a
 box's turn, `optimize.candidates`) reads `keep_loaded(drivers=False)` and unloads the driver's
 model as before, its next turn reloading it; no exclusive lease waits for a driver, which may be
-the one waiting on its own `wb image`. `models.driver_holders(m)`: each such model `discover()` finds on `m`'s GPU, not `m`
+the one waiting on its own `wb image`. The unasked `wb optimize start --if-due` doesn't run at all
+while `store.driver_models()` names a model `discover()` finds on this GPU (`optimize._driver_on_gpu`,
+#1501: its probes reloaded the driver's model mid-turn), so a user who always drives locally gets
+it only by asking (`wb optimize start`). `models.driver_holders(m)`: each such model `discover()` finds on `m`'s GPU, not `m`
 itself (the same model shares), and resident, as an admission-only holder
 (`driver:<id>`, `models.DRIVER_HOLDER`, never written to gpu.json): `GpuLease` admits `m` beside
 it only when `admits` says both fit, else the task queues, `waiting for the GPU (held by the
@@ -4975,7 +4978,8 @@ without `local: true`; an existing provider is left as it is, and a different ba
 again adopts a provider made before the mark, and Windows' new address (port and path kept)
 repoints a marked one, before any discovery has moved it, rather than refusing. `--start`/`--stop` set models.json `start`/`stop`.
 On an Ollama provider, after the `registered …` line, `optimize.start(if_due=True)` (a `--` line
-when it starts, as at `wb setup`; quiet when not due or a task holds the GPU), then the `next:` line
+when it starts, as at `wb setup`; quiet when not due, a task holds the GPU or a local driver
+drives on it, #1501), then the `next:` line
 (#1195). wb isn't tied to Ollama (2026-11-17);
 Ollama keeps pulls, deletes and sharing.
 
@@ -5737,6 +5741,7 @@ window or tags `digest` differs from the row's, #709); or the last run was stopp
 the end of `wb setup`, after each Ollama `wb model add` (pull, register and window in one command:
 the first run's separate yes for it, #1195), and once per Claude Code session after its first quiet turn (the mod's
 `measureIfDue`, `quietForJobs`, #541, a toast, no wake), through `wb optimize start --if-due`, which
+waits while a task holds the GPU or a local OpenCode driver drives on it (#1501), and
 measures only the new or stale models (`--all` measures every one). `--bench` and anything heavier
 wait for the user to ask: an unannounced long run could be cut short and alarm people (the user,
 2026-11-18).
@@ -9462,7 +9467,8 @@ the mod's `runWb`), not the lane's `RUN_MS` 15 s: `wb update --check` fetches, a
 is written before the fetch, so a killed check lost the week's (the 2026-11-26 review).
 - `wb update --check --if-due`, once a load: `update available …` and the marketplace clone's
   local changes (`LOCAL_CHANGES`, patches.CHECK_LINE's opening) toasted as wb says them.
-- `wb optimize start --if-due`, once a load, quiet: `measuring …` toasted.
+- `wb optimize start --if-due`, once a load, quiet: `measuring …` toasted; never while a local
+  driver drives on this GPU (*A local driver on the GPU*, #1501), so a GPU driver measures only when asked.
 - `wb deepmode --moved`, once a load while workflows.json holds 2.1's `mode: on` and no `deepmode`:
   its one line (the story's `moved.deepmode`) toasted, as the mod's `deepmodeMoved` does (#1507).
 - `wb scout --if-due`, once a load, in a server that owned a task in this load (`delegated`), wakes
