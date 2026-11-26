@@ -9672,8 +9672,11 @@ as `wb resume --all` leaves them (`cli.INTERRUPTED`). A resume refused with exit
 refusal is its null. A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
 Claude's, its work kept; while the run isn't `running` the item waits for `wb run resume`. It takes each report item that ended (`_take`: its object to `outputs/`,
 through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fix` list, at most `max`, the review
-`superseded`; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed, then starts
-what is ready (`runs.state`, rebuilt
+`superseded`; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
+`cause: item`, as an `on_failure` report item's: it holds only that item, and while it is open the driver still starts
+and resumes the others, `runs._going`, though it never finishes the run or pauses it; a second item's null then is
+raised after `wb run resume`, journalled `notice` only once raised; a `claude` stage's checkpoint may replace it, #1510),
+then starts what is ready (`runs.state`, rebuilt
 each pass from the flow, the journal and the tasks: a pipeline item once its input is in, a barrier's once all
 are) and has room (`_room`: `IN_FLIGHT` 6 items; an API stage's provider slots, `cli._api_slots_free`, and none
 while a task of the user's waits for one, `cli._api_pending`; on the GPU one waiting item per stage). Each start
@@ -9900,7 +9903,7 @@ $WB_HOME (~/.local/state/workbench)
                                  `unless_exists` paths at base, runs.existing, #1295), context,
                                  repo, base, base_ref, cwd, budget_usd, budget_min, overnight, trial, no_claude_md, created, driver {python, machine},
                                  session? (Claude Code's, or an OpenCode driver's with session_kind: opencode, #1309), claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,
-                                 why, pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
+                                 why, cause? (item: a checkpoint an item's null raised, runs._going), pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
                                  budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|escalate|escalated|fed|amend|notice|resumed|reaped,
                                  stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), ok?}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
                                  {key, input, result, task}; specs/<stage>-<n>.md (each item's spec); schemas/<stage>-<n>.json (a batch's schema, runs.batch_schema); notify.jsonl (its items' notices, the driver's);

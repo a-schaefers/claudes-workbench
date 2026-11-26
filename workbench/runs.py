@@ -1340,16 +1340,29 @@ def _take(run: Run, stage: dict, it: Item) -> None:
         if phase not in store.CLOSED:
             _wb(["discard", it.task, "--reason", f"run {run.name}: no valid result"], run)
         if stage.get("on_failure") == "checkpoint":
-            _checkpoint(run, f"{it.task} ({stage['id']} {it.key}) ended with no result: {why}")
+            _checkpoint(run, f"{it.task} ({stage['id']} {it.key}) ended with no result: {why}", item=True)
 
 
 def _src_items(run: Run, stage: dict) -> list:
     return state(run).get(stage.get("from")) or []
 
 
-def _checkpoint(run: Run, why: str) -> None:
-    if run.set_status_if(lambda st: st.get("phase") == "running", phase="checkpoint", why=why):
+def _going(st: dict) -> bool:
+    """Whether the run starts, and resumes, its items: running, or at a checkpoint an item's null
+    raised (`cause: item`), which holds only that item. One crashed code item stopped every other
+    from starting until wb run resume: a scheduled fix or build flow sat idle all night, and each
+    later night's fire was skipped (#1510, 2026-11-26)."""
+    return st.get("phase") == "running" or (st.get("phase") == "checkpoint" and st.get("cause") == "item")
+
+
+def _checkpoint(run: Run, why: str, item: bool = False) -> bool:
+    """The checkpoint raised and said, or False when the run wasn't there to raise it: an item's
+    (``item``) only from running, another over an item's too."""
+    if run.set_status_if(lambda st: st.get("phase") == "running" if item else _going(st), phase="checkpoint",
+                         why=why, cause="item" if item else None):
         run.notify("run_checkpoint", f"{why}. Then: wb run resume {run.name} (or wb run stop {run.name}).")
+        return True
+    return False
 
 
 def _ack_items(run: Run) -> None:
@@ -1441,7 +1454,7 @@ def _held(run: Run, it: Item) -> bool:
     st = store.Task(it.task).status
     if not _outside(st):
         return False
-    if run.status.get("phase") != "running":
+    if not _going(run.status):
         return True
     mine = [r for r in run.journal() if r.get("task") == it.task]
     why_out = cli.stopped_outside(st) or st.get("last") or "stopped"
@@ -1546,15 +1559,17 @@ def tick(run: Run) -> bool:
             if is_code(s) and it.state == "null" and s.get("on_failure", "checkpoint") == "checkpoint" \
                     and escalation(it.key) >= len(s.get("escalate") or []) \
                     and not any(r.get("kind") == "notice" and r.get("item") == it.task for r in run.journal()):
-                run.log(kind="notice", notice="run_checkpoint", item=it.task)
-                _checkpoint(run, f"{it.task} ({s['id']} {it.key}) is {store.Task(it.task).status.get('phase')}: "
-                                 f"{it.why}; Claude decides it (wb feedback, wb resume or wb discard)")
-    if run.status.get("phase") == "running":
+                # journalled only once raised: one that came at a checkpoint or a pause was marked
+                # said and never raised after the resume (#1510)
+                if _checkpoint(run, f"{it.task} ({s['id']} {it.key}) is {store.Task(it.task).status.get('phase')}: "
+                                    f"{it.why}; Claude decides it (wb feedback, wb resume or wb discard)", item=True):
+                    run.log(kind="notice", notice="run_checkpoint", item=it.task)
+    if _going(run.status):
         for s in stages(flow):
             if s.get("final") or s.get("claude"):
                 continue
             for it in st.get(s["id"]) or ():
-                if it.state != "pending" or run.status.get("phase") != "running":
+                if it.state != "pending" or not _going(run.status):
                     continue
                 m = stage_model(s, it)
                 if it.task and store.Task(it.task).exists:  # started, its runner not up yet
@@ -1592,10 +1607,11 @@ def tick(run: Run) -> bool:
     for s in stages(flow):
         if s.get("claude") and complete.get(s.get("from")) and st.get(s["id"]) is None:
             if not any(r.get("kind") == "notice" and r.get("stage") == s["id"] for r in run.journal()):
-                run.log(kind="notice", notice="run_checkpoint", stage=s["id"])
                 n = len([i for i in st.get(s["from"]) or () if i.state == "done"])
-                if run.set_status_if(lambda x: x.get("phase") in ("running", "paused"), phase="checkpoint",
-                                     why=f"stage {s['id']} is Claude's"):
+                # over an item's checkpoint too, whose items went on (#1510); journalled once raised
+                if run.set_status_if(lambda x: x.get("phase") in ("running", "paused") or _going(x),
+                                     phase="checkpoint", why=f"stage {s['id']} is Claude's", cause=None):
+                    run.log(kind="notice", notice="run_checkpoint", stage=s["id"])
                     run.notify("run_checkpoint", f"stage {s['id']} is yours: {n} result(s) of {s['from']} are in "
                                f"(wb run report {run.name} --stage {s['from']}). Merge them, then wb run feed "
                                f"{run.name} {s['id']} --file <list.json>")

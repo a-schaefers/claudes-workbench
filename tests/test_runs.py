@@ -1063,6 +1063,30 @@ class Runs(Base):
         self.assertEqual([(c["key"], c["task"]) for c in rep["code"] if c.get("phase") == "review"], [("code:1#e1", "esc-code-2")])
         run_wb("discard", "esc-code-2")
 
+    def test_a_crashed_code_item_checkpoints_claude_once_while_the_runs_other_items_go_on_to_review(self):
+        # #1510: one crashed item's checkpoint stopped every other start until wb run resume, so a
+        # scheduled fix or build flow sat idle all night and skipped each later night's fire
+        flow = {"v": 1, "name": "nf", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "items": ["f1", "f2", "f3", "f4"], "prompt": "Write {item} to answer.txt."},
+            {"id": "claude", "final": True, "from": "code"}]}
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"nf-code-1": "crash"})
+        run_wb("run", "start", "nf", "--plan", self.plan(flow), "--repo", str(self.repo))
+        names = [f"nf-code-{n}" for n in (2, 3, 4)]
+        deadline = time.time() + 120
+        while time.time() < deadline and not all(store.Task(n).exists and store.Task(n).status.get("phase") == "review"
+                                                 for n in names):
+            time.sleep(0.3)
+        st = runs.Run("nf").status
+        self.assertEqual([store.Task(n).status.get("phase") for n in names], ["review"] * 3, st)
+        self.assertEqual(store.Task("nf-code-1").status["phase"], "failed")
+        self.assertEqual((st["phase"], st["cause"]), ("checkpoint", "item"))
+        (said,) = [r for r in self.run_notices("nf") if r["kind"] == "run_checkpoint"]
+        self.assertIn("nf-code-1 (code 1) is failed", said["text"])
+        self.assertIn("resumed nf", run_wb("run", "resume", "nf"))
+        self.assertEqual(self.wait_run("nf", ("review", "failed", "paused", "stopped"))["phase"], "review")
+        for n in ("nf-code-1", *names):
+            run_wb("discard", n)
+
     def test_asks_left_past_refix_max_escalate_with_the_attempt_kept_and_the_last_roles_failure_asks_claude(self):
         asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
