@@ -72,6 +72,7 @@ import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
+import { keywords, onlyToggles } from './keywords'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, focusOf as focusOfTasks, frameOf, isEst, speechOf, taskLines, viewFacts } from './tasks'
 // moved to tasks.ts, shared with the OpenCode plugin's panel (#1312); still exported from here
@@ -536,6 +537,9 @@ const SKILL = 'workbench'
 const UPDATE = 'workbench-update'
 const QUIT = 'workbench-quit'
 const HAND_BACK = 'workbench-quit-and-hand-back-claude'
+// The one that doesn't: /deepmode is the user's own word for Dynamic workflows (#1278), as
+// `deepmode on` typed on a line of its own is
+const DEEPMODE = 'deepmode'
 
 // Claude coding (#92), the user's choice (`wb coding`): when Claude may write code for a delegated
 // task. "decide" (no saved choice) adds nothing, so Claude works as before there was a choice.
@@ -565,6 +569,25 @@ const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb deepmo
   'first, then tests, then UI or docs.'
 const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb deepmode` shows it): run one task ' +
   'at a time again, as the /workbench skill says.'
+
+// The keywords (#1278, keywords.ts): `deepmode on|off` typed is the user's yes, so the mod runs
+// `wb deepmode` itself, and sayRules' row tells Claude; `deepcode` adds wb's rule to that one
+// prompt (`wb deepmode --rule`, runs.DEEPCODE_RULE, read once a load), as the context the user
+// never sees. Only the user's own words count: never a [workbench] turn, an agent's or a slash command.
+const DEEPCODE_FALLBACK = 'The user wrote `deepcode` (Workbench\'s word, not Claude\'s `ultracode`): run this ' +
+  'request as a deep workflow, as the /workbench skill\'s *Deep workflows* says.'
+async function deepcodeRule($: any): Promise<string> {
+  if (mem.deepcodeRule) return mem.deepcodeRule
+  const { ok, out } = await runWb($, ['deepmode', '--rule'])
+  if (ok) mem.deepcodeRule = out
+  return ok ? out : DEEPCODE_FALLBACK
+}
+async function setDeepmode($: any, on: boolean): Promise<string> {
+  const { ok, out } = await runWb($, ['deepmode', on ? 'on' : 'off'])
+  const said = ok ? `workbench: ${out}` : `workbench: wb deepmode ${on ? 'on' : 'off'} failed: ${brief(out)}`
+  $.ui.toast(said)
+  return said
+}
 
 async function workflowsMode($: any): Promise<string> {
   try {
@@ -1839,6 +1862,7 @@ const mem = {
   started: false, // the ears and timers run
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
   queued: [] as string[], // turns for Claude that a command asked for
+  deepcodeRule: '', // `wb deepmode --rule`, read at the first deepcode (deepcodeRule)
   queuedRetryAt: 0, // a queued turn the engine dropped is tried again from then
   open: new Set<string>(), // this session's delegated tasks open at the last poll
   heldAsks: new Set<string>(), // questions (task:ts) held for a turn that could not take them (#542)
@@ -2908,7 +2932,15 @@ async function listen($: any, now: number) {
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
       : a.n == null ? `(about task ${String(a.task)}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
-    const text = chatPrompt(m, elsewhereNote + about)
+    // the keywords in the user's own web message (keywords.ts), never an agent's: a plugin's prompt
+    // carries no hidden context, so deepcode's rule rides in the text, as `about` does
+    let deep = ''
+    if (m.from === 'user' && m.role !== 'agent') {
+      const kw = keywords(String(m.text ?? ''))
+      if (kw.deepmode !== null) await setDeepmode($, kw.deepmode)
+      if (kw.deepcode) deep = `(${await deepcodeRule($)}) `
+    }
+    const text = chatPrompt(m, elsewhereNote + about + deep)
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     if (mem.busy) {
@@ -3554,6 +3586,10 @@ export const register: Register = (on, options) => {
       description: 'Stop this session\'s delegated agents now, finishing nothing',
     })
     await $.command.register({
+      name: DEEPMODE,
+      description: 'Dynamic workflows (deepmode): /deepmode on or off, alone to see it; on, substantive requests run as deep workflows',
+    })
+    await $.command.register({
       name: HAND_BACK,
       description: 'Stop this session\'s agents and hand their tasks back to Claude to finish',
     })
@@ -3724,11 +3760,26 @@ export const register: Register = (on, options) => {
 
   // Typed in the terminal: the user is back, so answers go here again
   on('prompt.submit', async ($, e, next) => {
-    if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith(AGENT) && !e.text.startsWith('[workbench]')) {
+    const typed = byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith(AGENT) && !e.text.startsWith('[workbench]')
+    if (typed) {
       await back($)
       userOwedClear() // back at the terminal: an answer there reaches them (#767), never an agent (#1273)
     }
-    return next(e)
+    if (!typed || e.command) return next(e)
+    const kw = keywords(e.text)
+    if (kw.deepmode !== null) {
+      const said = await setDeepmode($, kw.deepmode)
+      if (onlyToggles(e.text)) return { drop: said } // nothing else in it for Claude: no turn
+    }
+    if (!kw.deepcode) return next(e)
+    return next({ ...e, context: [...(e.context ?? []), await deepcodeRule($)] })
+  })
+
+  on('command.run', { command: DEEPMODE }, async ($, e) => {
+    const arg = String(e.args ?? '').trim().toLowerCase()
+    if (arg && arg !== 'on' && arg !== 'off') return { text: 'workbench: /deepmode on, /deepmode off, or /deepmode alone to see it' }
+    const { ok, out } = await runWb($, ['deepmode', ...(arg ? [arg] : [])])
+    return { text: ok ? out : `workbench: wb deepmode failed: ${out}` } // a change reaches Claude as sayRules' row
   })
 
   // This session's tasks only (`--repo`): another session keeps its own running.

@@ -6279,7 +6279,7 @@ change arriving as a row (`sayRules`, #540). Shell edits aren't seen: the block 
 
 **Dynamic workflows (deepmode)** (#1041, named deepmode by #1278: `cli.WORKFLOWS_LABEL`; `wb deepmode` and,
 its name before, `wb workflows`, one command; on, a substantive request runs as a deep workflow, *Deep
-workflows*; the `/deepmode` command is the host side, not yet made).
+workflows*; `/deepmode [on|off]` in both hosts, and `deepmode on|off` typed, *The keywords* below).
 Whether Claude may split one request into several tasks that run at once:
 the user's choice, `wb deepmode on|off` (the web app's Settings), kept beside the coding choice in `$WB_HOME/workflows.json` `{mode, ts}`
 (`cli.WORKFLOWS`, `workflows_mode`), read fresh, default `off` (no file, unreadable JSON, an unknown mode). Like
@@ -6298,6 +6298,24 @@ merged logic first, then tests, then UI or docs. Each task runs on its own role'
 nothing new decides what runs together: the GPU lease (`models.apart` cards together, the rest queued)
 and the provider slots (#1015). No cap on tasks at once (the owner's call, not asked for). Its Settings
 row is the web app's (#1283; the pane's until then, #1023).
+
+**The keywords** (#1278; `mod/hooks/keywords.ts`, both hosts' one copy, held to `tests/fixtures/keywords.json`
+as `runs.keywords` is; text, so never the kernel's: kernel/BOUNDARY.md): `deepcode`, a whole word outside
+backticks and fences, and a line of its own `deepmode on|off` (the last wins; `onlyToggles`: nothing else in
+the text). Only the user's own words: in the terminal (the mod's `prompt.submit`, `byUser` and none of `[web
+chat]`, `[agent `, `[workbench]` nor a slash command) or the user's web message (never an agent's), never
+Claude's `ultracode`. `deepcode` adds `wb deepmode --rule` (`runs.DEEPCODE_RULE`, read once a load;
+`DEEPCODE_FALLBACK` from a wb without it) to that prompt: the hidden `context` entry in the terminal, the text
+(`chatPrompt`'s `about`) for a web message, as a plugin's prompt has no context. `deepmode on|off` is the user's
+yes: the mod runs `wb deepmode on|off`, toasts its line, and a prompt of toggles alone is dropped with that
+line (no turn; `sayRules`' row tells Claude); else the rest goes on. `/deepmode [on|off]` (the mod's
+`DEEPMODE`, the one command not named `workbench-*`: the user's word) sets or shows it. In OpenCode
+(`opencode-plugin/deep.ts`, its prompt hook registered before upkeep's so that a toggle is in workflows.json
+when upkeep reads it): the session `prompt` hook reads a typed prompt (no metadata) or the chat's delivery of
+the user's (`chat.SOURCE`, `[web chat]`), runs wb as the session, and the `context` hook adds the rule, or the
+toggle's `TOGGLED` line, as system parts to that prompt's requests (while it is the newest user message, by
+the requests' message ids; to the next prompt without them); `/deepmode` is a server command (`command.transform`),
+said with a `synthetic` message that starts no turn.
 
 ## Experiments
 
@@ -7441,7 +7459,7 @@ mode and close the pane (`/workbench` turns it back on).
 setting `userConfig.wake` `on`|`off`, default `on`, changed with `claude plugin configure
 workbench@workbench`, which reloads the module), `hooks/hooks.json` (`{"modules":
 ["./register.tsx"]}`), `hooks/register.tsx` (everything), `hooks/apprentice.ts`, `hooks/splash.ts`
-(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
+(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/keywords.ts` (#1278: deepcode and deepmode in what the user typed, the OpenCode plugin's too), `hooks/core.ts` with the generated `hooks/kernel.js` and `hooks/kernel.d.ts`, and `hooks/golden/` (*The kernel*; `register.tsx` and `tasks.ts` import their phase sets and shared constants from `core.ts`), `hooks/register.test.tsx`, `hooks/tasks.test.ts` and `hooks/kernel.test.ts` (`claude plugin test mod`), `types/index.d.ts`
 (the atom types), `.claude-plugin/icon.png` (the `work` pose), `bin/wb` (#1190: the launcher
 Claude Code puts on its Bash tool's PATH, *Installing*).
 The root's `.claude-plugin/marketplace.json` (source `./mod`) makes the id `workbench@workbench`,
@@ -8156,7 +8174,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   as `../mod/hooks/…`: one animation for both hosts, #1333), the kernel's membrane
   `mod/hooks/core.ts` and the `kernel.js` it imports (which `upkeep.ts`, the notices and the panel
   import, #1315, #1313, #1312; not `kernel.d.ts`, types only), `mod/hooks/tasks.ts` and
-  `mod/hooks/modeline.ts` (the panel's: one Tasks view for both hosts, #1312) and `LICENSE` (the plugin and
+  `mod/hooks/modeline.ts` (the panel's: one Tasks view for both hosts, #1312), `mod/hooks/keywords.ts` (`deep.ts`'s,
+  #1278) and `LICENSE` (the plugin and
   the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
   executable); no `type` field, so nothing else in the repository changes how it loads. Each
   `mod/` entry is a file the plugin imports, itself or through another mod file, and each file a
@@ -8167,7 +8186,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   classify commands with, `consent.ts`'s dynamic import of the mod's core, #1314).
   `opencode-plugin/package.json` (`type: module`, `files` the parts and their modules:
   `server.ts`, `tui.ts`, `rpc.ts`, `wb.ts`, `chat.ts`, `driver.ts`, `skill.ts`, `agent.ts`, `notices.ts`,
-  `notices-tui.ts`, `jobs.ts`, `spans.ts`, `splash.tsx`, `upkeep.ts`, `commands.ts`, `consent.ts`, `consent-tui.ts`, `gates.ts`, `words.ts`, `calls.ts`,
+  `notices-tui.ts`, `jobs.ts`, `spans.ts`, `splash.tsx`, `upkeep.ts`, `commands.ts`, `deep.ts`, `consent.ts`, `consent-tui.ts`, `gates.ts`, `words.ts`, `calls.ts`,
   `pane.ts`, `pane-view.ts`, `pane.tsx`) is the one a clone's
   entry loads (`wb setup --opencode`'s `opencode-plugin/` directory). Each part is TypeScript, run
   as it is by OpenCode's Bun, a package's in `node_modules` too.
@@ -9131,8 +9150,9 @@ closed run, or one at `review`, never goes on (`runs._ended`; `wb run feed` asks
 flow import X.md` (`runs.import_command`) writes a flow of yours (`$WB_FLOWS/<name>.json`, or `--out`): one stage
 over the list param `items` (a code stage, or `--card`'s), its prompt the command's body with `$ARGUMENTS` as
 `{item}` (appended when absent) and its own braces kept as text, `description` from the frontmatter; a positional
-`$1` is refused. **The host side** (the mod's wake for a run row, `/deepmode`, the keywords' detection in the mod
-and the OpenCode plugin, the web chat's Settings row) is not in wb yet, but the mod's `WORKFLOWS_RULE`:
+`$1` is refused. **The host side**: the keywords and `/deepmode` are in both hosts (*The keywords*, under
+*Dynamic workflows (deepmode)*); the mod's wake for a run row and the web chat's run strip and Settings rows are
+not made yet, but the mod's `WORKFLOWS_RULE`:
 `runs.keywords`, `tests/fixtures/keywords.json`, `runs.DEEPCODE_RULE` (`wb deepmode --rule`), the run rows and
 `wb top --json`'s `runs` are its seam.
 
@@ -10548,7 +10568,7 @@ doc needs its own `!/` line).
   is the one each host names as acting next; modeline.ts's `modeline(link, cols, name)` (`MODELINE` by default,
   `Workbench` in OpenCode); the colour names `Part` uses → `pane-view.ts`'s `TOKEN`; `wb watch --json`'s and `wb diff`'s
   output → `pane.ts`'s `parseLines`, `diffLines`; the owner keys `owns` reads → `pane.ts`'s `PaneTask`.
-- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ each host's detection (the mod, the OpenCode plugin, the kernel's Keywords, #1325); `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip.
+- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ `mod/hooks/keywords.ts` (both hosts' detection; the root package.json's `files` brings it to the OpenCode plugin, `opencode-plugin/test/deep.test.ts` reads the fixture); `runs.PLACES`' `{report}` ↔ the shipped build, fix and best-of reviews and the review card; `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip.
 - **The wb the mod runs** (`findWb` in register.tsx: `WB_BIN`, `wb` on PATH, `~/.local/bin/wb`) → `cli.mod_wb`, what wb
   doctor says the mod runs, and wb setup's PATH note (#1200).
 - **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).
@@ -10752,7 +10772,7 @@ doc needs its own `!/` line).
   `reference/patching.md`. **`patches.SUITES`** (`KERNEL_CHECK`, `MOD_TESTS`, `PLUGIN_TESTS`, #1328) → `check.yml`'s
   `kernel`, `mod` and `opencode-plugin` jobs (`tests/test_workflows.py` holds the plugin's to `PLUGIN_TESTS`), and
   `_own_runs`' runners; **`patches.PLUGIN_SHARED`** → what `opencode-plugin/` imports from `mod/` (the kernel's core, the splash's
-  `splash.ts` and `apprentice.ts`, the panel's `tasks.ts` and `modeline.ts`; a LocalPatches test reads the imports). **`Workbench-Driver`** (`patches.DRIVER_TRAILER`) → `stamp_driver`, the pull request
+  `splash.ts` and `apprentice.ts`, the panel's `tasks.ts` and `modeline.ts`, `deep.ts`'s `keywords.ts`; a LocalPatches test reads the imports). **`Workbench-Driver`** (`patches.DRIVER_TRAILER`) → `stamp_driver`, the pull request
   template's `Written by:` line. **The crash hint's `CONTRIBUTING.md`** → that file at the root. **`patches.CARRIED`, the
   `Scope:` trailer** (`%(trailers:key=Scope)`, `me`) → `wb patch list`, `upstream`, `_refuse_send`, `doctor_lines`,
   CONTRIBUTING.md, the skill's `reference/patching.md`. **`PATCH_BRANCH`** → `cmd_update`, `doctor_lines`, the docs.
