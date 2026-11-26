@@ -19,10 +19,11 @@ const cut = (s: string, n: number) => (width(s) <= n ? s : n <= 0 ? '' : [...s].
  * What the modeline draws in a pane `cols` wide: `bar`, its bar row's text (in from each edge by
  * the bar's padding), and `rows`, the link's own rows under it when not even `[•_•] <url>` fits
  * there: the link cut by characters, `cols` a row and never at a word, so it stays one link.
+ * `name`: the pane's name (OpenCode's panel says `Workbench` alone, #1312).
  */
-export function modeline(link: Link, cols: number): { bar: string; rows: string[] } {
+export function modeline(link: Link, cols: number, name: string = MODELINE): { bar: string; rows: string[] } {
   const room = Math.max(1, cols - 2) // paddingX 1
-  const head = `${FACE.rest} ${MODELINE}`
+  const head = `${FACE.rest} ${name}`
   const url = link.url ?? ''
   if ((link.state === 'up' || link.state === 'started') && url) {
     const whole = `${head} - ${url}`

@@ -14,5 +14,6 @@
     "wb": "bin/wb"
   },
   "files": ["bin/", "workbench/", "agent/", "skill/", "opencode-plugin/*.ts", "opencode-plugin/*.tsx",
-            "mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "LICENSE"]
+            "mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts", "mod/hooks/core.ts",
+            "mod/hooks/kernel.js", "mod/hooks/modeline.ts", "LICENSE"]
 }

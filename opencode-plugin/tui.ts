@@ -1,10 +1,12 @@
 // The plugin's TUI part: OpenCode's terminal UI loads it for a server plugin that is active
 // (tui/src/plugin/context.tsx, `serverTuiPlugins`), so "-workbench" in a task's layer turns it
-// off with the server part. The pane, the footer and /workbench come in #1312; the skeleton
+// off with the server part. The panel, the sidebar section and the footer item are pane.tsx's
+// (#1312, #1332), /workbench the server part's (pane.ts); the skeleton
 // (#1311, 2026-11-25) asks the server part which wb it runs and says so only when it finds none:
 // every later piece needs it, and a service started without the user's PATH is the likely cause.
 import type { TuiContext, TuiPlugin } from './host.d.ts'
 import type { SplashHost } from './splash.tsx'
+import type { PaneHost } from './pane.tsx'
 import { Workbench, type Status } from './rpc.ts'
 
 // where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
@@ -32,12 +34,13 @@ const plugin: TuiPlugin = {
           : `this install of the plugin brings no wb, and OpenCode's PATH has none: ${GET_WB}`,
       })
     }
-    // the apprentice and the opening animation in Workbench's panel (#1333): imported here, not at
-    // load, as OpenTUI and Solid are only the TUI's; the context has what SplashHost names
-    // (plugin/src/tui/context.ts), which host.d.ts leaves out
+    // Workbench's panel with the apprentice and the opening animation (#1333), its sidebar section
+    // and footer item (#1312, #1332): imported here, not at load, as OpenTUI and Solid are only the
+    // TUI's; the context has what SplashHost and PaneHost name (plugin/src/tui/context.ts), which
+    // host.d.ts leaves out
     try {
-      const { mountSplash } = await import('./splash.tsx')
-      return mountSplash(ctx as TuiContext & SplashHost, st.home)
+      const { mountPane } = await import('./pane.tsx')
+      return mountPane(ctx as TuiContext & SplashHost & PaneHost, st.home)
     } catch {
       return // a TUI that can't load a plugin's OpenTUI views: the rest works without them
     }

@@ -83,7 +83,7 @@ export function Apprentice(props: { readonly theme: SplashHost['theme']; readonl
 }
 
 /** One play of the animation, filling its box; `onDone` once, after the last frame or a skip. */
-export function Splash(props: { readonly theme: SplashHost['theme']; readonly target?: () => Target; readonly onDone: () => void }): JSX.Element {
+export function Splash(props: { readonly theme: SplashHost['theme']; readonly target?: (rows: number, cols: number) => Target; readonly onDone: () => void }): JSX.Element {
   const play = new Play()
   const [frame, setFrame] = createSignal<Span[][]>([])
   let waited = 0
@@ -111,7 +111,7 @@ export function Splash(props: { readonly theme: SplashHost['theme']; readonly ta
   return (
     <box flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" onMouseDown={end}
       onSizeChange={function () {
-        if (play.fit(this.width, this.height, props.target?.() ?? restTarget(this.height))) setFrame(play.frame() ?? [])
+        if (play.fit(this.width, this.height, props.target?.(this.height, this.width) ?? restTarget(this.height))) setFrame(play.frame() ?? [])
         else end()
       }}>
       <Spans theme={props.theme} rows={frame()} />
@@ -129,7 +129,7 @@ export function replaySplash(host: SplashHost) {
 export function SplashThen(props: {
   readonly host: SplashHost
   readonly home: string // wb's state dir, where splash.json is
-  readonly target?: () => Target
+  readonly target?: (rows: number, cols: number) => Target
   readonly children: JSX.Element
 }): JSX.Element {
   const [seen, mark] = props.host.storage.memory(MEMORY, { initial: { played: false } })
@@ -155,11 +155,12 @@ function Resting(props: { readonly theme: SplashHost['theme'] }): JSX.Element {
 
 /**
  * Workbench's panel: `page` after the splash. The Tasks page (#1312) passes itself and where it
- * puts the apprentice and the modeline (`target`, splash.ts `Target`), so the words fall into
- * the modeline's row; without one they rise away. Returns the slot's removal.
+ * puts the apprentice and the modeline in a panel of that many rows and columns (`target`,
+ * splash.ts `Target`), so the words fall into the modeline's row; without one they rise away.
+ * Returns the slot's removal.
  */
 export function mountSplash(host: SplashHost, home: string, page?: (panel: Panel) => JSX.Element,
-  target?: () => Target): () => void {
+  target?: (rows: number, cols: number) => Target): () => void {
   return host.ui.slot({
     append: 'session.panel',
     render: panel => (

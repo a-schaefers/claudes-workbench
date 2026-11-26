@@ -73,7 +73,9 @@ import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import type { Link } from './modeline'
-import { ago, apiWorking, capRow, clip, compactWanted, taskLines } from './tasks'
+import { ago, apiWorking, capRow, clip, compactWanted, focusOf as focusOfTasks, frameOf, isEst, speechOf, taskLines, viewFacts } from './tasks'
+// moved to tasks.ts, shared with the OpenCode plugin's panel (#1312); still exported from here
+export { isEst, viewFacts }
 import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, codingGate, compactPlan, editFields, gateOf, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, tellPlan, WAKE_OPENING } from './core'
 import type { Gate as CommandGate } from './core'
 import type { Part as RowPart } from './tasks'
@@ -251,10 +253,6 @@ export function attachedLines(files: unknown): string {
 // (`wb stop --all`, status `parked`) the status line, rewake, the boundary and the jobs' gate
 // don't count. It stayed "awaiting review" and kept the weekly check off for good (#541); the
 // pane and `wb status --all` still show it.
-const COLOR: Record<string, string> = {
-  queued: 'subtle', running: 'claude', testing: 'suggestion', asking: 'warning',
-  review: 'success', stuck: 'error', failed: 'error', accepted: 'inactive', discarded: 'inactive',
-}
 
 type Row = Record<string, any>
 
@@ -275,41 +273,7 @@ const SPIN = ['✻', '✳', '✶', '✢', '·', '✢', '✶', '✳']
 // the followed task. A timer (FRAME_MS) swings the wrench now and then while it works and blinks
 // it otherwise: a stroke every frame was a distraction beside the transcript.
 const FRAME_MS = 450
-const BLINK_EVERY = 11 // frames
-const STROKE_EVERY = 6 // frames: the wrench comes up once in this many, else rests at its side
 const APPRENTICE = 'apprentice' // its Raster's key, for $.ui.blit
-type Speech = { pose: Pose; say: string; more: string; color: string }
-
-const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[], on: boolean): Speech => {
-  if (!focus) {
-    const more = on ? 'Ask Claude for anything: the coding comes to me.' : '/workbench turns workbench mode on.'
-    if (list.length) return { pose: 'rest', say: 'All caught up.', more, color: 'inactive' }
-    return on
-      ? { pose: 'rest', say: 'Workbench mode is on.', more, color: 'claude' }
-      : { pose: 'sleep', say: 'No delegated tasks.', more, color: 'inactive' }
-  }
-  const n = focus.name
-  switch (focus.phase) {
-    // each handoff names who acts next: "done" read as tests passed, accepted or landed (#103)
-    case 'review': return { pose: 'tada', say: focus.tests === 'pass' ? `Local tests passed on ${n}.` : `${n} is done.`,
-      more: 'Claude reviews next.', color: 'success' }
-    case 'asking': return { pose: 'ask', say: `I asked Claude about ${n}.`, more: 'Claude answers next.', color: 'warning' }
-    case 'stuck': return { pose: 'slump', say: `I'm stuck on ${n}.`, more: focus.last, color: 'error' }
-    case 'failed': return { pose: 'slump', say: `${n} failed.`, more: focus.last, color: 'error' }
-  }
-  // the hands move while it writes or tests; everything else is the model thinking or waiting
-  const working = /^(Writing|Running)/.test(doing)
-  return { pose: working ? 'work' : 'think', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
-}
-
-// The frame a pose shows at a tick: a stroke of the wrench now and then while working, else a
-// blink now and then.
-const frameOf = (pose: Pose, tick: number): Pose => {
-  if (pose === 'work') return tick % STROKE_EVERY ? 'swing' : 'work'
-  if (pose === 'sleep' || pose === 'slump') return pose
-  return tick % BLINK_EVERY === 0 ? 'blink' : pose
-}
-
 // What the Tasks page is made of, apart from its drawing: the render draws it and pageShape
 // measures it, so the two can't disagree (#963).
 function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: number, spin: string, cols: number,
@@ -2150,31 +2114,6 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
   return list.sort((a, b) => a.createdAt - b.createdAt)
 }
 
-// The Tasks view's facts of a task (#1048, tasks.ts), from the task.json and status.json scan
-// already read: nothing new is read for them
-export function viewFacts(sp: Row, st: Row) {
-  const num = (x: unknown) => (Number.isFinite(Number(x)) ? Number(x) : 0)
-  const live = st.live_used && typeof st.live_used === 'object' ? st.live_used : {}
-  const api = st.api && typeof st.api === 'object' ? st.api : null
-  const typical = st.typical && typeof st.typical === 'object' ? st.typical : {}
-  const fresh = Number((st.tuned ?? {}).fresh_at)
-  return {
-    group: typeof sp.group === 'string' ? sp.group : '',
-    cards: Array.isArray(st.cards) ? st.cards.filter((c: unknown) => Number.isInteger(c)) as number[] : [],
-    tools: num(st.tools), tokOut: num(st.tok_out),
-    // the window's fill only while it is this session's: a fresh session's first step reads 0 (#262)
-    ctxUsed: live.session && live.session === st.session ? num(live.used) : 0,
-    window: num(st.window), freshAt: Number.isFinite(fresh) && fresh > 0 ? fresh : null,
-    autoFixes: num(st.auto_fixes), autoFixMax: num(sp.auto_fix), roundFor: String(st.round_for ?? ''),
-    reviews: num(st.reviews), steps: num(st.steps),
-    // runner.active_so_far's parts: the step's rounds so far, and the one under way from its start
-    activeS: Math.max(0, num(st.active_s) - num(st.step_active_s)), roundStartedAt: num(st.round_started_at) * 1000,
-    typicalMin: num(typical.min), typicalN: num(typical.n), lateMin: num(st.late_min),
-    spend: !api ? null : api.plan ? 'plan' as const : typeof api.usd === 'number' ? api.usd as number : 'none' as const,
-    est: !!api && isEst(api.prices),
-  }
-}
-
 // The Tasks list's rows (#1048, tasks.ts): one or two a task, one when the pane can't hold two
 // (compactWanted), each with its task; the user's allowance for a task (`wb coding allow`) after
 // its rows. The render draws them and pageShape counts them, one row each: none wraps.
@@ -2313,21 +2252,9 @@ async function scope($: any): Promise<string[]> {
   return [...(mem.cwd ? ['--repo', mem.cwd] : []), ...[...mem.ids].flatMap(id => ['--session', id])]
 }
 
-// The task worth watching. The one followed stays while it runs: with two running, choosing by
-// the latest status write swapped the pane between them on every tool call (the 2026-11-16
-// audit). Else the newest started that runs (running, testing, asking before queued: a queued one
-// shows nothing yet), else the newest waiting for Claude. A task the user pressed (mem.picked,
-// #1048) is followed while it is listed, whatever its phase.
-const focusOf = (list: WbTask[], followed: string, picked = mem.picked): WbTask | undefined => {
-  const chosen = picked ? list.find(t => t.name === picked) : undefined
-  if (chosen) return chosen
-  const kept = list.find(t => t.name === followed && ACTIVE.has(t.phase))
-  if (kept) return kept
-  const by = (ts: WbTask[], k: 'createdAt' | 'updatedAt') => [...ts].sort((a, b) => b[k] - a[k])[0]
-  return by(list.filter(t => phaseOf(t).working), 'createdAt') ??
-    by(list.filter(t => ACTIVE.has(t.phase) && !phaseOf(t).working), 'createdAt') ??
-    by(list.filter(t => NEEDS.has(t.phase)), 'updatedAt')
-}
+// The task worth watching (tasks.ts `focusOf`), the one the user pressed first
+const focusOf = (list: WbTask[], followed: string, picked = mem.picked): WbTask | undefined =>
+  focusOfTasks(list, followed, picked)
 
 // Re-read the followed task's transcript, while the pane is shown: while it runs (the agent's
 // session moves between status writes) at most every LIVE_EVERY_MS, or once when it changed. Each
@@ -2449,10 +2376,6 @@ export function usd(x: number): string {
   return Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
 }
 
-// API dollars are estimates at the catalog's prices unless the user set the model's (wb model price,
-// #1135, 2026-11-23: the catalog ran about 2x DeepInfra's bill): `prices` is meter.basis's, missing
-// on rows from before it (the catalog's)
-export const isEst = (prices: unknown) => prices !== 'yours' && prices !== 'provider'
 
 // `wb route --json` (and `wb models --json`), for the Tasks view's day-cap line, kept ROLES_CACHE_MS
 const ROLES_CACHE_MS = 10_000

@@ -7616,7 +7616,7 @@ unless scrolled up; the stage (the apprentice as pixels at 20 rows by 40 columns
 one-line face; text wrapped by `wrapWords`, as Text's own wrapping beside the raster drew empty
 rows); the modeline. The modeline and the strip (`AbovePrompt`): *Seeing what the agent does*. The apprentice (`apprentice.ts`): 16×12 pixel art in half blocks into a
 `Raster` (cells as little-endian u32 triplets, base64), a pose per state (rest, blink, think, work,
-swing, tada, ask, slump, sleep), FACE the one-line faces; the bubble is `speechOf`.
+swing, tada, ask, slump, sleep), FACE the one-line faces; the bubble is tasks.ts's `speechOf` (shared with the OpenCode panel, #1312).
 
 **The Tasks view** (#1048; the owner, web chat 2026-11-23: "progress bar indicators or something,
 some type of indications showing me everything that's going on while it happens"). `hooks/tasks.ts`
@@ -8106,8 +8106,9 @@ one package whose parts OpenCode loads from one `plugins` entry (OpenCode 2.4.1'
 Its driver side is built from OpenCode's own parts (the host-shape decision,
 https://github.com/a-schaefers/workbench/issues/1296#issuecomment-7158435888); the agents stay one
 laned `opencode run --standalone` per round from the runner. The skeleton (#1311) and the web chat
-(#1319, `chat.ts`: *The web chat on OpenCode*, below); the pane, the notices, the gates and the agent
-come in #1312 to #1316. The chat runs `wb chat` commands only, as the session it acts for
+(#1319, `chat.ts`: *The web chat on OpenCode*, below); the pane (#1312, #1332: `/workbench`, the
+panel, the sidebar section and the footer item, `pane.ts`, `pane-view.ts`, `pane.tsx`); the notices,
+the gates and the agent come in #1313 to #1316. The chat runs `wb chat` commands only, as the session it acts for
 (`OPENCODE_SESSION_ID`), its claim in the session's directory; the driver part's (#1316) take no
 scope from the cwd (`wb driver beat`, `wb driver --session`, `wb route driver --json`); the first
 part that runs a task's commands (#1312) must run them in the OpenCode session's directory, where wb takes a
@@ -8121,19 +8122,24 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   OpenCode's Git install fetches: its `exports` point into `opencode-plugin/`, its `files` bring
   `bin/`, `workbench/`, `agent/`, `skill/`, `opencode-plugin/*.ts`, `opencode-plugin/*.tsx`, the
   Claude Code mod's `mod/hooks/splash.ts` and `mod/hooks/apprentice.ts` (which `spans.ts` imports
-  as `../mod/hooks/…`: one animation for both hosts, #1333) and `LICENSE` (the plugin and
+  as `../mod/hooks/…`: one animation for both hosts, #1333), its `mod/hooks/tasks.ts`,
+  `mod/hooks/core.ts`, `mod/hooks/kernel.js` (core.ts's) and `mod/hooks/modeline.ts` (the panel's:
+  one Tasks view for both hosts, #1312) and `LICENSE` (the plugin and
   the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
   executable); no `type` field, so nothing else in the repository changes how it loads. Each
-  `mod/` entry is a file the plugin imports, and each file a plugin module imports from beside it
-  is in `files` (`Setup`'s
+  `mod/` entry is a file the plugin imports, itself or through another mod file, and each file a
+  plugin module imports from beside it, and each such mod file in turn, is in `files` (a type-only
+  import is erased before it runs and needs none) (`Setup`'s
   `test_every_file_the_opencode_plugin_imports_from_beside_it_comes_with_each_install`).
   `opencode-plugin/package.json` (`type: module`, `files` every module: `server.ts`, `tui.ts`,
-  `rpc.ts`, `wb.ts`, `chat.ts`, `driver.ts`, `spans.ts`, `splash.tsx`) is the one a clone's
+  `rpc.ts`, `wb.ts`, `chat.ts`, `driver.ts`, `spans.ts`, `splash.tsx`, `pane.ts`, `pane-view.ts`,
+  `pane.tsx`) is the one a clone's
   entry loads (`wb setup --opencode`'s `opencode-plugin/` directory). Each part is TypeScript, run
   as it is by OpenCode's Bun, a package's in `node_modules` too.
   - `server.ts`: `{id: "workbench", setup}` (OpenCode's check is that shape alone,
     `core/src/plugin/module.ts` `Module`). Setup registers the RPC's `status` handler, sets up
-    the web chat (`chat.ts`'s `chat(ctx)`) and starts the driver part (`startDriver`); each part's
+    the web chat (`chat.ts`'s `chat(ctx)`), starts the driver part (`startDriver`) and the panel's
+    (`startPane`: its RPC and `/workbench`); each part's
     cleanup joins `stops`, and setup returns one cleanup that runs them all, newest first, at its
     end, so a part registered later is never after a `return`; under `WB_TASK` it returns at once
     (#1363). It exports `ID` and `status(options, env)`.
@@ -8156,8 +8162,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     'github:a-schaefers/workbench#main' brings it, or bin/wb setup --opencode in a clone`, its
     `GET_WB`, `ocplugin.GET_WB` word for word); nothing when all is well (a healthy install is
     seen in the TUI's `/plugins`, or `opencode plugin list`), nothing when the server part
-    doesn't answer. A no-op under `WB_TASK`. Then it imports `splash.tsx` (in setup, never at
-    load: OpenTUI and Solid are only the TUI's) and returns `mountSplash`'s removal as its cleanup;
+    doesn't answer. A no-op under `WB_TASK`. Then it imports `pane.tsx` (in setup, never at
+    load: OpenTUI and Solid are only the TUI's) and returns `mountPane`'s removal as its cleanup
+    (the panel through `mountSplash`, the sidebar section, the footer item, the palette entry);
     a TUI that can't load the views sets up without them, said nowhere.
   - `spans.ts` (#1333, slice 4c of #1296; pure, no OpenTUI or Solid, so Bun tests it bare): the
     cells the mod's `splash.ts` and `apprentice.ts` compute for Claude Code's Raster as rows of
@@ -8186,9 +8193,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     reload keeps; `replaySplash(host)` arms it again, for the mode's end as the mod's `splashed`
     atom) unless `<home>/splash.json` says off, then the page. `mountSplash(host, home, page?,
     target?)`: one `ui.slot` claim, `append` to `session.panel`, shown for the panel named `PANEL`
-    (`workbench`, the name #1312's `ui.panel.open` uses): the page after the splash, the Tasks
-    page's when #1312 passes it (with its `target`, where its apprentice and modeline are, so the
-    words fall into the modeline's row), else the apprentice resting at the panel's bottom left.
+    (`workbench`, the name `pane.tsx`'s `ui.panel.open` uses): the page after the splash, the Tasks
+    page's when `mountPane` passes it (with its `target(rows, cols)`, given the panel's size, where
+    its apprentice and modeline are, so the words fall into the modeline's row), else the
+    apprentice resting at the panel's bottom left.
     Tokens become `ctx.theme`'s colours: `accent` the theme's accent hue at step 400
     (`theme.hue.accent[400]`, the step of its feedback colours; the primary action's background
     is `transparent` in OpenCode's own theme, seen live), the rest `text.feedback.<kind>.base` and
@@ -8199,8 +8207,66 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     its `jsx-runtime`'s `JSX`; `tui/src/plugin/runtime-plugin-support.bun.ts`, OpenTUI's
     `ensureRuntimePluginSupport`, which rewrites a plugin's imports of them to the host's and runs
     a `.tsx` through Solid's JSX transform), the timers, `atob` and `readFileSync`, only what
-    `splash.tsx` and `spans.ts` use. Bun alone has none of those modules, so only the TUI imports
-    a module that does.
+    `splash.tsx` and `spans.ts` use (a span's `attributes` too, the panel's bold and underline).
+    Bun alone has none of those modules, so only the TUI imports a module that does.
+  - `pane.ts` (#1312, the server side; pure Node, Bun tests it bare): the panel's data over RPC and
+    `/workbench`. `WorkbenchPane` (`id: "workbench-pane"`): `tasks` → `{now, home, tasks, cap}`,
+    each open task's view facts (`viewFacts` from `mod/hooks/tasks.ts`, the mod's own) with its
+    owner keys (`session`, `driver`, `cwd`, `repo`, `subdir`), read by `scanTasks` from
+    `<home>/tasks/*/task.json` and `status.json` as the mod's `scan` reads them, less its pid and
+    adoption steps (bench tasks left out; a task closed for over `KEEP_CLOSED_MS` 30 minutes is
+    never read again, `gone`), and the day cap (`capOf` of `wb route --json`) only while an API
+    task works, kept `ROLES_MS` 10 s; `live {task}` → `{task, lines, why?}`, `wb watch <task>
+    --json --last 600` (`LIVE_LINES`) read again only once the task's status moved, a running one
+    no sooner than `LIVE_MS` 5 s; `diff {task}` → `wb diff <task>` as lines styled `head`, `add`,
+    `del`, `out` (`diffLines`, cut at `DIFF_CHARS`); `link` → `wb chat url --json` (`linkOf`), kept
+    `LINK_MS` 60 s. A task name is checked against `store.NAME_RE`'s shape before any wb call.
+    `/workbench` is a server command (`command.transform`'s `add`, `COMMAND`): it switches the
+    session to the `workbench` agent (`session.switchAgent`, `AGENT`; one that isn't there throws
+    `the Workbench agent isn't there (…): wb doctor says why`), applies the driver pin
+    (`driver.ts`'s `applyPin`, its failure ignored) and sends what was typed after it, if
+    anything, as the session's prompt with the invocation's delivery. Nothing in the pane hands
+    OpenCode a task's worktree: no `location`, no `/diff` and no `vcs` call (the host-shape
+    decision's critic 1; the source scan in `pane.test.ts`). `startPane(host, run)` registers the
+    RPC, then the command where `command.transform` is there, and returns the cleanup.
+  - `pane-view.ts` (pure): what the panel, the sidebar and the footer draw, as `Run`s (text, a
+    theme token, bold, dim, italic, underline; `runOf` turns tasks.ts's `Part` colour names into
+    the theme's: `claude` → `accent`, `suggestion` → `info`, `subtle` → `muted`, `inactive` →
+    `faint`, `permission` → `interactive`). `NAME` and `WHO`, `Workbench`: the panel's title and the
+    one who acts next (`… · Workbench steers it next`, `Workbench reviews next.`: tasks.ts's `who`,
+    Claude in Claude Code). `mine(task, here)`: the kernel's `owns` with `host: "opencode"`, the
+    session's id and directory; `scoped`: every open task while the session is on the Workbench
+    agent, else only its own. `footer`: `⚒ wb · 1 running · 1 review …` (`openCounts`, a stopped
+    count in the error colour), only in the mode or with an open task of its own: the footer item
+    replaces the mod's minimize strip (#1332). `sidebar`: `Workbench (1 running, 1 review)` cut to
+    the sidebar's width, then each task's one-line row (`taskLines` compact). `panelRows`: the
+    Tasks view's rows (`taskLines`, `compactWanted` for the panel's height), each with its task and
+    whether it is its first line. `modelineOf`: the mod's `modeline` named `Workbench`. `target(rows,
+    cols, link, cap)`: where the splash ends, the stage's first row and the modeline's (`pixels`:
+    the apprentice as art at 20 rows by 40 columns or more, else its face). `separator`, `wrap`.
+  - `pane.tsx` (the OpenTUI views): `mountPane(host, home)` mounts the page on the panel through
+    `mountSplash`, adds the `sidebar.content` and `prompt.footer.status` slots and a palette entry
+    `workbench.panel` (`Workbench: show or hide its panel`, a global layer). Selecting the
+    `workbench` agent in the route's session (`session.agent.selected`) opens the panel and toasts
+    the driver's notes (`WorkbenchDriver.driver` with `once`); leaving it closes the panel and arms
+    the splash again (`replaySplash`). `Feed` polls `tasks` every `POLL_MS` 2 s while a task is open
+    or the panel shows, else `IDLE_MS` 10 s, and `link` while the panel shows. The page (the
+    panel's width at 108 columns or more beside the session, fullscreen narrower): a driver line
+    when the driver is known, the task rows (a press on a task's first line follows it, the mod's
+    `followTask`), the separator (`── <task> · transcript ───`, a press or `d` switches to `diff`),
+    the meta and routed lines, the history in a `scrollbox` with sticky scroll at the bottom (it
+    follows the end, stops while scrolled up and follows again at the bottom, #1332), the stage
+    (`Apprentice` in its pose, `frameOf`, the bubble from tasks.ts's `speechOf` with `WHO`), the cap
+    row (`capRow`) and the modeline on the accent. The tail (`live`, or `diff`) runs every `TAIL_MS`
+    2 s only while the page is drawn (closing the panel stops it, #1332); one loop, a press starts
+    it again at once and drops an answer to an earlier one, so a transcript still on its way never
+    covers the diff asked for after it (the live check, 2026-11-26). Escape closes the panel while
+    it has the keyboard. The followed task is tasks.ts's `focusOf`, as the mod's: the one pressed, else the
+    one followed while it runs, else the newest that runs, then the newest queued, then the one
+    waiting for its reviewer that moved last.
+  - `pane-env.d.ts`: the runtime and OpenTUI and Solid parts only the pane uses (`readdirSync`, the
+    layout props, `scrollbox`, `TextAttributes`, `createMemo`, `For`); not `pane.d.ts`, which
+    TypeScript takes for `pane.ts`'s own output and ignores.
   - `wb.ts`: `findWb(options, env, exec, own)`: the options' `wb` (an absolute path; one that
     isn't there is `found: false`, never swapped for another), else the package's own `OWN`,
     `../bin/wb` from `wb.ts` (the Git install's in OpenCode's package cache, or a clone's: the
@@ -8327,7 +8393,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   (`bun check`, tsc's errors, Bun 1.4.4 in OpenCode 2.3.0, 1.4.5 in 2.4.1), with
   `opencode-plugin/tsconfig.json` (strict, `noUncheckedIndexedAccess`, `types: []`, `jsx:
   preserve` with `jsxImportSource: @opentui/solid`, `*.tsx` included; it checks the mod's
-  `splash.ts` and `apprentice.ts` too, as `spans.ts` imports them); the mod's TS
+  `splash.ts`, `apprentice.ts`, `tasks.ts`, `core.ts` and `modeline.ts` too, as the plugin imports
+  them); the mod's TS
   is Claude Code's to check (`mod/tsconfig.json` extends the types `claude plugin` generates).
   CI's `opencode-plugin` job runs it after the Bun tests (its own job since #1328, as `mod` is the
   mod's; it was the kernel job's), and `wb patch upstream` names both for a patch that touches
@@ -8342,7 +8409,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   `opencode-plugin/test/plugin.test.ts` (`BUN_BE_BUN=1 opencode test opencode-plugin/test`:
   both parts' shape and id, nothing touched under `WB_TASK` (a proxy context that records every
   access, the list asserted empty: a throw alone was swallowed by `tui.ts`'s own `catch`, so its
-  guard could be deleted with the test passing, #1311's review), the RPCs registered (`status`, the driver's), which wb
+  guard could be deleted with the test passing, #1311's review), the RPCs registered (`status`, the driver's, the panel's), which wb
   (the options', the package's own before PATH's) and which state dir (`~` and relative
   expanded)), `opencode-plugin/test/splash.test.ts` (#1333: every frame a `Play` gives at 60x26
   falling into a bar, 40x22 rising and 120x40 decodes to splash.ts's `frameCells` for
@@ -8351,7 +8418,14 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   is `cells(pose)` with its lamp the phase's token; a resize plans again from the same frame and
   ending and a small panel ends it for good; the rest target; WORKBENCH alone, cool, against
   Claude Code's CLAUDE'S WORKBENCH; splash.json; `tui.setup` with a found wb sets up with nothing
-  said when the views can't load, as under bare Bun), `Setup -k opencode` (the install and doctor's lines) and
+  said when the views can't load, as under bare Bun), `opencode-plugin/test/pane.test.ts` (#1312:
+  the scan, a closed task never read again, bench tasks out; the transcript read again only once
+  its task moved; the cap only while an API task works; the diff's styles, the cap, the link;
+  `/workbench`'s agent, pin and prompt, and its error without the agent; the registrations with and
+  without commands; ownership through the kernel; the footer, the sidebar (its head cut to its
+  width), the panel's rows (a press on each first line, the followed name underlined, the compact
+  form, `Workbench steers it next`), the separator, the theme tokens, the splash target at the
+  modeline; no `location`, `move` or `vcs` in the pane's modules), `Setup -k opencode` (the install and doctor's lines) and
   `test_doctor_survives_an_opencode_config_that_isnt_an_object_or_cant_be_read`,
   `test_wb_setup_opencodes_copy_brings_the_mod_files_it_imports_and_a_change_to_one_renews_it`, `Lane`'s
   `test_the_opencode_plugins_copy_is_read_in_the_lane_and_never_written`, `Update`'s
@@ -8387,11 +8461,20 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   a scratch config and state; a scratch plugin opened the panel, as #1312's `/workbench` will):
   it forges WORKBENCH in the panel, replans on the resize, a key skips it to the page, splash.json
   `on: false` shows the page at once, unpainted cells are the panel's raised surface and the lamp
-  the theme's accent.
+  the theme's accent. The pane checked by hand on 2.4.1 (2026-11-26, tmux at 140x40, the panel
+  beside the session and the sidebar shown, and 80x30, the panel fullscreen; a scratch config,
+  state and `WB_HOME`, a stand-in `workbench` agent, seeded tasks and two GPU trials): `/workbench`
+  switches the agent and opens the panel after the splash; the footer item counts the tasks and a
+  click on it opens the panel, Escape closes it, the palette entry toggles it; a click on a task's
+  row follows it; scrolling the transcript up holds it while the task writes on, and scrolling to
+  the bottom follows again; `d` shows `wb diff`'s diff and back; leaving the agent closes the
+  panel; a task started from inside OpenCode (`!wb start …`) runs on after the TUI and its server
+  end.
 - **Live checks #1311 owns**, each run by hand in a real OpenCode by the slice that first builds
   what it checks, and recorded there: setup off in `opencode run` (this slice: the canary in
-  `RealOpenCodeRun`); a runner that survives the TUI and the background service ending (#1312,
-  the first slice that starts a task from inside OpenCode); a wake with no TUI open and a notice
+  `RealOpenCodeRun`); a runner that survives the TUI and its server ending (#1312, checked
+  2026-11-26 with `--standalone`'s private server, above; the background service's is the same
+  detached runner); a wake with no TUI open and a notice
   resent once only (#1313, the notices); forms in the web app and on a phone (#1314, the gates).
 
 ### The web chat on OpenCode
@@ -10007,7 +10090,13 @@ doc needs its own `!/` line).
   `Token` in `spans.ts` (`LAMP_TOKEN`, the bar's blank-cell rule) and `splash.tsx`'s `themed`; **the accent**
   (`theme.hue.accent[400]`) → the colour #1312's modeline gives its row, the row the words fall into; **a mod file the
   plugin imports** (`../mod/hooks/…`) → the root `package.json`'s `files`, which OpenCode's Git install fetches and
-  `ocplugin.shared_files` copies beside a clone's copy (#1333).
+  `ocplugin.shared_files` copies beside a clone's copy (#1333), with what that file imports in turn.
+- **The Tasks view on both hosts** (#1312): tasks.ts's `taskLines`, `capRow`, `focusOf`, `speechOf`, `frameOf`,
+  `viewFacts` and `isEst` (moved there from register.tsx, which re-exports `viewFacts` and `isEst`) → the OpenCode
+  panel's `pane-view.ts` and `pane.tsx`, so a change draws on both; their `who` (`Claude` by default, `WHO` in OpenCode)
+  is the one each host names as acting next; modeline.ts's `modeline(link, cols, name)` (`MODELINE` by default,
+  `Workbench` in OpenCode); the colour names `Part` uses → `pane-view.ts`'s `TOKEN`; `wb watch --json`'s and `wb diff`'s
+  output → `pane.ts`'s `parseLines`, `diffLines`; the owner keys `owns` reads → `pane.ts`'s `PaneTask`.
 - **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ each host's detection (the mod, the OpenCode plugin, the kernel's Keywords, #1325); `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` ↔ SKILL.md's *Deep workflows* step 2 (a background `wb wait <run>`, until the mod delivers run rows) ↔ `wb run start`'s last line; `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's and the web's run strip.
 - **The wb the mod runs** (`findWb` in register.tsx: `WB_BIN`, `wb` on PATH, `~/.local/bin/wb`) → `cli.mod_wb`, what wb
   doctor says the mod runs, and wb setup's PATH note (#1200).

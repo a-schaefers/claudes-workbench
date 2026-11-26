@@ -33,7 +33,8 @@ declare module '@opentui/solid/jsx-runtime' {
     interface IntrinsicElements {
       box: Layout
       text: Layout & { readonly wrapMode?: 'none' | 'word' | 'char'; readonly fg?: Colour }
-      span: { readonly children?: Element; readonly style?: { readonly fg?: Colour; readonly bg?: Colour } }
+      // `attributes`: @opentui/core TextAttributes, OR-ed (the panel's bold and underlined runs, #1312)
+      span: { readonly children?: Element; readonly style?: { readonly fg?: Colour; readonly bg?: Colour; readonly attributes?: number } }
     }
   }
 }

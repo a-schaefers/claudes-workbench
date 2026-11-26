@@ -12,6 +12,7 @@ import { Workbench, type Status } from './rpc.ts'
 import { chat } from './chat.ts'
 import { findWb, wbEnv, wbHome } from './wb.ts'
 import { startDriver, type DriverHost } from './driver.ts'
+import { startPane, type PaneHost } from './pane.ts'
 
 export const ID = 'workbench'
 
@@ -32,6 +33,7 @@ const plugin: ServerPlugin = {
     const stopChat = await chat(ctx) // the web chat: in-process turns and chat_reply (#1319)
     if (stopChat) stops.push(stopChat)
     stops.push(await startDriver(ctx as ServerContext & DriverHost))  // the driver's heartbeat and RPC (#1316)
+    stops.push(await startPane(ctx as ServerContext & PaneHost))  // the panel's data and /workbench (#1312)
     return async () => { for (const stop of stops.reverse()) await stop().catch(() => {}) }
   },
 }

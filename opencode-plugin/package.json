@@ -19,6 +19,9 @@
     "chat.ts",
     "driver.ts",
     "spans.ts",
-    "splash.tsx"
+    "splash.tsx",
+    "pane.ts",
+    "pane-view.ts",
+    "pane.tsx"
   ]
 }

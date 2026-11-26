@@ -24770,29 +24770,38 @@ class Setup(Base):
 
     def test_every_file_the_opencode_plugin_imports_from_beside_it_comes_with_each_install(self):
         # #1333: the TUI part draws the splash from the Claude Code mod's own splash.ts and
-        # apprentice.ts (`../mod/hooks/…`), so OpenCode's Git install (the root package.json's
-        # files) and wb setup --opencode's copy must bring them, or its views never load
+        # apprentice.ts (`../mod/hooks/…`), and #1312's panel its Tasks view (tasks.ts, core.ts
+        # and the kernel it runs, modeline.ts), so OpenCode's Git install (the root package.json's
+        # files) and wb setup --opencode's copy must bring them and what they import in turn, or
+        # its views never load. A type-only import is erased before it runs: it needs no file.
         from workbench import ocplugin
         root = json.loads((ROOT / "package.json").read_text())["files"]
         plugin = json.loads((ocplugin.DIR / "package.json").read_text())["files"]
-        imports = set()
+        runtime = re.compile(r"""^(?!import type |export type ).*?(?:from '(\.\.?/[^']+)'|import\('(\.\.?/[^']+)'\))""", re.M)
+
+        def deps(path: Path) -> set[str]:
+            out = set()
+            for rel in runtime.findall(path.read_text()):
+                dep = path.parent / (rel[0] or rel[1])
+                dep = next((d for d in (dep, dep.with_name(dep.name + ".ts")) if d.is_file()), dep)
+                out.add(dep.resolve().relative_to(ROOT).as_posix())
+            return out
+
+        imports, todo = set(), []
         for name in plugin:
-            text = (ocplugin.DIR / name).read_text()
             self.assertTrue(fnmatch.fnmatch(f"opencode-plugin/{name}", "opencode-plugin/*.ts*"), name)
             self.assertTrue(any(fnmatch.fnmatch(f"opencode-plugin/{name}", f) for f in root), name)
-            for rel in re.findall(r"""from '(\.\.?/[^']+)'|import\('(\.\.?/[^']+)'\)""", text):
-                target = (ocplugin.DIR / (rel[0] or rel[1])).resolve().relative_to(ROOT).as_posix()
-                imports.add(target)
-                self.assertTrue(any(fnmatch.fnmatch(target, f) for f in root), (name, target))
-        self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts"} <= imports)
-        # and every mod file the Git install brings is one a module of the plugin imports
+            todo += [(name, t) for t in deps(ocplugin.DIR / name)]
+        while todo:  # what the mod files import in turn comes too
+            by, target = todo.pop()
+            self.assertTrue(any(fnmatch.fnmatch(target, f) for f in root), (by, target))
+            if target.startswith("mod/") and target not in imports:
+                todo += [(target, t) for t in deps(ROOT / target)]
+            imports.add(target)
+        self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts",
+                         "mod/hooks/core.ts", "mod/hooks/kernel.js", "mod/hooks/modeline.ts"} <= imports)
+        # and every mod file the Git install brings is one the plugin needs, itself or through another
         self.assertEqual({f for f in root if f.startswith("mod/")}, {t for t in imports if t.startswith("mod/")})
-        # the mod files import nothing else of the mod that would be left behind
-        for f in (f for f in root if f.startswith("mod/")):
-            for rel in re.findall(r"from '(\.\.?/[^']+)'", (ROOT / f).read_text()):
-                dep = (ROOT / f).parent / rel
-                dep = next((d for d in (dep, dep.with_name(dep.name + ".ts")) if d.is_file()), dep)
-                self.assertIn(dep.relative_to(ROOT).as_posix(), root, (f, rel))
 
     def test_wb_setup_opencodes_copy_brings_the_mod_files_it_imports_and_a_change_to_one_renews_it(self):
         # #1333: a copy of opencode-plugin/ alone left spans.ts's `../mod/hooks/splash.ts` unresolved;
@@ -24804,12 +24813,14 @@ class Setup(Base):
         copies = home / ".local/share/workbench/opencode-plugin"
         with mock.patch.object(cli, "PKG_ROOT", clone), mock.patch.object(ocplugin, "PKG_ROOT", clone), \
                 mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
-            self.assertEqual([p for p, _ in ocplugin.shared_files(clone)], ["mod/hooks/apprentice.ts", "mod/hooks/splash.ts"])
+            self.assertEqual([p for p, _ in ocplugin.shared_files(clone)],
+                             ["mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/kernel.js",
+                              "mod/hooks/modeline.ts", "mod/hooks/splash.ts", "mod/hooks/tasks.ts"])
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
             first = Path(self.plugins()[0]["package"])
             self.assertEqual(first.parent.parent, copies)
-            for f in ("mod/hooks/splash.ts", "mod/hooks/apprentice.ts"):
+            for f in ("mod/hooks/splash.ts", "mod/hooks/apprentice.ts", "mod/hooks/tasks.ts", "mod/hooks/kernel.js"):
                 self.assertEqual((first.parent / f).read_text(), (clone / f).read_text())
             self.assertTrue((first / "spans.ts").is_file() and (first / "splash.tsx").is_file())
             self.assertFalse((first.parent / "mod/hooks/register.tsx").exists())  # only what the plugin imports
