@@ -865,6 +865,31 @@ class Runs(Base):
         run_wb("discard", "bld-code-1")
         self.assertIn("closed bld", run_wb("run", "close", "bld"))
 
+    def test_a_code_item_at_review_stays_claudes_when_its_card_stops_loading_mid_run(self):
+        # #1470: is_code read the card on every pass, so a user's card edited past loading made
+        # the code at review read as a report: wb run close and the driver's _take discarded it
+        mine = Path(self.tmp.name) / "roles"
+        os.environ["WB_ROLES"] = str(mine)
+        self.assertEqual(wb("card", "copy", "build")[0], 0)
+        flow = {"v": 1, "name": "cc", "stages": [{"id": "code", "card": "build", "items": ["first"]},
+                                                 {"id": "claude", "final": True, "from": "code"}]}
+        run_wb("run", "start", "cc", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.wait_run("cc", ("review", "failed", "paused", "checkpoint", "stopped"))
+        self.assertEqual(store.Task("cc-code-1").status["phase"], "review")
+        with open(mine / "build.md", "a") as f:
+            f.write("x" * (cards.BODY_MAX + 600))
+        with self.assertRaises(RuntimeError):
+            cards.load("build")
+        run = runs.Run("cc")
+        self.assertEqual(runs.state(run)["code"][0].state, "done")  # still the code's, never a report's
+        run.set_status(phase="running")
+        runs.tick(run)
+        rc, _, err = wb("run", "close", "cc")
+        self.assertEqual(rc, 1)
+        self.assertIn("has code waiting on you: cc-code-1", err)
+        self.assertEqual(store.Task("cc-code-1").status["phase"], "review")
+        self.assertNotIn("null", [r.get("kind") for r in run.journal()])
+
     def test_a_gpu_budget_pauses_before_a_start_and_amend_then_resume_goes_on(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
         run_wb("run", "start", "bud", "--plan", self.plan({**AUDIT, "name": "bud"}), "--param", "areas=a",
@@ -1121,6 +1146,60 @@ class Runs(Base):
         rep = runs.report_of("esc")
         self.assertEqual([(c["key"], c["task"]) for c in rep["code"] if c.get("phase") == "review"], [("code:1#e1", "esc-code-2")])
         run_wb("discard", "esc-code-2")
+
+    def test_a_crashed_code_item_checkpoints_claude_once_while_the_runs_other_items_go_on_to_review(self):
+        # #1510: one crashed item's checkpoint stopped every other start until wb run resume, so a
+        # scheduled fix or build flow sat idle all night and skipped each later night's fire
+        flow = {"v": 1, "name": "nf", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "items": ["f1", "f2", "f3", "f4"], "prompt": "Write {item} to answer.txt."},
+            {"id": "claude", "final": True, "from": "code"}]}
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"nf-code-1": "crash"})
+        run_wb("run", "start", "nf", "--plan", self.plan(flow), "--repo", str(self.repo))
+        names = [f"nf-code-{n}" for n in (2, 3, 4)]
+        deadline = time.time() + 120
+        while time.time() < deadline and not all(store.Task(n).exists and store.Task(n).status.get("phase") == "review"
+                                                 for n in names):
+            time.sleep(0.3)
+        st = runs.Run("nf").status
+        self.assertEqual([store.Task(n).status.get("phase") for n in names], ["review"] * 3, st)
+        self.assertEqual(store.Task("nf-code-1").status["phase"], "failed")
+        self.assertEqual((st["phase"], st["cause"]), ("checkpoint", "item"))
+        (said,) = [r for r in self.run_notices("nf") if r["kind"] == "run_checkpoint"]
+        self.assertIn("nf-code-1 (code 1) is failed", said["text"])
+        self.assertIn("resumed nf", run_wb("run", "resume", "nf"))
+        self.assertEqual(self.wait_run("nf", ("review", "failed", "paused", "stopped"))["phase"], "review")
+        for n in ("nf-code-1", *names):
+            run_wb("discard", n)
+
+    def test_a_claude_stage_whose_inputs_finish_under_an_items_checkpoint_is_raised_once_claude_resumes(self):
+        # #1510's review: the merge stage's checkpoint replaced the crashed item's, the resume acked
+        # its notice and its journalled notice row kept tick from raising it again: the run sat
+        # running for ever, its driver alive and nothing due, and Claude never heard the merge was his
+        flow = {"v": 1, "name": "pq", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "items": ["f1", "f2"], "prompt": "Write {item} to answer.txt."},
+            {"id": "merge", "claude": True, "from": "code"},
+            {"id": "claude", "final": True, "from": "merge"}]}
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"pq-code-1": "crash"})
+        run_wb("run", "start", "pq", "--plan", self.plan(flow), "--repo", str(self.repo))
+        deadline = time.time() + 120  # until the code stage is complete: f1 null, f2 done
+        while time.time() < deadline and (runs.Run("pq").status.get("stages") or {}).get("code", {}).get("running", 1):
+            time.sleep(0.3)
+        time.sleep(1)  # the pass that found it complete, and would have raised the merge, has ended
+        st = runs.Run("pq").status
+        self.assertEqual((st["phase"], st.get("cause")), ("checkpoint", "item"), st)
+        self.assertIn("pq-code-1 (code 1) is failed", st["why"])
+        self.assertIn("resumed pq", run_wb("run", "resume", "pq"))
+        st = self.wait_run("pq", ("checkpoint", "review", "failed", "stopped"), timeout=60)
+        self.assertEqual((st["phase"], st["why"]), ("checkpoint", "stage merge is Claude's"), st)
+        self.assertEqual([r["stage"] for r in runs.Run("pq").journal() if r.get("kind") == "notice"
+                          and r.get("notice") == "run_checkpoint" and "stage" in r], ["merge"])
+        due = runs.due("pq")
+        self.assertIsNotNone(due)
+        self.assertIn("stage merge is yours", due["text"])
+        run_wb("run", "stop", "pq")
+        for n in ("pq-code-1", "pq-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
 
     def test_asks_left_past_refix_max_escalate_with_the_attempt_kept_and_the_last_roles_failure_asks_claude(self):
         asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
@@ -1592,17 +1671,20 @@ class Wiring(Base):
             store.write_json(t.dir / "status.json", status)
         return t
 
-    def test_an_open_runs_item_wakes_its_driver_but_its_question_still_wakes_claude(self):
+    def test_an_open_runs_item_wakes_its_driver_with_its_question_too_and_only_a_checkin_wakes_claude(self):
+        # #1506: the driver refuses an item's ask at its next pass, so a question that woke Claude
+        # cost a turn on an answer that lost the race or found the ask closed
         run = self.open_run()
         t = self.item("wr-find-1")
         t.notify("review", "the report")
         t.notify("question", "which file?", id="q1")
-        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["question"])
-        (routed,) = store.read_jsonl(runs.run_dir("wr") / "notify.jsonl")[0]
-        self.assertEqual(routed["kind"], "review")
+        t.notify("checkin", "how is it going?")
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["checkin"])
+        routed = store.read_jsonl(runs.run_dir("wr") / "notify.jsonl")[0]
+        self.assertEqual([r["kind"] for r in routed], ["review", "question"])
         runs.Run("wr").set_status(phase="review")
         t.notify("review", "again")  # the run no longer open: Claude's again
-        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["question", "review"])
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["checkin", "review"])
         self.assertTrue(run.exists)
 
     def test_a_routed_notice_leaves_its_noticed_mark_and_the_driver_acknowledges_it(self):

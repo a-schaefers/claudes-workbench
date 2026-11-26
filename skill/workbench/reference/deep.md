@@ -34,8 +34,9 @@ not on a repo's flow), `stages`. Each stage:
 - `escalate: [roles]`: on a code stage: an item stuck or failed, or with its review's asks left
   past refix's max, is tried again from the base on the next role (`<key>#e1`, …); the attempt
   before is kept. Shipped as `fix-escalate` (trivial, then significant).
-- `on_failure`: `checkpoint` stops the run for you when an item ends with no result; a code item
-  stuck or failed always does (with `escalate`, only once its last role has).
+- `on_failure`: `checkpoint` asks you when an item ends with no result; a code item stuck or
+  failed always does (with `escalate`, only once its last role has). It holds only that item:
+  the others still start and run, and the run ends after your `wb run resume`.
 - `"claude": true` with `from`: a checkpoint of yours. You merge, then `wb run feed`.
 - `max_items` (200): past it, items are `not_run`, named in the report.
 - `unless_exists`: on a stage whose `items` is a `files` param, a path template

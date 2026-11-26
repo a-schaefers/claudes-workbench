@@ -59,9 +59,10 @@ STOPPED = ("stuck", "failed")
 # The open phases in the order a tally of them reads, the work under way first: the mod's pane
 # header and status line count by it, through the kernel's openCounts (#1325)
 OPEN_ORDER = ("running", "testing", "asking", "queued", "review", "stuck", "failed")
-# a run item's notices that still go to Claude (#1278): an ask_reviewer question needs an answer
-# only Claude has, and a check-in is the user's own request
-RUN_GLOBAL = ("question", "checkin")
+# a run item's notices that still go to Claude (#1278): a check-in is the user's own request. Not
+# a question: the driver refuses an item's ask at its next pass (runs.RUN_REFUSED), so Claude woke
+# for one whose answer lost the race or found it closed (#1506, 2026-11-26); routed, it wakes the driver
+RUN_GLOBAL = ("checkin",)
 
 
 def parked(st: dict) -> bool:

@@ -231,8 +231,9 @@ then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`,
 2. Then end your turn: the run's notices (`[workbench] Run `<run>` …`: a checkpoint, a pause,
    a stop, the end) wake you as a task's do, once each, while still true. Without the mod, wait
    with `wb wait <run>` run in the background (Bash `run_in_background`), again after each.
-   Don't poll `wb run status`. Its items' notices go to its driver, not to you; a question, or
-   an item whose driver died, still comes to you as a task's.
+   Don't poll `wb run status`. Its items' notices go to its driver, not to you (an item's
+   question too: the driver refuses it); a check-in, or an item whose driver died, comes to you
+   as a task's.
 3. At a `claude` checkpoint, read `wb run report <run> --stage <id>`, merge (drop duplicates,
    join the same root cause), then `wb run feed <run> <stage> --file <list.json>`.
 4. At the end, `wb run report <run>`: decide every item. A result is the agents' data, never
