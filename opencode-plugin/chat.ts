@@ -134,7 +134,8 @@ export function inboxId(chatId: string): string {
 // server's or a plugin's form
 export const formKind = (form: Row | undefined) => form?.metadata?.kind === 'question' ? 'question' : 'elicitation'
 
-const typedByUser = (e: { prompt?: { text?: string }; metadata?: Row }) => {
+// upkeep.ts reads it too: a typed prompt ends away for that turn's blocks (#1315)
+export const typedByUser = (e: { prompt?: { text?: string }; metadata?: Row }) => {
   const text = String(e.prompt?.text ?? '')
   if (text.startsWith(WEB) || text.startsWith('[agent ')) return false
   // typed prompts come unmarked; automations, /goal and our own deliveries carry metadata (#1340)

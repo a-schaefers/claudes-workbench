@@ -103,6 +103,19 @@ Final, from #1356's production plan (#1354), with the owner's ruling on the gate
   roles, the coding mode and the usage, and says the words (`KEEP_ON_COMPACT`, the notes). The
   rest of `workbenchMode` is effects (the pane, the listener claim), and `firstTask` parses text:
   both stay in the host. `taskParts` stays out (rendering).
+- **#1325's last planned modules, judged against the entry test (2026-11-26):**
+  - **Keywords stays out.** It reads a prompt (fences, backticks, whole words, a line of its own),
+    which is parsing text. It is `mod/hooks/keywords.ts` instead: one TypeScript module that both
+    hosts import, as they do the splash and the Tasks view. wb's `runs.keywords` and
+    `tests/fixtures/keywords.json` hold it.
+  - **Offer stays in wb.** Scout timing is wb's (`cli.scout_offer_due`, `wb scout --if-due`, which
+    the OpenCode plugin runs). The mod's `scoutIfDue` checks the same two times in scout.json,
+    because it runs on its quiet polls, where a wb run per poll would cost too much. Either host's
+    `offered_at` spends the period's offer for both.
+  - **Ask stays in each host.** #1350 to #1352 removed most of the web chat's asks. What is left
+    (`answersTo`, `sameCall`) matches each host's own delivery, which is code for one host.
+  - **Wire stays out.** The chat API's shapes are types, not decisions. They go in #1323's one
+    shared types module, which the web app, the mod and the plugin import.
 
 ## The gate classifier
 

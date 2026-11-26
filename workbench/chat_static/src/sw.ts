@@ -15,8 +15,19 @@ async function key() {
 const plain = (t: unknown) => String(t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[`*_#>]/g, '').replace(/\s+/g, ' ').trim()
 const cut = (t: string, n: number) => t.length > n ? t.slice(0, n - 1) + '…' : t
 
-// Claude's message or a waiting line, as /api/latest gives it (chat.latest)
-interface Latest { now?: number; messages?: { from: string; text: string; ts?: number; what?: string }[]; push?: { test?: number } }
+// Claude's message or a waiting line, as /api/latest gives it (chat.latest), and the listener
+interface Latest {
+  now?: number; push?: { test?: number }
+  messages?: { from: string; text: string; ts?: number; what?: string; driver?: { tool: string } }[]
+  listener?: { tool?: string; driver?: { tool: string } } | null
+}
+
+// The title names the driver (#1319): a reply's own `driver`, else the listener's, else Claude
+// (Claude Code's, and every row before 2.2). OpenCode's user got pushes titled "Claude"
+const NAMES: Record<string, string> = { claude: 'Claude', opencode: 'OpenCode' }
+const named = (d?: { tool: string } | null) => (d && NAMES[d.tool]) || ''
+const driver = (s: Latest) => named(s.listener && s.listener.driver)
+  || (s.listener && s.listener.tool === 'opencode' ? 'OpenCode' : '') || 'Claude'
 
 async function what(): Promise<{ title: string; body: string }> {
   const token = await key()
@@ -28,12 +39,12 @@ async function what(): Promise<{ title: string; body: string }> {
   // Claude's last word, or the line that it waits in the terminal (#959, #1350)
   const last = (s.messages || []).filter(m => m.from === 'claude' || m.from === 'notice').at(-1)
   const test = s.push && s.push.test
-  if (test && now - test < 120 && test >= (last?.ts || 0)) return { title: 'Notifications work', body: "You'll hear from Claude here while you're away." }
+  if (test && now - test < 120 && test >= (last?.ts || 0)) return { title: 'Notifications work', body: `You'll hear from ${driver(s)} here while you're away.` }
   // the command as it is: plain() would drop the `*` of `rm -rf runs/*`
   if (last && last.from === 'notice') return { title: last.text,
     body: cut(String(last.what || '').replace(/\s+/g, ' ').trim() || 'Answer it in the terminal.', 180) }
-  if (last) return { title: 'Claude', body: cut(plain(last.text), 180) }
-  return { title: 'Claude', body: 'Something new in the chat.' }
+  if (last) return { title: named(last.driver) || driver(s), body: cut(plain(last.text), 180) }
+  return { title: driver(s), body: 'Something new in the chat.' }
 }
 
 self.addEventListener('push', e => {

@@ -18,6 +18,7 @@ import { registerAgent } from './agent.ts'
 import { startDriver, type DriverHost } from './driver.ts'
 import { notices } from './notices.ts'
 import { upkeep, type UpkeepHost } from './upkeep.ts'
+import { deep, type DeepHost } from './deep.ts'
 import { registerCommands, type CommandHost } from './commands.ts'
 import { startPane, type PaneHost } from './pane.ts'
 
@@ -51,6 +52,9 @@ const plugin: ServerPlugin = {
     if (stopCalls) stops.push(stopCalls)
     const stopNotices = await notices(ctx) // the notices and the background jobs (#1313, #1334)
     if (stopNotices) stops.push(stopNotices)
+    // deepcode and deepmode typed, /deepmode (#1278): its prompt hook before upkeep's, which reads the toggle
+    const stopDeep = await deep(ctx as unknown as DeepHost).catch(() => undefined)
+    if (stopDeep) stops.push(stopDeep)
     // the conversation's rules, what a compaction keeps, the boundary compaction; the commands (#1315)
     const stopUpkeep = await upkeep(ctx as unknown as UpkeepHost).catch(() => undefined)
     if (stopUpkeep) stops.push(stopUpkeep)

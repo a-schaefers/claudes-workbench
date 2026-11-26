@@ -33,8 +33,8 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { isAbsolute, join, resolve } from 'node:path'
 import type { ServerContext } from './host.d.ts'
 import {
-  APPROVAL_OWN, NOT_EDITED, ONLY, ROUTES_EDIT, allowances, codingMode, editedText, guarded, localOnlyPatchRefusal,
-  localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, type Classify, type Coding, type Env, type Places,
+  APPROVAL_OWN, NOT_EDITED, ONLY, ROUTES_EDIT, allowances, codingMode, editedText, guarded, lineCommands,
+  localOnlyPatchRefusal, localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, wordPath, type Classify, type Coding, type Env, type Places,
 } from './gates.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv } from './wb.ts'
 import { START_INPUT, startCall } from './tools.ts'
@@ -115,7 +115,7 @@ export interface ConsentContext {
   readonly session: { get(input: { sessionID: string }): Promise<{ location?: { directory?: string }; subpath?: string }> }
   readonly tool: {
     transform(cb: (editor: ToolEditor) => void): Promise<unknown>
-    hook(name: 'execute.before', cb: (e: { tool: string; sessionID: string; input: unknown }) => unknown): Promise<unknown>
+    hook(name: 'execute.before', cb: (e: Before) => unknown): Promise<unknown>
   }
   readonly permission: { hook(name: 'evaluate', cb: (e: Evaluation) => unknown): Promise<unknown> }
 }
@@ -132,9 +132,15 @@ export interface Evaluation {
   readonly action: string
   readonly resources: ReadonlyArray<string>
   readonly metadata?: Row
+  readonly source?: { readonly type?: string; readonly id?: string }  // the tool call that asks
   effect: string
   message?: string
 }
+// plugin/src/promise/tool.ts's `execute.before`: `id`, the call's (a permission's `source.id`)
+export interface Before { readonly tool: string; readonly sessionID: string; readonly id?: string; readonly input: unknown }
+// a shell call execute.before saw: its line and its workdir, for the permission hook's walk
+interface ShellCall { readonly session: string; readonly command: string; readonly workdir: string }
+export const CALLS_KEPT = 64
 
 // --- asking: one form per gated call
 export type Answer = 'yes' | 'no' | 'none'
@@ -445,7 +451,17 @@ export const NO_KERNEL = (task: string) => `workbench: not edited: ${task}'s cod
 
 export class Gates {
   private asking = new Map<string, Promise<string>>() // one form per task at a time: its answer shared
+  private calls = new Map<string, ShellCall>()        // the last CALLS_KEPT shell calls, by call id
   constructor(private d: GateDeps) {}
+
+  // The shell call a permission asks for: by its call id, else (a Code Mode program's call, whose
+  // permission names the program's) the session's newest whose line holds every resource
+  private call(e: Evaluation): ShellCall | undefined {
+    const byId = e.source?.id ? this.calls.get(e.source.id) : undefined
+    if (byId?.session === e.sessionID) return byId
+    return [...this.calls.values()].reverse()
+      .find(c => c.session === e.sessionID && e.resources.every(r => c.command.includes(r)))
+  }
 
   // OpenCode's permission hook: a deny sets `effect` and the words the model reads
   async evaluate(e: Evaluation): Promise<void> {
@@ -462,10 +478,15 @@ export class Gates {
       // a line OpenCode couldn't scan (metadata.reason) is one text: wb's own refusal guards it
       if (e.metadata?.reason !== undefined || !this.d.classify) return ''
       if (!e.resources.some(r => /\b(?:wb|workbench|route|start|settings|patch|-ok)\b|routes\.json|>|\btee\b|\bcp\b|\bmv\b|\bdd\b|\binstall\b|\bln\b|\brsync\b/.test(r))) return ''
-      const dir = await this.d.dir(e.sessionID)
-      const commands = e.resources.map(r => simpleWords(r))
-      return shellRefusal(commands, dir, this.d.places(), this.d.classify,
-        (args, cwd) => this.d.dry(args, cwd, e.sessionID), this.d.real)
+      const session = await this.d.dir(e.sessionID)
+      const p = this.d.places()
+      // the call's own line and workdir (OpenCode tells the model to set workdir over a cd): the
+      // cds its scan dropped put back, the commands run from workdir
+      const call = this.call(e)
+      const dir = call?.workdir ? wordPath(call.workdir, session, p) : session
+      const commands = (call ? lineCommands(call.command, e.resources) : e.resources).map(r => simpleWords(r))
+      return shellRefusal(commands, dir, p, this.d.classify,
+        (args, cwd) => this.d.dry(args, cwd || session, e.sessionID), this.d.real)
     }
     if (e.action !== 'edit') return ''
     const dir = await this.d.dir(e.sessionID)
@@ -519,11 +540,19 @@ export class Gates {
     return (await this.d.allow(task, session)) ? '' : NOT_EDITED(task)
   }
 
-  // execute.before: an edit of commands.json that lifts a repo's local_only (the permission hook
-  // sees only the path, never the text)
-  async before(e: { tool: string; sessionID: string; input: unknown }): Promise<void> {
-    if (e.tool !== 'edit' && e.tool !== 'write' && e.tool !== 'patch') return
+  // execute.before: a shell call's line and workdir kept for the permission hook that follows it
+  // (it hands the hook only the simple commands its scan kept); an edit of commands.json that
+  // lifts a repo's local_only refused (the permission hook sees only the path, never the text)
+  async before(e: Before): Promise<void> {
     const input = (e.input ?? {}) as Row
+    if ((e.tool === 'shell' || e.tool === 'bash') && e.id && typeof input.command === 'string') {
+      this.calls.delete(e.id)
+      this.calls.set(e.id, { session: e.sessionID, command: input.command,
+        workdir: typeof input.workdir === 'string' ? input.workdir : '' })
+      for (const k of this.calls.keys()) if (this.calls.size > CALLS_KEPT) this.calls.delete(k); else break
+      return
+    }
+    if (e.tool !== 'edit' && e.tool !== 'write' && e.tool !== 'patch') return
     const p = this.d.places()
     const file = this.d.real(p.commands)
     const dir = await this.d.dir(e.sessionID)
@@ -541,7 +570,9 @@ export class Gates {
         why = localOnlyPatchRefusal(removed, added)
       }
     } else {
-      if (at(String(input.path ?? '')) !== file) return
+      // 2.3.2's and 2.4.1's edit and write name the file `path`; `filePath` is 1.x's, and an
+      // OpenCode that still takes it is covered (the kernel-gates lane notes, #1314)
+      if (at(String(input.path ?? input.filePath ?? '')) !== file) return
       const next = editedText(e.tool, input, now)
       if (next !== undefined) why = localOnlyRefusal(now, next)
     }

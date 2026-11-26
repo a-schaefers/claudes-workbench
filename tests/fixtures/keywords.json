@@ -1,5 +1,5 @@
 {
-  "_doc": "#1278: what the hosts' keyword detection must say for each text, as runs.keywords does (the Claude Code mod, the OpenCode plugin, the kernel's Keywords, #1325). deepcode: the word, whole, outside backticks and fences. deepmode: a line of its own, `deepmode on` or `deepmode off`; the last such line wins; null when none.",
+  "_doc": "#1278: what the hosts' keyword detection must say for each text, as runs.keywords does: mod/hooks/keywords.ts, which the Claude Code mod and the OpenCode plugin both import (opencode-plugin/test/deep.test.ts reads this file). deepcode: the word, whole, outside backticks and fences. deepmode: a line of its own, `deepmode on` or `deepmode off`; the last such line wins; null when none.",
   "cases": [
     {"text": "deepcode fix the flaky login test", "deepcode": true, "deepmode": null},
     {"text": "please DeepCode this: audit the parser", "deepcode": true, "deepmode": null},
@@ -12,6 +12,12 @@
     {"text": "turn deepmode on please", "deepcode": false, "deepmode": null},
     {"text": "deepmode on\nthen later\ndeepmode off", "deepcode": false, "deepmode": false},
     {"text": "deepmode on\ndeepcode rename the flag", "deepcode": true, "deepmode": true},
+    {"text": "the \u00fcberdeepcode tool, and deepcode_x, and 1deepcode", "deepcode": false, "deepmode": null},
+    {"text": "deepcode.", "deepcode": true, "deepmode": null},
+    {"text": "```\nunclosed fence: deepcode\ndeepmode on", "deepcode": false, "deepmode": null},
+    {"text": "deepmode on\r\n", "deepcode": false, "deepmode": true},
+    {"text": "deepmode on\u2028then", "deepcode": false, "deepmode": null},
+    {"text": "deepmode\noff", "deepcode": false, "deepmode": false},
     {"text": "", "deepcode": false, "deepmode": null}
   ]
 }

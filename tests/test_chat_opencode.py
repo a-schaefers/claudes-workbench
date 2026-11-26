@@ -63,6 +63,15 @@ class OpenCodeChat(Base):
         self.claim(start="1")                                          # our pid, another start: recycled
         self.assertIsNone(chat.listener())
 
+    def test_a_claim_newer_than_the_servers_last_beat_listens_until_a_beat_can_say(self):
+        # #1319's live check (2026-11-26): the user's first prompt in a new session claimed the
+        # chat up to 30 s before the next beat listed it, and the page said "no session listening"
+        self.beat("ses_old", store="/db/opencode.db", ts=time.time() - 20)  # listed before the session was
+        self.claim("ses_new")
+        self.assertEqual(chat.listener()["session"], "ses_new")
+        self.beat("ses_old", store="/db/opencode.db", ts=time.time() + 1)   # a listing after the claim
+        self.assertIsNone(chat.listener())                                  # without it: deleted there
+
     def test_the_server_takes_the_chat_moves_it_between_its_sessions_and_drops_it(self):
         self.assertEqual(run_wb("chat", "listener", "ses_a", "--pid", str(ME), "--busy").strip(), "listening")
         lst = store.read_json(chat.chat_dir() / "listener.json", None)
@@ -213,6 +222,18 @@ class OpenCodeChat(Base):
             nid = run_wb("chat", "notice", "--tool", "AskUserQuestion", "--kind", "question").strip()
         row = next(r for r in chat.thread() if r["id"] == nid)
         self.assertEqual((row["text"], row.get("driver")), (chat.WAITING, None))
+
+    def test_a_push_names_the_driver_by_its_reply_and_the_listener_it_fetches(self):
+        # #1319: the service worker titled every push "Claude", OpenCode's replies too: /api/latest
+        # gave it the row alone, and a row with no `driver` needs the listener's to be named
+        self.assertIsNone(chat.latest()["listener"])
+        run_wb("chat", "listener", "ses_a", "--pid", str(ME))
+        with self.as_session("ses_a"):
+            run_wb("chat", "reply", "--to", "user", "--text", "Tests pass")
+        got = chat.latest()
+        self.assertEqual(got["messages"][-1]["driver"], {"tool": "opencode"})   # the title's
+        self.assertEqual(got["listener"]["driver"], {"tool": "opencode"})       # the fallback's
+        self.assertEqual(got["listener"]["tool"], "opencode")
 
 
 if __name__ == "__main__":
