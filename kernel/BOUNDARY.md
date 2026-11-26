@@ -32,6 +32,9 @@ defined (`tests/test_kernel.py`).
 | `noticesDue` | Kernel.Notice | which notices are due a look: per task its questions and newest notice within the hour, and each task's newest notice however old | born:#1325 | core.ts; register.tsx (`deliver`); the OpenCode plugin from #1313 |
 | `noticePlan` | Kernel.Notice | one due notice judged: still true, toasted once, and the act (skip, none, steer, hold, wake, ack, missed) | born:#1325 | core.ts; register.tsx (`deliver`); the OpenCode plugin from #1313 (steer and queue) |
 | `rewakePlan` | Kernel.Notice | the rewake net: recent, a candidate now, due, and the notice kind a phase stands for | mod/hooks/register.tsx:REWAKE_MAX_MS | core.ts; register.tsx (`rewake`, `quietForJobs`); the OpenCode plugin from #1313 (its idle re-wake) |
+| `tellPlan` | Kernel.Mode | what to tell a conversation of the rules: a first message's context blocks, or midway the rules it lacks, and what it has been told after | born:#1325 | core.ts; register.tsx (`unsaid`, `prompt.context`); the OpenCode plugin from #1315 (its instructions) |
+| `modesPlan` | Kernel.Mode | the sessions kept in workbench mode: whether this process's is, and the record to keep | mod/hooks/register.tsx:MODES_KEEP_MS | core.ts; register.tsx (`keepMode`, `modeKept`); the OpenCode plugin from #1312 |
+| `compactPlan` | Kernel.Mode | a task boundary: the mark kept, whether to read the context's usage now, and whether to compact | mod/hooks/register.tsx:COMPACT_AT | core.ts; register.tsx (`poll`, `compactAtBoundary`); the OpenCode plugin from #1315 (its compaction) |
 | `awayNow` | Kernel.Away | whether the user is away from the terminal: the web chat used lately, or one of the session's tasks open since | mod/hooks/register.tsx:AWAY_MS | core.ts; register.tsx; the OpenCode plugin from #1319 |
 
 ## Modules
@@ -44,6 +47,7 @@ defined (`tests/test_kernel.py`).
 | Kernel.Owner | `owns` |
 | Kernel.Away | `awayNow` |
 | Kernel.Notice | `noticesDue`, `noticePlan`, `rewakePlan` |
+| Kernel.Mode | `tellPlan`, `modesPlan`, `compactPlan` |
 
 ## Rulings
 
@@ -82,8 +86,12 @@ Final, from #1356's production plan (#1354), with the owner's ruling on the gate
   host reads the files, runs `wb ack`'s compare-and-set (the lock, `claim_ack`), submits and says
   the words. M3's TypeScript step was the parity run itself: main's inline code against the port,
   over seeded histories, before the inline copy was deleted.
-- **Next, by the owner's ruling (2026-11-25, on #1325 and #1356):** the mode machine and
-  `compactPlan` move in; `taskParts` stays out (rendering).
+- **Mode and compactPlan, by the owner's ruling (2026-11-25, on #1325 and #1356):** what a
+  conversation is told of the rules (`unsaid`'s diff, `prompt.context`'s blocks), the sessions
+  kept in the mode and the boundary compaction are the kernel's; the host reads notes.md, the
+  roles, the coding mode and the usage, and says the words (`KEEP_ON_COMPACT`, the notes). The
+  rest of `workbenchMode` is effects (the pane, the listener claim), and `firstTask` parses text:
+  both stay in the host. `taskParts` stays out (rendering).
 
 ## Budget
 

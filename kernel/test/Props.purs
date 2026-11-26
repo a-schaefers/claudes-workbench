@@ -10,6 +10,7 @@ import Data.Array (all, any, concatMap, elem, filter, foldl, index, intersect, l
 import Data.Int (floor, toNumber)
 import Data.Maybe (fromMaybe, maybe)
 import Kernel.Away (awayNow)
+import Kernel.Mode (Said, compactPlan, modesPlan, tellPlan)
 import Kernel.Notice (noticePlan, noticesDue, rewakePlan)
 import Kernel.Owner (owns)
 import Kernel.Phase (openCounts, phaseOf)
@@ -55,12 +56,15 @@ run seed n = (foldl step { s: start seed, out: [] } (if n < 1 then [] else range
       nd = rowsFrom aw.s
       np = planFrom nd.s
       rp = rewakeFrom np.s
+      tp = tellFrom rp.s
+      mp = modesFrom tp.s
+      cq = compactFrom mp.s
       say :: forall a b. Show a => Show b => a -> b -> String -> String
       say x got what = "seed " <> show seed <> " case " <> show i <> ": " <> show x <> " gave " <> show got
         <> ": "
         <> what
     in
-      { s: rp.s
+      { s: cq.s
       , out: acc.out <> map (say facts (phaseOf facts)) (judge facts)
           <> map (say tl.tasks (openCounts { tasks: tl.tasks })) (judgeCounts tl.tasks)
           <> map (say ow.facts (owns ow.facts)) (judgeOwner ow.facts)
@@ -68,6 +72,9 @@ run seed n = (foldl step { s: start seed, out: [] } (if n < 1 then [] else range
           <> map (say nd.facts (noticesDue nd.facts)) (judgeDue nd.facts)
           <> map (say np.facts (noticePlan np.facts)) (judgePlan np.facts)
           <> map (say rp.facts (rewakePlan rp.facts)) (judgeRewake rp.facts)
+          <> map (say tp.facts (tellPlan tp.facts)) (judgeTell tp.facts)
+          <> map (say mp.facts (modesPlan mp.facts)) (judgeModes mp.facts)
+          <> map (say cq.facts (compactPlan cq.facts)) (judgeCompact cq.facts)
       }
 
 -- | The phase round-trips: each flag says which of wb's sets the phase is in (store.py, through
@@ -281,6 +288,114 @@ rewakeFrom s0 =
       }
   }
   where
+  r k = foldl (\x _ -> next x) s0 (range 0 k)
+
+type TellFacts = { first :: Boolean, want :: Said, was :: Said, known :: Boolean, any :: Boolean, delegating :: Boolean, away :: Boolean }
+
+-- | The said-versus-wanted diff is idempotent: told once, told again with what it was told, it
+-- | says nothing and the record stands; a first message records what should be known; nothing
+-- | is said twice, and the notes and the wake-off note, once said, stay said; the words come from
+-- | a closed set; out of the mode with nothing open only the notes and the wake-off note move.
+judgeTell :: TellFacts -> Array String
+judgeTell f =
+  check (all (\w -> elem w [ "mode", "coding", "notes", "workflows", "away", "wakeOff", "routes", "routesChanged" ]) r.say) "a word outside the closed set"
+    <> check (nub r.say == r.say) "a rule said twice"
+    <> check (again.say == [] && again.said == r.said) "said again, it says more or changes the record"
+    <> check (not f.first || r.said == f.want) "a first message doesn't record what should be known"
+    <> check (f.first || f.any || r.said.coding == f.was.coding && r.said.routes == f.was.routes && r.said.workflows == f.was.workflows)
+      "out of the mode with nothing open, a rule moved"
+    <> check (elem "mode" r.say == (f.first && f.delegating)) "the mode block is not exactly a first message while delegating"
+    <> check (not f.first || not f.known || not (elem "notes" r.say) || f.was.notes == "") "notes /workbench said told again"
+    <> check (f.first || (f.was.notes == "" || r.said.notes /= "") && (not f.was.wakeOff || r.said.wakeOff)) "the notes or the wake-off note unsaid midway"
+  where
+  r = tellPlan f
+  again = tellPlan f { first = false, was = r.said, known = true }
+
+type ModesFacts = { modes :: Array { id :: String, at :: Number }, ids :: Array String, now :: Number, on :: Boolean }
+
+-- | The modes kept: none 30 days old, every id of this process at `now` exactly when turned on,
+-- | none of them when turned off, every other kept one as it was; `kept` exactly when an id is
+-- | among them.
+judgeModes :: ModesFacts -> Array String
+judgeModes f =
+  check (all (\m -> f.now - m.at < 2592000000.0) r.modes) "a mode thirty days old kept"
+    <> check (all (\id -> elem { id, at: f.now } r.modes == f.on) f.ids) "this process's ids not on exactly when turned on"
+    <> check (all (\m -> elem m.id f.ids || elem m f.modes) r.modes) "a mode made up"
+    <> check (r.kept == any (\id -> any (\m -> m.id == id) f.modes) f.ids) "kept is not an id among them"
+  where
+  r = modesPlan f
+
+type CompactFacts =
+  { on :: Boolean, was :: Array String, open :: Array String, boundary :: Boolean, busy :: Boolean, waiting :: Boolean
+  , percentSet :: Boolean, percent :: Number, tokens :: Number, window :: Number, autoCompact :: Boolean, threshold :: Number }
+
+-- | The boundary: never out of the mode, never busy or with a task waiting, never mid-mark (a
+-- | check clears it), a compaction only on a check and never with it off or below the mark.
+judgeCompact :: CompactFacts -> Array String
+judgeCompact f =
+  check (f.on || not r.boundary && not r.check) "a boundary out of the mode"
+    <> check (not r.check || not f.busy && not f.waiting) "checked busy or with a task waiting"
+    <> check (not (r.check && r.boundary)) "the mark kept past its check"
+    <> check (not r.compact || r.check) "compacted without a check"
+    <> check (not (f.percentSet && f.percent == 0.0) || not r.compact) "compacted with it off"
+    <> check (not r.compact || f.tokens > 0.0) "compacted with no usage read"
+    <> check (r.boundary || r.check || not f.on || not (f.boundary || any (\n -> not (elem n f.open)) f.was)) "a closed task's boundary dropped"
+  where
+  r = compactPlan f
+
+tellFrom :: Int -> { s :: Int, facts :: TellFacts }
+tellFrom s0 =
+  { s: r 15
+  , facts:
+      { first: r 0 `mod` 2 == 0
+      , want: saidFrom (r 1) (r 2) (r 3) (r 4) (r 5)
+      , was: saidFrom (r 6) (r 7) (r 8) (r 9) (r 10)
+      , known: r 11 `mod` 2 == 0
+      , any: r 12 `mod` 3 /= 0
+      , delegating: r 13 `mod` 2 == 0
+      , away: r 14 `mod` 3 == 0
+      }
+  }
+  where
+  r k = foldl (\x _ -> next x) s0 (range 0 k)
+  saidFrom a b c d e =
+    { notes: pick [ "", "n1", "n2" ] a, wakeOff: b `mod` 2 == 0, coding: pick [ "decide", "never", "always" ] c
+    , routes: pick [ "", "r1", "r2" ] d, workflows: pick [ "on", "off" ] e }
+
+modesFrom :: Int -> { s :: Int, facts :: ModesFacts }
+modesFrom s0 =
+  { s: r 12
+  , facts:
+      { modes: map (\k -> { id: pick ids (r k), at: 1.0e12 - toNumber (r (k + 4) `mod` 40) * 86400000.0 }) (range 1 (r 0 `mod` 4))
+      , ids: nub (map (\k -> pick ids (r (k + 8))) (range 1 (r 9 `mod` 3)))
+      , now: 1.0e12
+      , on: r 11 `mod` 2 == 0
+      }
+  }
+  where
+  ids = [ "s1", "s2", "s3", "s4" ]
+  r k = foldl (\x _ -> next x) s0 (range 0 k)
+
+compactFrom :: Int -> { s :: Int, facts :: CompactFacts }
+compactFrom s0 =
+  { s: r 14
+  , facts:
+      { on: r 0 `mod` 4 /= 0
+      , was: nub (map (\k -> pick names (r k)) (range 1 (r 1 `mod` 3)))
+      , open: nub (map (\k -> pick names (r (k + 3))) (range 1 (r 4 `mod` 3)))
+      , boundary: r 7 `mod` 3 == 0
+      , busy: r 8 `mod` 3 == 0
+      , waiting: r 9 `mod` 3 == 0
+      , percentSet: r 10 `mod` 2 == 0
+      , percent: toNumber (r 10 `mod` 5) * 25.0
+      , tokens: toNumber (r 11 `mod` 5) * 50000.0
+      , window: 200000.0
+      , autoCompact: r 12 `mod` 2 == 0
+      , threshold: toNumber (r 13 `mod` 2) * 160000.0
+      }
+  }
+  where
+  names = [ "a", "b", "c" ]
   r k = foldl (\x _ -> next x) s0 (range 0 k)
 
 check :: Boolean -> String -> Array String

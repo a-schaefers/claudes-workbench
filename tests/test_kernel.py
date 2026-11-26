@@ -593,7 +593,7 @@ class Checker(unittest.TestCase):
         self.assertIn("mod/hooks/core.ts:ACTIVE is still defined", self.errors())
 
     def test_a_hand_copy_of_a_table_back_in_the_mod(self):
-        self.edit("mod/hooks/register.tsx", "CLOSED, NEEDS, NO_ANSWER,", "CLOSED, NO_ANSWER,")
+        self.edit("mod/hooks/register.tsx", " NEEDS, NO_ANSWER,", " NO_ANSWER,")
         self.edit("mod/hooks/register.tsx", "\nexport function attachedLines", "\nconst NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])\nexport function attachedLines")
         self.assertIn("mod/hooks/register.tsx:NEEDS is still defined", self.errors())
         self.edit("mod/hooks/tasks.ts", "import { CLOSED, openCounts, phaseOf } from './core'\n",

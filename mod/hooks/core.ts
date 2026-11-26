@@ -56,3 +56,22 @@ export const noticePlan = (facts: Parameters<typeof K.noticePlan>[0]): ReturnTyp
 // The rewake check (Kernel.Notice): recent, a candidate now, due, and the kind its phase stands for
 export const rewakePlan = (facts: Parameters<typeof K.rewakePlan>[0]): ReturnType<typeof K.rewakePlan> =>
   K.rewakePlan({ ...facts, phase: String(facts.phase ?? ''), parked: !!facts.parked })
+
+export type Said = Parameters<typeof K.tellPlan>[0]['want']
+// What to tell a conversation of the rules (Kernel.Mode): at its first message the context
+// blocks, midway the rules it lacks, and what it has been told after (`said`)
+export const tellPlan = (facts: Parameters<typeof K.tellPlan>[0]): { say: string[]; said: Said } => {
+  const r = K.tellPlan(facts)
+  return { say: [...r.say], said: { ...r.said } }
+}
+// The sessions kept in workbench mode (Kernel.Mode), from `$.store`'s `modes` (id → ms): whether
+// one of `ids` is among them, and the record to keep (none 30 days old; `on`, the ids at `now`)
+export const modesPlan = (modes: unknown, ids: Iterable<string>, now: number, on: boolean): { kept: boolean; modes: Record<string, number> } => {
+  const rows = Object.entries(modes && typeof modes === 'object' ? modes : {})
+    .filter(([, at]) => typeof at === 'number').map(([id, at]) => ({ id, at: at as number }))
+  const r = K.modesPlan({ modes: rows, ids: [...ids], now, on })
+  return { kept: r.kept, modes: Object.fromEntries(r.modes.map(m => [m.id, m.at])) }
+}
+// A task boundary (Kernel.Mode): the mark kept, whether to read the context's usage now, and
+// whether it is far enough along to compact
+export const compactPlan = (facts: Parameters<typeof K.compactPlan>[0]): ReturnType<typeof K.compactPlan> => K.compactPlan(facts)

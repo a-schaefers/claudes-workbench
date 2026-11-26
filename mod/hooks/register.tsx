@@ -17,10 +17,9 @@
 // Claude's own context. In workbench mode, whatever compacts it (the engine at its limit, /compact,
 // this mod), the summary is told to keep the delegation state, and after a compaction or /clear
 // the open tasks come back as a context block. At a task boundary (one of this session's just
-// closed, none waiting for Claude) the mod compacts early once Claude is COMPACT_AT of the way to
-// the engine's own compaction, so a long delegation session sheds finished tasks' detail at a
-// clean point instead of mid-review.
-const COMPACT_AT = 0.5
+// closed, none waiting for Claude) the mod compacts early once Claude is half of the way to the
+// engine's own compaction (`WB_COMPACT_AT`; the kernel's `compactPlan`), so a long delegation
+// session sheds finished tasks' detail at a clean point instead of mid-review.
 const KEEP_ON_COMPACT =
   'Workbench delegation is in progress. Keep: the user\'s goals and decisions, which tasks were ' +
   'delegated (names, repos, branches, what each is for), which are open and what each needs ' +
@@ -75,7 +74,7 @@ import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, taskLines } from './tasks'
-import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, WAKE_OPENING } from './core'
+import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, compactPlan, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, tellPlan, WAKE_OPENING } from './core'
 import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
@@ -1996,25 +1995,25 @@ async function wanted($: any, delegating: boolean, notesToo = true): Promise<Sai
 async function unsaid($: any, delegating: boolean): Promise<string[]> {
   const want = await wanted($, delegating, !mem.said?.notes) // said once: not read at every poll
   const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide', routes: '', workflows: 'off' } // after the await: no other caller in between
-  const out: string[] = []
-  if (want.notes && !was.notes) out.push(NOTES_NOTE(want.notes))
-  if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
   const any = delegating || mem.open.size > 0 // out of the mode with nothing open: nothing changes
-  if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
-  // the roles (#1014): any change, however made (the dialog, the web app, a terminal, a hand edit);
-  // the web app's says so (#1283)
-  if (any && want.routes !== was.routes) {
-    const now = await readRoutes($)
-    // the web app's only when this change stamped a role there: newer than the stamp last told, or
-    // (none told this load) made since this poll's window began (review of #1283, 2026-11-25: a day
-    // cap set in the terminal after a role last set on the web app read "(the user, on the web app)")
-    const since = mem.routesStamp ?? (await $.clock.now()) / 1000 - ROUTES_FRESH_S
-    out.push(was.routes ? ROUTES_CHANGED(want.routes, !!now.web && (now.stamp ?? 0) > since) : ROUTES_NOTE(now))
-    mem.routesStamp = Math.max(now.stamp ?? since, since)
+  const plan = tellPlan({ first: false, want, was, known: true, any, delegating, away: false })
+  const out: string[] = []
+  for (const say of plan.say) {
+    if (say === 'notes') out.push(NOTES_NOTE(want.notes))
+    else if (say === 'wakeOff') out.push(WAKE_OFF_NOTE)
+    else if (say === 'coding') out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
+    else if (say === 'workflows') out.push(want.workflows === 'on' ? WORKFLOWS_RULE : WORKFLOWS_OFF) // #1041
+    else { // the roles (#1014): any change, however made (the dialog, the web app, a terminal, a hand edit); the web app's says so (#1283)
+      const now = await readRoutes($)
+      // the web app's only when this change stamped a role there: newer than the stamp last told, or
+      // (none told this load) made since this poll's window began (review of #1283, 2026-11-25: a day
+      // cap set in the terminal after a role last set on the web app read "(the user, on the web app)")
+      const since = mem.routesStamp ?? (await $.clock.now()) / 1000 - ROUTES_FRESH_S
+      out.push(say === 'routesChanged' ? ROUTES_CHANGED(want.routes, !!now.web && (now.stamp ?? 0) > since) : ROUTES_NOTE(now))
+      mem.routesStamp = Math.max(now.stamp ?? since, since)
+    }
   }
-  if (any && want.workflows !== was.workflows) out.push(want.workflows === 'on' ? WORKFLOWS_RULE : WORKFLOWS_OFF) // #1041
-  await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding,
-    routes: any ? want.routes : was.routes, workflows: any ? want.workflows : was.workflows })
+  await setSaid($, plan.said)
   return out
 }
 
@@ -2440,10 +2439,10 @@ async function scoutOffered($: any, now: number): Promise<void> {
   await $.fs.write(path, JSON.stringify({ ...st, offered_at: now / 1000 })).catch(() => {})
 }
 
-async function compactAtBoundary($: any): Promise<void> {
+async function compactAtBoundary($: any, at: Omit<Parameters<typeof compactPlan>[0], 'percentSet' | 'percent' | 'tokens' | 'window' | 'autoCompact' | 'threshold'>): Promise<void> {
   const set = await $.env.get('WB_COMPACT_AT') // a percentage; 0 turns it off
-  const at = set && Number.isFinite(Number(set)) ? Number(set) / 100 : COMPACT_AT
-  if (!at) return
+  const percentSet = !!set && Number.isFinite(Number(set))
+  if (percentSet && !Number(set)) return
   let context
   try {
     ({ context } = await $.session.usage({ breakdown: 'summary' }))
@@ -2451,8 +2450,9 @@ async function compactAtBoundary($: any): Promise<void> {
     return // no reading yet (a session before its first turn)
   }
   const b = context.breakdown
-  const limit = b?.isAutoCompactEnabled && b.autoCompactThreshold ? b.autoCompactThreshold : context.window
-  if (!context.tokens || context.tokens < at * limit) return
+  const plan = compactPlan({ ...at, percentSet, percent: percentSet ? Number(set) : 0, tokens: Number(context.tokens) || 0,
+    window: Number(context.window) || 0, autoCompact: !!b?.isAutoCompactEnabled, threshold: Number(b?.autoCompactThreshold) || 0 })
+  if (!plan.compact) return
   try {
     await $.session.compact({ instructions: KEEP_ON_COMPACT }) // no toast: Claude Code shows it (#1322)
   } catch {
@@ -2710,14 +2710,13 @@ async function poll($: any) {
     // Only this session's tasks, and only in workbench mode, make a boundary: a task closing
     // compacted every session's context, delegating or not (the 2026-11-16 audit).
     const open = new Set(list.filter(t => isOpen(t) && mine(t)).map(t => t.name))
-    if (on && [...mem.open].some(name => !open.has(name))) mem.boundary = true
-    if (!on) mem.boundary = false
+    const was = [...mem.open]
     mem.open = open
     await sayRules($, on)
-    if (mem.boundary && !mem.busy && !list.some(t => phaseOf(t).waits && mine(t))) {
-      mem.boundary = false
-      await compactAtBoundary($)
-    }
+    const at = { on, was, open: [...open], boundary: mem.boundary, busy: mem.busy, waiting: list.some(t => phaseOf(t).waits && mine(t)) }
+    const plan = compactPlan({ ...at, percentSet: false, percent: 0, tokens: 0, window: 0, autoCompact: false, threshold: 0 })
+    mem.boundary = plan.boundary
+    if (plan.check) await compactAtBoundary($, at)
     // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn,
     // in a session that delegates with wakes on: the plugin runs in every session, and one for
     // another project got the check, spent the day's offer and ignored wake off (#919)
@@ -3666,24 +3665,16 @@ async function workbenchMode($: any, on: boolean) {
 // session resumed in a new process (`claude --continue`/`--resume`) comes back in it: the atom
 // died with the old process, and until Claude happened to run a delegating command the chat
 // didn't listen, the pane and status line didn't show it, and a compaction dropped it (#689).
-// Kept MODES_KEEP_MS; a quit clears every id this process has had.
-const MODES_KEEP_MS = 30 * 24 * 3600_000
+// Kept 30 days (the kernel's `modesPlan`); a quit clears every id this process has had.
 async function keepMode($: any, on: boolean) {
   try {
     const now = await $.clock.now()
-    const was = (await $.store.get('modes')) as Record<string, number> | undefined
-    const modes: Record<string, number> = {}
-    for (const [id, at] of Object.entries(was && typeof was === 'object' ? was : {})) {
-      if (typeof at === 'number' && now - at < MODES_KEEP_MS && !mem.ids.has(id)) modes[id] = at
-    }
-    if (on) for (const id of mem.ids) modes[id] = now
-    await $.store.set('modes', modes)
+    await $.store.set('modes', modesPlan(await $.store.get('modes'), mem.ids, now, on).modes)
   } catch {} // no store (an older Claude Code, a test without one): the mode lasts this process
 }
 async function modeKept($: any): Promise<boolean> {
   try {
-    const modes = (await $.store.get('modes')) as Record<string, number> | undefined
-    return !!modes && typeof modes === 'object' && [...mem.ids].some(id => typeof modes[id] === 'number')
+    return modesPlan(await $.store.get('modes'), mem.ids, 0, false).kept
   } catch {
     return false
   }
@@ -4060,23 +4051,25 @@ export const register: Register = (on, options) => {
     const st = await read($, chat)
     const isAway = await away($, st)
     const blocks = [...r.blocks]
-    if (st.delegating) blocks.push({ name: 'workbench-mode', text: MODE_NOTE(mem.skill) })
     const want = await wanted($, st.delegating)
     // /workbench as the first message said them in its text already (#540)
     const had = mem.skillTurn ? mem.said : null
     mem.skillTurn = false
-    await setSaid($, want)
-    if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
-    if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
-    if (want.workflows === 'on' && had?.workflows !== 'on') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
-    if (isAway) {
-      blocks.push({ name: 'web-chat', text: AWAY_NOTE })
-      mem.awayNoted = true
-    }
-    if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
-    if (want.routes && had?.routes !== want.routes) { // read while delegating or with a task open, as `wanted` does
-      const routes = await readRoutes($) // once any role has an API model (#1014)
-      if (routes.api) blocks.push({ name: 'workbench-routes', text: ROUTES_NOTE(routes) })
+    const plan = tellPlan({ first: true, want, was: had ?? want, known: !!had, any: true, delegating: !!st.delegating, away: isAway })
+    await setSaid($, plan.said)
+    for (const say of plan.say) {
+      if (say === 'mode') blocks.push({ name: 'workbench-mode', text: MODE_NOTE(mem.skill) })
+      else if (say === 'coding') blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
+      else if (say === 'notes') blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
+      else if (say === 'workflows') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
+      else if (say === 'away') {
+        blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+        mem.awayNoted = true
+      } else if (say === 'wakeOff') blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
+      else if (say === 'routes') { // read while delegating or with a task open, as `wanted` does
+        const routes = await readRoutes($) // once any role has an API model (#1014)
+        if (routes.api) blocks.push({ name: 'workbench-routes', text: ROUTES_NOTE(routes) })
+      }
     }
     const { ok, out: status, aborted } = await runWb($, ['status', ...(await scope($))])
     if (!ok && !aborted) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
