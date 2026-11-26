@@ -5978,6 +5978,169 @@ class RoundEnd(Base):
         self.assertEqual((st["phase"], st["last"]), ("review", "tests passed: Claude reviews next"))
 
 
+class RepoProfile(Base):
+    """commands.json `repos.<path>.test` and `skills` (#1295, P2): a repo's standing acceptance
+    command, run with every task's own, and the skills every task there is handed."""
+
+    def commands(self, entry: dict) -> None:
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): entry}}))
+
+    def refused(self, name: str, *extra) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start(name, "ok", *extra)
+        return err.getvalue()
+
+    def test_a_failing_repo_test_sends_the_task_back_for_a_fix_as_its_own_test_does(self):
+        # NO_HOOKS keeps a team's pre-commit lint from running, so it had to be restated in every
+        # --test; the repo's `test` is that gate, run like --test in the agent's lane (#1295 P2)
+        self.commands({"test": TEST_CMD})
+        out = self.start("t-rt", "fix")
+        self.assertIn(f"tests `{TEST_CMD}`", out)
+        st = wait_phase("t-rt", {"review"})
+        task = store.Task("t-rt")
+        self.assertEqual(task.spec["test_cmd"], TEST_CMD)
+        self.assertEqual((st["round"], st["auto_fixes"]), (2, 1))  # round 1 failed it, round 2 was automatic
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIn("acceptance tests fail", task.round_dir(2).joinpath("prompt.md").read_text())
+        self.assertIn(TEST_CMD, task.round_dir(1).joinpath("prompt.md").read_text())  # the agent is told
+
+    def test_a_tasks_own_test_is_added_after_the_repos_and_a_report_runs_neither(self):
+        self.commands({"test": "test -f README.md"})
+        self.start("t-both", "ok", "--test", TEST_CMD)
+        self.assertEqual(store.Task("t-both").spec["test_cmd"], f"test -f README.md && {TEST_CMD}")
+        wait_phase("t-both", {"review"})
+        grants = store.read_json(context.rules_dir(store.Task("t-both")) / "grants.json", {})
+        self.assertIn("test -f README.md", grants.get("allow") or [])  # granted, as --test is
+        self.start("t-same", "ok", "--test", "test -f README.md")      # one already in --test
+        self.assertEqual(store.Task("t-same").spec["test_cmd"], "test -f README.md")
+        self.start("t-report", "ok", "--report", "--schema", "findings")
+        self.assertFalse(store.Task("t-report").spec.get("test_cmd"))
+
+    def test_the_repos_test_is_kept_whole_beside_the_tasks(self):
+        self.assertEqual(context.with_repo_test("make lint", None), "make lint")
+        self.assertEqual(context.with_repo_test(None, "make test"), "make test")
+        self.assertEqual(context.with_repo_test("  ", "make test"), "make test")
+        self.assertEqual(context.with_repo_test("make lint", "  "), "make lint")
+        self.assertEqual(context.with_repo_test("make lint", "npm test | tee log"), "make lint && npm test | tee log")
+        self.assertEqual(context.with_repo_test("make lint", "make lint && pytest"), "make lint && pytest")
+        self.assertEqual(context.with_repo_test("make", "make test"), "make && make test")  # not its substring
+        # a part a shell would split otherwise: `a; b && c` ran a's failure past, and `x && a || b`
+        # passed with x failing
+        self.assertEqual(context.with_repo_test("ruff check .; mypy .", "pytest"), "(ruff check .; mypy .) && pytest")
+        self.assertEqual(context.with_repo_test("make lint", "pytest || pytest --lf"),
+                         "make lint && (pytest || pytest --lf)")
+        self.assertEqual(context.with_repo_test("npm ci\nnpm run lint", "npm test"), "(npm ci\nnpm run lint) && npm test")
+
+    def test_the_repos_skills_are_handed_to_every_task_there_and_a_missing_one_is_named(self):
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "house-style", "house-style", "Use when writing this repo's code.")
+        self.commands({"skills": ["house-style", "gone-skill"]})
+        out = self.start("t-sk", "ok")
+        self.assertIn('note: commands.json "repos" skills gone-skill: not in the library', out)
+        task = store.Task("t-sk")
+        self.assertEqual(task.status["skills"], ["house-style"])
+        wait_phase("t-sk", {"review"})
+        self.assertIn(str(lib / "house-style"), json.loads(
+            (context.rules_dir(task) / "opencode.json").read_text())["skills"])
+
+    def test_a_repos_test_or_skills_of_the_wrong_shape_is_refused(self):
+        for entry, said in (({"test": ["make", "lint"]}, '"test" is a command'), ({"test": " "}, '"test" is a command'),
+                            ({"skills": "house-style"}, '"skills" is a list of the skill library'),
+                            ({"skills": ["House Style"]}, '"skills" is a list of the skill library')):
+            self.commands(entry)
+            self.assertIn(said, self.refused("t-bad"))
+
+
+class AgentSetup(Base):
+    """What wb's agents get (#1295, P1): context.agent_setup, wb doctor's lines, fixed_prompt."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        os.environ["HOME"] = str(self.home)
+        for v in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG",
+                  "OPENCODE_CONFIG_CONTENT"):
+            os.environ.pop(v, None)
+        self.oc = self.home / ".config" / "opencode"
+        (self.oc / "plugins").mkdir(parents=True)
+
+    def config(self, **keys) -> None:
+        (self.oc / "opencode.json").write_text(json.dumps({**OPENCODE_CONFIG, **keys}))
+        os.environ["WB_OPENCODE_CONFIG"] = str(self.oc / "opencode.json")
+
+    def by(self, task=None) -> dict:
+        return {it["name"]: it for it in context.agent_setup(task)}
+
+    def test_each_source_is_listed_with_its_state_and_bytes(self):
+        (self.oc / "AGENTS.md").write_text("x" * 400)
+        write_skill(self.oc / "skills" / "oc-skill", "oc-skill", "Use when OC.")
+        write_skill(self.home / ".claude" / "skills" / "mine", "mine", "Claude's own.")
+        write_skill(self.home / ".agents" / "skills" / "cross", "cross", "Every tool's.")
+        (self.home / ".claude" / "CLAUDE.md").write_text("Claude's.\n")
+        (self.oc / "plugins" / "lint.js").write_text(
+            "export default { id: 'lint', async setup(ctx) { await ctx.tool.transform(e => "
+            "e.add({ name: 'lintcheck', description: 'd', input: {}, execute: async () => ({}) })) } }\n")
+        own = Path(self.tmp.name) / "own-opencode.json"
+        own.write_text("{}")
+        os.environ["OPENCODE_CONFIG"] = str(own)
+        self.config(instructions=["https://example.com/rules.md"], formatter={"prettier": {}},
+                    references={"docs": {"path": "~/.docs", "description": "the docs"}, "bare": "~/.bare"},
+                    mcp={"servers": {"github": {"type": "remote", "url": "https://x"}}})
+        got = self.by()
+        state = lambda n: (got[n]["state"], got[n]["prompt"])  # noqa: E731
+        self.assertEqual(state("~/.config/opencode/AGENTS.md"), ("reaches", True))
+        self.assertEqual(got["~/.config/opencode/AGENTS.md"]["bytes"], 400)
+        self.assertEqual(state("skill oc-skill"), ("reaches", True))
+        self.assertEqual(got["skill oc-skill"]["bytes"], context.SKILL_TAGS + 2 * len("oc-skill") + len("Use when OC."))
+        self.assertEqual((state("skill mine"), state("skill cross")), (("denied", False), ("denied", False)))
+        self.assertEqual(state("~/.claude/CLAUDE.md"), ("dropped", False))
+        self.assertEqual((got["plugin lint.js"]["state"], got["plugin lint.js"]["tools"]), ("reaches", ["lintcheck"]))
+        self.assertEqual((state("https://example.com/rules.md"), got["https://example.com/rules.md"]["bytes"]),
+                         (("reaches", True), None))       # fetched by OpenCode: no size until then
+        self.assertEqual((state("reference docs"), state("reference bare")), (("reaches", True), ("dropped", False)))
+        self.assertEqual(state("formatter (prettier)"), ("reaches", False))
+        self.assertEqual(state("MCP server github"), ("denied", False))
+        self.assertEqual(got[f"{own} (OPENCODE_CONFIG)"]["state"], "dropped")
+        self.assertEqual(state("the handbook"), ("reaches", True))
+        self.assertTrue(all(it["state"] in context.SETUP_STATES for it in got.values()))
+        lines = cli.setup_lines()
+        self.assertTrue(lines[0].startswith("agents get the handbook "), lines)
+        self.assertIn("skill oc-skill", lines[0])
+        self.assertIn("plugin lint.js (tools lintcheck)", lines[0])
+        self.assertEqual(lines[1], "kept from agents: 2 skills denied by name (Claude's, ~/.agents', "
+                                   f"`workbench`), ~/.claude/CLAUDE.md, {own} (OPENCODE_CONFIG), "
+                                   "reference bare, MCP server github")
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        self.assertIn("--  agents get the handbook", buf.getvalue())
+
+    def test_a_global_skill_or_agents_md_counts_in_the_fixed_prompt(self):
+        # #1295 P1: a 32K window was judged without what the user's global OpenCode setup adds
+        self.start("t-before", "ok")
+        before = dict(context.fixed_prompt(store.Task("t-before"))[1])
+        (self.oc / "AGENTS.md").write_text("y" * 4000)
+        write_skill(self.oc / "skills" / "big", "big", "Use when " + "z" * 1000)
+        self.start("t-after", "ok")
+        tokens, parts = context.fixed_prompt(store.Task("t-after"))
+        self.assertEqual(dict(parts)["~/.config/opencode/AGENTS.md"], 1000)
+        self.assertIn("skill big", dict(parts))
+        self.assertNotIn("~/.config/opencode/AGENTS.md", before)
+        self.assertEqual(tokens, sum(n for _, n in parts))
+
+    def test_a_handed_skill_reaches_and_the_library_is_one_line(self):
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "handed", "handed", "Use when H.")
+        write_skill(lib / "other", "other", "Use when O.")
+        self.assertEqual(self.by()["the skill library (2)"]["state"], "dropped")
+        self.start("t-h", "ok", "--skill", "handed")
+        got = self.by(store.Task("t-h"))
+        self.assertEqual(got["skill handed"]["state"], "reaches")
+        self.assertNotIn("skill other", got)
+
+
 class AutoFix(Base):
     """What a failing test run sends back to the agent, and what it leaves to Claude."""
 
@@ -6042,27 +6205,30 @@ class AutoFix(Base):
         # #779 (the second 2026-11-21 audit): every timeout skipped auto-fix and said to raise
         # --test-timeout, even when the base check had run the whole suite in a second: the
         # change's infinite loop cost a full-length run and a wake auto-fix could have handled
-        self.start("t-hang", "ok", "--auto-fix", "1", "--test-timeout", "4", "--test",
-                   "if grep -qx 42 answer.txt 2>/dev/null; then sleep 30; fi")
-        st = wait_phase("t-hang", {"review", "stuck", "failed"}, timeout=90)
+        # The limit leaves the base check room on a loaded CI runner: at 4 s, a base check of a
+        # grep that took 1.0 s there (past HANG_SHARE of it) read as slow, failing this on two
+        # branches (2026-11-26, #1454 and #1461)
+        self.start("t-hang", "ok", "--auto-fix", "1", "--test-timeout", "12", "--test",
+                   "if grep -qx 42 answer.txt 2>/dev/null; then sleep 60; fi")
+        st = wait_phase("t-hang", {"review", "stuck", "failed"}, timeout=120)
         self.assertEqual((st["phase"], st["round"], st["auto_fixes"]), ("review", 2, 1))
         base = st["base_check"]
         self.assertTrue(base["ok"])
-        self.assertLess(base["secs"], 1)
+        self.assertLessEqual(base["secs"], runner.HANG_SHARE * 12)
         prompt = store.Task("t-hang").round_dir(2).joinpath("prompt.md").read_text()
-        self.assertTrue(prompt.startswith("The acceptance tests fail. They now run past 4s, where "
+        self.assertTrue(prompt.startswith("The acceptance tests fail. They now run past 12s, where "
                                           f"they finished in {base['secs']:g}s on the base: look "
                                           "for a loop that never ends"), prompt[:300])
         self.assertIn("the bug is in this change", prompt)
         # a base check that failed, or another command than the one checked, says nothing of speed
         task = store.Task("t-hang")
-        self.assertEqual(runner.hang(task, 4), {"base": base["secs"], "limit": 4})
-        task.set_status(base_check={**base, "secs": 2.0})          # half the limit: maybe slow
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertEqual(runner.hang(task, 12), {"base": base["secs"], "limit": 12})
+        task.set_status(base_check={**base, "secs": 6.0})          # half the limit: maybe slow
+        self.assertIsNone(runner.hang(task, 12))
         task.set_status(base_check={**base, "ok": False, "exit": 1})
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertIsNone(runner.hang(task, 12))
         task.set_status(base_check={**base, "cmd": "make check"})
-        self.assertIsNone(runner.hang(task, 4))
+        self.assertIsNone(runner.hang(task, 12))
 
     @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_tests_the_lane_refused_a_device_are_not_sent_back_as_the_agents_bug(self):
@@ -9782,6 +9948,33 @@ class Watch(Base):
                 run_wb("watch", "t-handed", "--json")
         self.assertEqual(sorted(exported), ["ses_new"] * 3 + ["ses_old1", "ses_old2"])
 
+    def test_export_gives_each_sessions_messages_earlier_first_and_never_the_agents_own_info(self):
+        # #1331: the OpenCode plugin's child sessions take only messages from the export, as its
+        # info is the agent's database's (the host-shape decision's critic 2); an earlier session
+        # is exported once, and one whose export failed is named, for the plugin's next look
+        from workbench import transcript
+        t = store.Task("t-kids")
+        store.write_json(t.dir / "task.json", {"name": "t-kids", "created_at": store.now()})
+        t.set_status(phase="review", round=2, session="ses_new", sessions=["ses_old", "ses_busy"])
+        exported = []
+
+        def fake(sid, strict=False, task=None):
+            exported.append(sid)
+            if sid == "ses_busy":
+                return {}
+            return {"info": {"id": sid, "location": {"directory": str(t.worktree)}},
+                    "messages": [{"id": f"msg_{sid}", "type": "user", "text": "x", "time": {"created": 1}}]}
+        with mock.patch.object(transcript, "export", fake):
+            got = [json.loads(run_wb("watch", "t-kids", "--export")) for _ in range(2)]
+        self.assertEqual(got[0], got[1])
+        self.assertEqual(got[0]["task"], "t-kids")
+        self.assertEqual([(s["session"], s["current"]) for s in got[0]["sessions"]],
+                         [("ses_old", False), ("ses_new", True)])
+        self.assertEqual(got[0]["sessions"][0]["messages"][0]["id"], "msg_ses_old")
+        self.assertEqual(got[0]["missing"], ["ses_busy"])             # the plugin asks again
+        self.assertNotIn("info", json.dumps(got[0]))
+        self.assertEqual(sorted(exported), ["ses_busy", "ses_busy", "ses_new", "ses_new", "ses_old"])
+
     def test_an_agent_switch_in_the_export_is_no_message_to_any_reader(self):
         # #1290 (2026-11-24, OpenCode 2.3.2): every round's `--agent wb-code` puts an
         # `agent-switched` message ahead of its prompt, the session's first and one per later
@@ -11849,6 +12042,111 @@ class RealOpenCode(Base):
         for unseen in ("CANARY-SPAN", "CANARY-FENCED", "CANARY-CREDENTIAL", "CANARY-OUTSIDE",
                        "CANARY-CLAUDE-GLOBAL", "CANARY-CLAUDE-IMPORT", "CANARY-CLAUDE-RULE"):
             self.assertNotIn(unseen, text)
+
+    @home_outside_the_lane
+    def test_what_agent_setup_says_reaches_is_what_the_model_receives(self):
+        # #1295 P1 (2026-11-26): what a customizer's global OpenCode setup added (its AGENTS.md,
+        # instructions, skills, a plugin's tools) reached every agent unseen and uncounted. The
+        # inventory lists each source; every one it says reaches is in the request, nothing in
+        # the request is missing from it, and fixed_prompt is the request's size within 10%
+        from workbench import runner
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-setup-test-"))  # outside a temp root
+        self.addCleanup(shutil.rmtree, home, True)
+        os.environ["HOME"] = str(home)
+        for v in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+                  "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"):
+            os.environ.pop(v, None)
+        oc = home / ".config" / "opencode"
+        (oc / "plugins").mkdir(parents=True)
+        (oc / "AGENTS.md").write_text("CANARY-OC-AGENTS: OpenCode's global instructions.\n")
+        write_skill(oc / "skills" / "oc-skill", "oc-skill", "Use when CANARY-OC-SKILL.")
+        write_skill(home / ".claude" / "skills" / "claude-skill", "claude-skill", "Use when CANARY-CLAUDE-SKILL.")
+        write_skill(home / ".agents" / "skills" / "agents-skill", "agents-skill", "Use when CANARY-AGENTS-SKILL.")
+        write_skill(home / "more-skills" / "listed", "listed", "Use when CANARY-LISTED-SKILL.")
+        write_skill(home / ".team-skills" / "dotted", "dotted", "Use when CANARY-DOTTED-SKILL.")
+        (home / "notes").mkdir()   # outside the home's dotfiles: the lane doesn't read it
+        (home / "notes" / "extra.md").write_text("CANARY-OC-INSTRUCTION: a global instruction file.\n")
+        (home / ".notes").mkdir()
+        (home / ".notes" / "dot.md").write_text("CANARY-DOT-INSTRUCTION: one the lane reads.\n")
+        (home / "refs").mkdir()
+        (oc / "plugins" / "canary.js").write_text(  # OpenCode's V2 plugin shape: a default export
+            "export default { id: 'canary', async setup(ctx) {\n"
+            "  await ctx.tool.transform((editor) => {\n"
+            "    editor.add({ name: 'canarytool', description: 'CANARY-PLUGIN-TOOL says ok',\n"
+            "                 input: { type: 'object', properties: {} }, execute: async () => ({ content: 'ok' }) })\n"
+            "  })\n} }\n")
+        ver = subprocess.run(["opencode", "--version"], capture_output=True, text=True).stdout
+        new = tuple(int(n) for n in re.findall(r"\d+", ver)[:2]) >= (2, 4)  # references: 2.4's
+        config = {**OPENCODE_CONFIG, "instructions": [str(home / "notes" / "extra.md"), "~/.notes/*.md"],
+                  "skills": [str(home / "more-skills"), "~/.team-skills"],
+                  **({"references": {"docs": {"path": str(home / "refs"), "description": "CANARY-REFERENCE"},
+                                     "bare": str(home / "refs")}} if new else {})}
+        (oc / "opencode.json").write_text(json.dumps(config))
+        os.environ["WB_OPENCODE_CONFIG"] = str(oc / "opencode.json")  # wb reads what OpenCode reads
+        Path(os.environ["WB_AGENTS_MD"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(os.environ["WB_AGENTS_MD"]).write_text("CANARY-WB-AGENTS: the user's file for agents.\n")
+        (self.repo / "CLAUDE.md").write_text("CANARY-CLAUDE-MD: follow me\n")
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "rules"], check=True)
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "handed", "handed", "Use when CANARY-HANDED.")
+        write_skill(lib / "kept", "kept", "Use when CANARY-KEPT.")
+        self.start("t-setup", "ok", "--skill", "handed")
+        wait_phase("t-setup", {"review"})
+        task = store.Task("t-setup")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "setup-requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out)])
+        self.addCleanup(server.kill)
+        env = runner.opencode_env(task)
+        layer_path = Path(env["OPENCODE_CONFIG"])
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        items = context.agent_setup(task)
+        tokens, _ = context.fixed_prompt(task)
+        time.sleep(0.5)
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        cmd = lane.wrap(context.writable(task), ["opencode", "run", "--standalone", "-m", "cap/cap",
+                                                 "--format", "json", "--", prompt],
+                        context.readable(task), context.unix_paths(task))
+        subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        agent = max(reqs, key=lambda r: len(r.get("tools", [])))  # not the title request
+        text = json.dumps(agent["messages"])
+        tools = {t["function"]["name"] for t in agent["tools"]}
+        reach = {it["name"] for it in items if it["state"] == "reaches"}
+        canaries = {"CANARY-OC-AGENTS": "~/.config/opencode/AGENTS.md",
+                    "CANARY-OC-INSTRUCTION": "~/notes/extra.md", "CANARY-OC-SKILL": "skill oc-skill",
+                    "CANARY-LISTED-SKILL": "skill listed", "CANARY-WB-AGENTS": "~/.config/workbench/AGENTS.md",
+                    "CANARY-CLAUDE-MD": "CLAUDE.md", "CANARY-HANDED": "skill handed",
+                    "CANARY-CLAUDE-SKILL": "skill claude-skill", "CANARY-AGENTS-SKILL": "skill agents-skill",
+                    "CANARY-KEPT": "skill kept", "CANARY-DOT-INSTRUCTION": "~/.notes/dot.md",
+                    "CANARY-DOTTED-SKILL": "skill dotted", "CANARY-REFERENCE": "reference docs"}
+        for canary, name in canaries.items():  # in the request exactly when listed as reaching
+            self.assertEqual(canary in text, name in reach, (canary, name))
+        self.assertEqual(new, "reference docs" in reach)
+        unread = {"~/notes/extra.md": "dropped", "skill listed": "dropped"} if lane.held() else {}
+        self.assertEqual({it["name"]: it["state"] for it in items if it["state"] != "reaches"},
+                         {**unread, "skill claude-skill": "denied", "skill agents-skill": "denied",
+                          **({"reference bare": "dropped"} if new else {})})  # undescribed
+        plugins = [it for it in items if it["kind"] == "plugins" and it["state"] == "reaches"]
+        self.assertEqual([it.get("tools") for it in plugins], [["canarytool"]])
+        self.assertIn("canarytool", tools)
+        for it in items:  # each file it says reaches, in the request
+            if it["state"] == "reaches" and it["prompt"] and it["kind"] == "instructions" and it["path"]:
+                first = Path(it["path"]).read_text().strip().splitlines()[0]
+                self.assertIn(json.dumps(first)[1:-1], text, it["name"])
+        sent = (sum(len(m["content"]) if isinstance(m.get("content"), str) else len(json.dumps(m.get("content")))
+                    for m in agent["messages"]) + len(json.dumps(agent["tools"])))
+        self.assertLess(abs(tokens - sent / context.CHARS_PER_TOKEN), 0.1 * sent / context.CHARS_PER_TOKEN,
+                        (tokens, sent // context.CHARS_PER_TOKEN))
 
     def test_opencode_without_the_lane_reads_no_claude_md_of_the_users(self):
         # #1061 (2026-11-23): OpenCode 2.3 reads ~/.claude/CLAUDE.md itself as a global
@@ -24297,11 +24595,12 @@ class DynamicWorkflows(Base):
     def test_a_fan_out_passes_one_group(self):
         # #1048: tasks started with one --group carry the group the pane draws under one header;
         # since #1278 a run's driver passes it (runs._start: --group <run>), and the mod's rule
-        # sends a fan-out to wb run, its wake a background wb wait (the review of #1278)
+        # sends a fan-out to wb run, whose notices wake Claude as a task's (the mod's deliverRuns,
+        # #1278's S9; a background wb wait before it, the review of #1278)
         mod = (Path(__file__).parent.parent / "mod/hooks/register.tsx").read_text()
         rule = " ".join(mod.split("const WORKFLOWS_RULE = ")[1].split("\nconst ")[0].split())
-        self.assertIn("start it once with `wb run start`", rule)
-        self.assertIn("`wb wait <run>` in the background", rule)
+        self.assertIn("start it once with `wb run start`, then end your turn", rule)
+        self.assertIn("wake you as a task\\'s do", rule)
         self.assertIn('"--group", run.name', (Path(__file__).parent.parent / "workbench/runs.py").read_text())
         with mock.patch.object(cli, "spawn_runner", lambda task: 0):
             for name in ("auth-logic", "auth-tests", "auth-docs"):
@@ -24868,7 +25167,7 @@ class Setup(Base):
                 mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
             self.assertEqual([p for p, _ in ocplugin.shared_files(clone)],
                              ["mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/flows.ts", "mod/hooks/kernel.js",
-                              "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/splash.ts",
+                              "mod/hooks/keywords.ts", "mod/hooks/modeline.ts", "mod/hooks/shell.ts", "mod/hooks/splash.ts",
                               "mod/hooks/story.ts", "mod/hooks/tasks.ts", "mod/hooks/waiting.ts"])
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
@@ -35256,6 +35555,126 @@ class RealOpenCodePlugin(Base):
             if want in out or time.monotonic() > end:
                 return out
             time.sleep(0.5)
+
+    # the TUI part's import (opencode-plugin/children-tui.ts `Children`) against a real server, with
+    # a client of fetch calls shaped as OpenCode's generated one (session.get, session.remove,
+    # experimental.session.import): data in through the environment
+    CHILDREN_SYNC = """
+const auth = 'Basic ' + btoa('opencode:' + process.env.OPENCODE_PASSWORD)
+const call = async (method, path, body) => {
+  const r = await fetch(process.env.URL + path, { method, body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { authorization: auth, 'content-type': 'application/json' } })
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text())
+  return r.status === 204 ? undefined : (await r.json()).data
+}
+const { Children } = await import(process.env.MOD)
+const client = { session: { get: i => call('GET', '/api/session/' + i.sessionID),
+  remove: i => call('DELETE', '/api/session/' + i.sessionID) } }
+const failed = []
+const importer = input => call('POST', '/api/experimental/session/import', input).catch(e => { failed.push(String(e)); throw e })
+const c = new Children(client, importer, async () => JSON.parse(process.env.SESSIONS))
+await c.sync([{ name: 't-kid', phase: 'review', updatedAt: 1, session: process.env.LEAD, driver: 'opencode' }])
+console.log(JSON.stringify({ failed }))
+"""
+
+    def test_a_task_session_is_imported_as_its_leads_child_at_the_leads_location_by_opencodes_import(self):
+        # #1331 (the host-shape decision on #1296): an agent's session is a child of the session
+        # that started its task, in OpenCode's own picker, at the lead's location and never the
+        # worktree (critic 1), its info the membrane's (critic 2), every tool denied. The route is
+        # experimental: this fails by name when OpenCode drops or changes it, and the plugin falls
+        # back to the panel's tail
+        url = self.serve()
+        end = time.monotonic() + 60
+        while True:                               # once the server answers
+            out = self.ask(url, "api", "POST", "/api/session", "-d",
+                           json.dumps({"location": {"directory": str(self.project)}}))
+            if out.startswith("{") or time.monotonic() > end:
+                break
+            time.sleep(0.5)
+        lead = json.loads(out)["data"]
+        worktree = self.root / "state" / "tasks" / "t-kid" / "worktree"
+        at = int(time.time() * 1000)
+        msg = lambda n, kind, **kw: {"id": f"msg_wb1331{n:020d}", "type": kind, "time": {"created": at + n}, **kw}  # noqa: E731
+        sessions = {"task": "t-kid", "sessions": [{"session": "ses_wb1331agent000000000001", "current": True, "messages": [
+            msg(1, "user", text="Write the answer."),
+            msg(2, "location-switched", location={"directory": str(worktree)}),
+            msg(3, "synthetic", text="a note")]}]}
+
+        def sync():
+            r = subprocess.run([shutil.which("opencode") or "opencode", "-e", self.CHILDREN_SYNC], capture_output=True,
+                               text=True, timeout=60, env={
+                                   **os.environ, "BUN_BE_BUN": "1", "URL": url, "LEAD": lead["id"],
+                                   "MOD": str(ROOT / "opencode-plugin" / "children-tui.ts"),
+                                   "SESSIONS": json.dumps(sessions)})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout.splitlines()[-1]), {"failed": []})
+        sync()
+        child = json.loads(self.ask(url, "api", "GET", "/api/session/ses_wb1331agent000000000001"))["data"]
+        self.assertEqual(child["parentID"], lead["id"])
+        self.assertEqual(child["location"], {"directory": str(self.project)})
+        self.assertEqual(child["permissions"], [{"action": "*", "resource": "*", "effect": "deny"}])
+        self.assertEqual(child["metadata"]["workbench"]["messages"], 2)
+        self.assertNotIn(str(worktree), json.dumps(child))
+        kids = json.loads(self.ask(url, "api", "GET", f"/api/session?parentID={lead['id']}"))["data"]
+        self.assertEqual([k["id"] for k in kids], [child["id"]])
+        shown = lambda: sorted(m["id"][-2:] for m in json.loads(self.ask(  # noqa: E731
+            url, "api", "GET", f"/api/session/{child['id']}/message"))["data"])
+        self.assertEqual(shown(), ["01", "03"])  # the user's and the synthetic, never the switch
+        sync()                                    # the same messages again: as it was, no second copy
+        self.assertEqual(shown(), ["01", "03"])
+        # a round of feedback in the same session: its copy is replaced by the longer one
+        sessions["sessions"][0]["messages"].append(msg(4, "user", text="Now the tests."))
+        sync()
+        self.assertEqual(shown(), ["01", "03", "04"])
+
+    def test_wb_accept_tells_an_opencode_drivers_write_in_the_worktree_from_the_build_it_ran_there(self):
+        # #1331's live acceptance: a real OpenCode driver's calls in a task's worktree are kept by
+        # the plugin (calls.ts, execute.before/after) as claude-calls/ rows, so `wb accept` tells
+        # what its `write` put there (its hand: committed with --include) from what a build its
+        # `shell` ran wrote (left out), as the mod's rows do for Claude. Without the rows both
+        # are the hand's; with the shell's alone, the write a moment after it reads as the build's
+        from workbench import chat, ocplugin
+        chat.set_on(False)  # the prompt reaches the chat part too (see the skill test below)
+        os.environ["HOME"] = str(self.root / "home")
+        (self.repo / ".gitignore").write_text("lib/\n")
+        (self.repo / "make.sh").write_text("mkdir -p lib && echo built > lib/built.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "build"], check=True)
+        self.start("t-hand", "ok", "--test", TEST_CMD)
+        wait_phase("t-hand", {"review"})
+        t = store.Task("t-hand")
+        target = t.worktree / "lib" / "a.py"
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = self.root / "requests.jsonl"
+        calls = [{"name": "shell", "arguments": {"command": "sh make.sh", "workdir": str(t.worktree)}},
+                 {"name": "write", "arguments": {"path": str(target), "content": "x = 1\n"}}]
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out),
+                                   json.dumps(calls)])
+        self.addCleanup(lambda: (server.kill(), server.wait()))
+        self.conf.write_text(json.dumps({
+            "plugins": [{"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb")}}],
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 131072, "output": 1024}}}}}}))
+        url = self.serve()
+        self.listed(url, ocplugin.PLUGIN_ID)
+        self.ask(url, "run", "-m", "cap/cap", "--auto", "--format", "json", "fix it by hand")
+        self.assertEqual(target.read_text(), "x = 1\n")
+        self.assertTrue((t.worktree / "lib" / "built.txt").is_file())
+        rows = [json.loads(f.read_text()) for f in sorted((context.rules_dir(t) / runner.CLAUDE_CALLS).glob("*.json"))]
+        self.assertEqual(sorted(r["tool"] for r in rows), ["shell", "write"], rows)
+        self.assertTrue(all(isinstance(r["end"], float) and not r.get("denied") for r in rows), rows)  # over
+        self.assertEqual(runner.hand_wrote(t), ["lib/a.py"])
+        self.assertEqual(runner.hand_left(t), ["lib/built.txt"])
+        said = run_wb("accept", "t-hand", "-m", "feat: by hand", "--merge", "--include")
+        self.assertIn("accepted t-hand", said)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/a.py", tree)
+        self.assertNotIn("lib/built.txt", tree)
 
     def test_the_plugin_loads_in_a_real_opencode_and_its_rpc_names_the_wb_its_options_give(self):
         from workbench import ocplugin

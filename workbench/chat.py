@@ -1000,7 +1000,8 @@ def snapshot() -> dict:
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
-            "tasks": open_tasks(), "dictate": dictate_ready(), "settings": settings_rev(), "now": store.now()}
+            "tasks": open_tasks(), "runs": open_runs(), "dictate": dictate_ready(), "settings": settings_rev(),
+            "now": store.now()}
 
 
 def open_tasks() -> list[dict]:
@@ -1017,6 +1018,22 @@ def open_tasks() -> list[dict]:
         out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
                     "via": sp.get("via") or "gpu", "provider_name": sp.get("provider_name") or ""})
     return out
+
+
+RUN_FIELDS = ("run", "flow", "phase", "why", "stages", "spent_usd", "budget_usd", "budget_min", "gpu_min")
+
+
+def open_runs() -> list[dict]:
+    """The runs not closed, for the page's runs strip (#1278's S12): runs.snapshot's rows, by their
+    start, without where each ran (`session`, `cwd`) or whether its driver lives (a `ps` each on
+    macOS, on every change the state is built for): `{run, flow, phase, why, stages: {id: {done,
+    running, null, filtered, not_run}}, spent_usd, budget_usd, budget_min, gpu_min}`. From the run
+    files alone, as wb top's tick reads them."""
+    from . import runs
+    try:
+        return [{k: r.get(k) for k in RUN_FIELDS} for r in runs.snapshot(live=False)]
+    except (OSError, ValueError):
+        return []
 
 
 # ---- the task sheet (#1201): what `wb status`, `wb report`, `wb diff` and `wb log` show of an
@@ -2588,7 +2605,7 @@ def settings_rev() -> dict | None:
 
 
 def admin_set(key, value) -> tuple[int, dict]:
-    """POST /api/settings: (status, body). 200 {ok, said, rows, changes, help?}; 400 for no such row
+    """POST /api/settings: (status, body). 200 {ok, said, rows, changes, help?, detail?}; 400 for no such row
     or a value it doesn't take (nothing runs); 409 {ok: false, error, rows} when wb refused. A
     change that went through is {ts, key, label, from, to, said, help?, by: "web"} in CHANGES, which
     the row's wb child logs (cli.main, settings.logged: one writer for every caller, #1355)."""
@@ -2607,7 +2624,8 @@ def admin_set(key, value) -> tuple[int, dict]:
     if not done["ok"]:
         return 409, {"ok": False, "error": done["said"], "rows": rows}
     helps = {"help": done["help"]} if done.get("help") else {}
-    return 200, {"ok": True, "said": done["said"], "rows": rows, "changes": admin.changes(), **helps}
+    detail = {"detail": done["detail"]} if done.get("detail") else {}  # a run's Summary (#1278's S12)
+    return 200, {"ok": True, "said": done["said"], "rows": rows, "changes": admin.changes(), **helps, **detail}
 
 
 class TopFeed:

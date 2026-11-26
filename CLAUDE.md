@@ -65,7 +65,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `cli.py`: `wb` and `PROTOCOL` (the agent's rules; `WRITING_PROTOCOL`, the writing role's, same fold). `runner.py`: the detached per-task driver,
   and OpenCode's environment (`opencode_env`: the task's home, the shell shim).
   `events.py`: OpenCode's events, the stuck detector. `ask_mcp.py`: `ask_reviewer`, both sides.
-- `context.py`: what the agent knows and may do (instructions: the user's are `USER_AGENTS_MD`,
+- `context.py`: what the agent knows and may do (`agent_setup`: every source that reaches it, #1295; instructions: the user's are `USER_AGENTS_MD`,
   `~/.config/workbench/AGENTS.md`, never Claude's `~/.claude` files, #1061; denies, the shell allowlist, the
   lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`;
   `API_HIDDEN`, the token files an API task's lane hides too when they hold a credential; grants). `lane.py`: the Landlock lane, Seatbelt's on macOS. `gitguard.py`: the agent's read-only `git`.

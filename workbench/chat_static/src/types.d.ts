@@ -19,6 +19,7 @@ type Msg = import('../../../mod/types/wire.js').ChatMsg
 interface Outgoing { cid: string; text: string; ts: number; error?: string; about?: About; files?: WbFile[] }
 type Listener = import('../../../mod/types/wire.js').Listener
 type OpenTask = import('../../../mod/types/wire.js').OpenTask
+type OpenRun = import('../../../mod/types/wire.js').OpenRun
 type ApiCost = import('../../../mod/types/wire.js').ApiCost
 type ApiWeek = import('../../../mod/types/wire.js').ApiWeek
 type Savings = import('../../../mod/types/wire.js').Savings

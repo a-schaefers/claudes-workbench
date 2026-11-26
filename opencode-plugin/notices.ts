@@ -21,7 +21,7 @@ import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } fr
 import { join, resolve } from 'node:path'
 import type { Registration, RpcDefinition, RpcHandlers, ServerContext } from './host.d.ts'
 import { findWb, wbEnv, wbHome, type Options } from './wb.ts'
-import { ACTIVE, NEEDS, NO_ANSWER, WAKE_OPENING, noticePlan, noticesDue, owns, rewakePlan } from '../mod/hooks/core.ts'
+import { ACTIVE, NEEDS, NO_ANSWER, WAKE_OPENING, noticePlan, noticesDue, owns, rewakePlan, runNoticePlan, runNoticesDue } from '../mod/hooks/core.ts'
 import type { NoticeRow, StatusFile, TaskFile } from '../mod/types/wire.d.ts'
 import { Jobs } from './jobs.ts'
 
@@ -193,6 +193,18 @@ export const parseLines = (text: string): NoticeRow[] => text.split('\n').flatMa
     return r && typeof r === 'object' && typeof r.task === 'string' && typeof r.ts === 'number' ? [r as NoticeRow] : []
   } catch { return [] }
 })
+// a run's own notices (runs.Run.notify, #1278's S9): `run`, no `task`
+export const parseRunLines = (text: string): NoticeRow[] => text.split('\n').flatMap(line => {
+  try {
+    const r = JSON.parse(line)
+    return r && typeof r === 'object' && !('task' in r) && typeof r.run === 'string' && typeof r.ts === 'number'
+      ? [r as NoticeRow] : []
+  } catch { return [] }
+})
+export const RUN_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/ // runs.RUN_RE
+// a run notice's toast, by its kind (the mod's RUN_HEADLINE)
+export const RUN_HEADLINE: Record<string, string> = { run_checkpoint: 'is at a checkpoint', run_done: 'is done',
+  run_paused: 'is paused', run_stopped: 'was stopped', run_failed: 'has failed' }
 
 export class NoticeLane {
   sessions: NoticeSessions | undefined
@@ -254,12 +266,12 @@ export class NoticeLane {
   }
 
   // `wb ack <task> <ts>`: true taken, false another took it (exit 3), null wb couldn't say
-  async take(name: string, ts: number): Promise<boolean | null> {
-    const r = await this.deps.run(['ack', name, String(ts)])
+  async take(name: string, ts: number, run = false): Promise<boolean | null> {
+    const r = await this.deps.run(['ack', name, String(ts), ...(run ? ['--run'] : [])])
     return r.code === 0 ? true : r.code === 3 ? false : null
   }
-  async release(name: string, prev: number, ts: number) {
-    await this.deps.run(['ack', name, String(prev), '--if', String(ts)])
+  async release(name: string, prev: number, ts: number, run = false) {
+    await this.deps.run(['ack', name, String(prev), '--if', String(ts), ...(run ? ['--run'] : [])])
   }
 
   // into the session as OpenCode's own synthetic message: whether it was admitted
@@ -400,7 +412,55 @@ export class NoticeLane {
         }
       }
     }
+    if (await this.deliverRuns(now, text)) held = true
     if (!held) this.lastSize = size
+  }
+
+  // A run's own notices (#1278's S9: run_checkpoint, run_done, run_paused, run_stopped, run_failed):
+  // the one wake a run gives, to the session here that ran `wb run start` (run.json `session`,
+  // `session_kind` opencode), once (`wb ack --run`, which `wb wait <run>` shares), while the run is
+  // still in the phase it was raised in (runNoticePlan). Its text is the wake whole; its items'
+  // notices are its driver's (runs/<run>/notify.jsonl), never here. True when one is held.
+  async deliverRuns(now: number, text: string): Promise<boolean> {
+    const rows = parseRunLines(text)
+    if (!rows.length) return false
+    let held = false
+    for (const d of runNoticesDue(rows, this.startedAt, now)) {
+      const name = d.task
+      if (!RUN_NAME.test(name)) continue
+      let acked = this.num(this.path('runs', name, 'acked'))
+      const picks = d.picks.map(i => rows[i]!).filter(Boolean)
+      if (picks.every(r => r.ts <= acked)) continue
+      const spec = json<Row>(this.deps.read(this.path('runs', name, 'run.json')))
+      const sid = await this.ownerOf({ session: spec.session, driver: { tool: spec.session_kind === 'opencode' ? 'opencode' : '' } } as TaskFile)
+      if (!sid) continue // another driver's, another server's or no session's: theirs (or wb wait's)
+      const status = json<Row>(this.deps.read(this.path('runs', name, 'status.json')))
+      for (const row of picks) {
+        const key = `run:${name}:${row.ts}`
+        const kind = String(row.kind ?? '')
+        const plan = runNoticePlan({ phase: String(status.phase ?? ''), raisedIn: String(row.phase ?? ''), ts: Number(row.ts),
+          acked, own: true, wake: this.deps.wake, busy: !!this.busy.get(sid), toasted: this.toasted.has(key) })
+        if (plan.act === 'skip') continue
+        const title = `run ${name} ${RUN_HEADLINE[kind] ?? kind}`
+        if (plan.toast) {
+          this.toasted.add(key)
+          this.toast(key, title, sid, true, kind === 'run_done' ? 'info' : 'warning')
+        }
+        if (plan.act === 'none') continue
+        if (plan.act !== 'wake' && plan.act !== 'ack') { held = true; continue } // mid-turn: sent at its end
+        const took = await this.take(name, row.ts, true)
+        if (took === null) { held = true; continue }
+        const prev = acked
+        acked = row.ts
+        if (!took || plan.act !== 'wake') continue
+        if (!(await this.send(sid, noticeId(`run:${name}`, kind, row.ts), String(row.text ?? ''), 'queue',
+          { run: name, kind, ts: row.ts, title }))) {
+          await this.release(name, prev, row.ts, true)
+          held = true // tried again at the next look
+        }
+      }
+    }
+    return held
   }
 
   asking(name: string, id: string): boolean {

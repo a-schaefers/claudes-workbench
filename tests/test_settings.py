@@ -93,6 +93,31 @@ class Settings(Rows):
         self.assertEqual(by["api-trivial"]["value"], "deepseek/deepseek-flash")
         self.assertEqual(by["role-trivial"]["says"], "Trivial coding runs on this machine's GPU.")
 
+    def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
+        # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
+        home = Path(self.tmp.name) / "home"
+        tw.write_skill(home / ".config" / "opencode" / "skills" / "team", "team", "Use when T.")
+        tw.write_skill(home / ".claude" / "skills" / "mine", "mine", "Claude's.")
+        os.environ["HOME"] = str(home)
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        settings.drop()
+        rows = [r for r in settings.rows() if r["group"] == "setup"]
+        by = {r["key"]: r for r in rows}
+        self.assertEqual({r["kind"] for r in rows}, {"info"})
+        self.assertTrue(by["setup-instructions"]["text"].startswith("Instructions: the handbook "))
+        self.assertIn("team 0.", by["setup-skills"]["text"])
+        self.assertIn("and what Claude hands a task from the skill library (0)", by["setup-skills"]["text"])
+        self.assertEqual(by["setup-kept"]["text"],
+                         "Kept from agents: 1 skill denied by name (Claude's, ~/.agents', `workbench`).")
+        self.assertRegex(by["setup-size"]["text"], r"^About \d+\.\dK tokens, with OpenCode's own")
+        self.assertNotIn("setup-plugins", by)  # none: no row
+        with self.assertRaises(ValueError):
+            settings.apply("setup-skills", "x")
+        (home / ".config" / "opencode" / "skills" / "team" / "SKILL.md").unlink()
+        settings.drop()
+        by = {r["key"]: r for r in settings.rows() if r["group"] == "setup"}
+        self.assertEqual(by["setup-skills"]["text"], "Skills: what Claude hands a task from the skill library (0).")
+
     def test_the_driver_row_reads_claude_code_fixed_without_the_opencode_plugin_and_takes_any_id_with_it(self):
         # #1316: the OpenCode path's standing driver (routes.json `driver`, wb route driver),
         # each session's own /models by default; Claude Code's driver is Claude Code
@@ -247,6 +272,60 @@ class Settings(Rows):
         self.assertEqual((row["value"], row["help"]), ("on", got["help"].replace(
             "; tasks already started keep theirs", "")))
         self.assertNotIn("help", settings.apply("probe", "off"))
+
+
+class RunRows(Rows):
+    """The workflows group (#1278's S12): a row per run not closed, with its Stop and its Summary."""
+
+    def make_run(self, name, phase, **status):
+        from workbench import runs
+        d = runs.run_dir(name)
+        d.mkdir(parents=True)
+        store.write_json(d / "run.json", {"name": name, "flow_name": "audit", "flow": runs.load_flow("audit"),
+                                          "params": {"areas": ["a.py"]}, "created": time.time()})
+        runs.Run(name).set_status(phase=phase, why=status.pop("why", ""), **status)
+
+    def test_each_run_not_closed_has_its_row_with_stop_while_open_and_its_summary(self):
+        self.make_run("night", "running", stages={"find": {"done": 1, "running": 2, "null": 0}}, spent_usd=0.25, budget_usd=2.0)
+        self.make_run("held", "paused", why="paused at the day cap")
+        self.make_run("ended", "review")
+        self.make_run("gone", "closed")
+        by = {r["key"]: r for r in settings.rows()}
+        self.assertNotIn("run-gone", by)
+        night = by["run-night"]
+        self.assertEqual((night["group"], night["kind"], night["label"]), ("workflows", "action", "Run night"))
+        self.assertEqual(night["text"], "flow audit · running (no driver) · find: 1 done, 2 running · $0.25 of $2.00")
+        self.assertEqual([c["value"] for c in night["choices"]], ["stop", "summary"])
+        self.assertTrue(by["run-held"]["text"].endswith(". paused at the day cap"), by["run-held"]["text"])
+        self.assertEqual([c["value"] for c in by["run-ended"]["choices"]], ["summary"])  # at review: nothing to stop
+        self.assertEqual(by["workflows"]["group"], "workflows")                          # deepmode beside them
+        self.assertIn("audit", by["flows"]["text"])
+        log = self.fake_wb()
+        with mock.patch.object(settings, "drop", lambda: None):
+            self.assertTrue(settings.apply("run-night", "stop")["ok"])
+            self.assertTrue(settings.apply("run-night", "summary")["ok"])
+            with self.assertRaises(ValueError):
+                settings.apply("run-ended", "stop")
+        self.assertEqual([json.loads(x) for x in log.read_text().splitlines()],
+                         [["run", "stop", "night"], ["run", "report", "night"]])
+
+    def test_the_web_apps_stop_and_summary_run_wb_and_neither_is_recorded_as_a_change(self):
+        from workbench import chat, runs
+        self.make_run("night", "running")
+        before = next(r for r in settings.rows() if r["key"] == "run-night")
+        got = settings.apply("run-night", "summary")
+        self.assertTrue(got["ok"], got)
+        self.assertTrue(got["detail"].startswith("run night · flow audit · running"), got)
+        self.assertEqual(got["said"], got["detail"].splitlines()[0])
+        got = settings.apply("run-night", "stop")
+        self.assertTrue(got["ok"], got)
+        self.assertNotIn("detail", got)
+        self.assertEqual(runs.Run("night").status["why"], runs.WEB_STOP)       # wb ran as the web's
+        self.assertEqual([r["kind"] for r in store.notices(runs=True)], ["run_stopped"])
+        self.assertIsNone(settings.record(before, "run-night", "stop", got, "web"))
+        self.assertFalse(chat.changes_path().exists())
+        self.assertEqual([c["value"] for c in next(r for r in settings.rows() if r["key"] == "run-night")["choices"]],
+                         ["summary"])
 
 
 class ClaudeSets(Rows):

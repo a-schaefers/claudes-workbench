@@ -12,7 +12,8 @@
 // again with no reload, a draft kept, and a change this page didn't make is toasted on any view.
 (() => {
     'use strict';
-    const GROUPS = [['shared', 'Agents and roles'], ['web', 'Web app'], ['gpu', 'GPU'], ['api', 'API'], ['terminal', 'Terminal'],
+    const GROUPS = [['shared', 'Agents and roles'], ['web', 'Web app'], ['gpu', 'GPU'], ['api', 'API'],
+        ['setup', 'What your agents get'], ['workflows', 'Deep workflows'], ['terminal', 'Terminal'],
         ['experimental', 'Experimental']];
     const SEG_MAX = 4; // a segmented control up to this many choices, a <select> past it
     const OTHER = '\u0000other'; // the select's "Other model…" (never a model id: a NUL)
@@ -31,6 +32,10 @@
     let drawing = false; // a redraw takes the focused input away: its blur sends nothing
     let changes = []; // the newest changes, newest first (GET /api/settings's `changes`)
     let lastWrite = 0; // when this page's last write was answered (ms): its own change isn't news
+    // an action's answer to draw under its row (a run's Summary: its report, #1278's S12), by key;
+    // agent-written results among it, so text alone, never markup
+    const details = new Map();
+    let focusGroup = ''; // a group to bring into view at the next draw (the runs strip's tap)
     // who made a change, as settings-changes.jsonl's `by` says (store.caller_kind, or the web's click)
     const BY = { web: 'the web app', claude: 'Claude', opencode: 'OpenCode', terminal: 'the terminal', agent: 'an agent' };
     const byWord = (by) => BY[by] || by || 'someone';
@@ -98,6 +103,8 @@
                 rows = body.rows;
             if (Array.isArray(body.changes))
                 changes = body.changes;
+            if (r.ok && body.ok && typeof body.detail === 'string')
+                details.set(key, body.detail);
             said = r.ok && body.ok ? body.said || 'Done.' : body.error || body.said || `the server said ${r.status}`;
             if (r.ok && body.ok && body.help)
                 said = `${/[.!?]$/.test(said) ? said : said + '.'} ${helpSaid()}`;
@@ -253,6 +260,9 @@
             line.append(b);
         }
         box.append(line);
+        const detail = details.get(row.key);
+        if (detail)
+            box.append(el('pre', 'small set-detail', detail));
     }
     function drawRow(row) {
         const box = el('div', 'set-row');
@@ -357,6 +367,13 @@
                 catch { }
             }
         }
+        if (focusGroup) {
+            const card = root.querySelector(`.set-card[data-group="${CSS.escape(focusGroup)}"]`);
+            if (card) {
+                focusGroup = '';
+                card.scrollIntoView({ block: 'start' });
+            }
+        }
         if (held) {
             const box = root.querySelector(`.set-row[data-key="${CSS.escape(held.key)}"]`);
             const to = box && ((held.value != null && box.querySelector(`${held.tag}[data-value="${CSS.escape(held.value)}"]`))
@@ -391,6 +408,8 @@
         if (r && !mine)
             WB.toast(`${r.label || r.key} set to ${valueWord(r.to)} by ${byWord(r.by)}`);
     });
+    // the runs strip's tap (app.ts): Settings at the workflows group, where each run's row is
+    document.addEventListener('wb-settings-group', e => { focusGroup = String(e.detail || ''); draw(); });
     WB.view('settings', {
         mount(r) { root = r; },
         show() { showing = true; load(); },

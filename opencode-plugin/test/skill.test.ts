@@ -59,16 +59,16 @@ test("OpenCode's copy has no run_in_background, no $CLAUDE_CODE_SESSION_ID, and 
   expect(offenders(/wb chat reply/)).toEqual([])
 })
 
-test("the patch procedure states OpenCode's facts, never Claude Code's: no `!` prompt, the clone to make, the form only for the send (#1321, findings 7 and 17)", () => {
+test("the patch procedure states OpenCode's facts, never Claude Code's: no `!` prompt, the clone to make, every send upstream in the form (#1321, findings 7 and 17; #1296's row 14)", () => {
   // OpenCode's `!` has no terminal for sudo or gh's login to ask on; its terminal pane does
   expect(offenders(/`! |`!` prefix/)).toEqual([])
   for (const id of ['prompt', 'workbench-patching', 'workbench-models']) expect(OPENCODE[id]?.includes(PANE_OR_TERMINAL)).toBe(true)
   const patching = OPENCODE['workbench-patching'] ?? ''
   // Claude Code's install steps, plugin and dialog: none, but where both are on one machine
-  expect(patching.match(/claude plugin install|restart of Claude|\bdialogs?\b|Once, on a marketplace install|The plugin holds every send/g)).toEqual(null)
-  // OpenCode's install can't keep a patch: wb patch says what makes a clone; the form asks for the send alone
+  expect(patching.match(/claude plugin install|restart of Claude|\bdialogs?\b|Once, on a marketplace install/g)).toEqual(null)
+  // OpenCode's install can't keep a patch: wb patch says what makes a clone; the form asks for every send (upstream.ts)
   const says = ["`/reload-plugins` in Claude Code", "On a machine with Claude Code's install too, it found local changes",
-    '`wb patch` refuses there and prints the two commands that make one', 'The form is only for that send',
+    '`wb patch` refuses there and prints the two commands that make one', 'The plugin holds\nevery send to workbench upstream', 'GitHub MCP tool yourself (those ask in\nthe same form',
     'the form waits in the terminal for their answer', '**A GitHub MCP server is optional**']
   expect(says.filter((s) => !patching.includes(s))).toEqual([])
 })

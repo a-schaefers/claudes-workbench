@@ -74,6 +74,9 @@ export type StatusFile = {
 export type NoticeRow = {
   /** seconds, after every notice before it and the task's acknowledgement (#473) */
   ts: number; task: string
+  /** a run's own notice (runs.Run.notify, #1278): its run, no `task`, `kind` run_checkpoint,
+   * run_done, run_paused, run_stopped or run_failed, and `phase` the run's while it is still true */
+  run?: string; phase?: string
   /** review, stuck, failed, question, checkin, … */
   kind: string; text?: string
   /** the tasks a batch notice is for (one restart or update stopped them all) */
@@ -128,6 +131,12 @@ export type ChatLink = { state: 'up' | 'started' | 'off' | 'blocked' | 'failed';
 
 /** chat.open_tasks: the strip's and the task sheet's */
 export type OpenTask = { name: string; phase: string; model?: string; via?: string; provider_name?: string }
+/** chat.open_runs: the runs strip's (runs.snapshot's rows, #1278): each stage's counts by state */
+export type OpenRun = {
+  run: string; flow?: string | null; phase?: string | null; why?: string
+  stages?: Record<string, Record<string, number>>; spent_usd?: number; budget_usd?: number | null
+  budget_min?: number | null; gpu_min?: number
+}
 export type ApiCost = { tasks: number; unknown: number; plan?: number; cost: number; prices?: string }
 export type ApiWeek = ApiCost & { by_provider?: Record<string, ApiCost>; names?: Record<string, string> }
 /** chat.week_saved */
@@ -145,7 +154,7 @@ export type DriverState = {
 export type SettingsRev = { ts: number; key: string; label: string; to?: unknown; by: string }
 export type ChatState = {
   messages: ChatMsg[]; push: { key?: string; test?: number }; listener: Listener | null; savings?: Savings | null
-  expire?: number; uploads?: Limits | null; tasks?: OpenTask[]; dictate?: boolean
+  expire?: number; uploads?: Limits | null; tasks?: OpenTask[]; runs?: OpenRun[]; dictate?: boolean
   driver?: DriverState | null; settings?: SettingsRev | null
   /** chat.API_VERSION */
   api?: number

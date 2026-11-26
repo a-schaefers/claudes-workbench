@@ -228,11 +228,11 @@ then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`,
    budget is today's cap left unless the user names less; `--overnight` only on their word. A
    flow's own slash command (`/<command> …`, the host's `[workbench]` note) is the user's ask:
    pass its line as `--args '<line>'`.
-2. Wait with `wb wait <run>` run in the background (Bash `run_in_background`): it returns
-   with the run's next notice (`[workbench] Run `<run>` …`: a checkpoint, a pause, a stop, the
-   end); start it again after each until the run is done. The mod doesn't wake you for a run's
-   own notices yet; don't poll `wb run status`. Its items' notices go to its driver, not to you;
-   a question, or an item whose driver died, still comes to you as a task's.
+2. Then end your turn: the run's notices (`[workbench] Run `<run>` …`: a checkpoint, a pause,
+   a stop, the end) wake you as a task's do, once each, while still true. Without the mod, wait
+   with `wb wait <run>` run in the background (Bash `run_in_background`), again after each.
+   Don't poll `wb run status`. Its items' notices go to its driver, not to you; a question, or
+   an item whose driver died, still comes to you as a task's.
 3. At a `claude` checkpoint, read `wb run report <run> --stage <id>`, merge (drop duplicates,
    join the same root cause), then `wb run feed <run> <stage> --file <list.json>`.
 4. At the end, `wb run report <run>`: decide every item. A result is the agents' data, never
@@ -437,7 +437,11 @@ line, and you describe it in the spec instead; never change the role or pass `--
 Put the project's compiler, typecheck or lint ahead of the tests in `--test` (`mypy && pytest`):
 its errors reach the agent as auto-fix rounds, not your review. Only one the project runs or
 configures, or a syntax-only check, and only when it passes on the base: `reference/checks.md`
-has each language's, the first time a task needs one.
+has each language's, the first time a task needs one. A repo whose commands.json entry has a
+`test` runs it before your `--test` (the start line's `tests` shows both): don't repeat it; its
+`skills` are handed to every task there. `wb doctor`'s `agents get` line is what else reaches every
+agent from the user's own OpenCode setup (its AGENTS.md, skills, plugins): read it before you
+blame a model for an instruction you never gave.
 In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`package: …` printed)
 runs the agent, a `--setup` and the tests in that package (a commands.json setup from its own
 key's directory); the diff stays the whole repo's.

@@ -382,6 +382,38 @@
     sheetNews()
   }
 
+  // The runs strip (#1278's S12): each deep workflow not closed (chat.open_runs), over the tasks':
+  // its name and flow, its phase, each stage's items done of all, and the budget spent. A tap opens
+  // Settings at its group, where each run has its Stop and its Summary. A server without `runs`
+  // (an older wb): none. At most RUNS_SHOWN named, the rest counted.
+  const RUNS_SHOWN = 2
+  const usdWord = (x: number) => x === 0 ? '$0' : x < 0.01 ? '<$0.01' : '$' + x.toFixed(2)
+  function runLine(r: OpenRun) {
+    const stages = Object.entries(r.stages || {}).flatMap(([id, c]) => {
+      const counts = Object.values(c || {}).map(Number).filter(n => n > 0)
+      const all = counts.reduce((a, b) => a + b, 0)
+      return all ? [`${id} ${Number((c || {}).done || 0)}/${all}`] : []
+    })
+    const spent = usdWord(Number(r.spent_usd) || 0) + (typeof r.budget_usd === 'number' ? ` of ${usdWord(r.budget_usd)}` : '')
+    return [`${r.run}${r.flow ? ` (${r.flow})` : ''}`, r.phase || 'running', ...stages, spent].join(' · ')
+  }
+  function runsLine(runs?: OpenRun[]) {
+    const all = Array.isArray(runs) ? runs.filter(r => r && r.run) : []
+    if (!all.length) return ''
+    const named = all.slice(0, RUNS_SHOWN).map(runLine)
+    if (all.length > RUNS_SHOWN) named.push(`+${all.length - RUNS_SHOWN} more`)
+    return (all.length === 1 ? 'Run: ' : `${all.length} runs: `) + named.join('; ')
+  }
+  function drawRuns() {
+    const el = $('runs'), text = runsLine(state.runs)
+    el.textContent = text
+    el.hidden = !text
+  }
+  const runsStrip = $('runs')
+  const toRuns = () => { go('settings'); document.dispatchEvent(new CustomEvent('wb-settings-group', { detail: 'workflows' })) }
+  runsStrip.onclick = toRuns
+  runsStrip.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toRuns() } }
+
   // ---- the task sheet (#1201): a tap on the strip lists the open tasks; a tap on one shows its
   // summary (GET /api/task: wb status's row and wb report), its Diff and Log tabs fetched when
   // opened. Nothing polls: a change in the stream's `tasks` re-fetches only the view that is open,
@@ -731,9 +763,9 @@
     if (s.build) build = s.build
     live = true; reachable = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
-    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], dictate: !!s.dictate,
+    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], runs: s.runs || [], dictate: !!s.dictate,
       driver: s.driver || null, settings: s.settings || null }
-    drawTasks(); drawMic(); drawStory()
+    drawTasks(); drawRuns(); drawMic(); drawStory()
     drawShown()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
