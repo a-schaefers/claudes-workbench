@@ -8131,7 +8131,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   hosts, #1333) and `LICENSE` (the plugin and
   the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
   executable); no `type` field, so nothing else in the repository changes how it loads. Each
-  `mod/` entry is a file the plugin imports, and each file a plugin module imports from beside it
+  `mod/` entry is a file the plugin imports, or one such a file imports in turn (core.ts's
+  `kernel.js`, with its `kernel.d.ts`), and each file a plugin module imports from beside it
   is in `files` (`Setup`'s
   `test_every_file_the_opencode_plugin_imports_from_beside_it_comes_with_each_install`).
   `opencode-plugin/package.json` (`type: module`, `files` the parts and their modules:

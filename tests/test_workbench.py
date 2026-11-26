@@ -24812,8 +24812,21 @@ class Setup(Base):
                 imports.add(target)
                 self.assertTrue(any(fnmatch.fnmatch(target, f) for f in root), (name, target))
         self.assertTrue({"mod/hooks/splash.ts", "mod/hooks/apprentice.ts"} <= imports)
-        # and every mod file the Git install brings is one a module of the plugin imports
-        self.assertEqual({f for f in root if f.startswith("mod/")}, {t for t in imports if t.startswith("mod/")})
+        # and every mod file the Git install brings is one a module of the plugin imports, or one
+        # of those imports in turn: core.ts's kernel.js, with its types (#1313)
+        reached, todo = set(), [t for t in imports if t.startswith("mod/")]
+        while todo:
+            f = todo.pop()
+            if f in reached:
+                continue
+            reached.add(f)
+            if f.endswith(".js") and (ROOT / f).with_suffix(".d.ts").is_file():
+                reached.add((ROOT / f).with_suffix(".d.ts").relative_to(ROOT).as_posix())
+            for rel in re.findall(r"from '(\.\.?/[^']+)'", (ROOT / f).read_text()):
+                dep = (ROOT / f).parent / rel
+                dep = next((d for d in (dep, dep.with_name(dep.name + ".ts")) if d.is_file()), dep)
+                todo.append(dep.resolve().relative_to(ROOT).as_posix())
+        self.assertEqual({f for f in root if f.startswith("mod/")}, reached)
         # the mod files import nothing else of the mod that would be left behind
         for f in (f for f in root if f.startswith("mod/")):
             for rel in re.findall(r"from '(\.\.?/[^']+)'", (ROOT / f).read_text()):
@@ -24831,7 +24844,9 @@ class Setup(Base):
         copies = home / ".local/share/workbench/opencode-plugin"
         with mock.patch.object(cli, "PKG_ROOT", clone), mock.patch.object(ocplugin, "PKG_ROOT", clone), \
                 mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
-            self.assertEqual([p for p, _ in ocplugin.shared_files(clone)], ["mod/hooks/apprentice.ts", "mod/hooks/splash.ts"])
+            self.assertEqual([p for p, _ in ocplugin.shared_files(clone)], [
+                "mod/hooks/apprentice.ts", "mod/hooks/core.ts", "mod/hooks/kernel.d.ts", "mod/hooks/kernel.js",
+                "mod/hooks/splash.ts"])  # the splash's (#1333) and the kernel's membrane, the notices' (#1313)
             code, out = self.setup("--opencode")
             self.assertEqual(code, 0, out)
             first = Path(self.plugins()[0]["package"])
