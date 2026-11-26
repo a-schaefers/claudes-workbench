@@ -28179,6 +28179,19 @@ class Projects(Base):
         task = store.Task("t-ag")
         self.assertIn(task.worktree / "AGENTS.md", context.instruction_files(task)[0])
 
+    def test_accept_in_a_repo_whose_instructions_are_a_committed_agents_md_asks_for_no_claude_md(self):
+        # #1513 (the #1373 audit, 2026-11-26): wb start said the agent gets AGENTS.md, then every
+        # accept said "the repo has no CLAUDE.md: write one (wb init)"
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("mv", "CLAUDE.md", "AGENTS.md")
+        g("commit", "-qm", "the OpenCode way")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-aga", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo")
+        wait_phase("t-aga", {"review"})
+        out = run_wb("accept", "t-aga", "-m", "feat: answer")
+        self.assertIn("accepted t-aga", out)
+        self.assertNotIn("no CLAUDE.md", out)
+
     def test_a_package_with_only_its_own_agents_md_is_the_tasks_package(self):
         # #1394 (2026-11-25): only a CLAUDE.md made a package, so from packages/app with only an
         # AGENTS.md the agent, the setup and the tests ran at the root

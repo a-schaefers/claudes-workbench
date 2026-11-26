@@ -5033,8 +5033,12 @@ def cmd_accept(a):
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
         # the task's own commit counts: by its recorded object, as --merge deleted the branch,
         # and every merged accept then said the repo had no CLAUDE.md (#269, the audit of 1.2)
-        note = claude_md_status(repo, gitops.git(repo, "rev-parse", "--short", tip).strip(),
-                                spec.get("subdir") or "")  # the package's own (#783)
+        rev, sub = gitops.git(repo, "rev-parse", "--short", tip).strip(), spec.get("subdir") or ""
+        note = claude_md_status(repo, rev, sub)  # the package's own (#783)
+        # a committed AGENTS.md is the agent's instructions, as wb start just said: told to
+        # write a CLAUDE.md at every accept, it contradicted start (#1513, 2026-11-26)
+        if note == "no CLAUDE.md" and (_agents_md_at(repo, rev, sub) or _agents_md_at(repo, rev)):
+            note = None
     except (gitops.GitError, OSError, ValueError):
         note = None
     if note == "no CLAUDE.md":  # how current it is, and "keep it current", went (#1322)
