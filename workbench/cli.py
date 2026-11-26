@@ -4855,7 +4855,13 @@ def cmd_takeover(a):
             print("stopped: " + "; ".join(drivers))
         tasks, others = _scope([t for t in store.all_tasks()
                                 if t.status.get("phase") not in store.CLOSED], *_caller(a))
-        if not tasks:
+        # a task an earlier /workbench-quit parked stays the user's to pick up by name: the
+        # hand-back took it over too, and the driver was told to finish and accept it without
+        # asking (#1540, the 2.2 bar, 2026-11-26). Its line never starts "took over", which the
+        # mod's and the plugin's turn key on
+        held = [t.name for t in tasks if store.parked(t.status)]
+        tasks = [t for t in tasks if not store.parked(t.status)]
+        if not tasks and not held:
             print("no open delegated tasks to take over")
         refused = 0
         for t in tasks:  # each refusal said (die's line) and the rest still taken: one refused
@@ -4871,6 +4877,9 @@ def cmd_takeover(a):
                                                 user=a.user))
             except SystemExit as e:
                 refused = max(refused, e.code if isinstance(e.code, int) else 1)
+        if held:
+            print("left parked by an earlier quit (leave them unless the user asks): "
+                  + ", ".join(held))
         _say(_others_line(others, "left alone"))
         if refused:
             sys.exit(refused)
