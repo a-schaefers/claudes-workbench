@@ -3352,7 +3352,9 @@ command runs in the agent's lane and environment, so its code gains nothing when
 
 **Claude's files.** The `edit` permission denies `*CLAUDE.md`, `*CLAUDE.local.md`, `*AGENTS.md`,
 `.claude/*`, `*/.claude/*` and the skill library (`<library>/*`); a shell change shows in the round
-report. For a change to CLAUDE.md or AGENTS.md the handbook (and `agent/WRITING.md`) has the agent write the whole new file
+report. The handbook (and `agent/WRITING.md`) names every file the edit tools refuse, OpenCode's
+(`OPENCODE_FILES`) too, so a task that touches one isn't spent on denied edits (#1521). For a change to CLAUDE.md or
+AGENTS.md outside `.claude/` (`.claude/*` denies a `.proposed` there too) it has the agent write the whole new file
 as `<name>.proposed` (`runner.PROPOSABLE`, `runner.proposals`: new, untracked at the step's start,
 from `git ls-files --others --exclude-standard`, never a link). One the project tracks is its own
 file (accept once deleted a team's committed draft, #321). The review notice shows each as a diff
