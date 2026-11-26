@@ -688,13 +688,23 @@ def held_why(run) -> str:
     """Why a flow's fire waits on its last run: going, or held for Claude, with its why and the
     command that answers it. A checkpoint left open past the next night skipped that fire as
     `still going`, and every later night's too, with no word of what held it (#1510, 2026-11-26)."""
-    st = run.status
+    from . import runs as runs_
+    st, n = run.status, run.name
     phase, held = st.get("phase"), " ".join(str(st.get("why") or "").split())[:200]
+    # each hold's own next step (#1546, 2026-11-26): `wb run resume` for every one wedged a run at
+    # a claude stage (running, nothing due: only wb run feed goes on) and re-paused one at its budget
     if phase == "checkpoint":
-        return f"run {run.name} waits for Claude at a checkpoint ({held}): wb run resume {run.name}, and the next fire starts"
+        if st.get("cause") != "item" and (s := runs_.awaiting_feed(run)):
+            return (f"run {n} waits for Claude at a checkpoint ({held}): wb run report {n} --stage {s['from']}, "
+                    f"then wb run feed {n} {s['id']} --file <list.json>")
+        return f"run {n} waits for Claude at a checkpoint ({held}): then wb run resume {n}"
     if phase == "paused":
-        return f"run {run.name} is paused ({held}): wb run resume {run.name}, and the next fire starts"
-    return f"run {run.name} is still going"
+        why = str(st.get("why") or "")
+        if why.startswith(("the run's budget", "the run's GPU budget")):  # runs._budget_stop's
+            flag = "--budget-min" if why.startswith("the run's GPU budget") else "--budget-usd"
+            return f"run {n} is paused ({held}): wb run amend {n} {flag} N, then wb run resume {n}; or wb run stop {n}"
+        return f"run {n} is paused ({held}): once that allows, wb run resume {n}; or wb run stop {n}"
+    return f"run {n} is still going"
 
 
 def _fire_flow(name: str, s: dict, started: float) -> int:

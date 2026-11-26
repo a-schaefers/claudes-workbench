@@ -753,12 +753,28 @@ class ScheduledFlows(Base):
         row = schedule.runs("nightly")[-1]
         self.assertEqual(row["outcome"], "skipped")
         self.assertEqual(row["why"], f"run nightly-{day} waits for Claude at a checkpoint (nightly-code-1 (code 1) is failed: "
-                                     f"opencode exited 1): wb run resume nightly-{day}, and the next fire starts")
+                                     f"opencode exited 1): then wb run resume nightly-{day}")
         self.assertIn("waits for Claude at a checkpoint", out.getvalue())
-        r.set_status(phase="paused", why="the budget")
-        self.assertIn("is paused (the budget): wb run resume", schedule.held_why(r))
+        r.set_status(phase="paused", why="the day cap: $5.00 spent today")
+        self.assertEqual(schedule.held_why(r), f"run nightly-{day} is paused (the day cap: $5.00 spent today): once that "
+                                               f"allows, wb run resume nightly-{day}; or wb run stop nightly-{day}")
         r.set_status(phase="running", why="")
         self.assertEqual(schedule.held_why(r), f"run nightly-{day} is still going")
+
+    def test_a_flow_fire_held_by_its_last_runs_budget_names_the_amend_that_lets_it_go_on(self):
+        # #1546 (2026-11-26): the row said `wb run resume <run>, and the next fire starts`, and the
+        # resume paused again at once at the same budget
+        from workbench import schedule
+        r = runs.Run("nightly-1")
+        r.dir.mkdir(parents=True)
+        store.write_json(r.dir / "spec.json", {"flow": self.NIGHT})
+        r.set_status(phase="paused", why="the run's budget: $2.00 spent of $2.00, and the next request can cost up to $0.01")
+        self.assertEqual(schedule.held_why(r), "run nightly-1 is paused (the run's budget: $2.00 spent of $2.00, and the next "
+                         "request can cost up to $0.01): wb run amend nightly-1 --budget-usd N, then wb run resume "
+                         "nightly-1; or wb run stop nightly-1")
+        r.set_status(phase="paused", why="the run's GPU budget: 30 of 30 minutes used")
+        self.assertIn("wb run amend nightly-1 --budget-min N, then wb run resume nightly-1", schedule.held_why(r))
+        self.assertNotIn("next fire starts", schedule.held_why(r))
 
     def wait_ended(self, name):
         deadline = time.time() + 60
@@ -1016,6 +1032,28 @@ class Runs(Base):
         self.assertIn("fed chk merge: 1 item(s)", run_wb("run", "feed", "chk", "merge", "--file", str(feed)))
         self.assertEqual(self.wait_run("chk", ("review", "failed"))["phase"], "review")
         self.assertEqual([f["result"]["verdict"] for f in runs.report_of("chk")["final"]], ["unsure"])
+
+    def test_a_resume_at_a_claude_checkpoint_is_refused_with_its_feed_and_a_held_fire_names_it_too(self):
+        # #1546 (2026-11-26): a resume there set the run running and acked the checkpoint, which
+        # tick raises once, so it sat with nothing due and every scheduled fire after it skipped
+        from workbench import schedule
+        flow = {"v": 1, "name": "chk", "params": {"areas": "list"}, "stages": [
+            AUDIT["stages"][0],
+            {"id": "merge", "claude": True, "from": "find"},
+            {"id": "verify", "card": "verify", "from": "merge", "prompt": "Check this finding:\n{item}"},
+            {"id": "end", "final": True, "from": "verify"}]}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Audit area": {"findings": [finding("A1", "claim-one")], "covered": ["README.md"]}})
+        run_wb("run", "start", "chk", "--plan", self.plan(flow), "--param", "areas=a", "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("chk", ("checkpoint", "review", "failed"))["phase"], "checkpoint")
+        feed = "wb run report chk --stage find, then wb run feed chk merge --file <list.json>"
+        self.assertEqual(schedule.held_why(runs.Run("chk")),
+                         f"run chk waits for Claude at a checkpoint (stage merge is Claude's): {feed}")
+        code, _, err = wb("run", "resume", "chk")
+        self.assertEqual(code, 1)
+        self.assertIn(feed, err)
+        self.assertEqual(runs.Run("chk").status["phase"], "checkpoint")
+        self.assertIsNotNone(runs.awaiting_feed(runs.Run("chk")))
 
     def test_a_dead_driver_stops_its_run_once_and_resume_goes_on_from_the_journal(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})

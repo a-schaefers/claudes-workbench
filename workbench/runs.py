@@ -2351,9 +2351,22 @@ def _ack_run(run: Run) -> None:
         run.claim_ack(max(r["ts"] for r in rows))
 
 
+def awaiting_feed(run: Run) -> dict | None:
+    """The `claude` stage whose inputs are all in and that Claude hasn't fed yet, or None."""
+    st = state(run)
+    complete = st.get("_complete") or {}
+    return next((s for s in stages(run.flow) if s.get("claude") and complete.get(s.get("from"))
+                 and st.get(s["id"]) is None), None)
+
+
 def cmd_resume(a) -> None:
     run = need(a.name)
     reap(run)
+    # at a claude stage only its feed goes on: a resume set the run running, acked the checkpoint
+    # tick raises once, and left it with nothing due, every later scheduled fire skipped (#1546)
+    if not _ended(run) and (s := awaiting_feed(run)):
+        _die(f"run {run.name} waits for Claude's merge at stage {s['id']}: wb run report {run.name} --stage "
+             f"{s['from']}, then wb run feed {run.name} {s['id']} --file <list.json> (a resume can't go on)")
     phase = run.status.get("phase")
     if phase == "running" and driver_alive(run):
         print(f"run {run.name} is running")
