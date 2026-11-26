@@ -36,7 +36,7 @@ outward: commits, branches, merges, pushes, PRs, CI/CD, deploys, infrastructure.
 from its handbook and will say so in its summary when the task needs one
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
 its PATH; scratch repos under the temp directory or nested in the worktree, which tests make,
-stay writable), no `gh`, and no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules
+stay writable), no `gh`, and no edits to CLAUDE.md, AGENTS.md, `.claude/`, opencode.json or `.opencode/`. The shell rules
 refuse the direct forms; behind them, where `wb doctor` reports Landlock or Seatbelt (macOS), the kernel refuses root and writes to the repo's git,
 and no credential is in the agent's reach, so `gh` or a push gets no login. Without either
 (old kernels) only the rules hold: read the report's flagged files closely and check
@@ -208,7 +208,8 @@ if you can, and start nothing until the plan is approved; then write the first s
   planned that don't fit a shipped flow go in a flow you write (`--plan`, `reference/deep.md`),
   each its own spec, role and acceptance command as above; review each result on its own, accept
   logic first, then tests, then UI or docs.
-- **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make
+- **What stays yours**, marked apart: git, CLAUDE.md, the project's opencode.json and `.opencode/`
+  (an agent's edit tools refuse them, as they do CLAUDE.md), choices and setup only the user can make
   (downloads, licences, public repos), and the checks you run at review (a screenshot to look at,
   tests to break on purpose, a grader).
 Keep code out of the plan except those interfaces: the agents write it, you hold the bar. The plan

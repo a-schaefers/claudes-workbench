@@ -91,6 +91,13 @@ test("the plugin's wakes (#1313) end the driver's turn, and with its wake option
   expect(where(ROOT, { wb: join(ROOT, 'bin', 'wb'), wake: 'off' }, {}).wakes).toBe(false)
 })
 
+test("on OpenCode /clear starts a session that owns none of the open tasks, so the prompt calls it safe only with none open and names /sessions as the way back (#1498)", () => {
+  expect(/or\s+`\/clear`\s+a\s+`workbench`\s+context\s+block\s+lists/.test(R.prompt)).toBe(false)
+  expect(/tell\s+the\s+user\s+`\/clear`\s+is\s+safe\./.test(R.prompt)).toBe(false)
+  expect(R.prompt.includes("`/clear` and `/new` start a new session, which owns none of this one's open tasks (they stay this session's, and `/sessions` goes back to it)")).toBe(true)
+  expect(R.prompt.includes('tell the user `/clear` is safe once no task is open, and otherwise to come back here with `/sessions`.')).toBe(true)
+})
+
 test("the user's two commands are the plugin's (#1315): a quit switches the session to Build, closing the panel (#1312), and words never do", () => {
   expect(R.prompt.includes('the plugin runs them, switches this session to the Build agent (which closes the Workbench panel) and tells you what it did:')).toBe(true)
   // the prompt is the plugin's, so its commands are always offered: no branch without it

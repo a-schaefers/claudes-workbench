@@ -3120,6 +3120,22 @@ def _others_line(others, what):
     return "\n".join(lines)
 
 
+# An OpenCode session keeps its tasks when the user runs /clear or /new, which start a new session
+# with a new id (Claude Code's mod keeps every id of the process, register.tsx; OpenCode has no
+# such thing): the new one lists them as open elsewhere and can't adopt them while the old one
+# lives, so the line names the way back, OpenCode's /sessions (#1498, 2026-11-26)
+OPENCODE_WAY_BACK = "; /sessions goes back to the OpenCode session one is open in (/clear and /new start a new one)"
+
+
+def _elsewhere_line(others, kind) -> str:
+    """wb status's `open elsewhere` line; from an OpenCode driver, with OPENCODE_WAY_BACK when an
+    OpenCode session holds one of them."""
+    line = _others_line(others, "open elsewhere")
+    if line and kind == "opencode" and any(store.driver_of(t.spec) == "opencode" for t in others):
+        line += OPENCODE_WAY_BACK
+    return line
+
+
 STATUS_MODEL = 24  # wb status's model column
 
 
@@ -3148,7 +3164,8 @@ def cmd_status(a):
     tasks = [need(a.name)] if a.name else [t for t in store.all_tasks()  # replays: wb bench report
                                            if a.all or (t.status.get("phase") not in store.CLOSED
                                                         and not t.spec.get("bench"))]
-    tasks, others = (tasks, []) if a.name else _scope(tasks, *_caller(a))
+    caller = (None, None, None) if a.name else _caller(a)
+    tasks, others = (tasks, []) if a.name else _scope(tasks, *caller)
     parked = [] if a.name or a.all else [t for t in tasks if store.parked(t.status)]
     tasks = [t for t in tasks if t not in parked]
     others = [t for t in others if a.all or not store.parked(t.status)]
@@ -3157,7 +3174,7 @@ def cmd_status(a):
     if not tasks:
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
         _say(parked_line)
-        _say(_others_line(others, "open elsewhere"))
+        _say(_elsewhere_line(others, caller[2]))
         if not a.name:
             _run_lines(a)
         return
@@ -3181,7 +3198,7 @@ def cmd_status(a):
     if a.name and (line := use_line(tasks[0])):
         print(line)
     _say(parked_line)
-    _say(_others_line(others, "open elsewhere"))
+    _say(_elsewhere_line(others, caller[2]))
 
 
 def _run_lines(a) -> None:

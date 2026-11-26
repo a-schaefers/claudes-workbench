@@ -156,6 +156,13 @@ export const HOST_LINES: readonly Rule[] = [
   // agents read OpenCode's global AGENTS.md (context.py, the project-config note), as the driver does
   line("It never gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`: those are yours. When you will review against one of those global rules,",
     "It never gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`; it does get OpenCode's global `~/.config/opencode/AGENTS.md`, as you do. When you will review against a global rule it doesn't get,"),
+  // OpenCode's /clear and /new start a new session, which owns none of the open tasks (Claude
+  // Code's mod keeps every id of the process across a /clear; OpenCode has no such thing), and
+  // /sessions goes back to the old one: "/clear is safe" left them out of reach (#1498, 2026-11-26)
+  line("after a compaction or `/clear` a `workbench` context block lists the open tasks. So don't carry diffs or reports forward: `wb status` and `wb report <name>` bring them back. Between unrelated jobs, tell the user `/clear` is safe.",
+    "after a compaction a `workbench` context block lists the open tasks. So don't carry diffs or reports forward: `wb status` and `wb report <name>` bring them back. "
+      + "`/clear` and `/new` start a new session, which owns none of this one's open tasks (they stay this session's, and `/sessions` goes back to it): "
+      + 'between unrelated jobs, tell the user `/clear` is safe once no task is open, and otherwise to come back here with `/sessions`.'),
   // a Claude Code session's tasks come to OpenCode only by `wb adopt`: the directory rule never
   // crosses drivers (#1309), and "gone" read as if it did (#1482, 2026-11-26)
   line('one whose Claude Code process has exited,', "one whose OpenCode session is gone (a Claude Code session's only by `wb adopt`),"),

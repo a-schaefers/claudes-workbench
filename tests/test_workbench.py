@@ -42197,6 +42197,21 @@ class OpenCodeDriver(Base):
         self.assertEqual((spec["session"], "driver" in spec, store.driver_of(spec)), ("sess-1", False, "claude"))
         self.assertIn("open elsewhere (other sessions'): t-oc", self.wb("status")[1])
 
+    def test_status_names_sessions_as_the_way_back_to_an_opencode_sessions_task_a_clear_left_behind(self):
+        # #1498: OpenCode's /clear and /new start a new session, which can't see, adopt or be woken
+        # by the old one's open tasks, and nothing named /sessions, the way back to them
+        self.beat("ses_a", "ses_b")
+        self.opencode_task("t-oc", "ses_a", phase="review")
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"               # the session /clear started
+        line = [l for l in self.wb("status")[1].splitlines() if l.startswith("open elsewhere")]
+        self.assertEqual(line, [f"open elsewhere (other sessions'): t-oc ({self.here})" + cli.OPENCODE_WAY_BACK])
+        self.assertIn("/sessions", cli.OPENCODE_WAY_BACK)
+        os.environ.pop("OPENCODE_SESSION_ID")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-1"           # Claude Code's session: no OpenCode hint
+        out = self.wb("status")[1]
+        self.assertIn("open elsewhere (other sessions'): t-oc", out)
+        self.assertNotIn("/sessions", out)
+
     def test_the_heartbeat_says_whether_a_session_is_live_gone_or_unknown(self):
         d = self.server()
         self.assertEqual(store.driver_state("ses_a"), "unknown")     # no store recorded
