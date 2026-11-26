@@ -36151,7 +36151,10 @@ console.log(JSON.stringify({ failed }))
                     if meta.get("source") == "workbench.notice" and meta.get("kind") == "settings":
                         got.append(r)
             return got
-        # the user types here: the prompt hook names the session, and the turn (no provider) ends
+        # the user types here: the prompt hook names the session, and the turn (no provider) ends.
+        # A TUI shows the session first (the TUI part's `shown`): a prompt in a session none shows
+        # is a script's `opencode run`, never the user's (#1492, 2026-11-26)
+        self.ask(url, "api", "POST", "/api/rpc/workbench-chat/shown", "-d", json.dumps({"input": {"sessionID": sid}}))
         self.ask(url, "api", "POST", f"/api/session/{sid}/prompt", "-d", json.dumps({"text": "hello"}))
         ts = store.now()
         store.append_jsonl(store.home() / "settings-changes.jsonl", {
