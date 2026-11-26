@@ -4857,18 +4857,25 @@ def cmd_run(a):
 
 
 PARK_GROUP_SECS = 5  # one quit's `parked` stamps: one since #1550, one per task stopped before
+# how long after a quit the hand-back is still that quit's own: a quit a day back, then
+# /workbench and the hand-back with nothing delegated between, took over yesterday's parked
+# tasks and Claude was told to finish and accept them (#1550's review, 2026-11-26)
+PARK_FRESH_SECS = 600
 
 
 def _just_parked(scoped) -> set[str]:
-    """The tasks of the scope (`scoped`, closed ones too) that the latest quit parked, while
-    nothing in the scope has moved since: its newest `parked` stamp and those within
-    PARK_GROUP_SECS of it. A task started, resumed, accepted or changed after that quit means the
-    work went on, and the quit is an earlier one, whose tasks stay parked (#1540); a quit
-    straight before the hand-back is the hand-back's own, and its tasks are taken over (#1550)."""
+    """The tasks of the scope (`scoped`, closed ones too) that the latest quit parked, while that
+    quit is under PARK_FRESH_SECS old and nothing in the scope has moved since: its newest
+    `parked` stamp and those within PARK_GROUP_SECS of it. A task started, resumed, accepted or
+    changed after that quit means the work went on, and the quit is an earlier one, whose tasks
+    stay parked (#1540), as do an older quit's; a quit straight before the hand-back is the
+    hand-back's own, and its tasks are taken over (#1550)."""
     parked = [t for t in scoped if store.parked(t.status)]
     if not parked:
         return set()
     last = max(float(t.status["parked"]) for t in parked)
+    if store.now() - last > PARK_FRESH_SECS:
+        return set()
     group = {t.name for t in parked if float(t.status["parked"]) >= last - PARK_GROUP_SECS}
     moved = any(max(t.status.get("updated_at") or 0, t.spec.get("created_at") or 0) > last
                 for t in scoped if t.name not in group)

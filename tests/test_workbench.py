@@ -9598,6 +9598,25 @@ class Steering(Base):
         self.assertTrue(store.parked(store.Task("t-old").status))
         self.assertFalse(store.Task("t-old").status.get("taken_over"))
 
+    def test_a_hand_back_a_day_after_the_quit_leaves_what_that_quit_parked(self):
+        # #1550's review (2026-11-26): a quit, then a day later /workbench and the hand-back with
+        # nothing delegated between, took over yesterday's parked task, and Claude was told to
+        # finish and accept it (#1540 back): the latest quit counted however old it was
+        here = os.getcwd()
+        self.start("t-old", "ok", "--test", TEST_CMD)
+        wait_phase("t-old", {"review"})
+        run_wb("stop", "--all", "--park-waiting", "--repo", here)
+        old = store.Task("t-old")
+        st = old.status
+        store.write_json(old.dir / "status.json", {**st, "parked": st["parked"] - 86400,
+                                                   "updated_at": st["updated_at"] - 86400})
+        out = run_wb("takeover", "--all", "--user", "--repo", here)
+        self.assertNotRegex(out, r"(?m)^took over ")
+        self.assertIn("left parked by an earlier quit (leave them unless the user asks): t-old", out)
+        st = store.Task("t-old").status
+        self.assertTrue(store.parked(st))
+        self.assertFalse(st.get("taken_over"))
+
     def test_wb_doctor_names_the_tasks_left_waiting_on_claude_for_days(self):
         # #541: a task left stuck, failed or in review for weeks was named nowhere
         self.start("t-idle", "ok")
