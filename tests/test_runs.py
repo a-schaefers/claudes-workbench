@@ -1509,9 +1509,40 @@ class RunsApi(Base):
         self.assertEqual(night.status["phase"], "running")
         self.assertEqual(self.notices("night"), [])
         self.assertEqual([r["kind"] for r in night.journal() if r.get("stage") == "find"],
-                         ["item", "retry", "item", "retry"])
+                         ["item", "retry"])                              # once a day (#1543)
         (it,) = runs.state(night)["find"]
         self.assertEqual(it.state, "pending")                            # tried again past midnight
+
+    def test_a_run_at_the_day_cap_starts_nothing_again_until_the_day_changes(self):
+        # #1543, 2026-11-26: each pass ran a refused wb start, journalled item and retry and wrote
+        # a spec, and the journal's write woke the driver at once (7 starts a second all night);
+        # at an item's checkpoint the cap never paused the run, which started paid items past midnight
+        from workbench.watch import Watcher
+        self.spent(5.03)                                                 # today at the $5 cap
+        night, _ = self.start("capn", "--budget-usd", "1", "--overnight")
+        held, _ = self.start("capk", "--budget-usd", "1")
+        held.set_status(phase="checkpoint", cause="item", why="x")
+        store.tasks_dir().mkdir(parents=True, exist_ok=True)
+        for run in (night, held):
+            with Watcher(run.dir, store.tasks_dir()) as w:
+                runs.tick(run)                                           # the one refused start
+                w.wait(0.05)
+                for _ in range(5):
+                    self.assertTrue(runs.tick(run))
+                    self.assertEqual(w.wait(0.2), [])                    # nothing written: the full wait
+            self.assertEqual([r["kind"] for r in run.journal() if r.get("stage") == "find"], ["item", "retry"])
+            self.assertEqual(len(list((run.dir / "specs").glob("find-*.md"))), 1)
+        self.assertEqual(night.status["phase"], "running")
+        self.assertEqual((held.status["phase"], held.status["cause"]), ("paused", "item"))
+        self.assertIn(meter.RESETS, held.status["why"])
+        self.assertIn("is paused: paused: significant role: API spend today is", self.notices("capk")[-1]["text"])
+        with mock.patch.object(meter, "day", return_value="2099-01-01"):  # past midnight
+            runs.tick(night)
+            runs.tick(held)
+        self.assertEqual([r["kind"] for r in night.journal() if r.get("stage") == "find"],
+                         ["item", "retry", "item", "retry"])            # the overnight run tries again
+        self.assertEqual([r["kind"] for r in held.journal() if r.get("stage") == "find"], ["item", "retry"])
+        self.assertEqual(held.status["phase"], "paused")                 # nothing until wb run resume
 
     def test_any_other_exit_3_is_not_run_and_an_overnight_run_never_tries_it_again(self):
         # the review of #1278 (2026-11-25): "day cap" matched NO_PRICE, NO_CAP and UNREADABLE too,

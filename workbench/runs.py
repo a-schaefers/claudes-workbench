@@ -1385,7 +1385,8 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     # the day cap's own refusal, the one that clears at midnight (meter.RESETS, anywhere in what
     # wb start said): no cap, no price or an unreadable routes.json say "day cap" too, and never clear
     if r.returncode == 3 and meter.RESETS in (r.stderr or "") + (r.stdout or ""):
-        run.log(kind="retry", stage=stage["id"], key=it.key)
+        # its day and cap, so the next pass doesn't run wb start again while they hold (_cap_held)
+        run.log(kind="retry", stage=stage["id"], key=it.key, day=meter.day(), cap=meter.cap(), why=why)
         return "paused", why
     if r.returncode == 3:
         return "not_run", why
@@ -1588,6 +1589,19 @@ def _held(run: Run, it: Item) -> bool:
     return True
 
 
+def _cap_held(run: Run, stage: dict, it: Item) -> str | None:
+    """The day cap's refusal of ``it``'s last start while it still holds (that day, that cap),
+    else None. Each pass ran a refused wb start, journalled item and retry and wrote a spec, and
+    the journal's write woke the driver at once: about 7 starts a second until midnight at the
+    cap, under keep-awake (#1543, 2026-11-26). A cap the user raised tries again."""
+    rows = [r for r in run.journal() if r.get("stage") == stage["id"] and r.get("key") == it.key
+            and r.get("kind") in ("item", "retry")]
+    last = rows[-1] if rows else {}
+    if last.get("kind") == "retry" and last.get("day") == meter.day() and last.get("cap") == meter.cap():
+        return last.get("why") or f"the day cap ({meter.RESETS})"
+    return None
+
+
 def _room(run: Run, stage: dict, st: dict, m) -> str | None:
     """Why stage's next item can't start now (None: it can): the run's items in flight, the
     provider's slots, a user's task waiting first, the GPU's one waiting item per stage."""
@@ -1695,14 +1709,16 @@ def tick(run: Run) -> bool:
                                                          and r.get("key") == it.key for r in run.journal()):
                     prev = escalation_key(it.key, k - 1) if k > 1 else re.sub(r"#e\d+\Z", "", it.key)
                     run.log(kind="escalated", stage=s["id"], key=it.key, after=prev, role=item_role(s, it))
-                got, why = _start(run, s, it, n)
+                got, why = ("paused", capped) if (capped := _cap_held(run, s, it)) else _start(run, s, it, n)
                 if got in ("not_run", "null"):
                     run.log(kind=got, stage=s["id"], key=it.key, why=why)
                     it.state = got
                 elif got == "paused":
                     if run.spec.get("overnight"):
-                        break  # the day cap's: tried again each tick, past midnight
-                    if run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
+                        break  # the day cap's: tried again on the first pass past midnight (_cap_held)
+                    # at an item's checkpoint too (_going, its cause kept): held only there, the run
+                    # started paid items past midnight with nobody's wb run resume (#1543)
+                    if run.set_status_if(_going, phase="paused", why=why):
                         run.notify("run_paused", f"paused: {why}. Done work is kept: wb run resume {run.name} "
                                                  "once the cap allows")
                     break
