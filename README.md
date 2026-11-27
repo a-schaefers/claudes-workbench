@@ -87,9 +87,9 @@ well on short, tested steps, so each step is sized to the model that writes it
 
 ## Install
 
-Install the plugin in one of the following:
+Install the plugin in one of:
 
-### OpenCode Workbench (CLI only)
+### OpenCode Workbench: (CLI only)
 
 ```sh
 opencode plugin add 'github:a-schaefers/workbench#main'
@@ -98,7 +98,7 @@ opencode plugin add 'github:a-schaefers/workbench#main'
 Open OpenCode in your project, pick the strongest model you have, local or API, for the orchestrator
 agent in `/models`, and type `/workbench`. OpenCode keeps the plugin up to date.
 
-### Claude Code Workbench (CLI only)
+### Claude Code Workbench: (CLI only)
 
 ```sh
 claude plugin marketplace add a-schaefers/workbench
