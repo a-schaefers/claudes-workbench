@@ -9487,6 +9487,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       prompt (waited for at most `REFRESH_WAIT_MS` 3 s, `within`), a switch of agent (the event, which
       names a session switched to the Workbench agent before any hook has, or
       the `context` hook seeing a new one), each idle look, and before each wake notices.ts sends
+      and each turn `commands.ts` starts (the hand-back's, the model check's: #1598)
       (`beforeWake`, at most `REFRESH_WAIT_MS`, by each upkeep of the process that knows the
       session, else the first: they are on `globalThis`, as the notices' lane is): OpenCode runs no
       `prompt` hook for a synthetic message, so a review's wake once came with the last idle look's
@@ -9536,7 +9537,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     `…-hand-back-claude`): `wb takeover --all --user`; nothing taken over (`took over` nowhere in
     its output) on a failure is the command's error and the mode stays; on exit 0 the switch to
     `build` and the output with `HAND_ONE` (ask for a parked task by name), no turn (#1550); else
-    the switch and `DONE_NOTE`, which starts the turn that finishes them. `/workbench-models` (`MODELS`): scout.json's
+    the switch and `DONE_NOTE`, which starts the turn that finishes them. A note that starts a turn
+    (`say`, `resume: true`) has upkeep's entries read again first (`beforeWake`, after the switch):
+    a synthetic message runs no `prompt` hook, so the hand-back's turn once had each task it took
+    over still running in the `workbench` entry (#1598). `/workbench-models` (`MODELS`): scout.json's
     `offered_at` written, as the mod's `scoutOffered`, and `SCOUT_NOTE` (the mod's, its reference
     named as the `workbench-models` skill) as a turn. `/workbench-update` (`UPDATE`): `wb update`
     (`UPDATE_MS` 600 s; the rest `RUN_MS` 120 s), its output posted without a turn (OpenCode reloads

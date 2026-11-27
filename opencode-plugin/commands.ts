@@ -12,6 +12,8 @@ import { execFile } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AGENT } from './agent.ts'
+// each other's at call time only (upkeep uses whereOf and sessionRunner), so the cycle is safe
+import { beforeWake } from './upkeep.ts'
 import { findWb, wbEnv, wbHome, type Options } from './wb.ts'
 
 export const QUIT = 'workbench-quit'
@@ -132,6 +134,10 @@ async function leave(host: CommandHost, sessionID: string, where: Where): Promis
 
 async function say(host: CommandHost, sessionID: string, text: string, description: string, resume: boolean): Promise<void> {
   if (!host.session?.synthetic) throw new Error(`${description}\n${text}`) // nowhere else to say it
+  // a turn's first step reads the session's blocks, and no prompt hook runs for a synthetic message:
+  // upkeep's read again first (after leave(), so the switch to Build is seen too), as notices.ts's
+  // wakes do (#1545), or the hand-back's turn had each task it took over still running (#1598, 2026-11-27)
+  if (resume) await beforeWake(sessionID)
   await host.session.synthetic({ sessionID, text, description, metadata: { source: SOURCE }, resume })
 }
 
