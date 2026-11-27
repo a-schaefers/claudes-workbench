@@ -1281,6 +1281,57 @@ class Runs(Base):
         self.assertEqual(self.wait_run("stp", ("review", "failed", "checkpoint"))["phase"], "review")
         self.assertEqual(runs.report_of("stp")["null"], [])
 
+    def test_a_resume_held_at_the_runs_budget_keeps_wb_run_stops_items_held_and_never_escalates_them(self):
+        # #1612 (bar loop #1030, 2026-11-27): #1600 held wb run resume at the run's budget, but
+        # _held and _live held only the items stopped from outside, so the next tick took wb run
+        # stop's report item as null, its paid work discarded, and read its code item as null,
+        # which escalated it to the paid role unasked
+        def held_then_resumed(name, task):
+            self.wait_item(task, lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+            run_wb("run", "stop", name)
+            run_wb("run", "amend", name, "--budget-min", "0")             # the budget spent meanwhile
+            self.assertIn(f"resumed {name}", run_wb("run", "resume", name))
+            self.assertEqual(self.wait_run(name, ("paused", "review", "failed", "checkpoint"))["phase"], "paused")
+            run = runs.Run(name)
+            deadline = time.time() + 10                                   # the driver's ticks while paused
+            while time.time() < deadline and not any(r.get("kind") in ("null", "escalate", "escalated")
+                                                      for r in run.journal()):
+                time.sleep(0.2)
+            self.assertEqual([r for r in run.journal() if r.get("kind") in ("null", "escalate", "escalated")], [])
+            self.assertEqual((store.Task(task).status["phase"], store.Task(task).status["last"]),
+                             ("stuck", runs.STOPPED_BY_CLAUDE))           # held where it stopped
+            self.assertEqual(runs.report_of(name)["null"], [])
+            # the paused driver goes first: it holds FAKE_SLEEP's 600, and its tick may resume the
+            # item before this resume does; the next driver takes the item up (still wb run stop's)
+            run_wb("run", "stop", name)
+            os.environ["FAKE_SLEEP"] = "0"
+            run_wb("run", "amend", name, "--budget-min", "100")
+            run_wb("run", "resume", name)
+            return run
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
+        os.environ["FAKE_SLEEP"] = "600"
+        run_wb("run", "start", "stp", "--plan", self.plan({**AUDIT, "name": "stp"}), "--param", "areas=a",
+               "--repo", str(self.repo))
+        run = held_then_resumed("stp", "stp-find-1")                     # (a) a report item
+        self.assertEqual(self.wait_run("stp", ("review", "failed", "checkpoint"))["phase"], "review")
+        self.assertEqual(runs.report_of("stp")["null"], [])
+        (found,) = runs.state(run)["find"]
+        self.assertEqual(found.state, "done")
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": {"verdict": "approve", "must_fix": [],
+                                                                        "nits": [], "summary": "good"}})
+        os.environ["FAKE_SLEEP"] = "600"
+        run_wb("run", "start", "fe", "--flow", "fix-escalate", "--param", 'findings=["answer.txt must hold 42"]',
+               "--repo", str(self.repo))
+        run = held_then_resumed("fe", "fe-code-1")                       # (b) a code item
+        self.wait_item("fe-code-1", lambda st: st.get("phase") == "review", timeout=60)
+        self.assertEqual([r["task"] for r in run.journal() if r.get("kind") == "item" and r.get("stage") == "code"],
+                         ["fe-code-1"])
+        self.assertEqual([r for r in run.journal() if r.get("kind") in ("escalate", "escalated")], [])
+        run_wb("run", "stop", "fe")
+        for n in runs.run_tasks(run):
+            if store.Task(n).exists and store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
     def test_a_driver_waiting_on_an_item_sleeps_rewriting_no_status(self):
         # the review of #1278 (2026-11-25): every pass wrote status.json in the run directory the
         # driver watches, so each wait returned at once: 20 rewrites a second while an item ran

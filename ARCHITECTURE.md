@@ -10356,7 +10356,10 @@ each pass, so the first pass after `wb run amend --budget-usd N` and `wb run res
 refix paid a coding round past the budget, while the run read `paused`, #1586), and so does a resume of a held
 item, the driver's (`runs._held`) and `wb run resume`'s (`runs._resume_items`): past the budget the item stays
 held, its work kept, and the run pauses (`--overnight` waits past the day cap only, never past the run's own
-budget). Each is priced by `runs.paid_model(stage, it)`: the item's task's own model once it has one (a resume or
+budget). Held means `wb run stop`'s items too (`runs._held_stop`, journal `stopped` not yet `resumed`; `_live`
+reads such a code item `running` while the run is open): only the ones stopped from outside were, so a resume
+held at the budget let the next tick take a stopped report item as null, its paid work discarded, and read a
+stopped code item as null, escalated to the paid role unasked (#1612). Each is priced by `runs.paid_model(stage, it)`: the item's task's own model once it has one (a resume or
 a refix runs on the model its rounds began on), else its role's now (`stage_model`); resumed unchecked, an
 overnight item went on each midnight past `--budget-usd`, and a refix priced by its role read the GPU once the
 role moved there and ran on the task's API model (#1600). Items already running finish
