@@ -903,6 +903,7 @@ def state(run: Run) -> dict:
     fed = {}
     escalated = set()  # (code stage, key): a review's asks left past refix's max sent it on (_take)
     refused = set()  # tasks whose last resume was the driver's, refused (_held's null)
+    run_stopped = set()  # tasks wb run stop stopped, not resumed since (_run_stopped, _live's, #1612)
     for r in rows:
         k = (r.get("stage"), r.get("key"))
         if r.get("kind") == "item":
@@ -921,6 +922,9 @@ def state(run: Run) -> dict:
             escalated.add((r.get("stage"), r.get("key")))
         elif r.get("kind") == "resumed":  # _live's: the driver's own resume refused, its last
             (refused.add if r.get("by") == "driver" and not r.get("ok") else refused.discard)(r.get("task"))
+            run_stopped.discard(r.get("task"))
+        elif r.get("kind") == "stopped":
+            run_stopped.add(r.get("task"))
     skipped = set(spec.get("skip") or ())
     driven = run.status.get("phase") in OPEN  # _live's: what follows may still start
     out: dict = {}
@@ -1045,7 +1049,8 @@ def state(run: Run) -> dict:
             elif v is WAITING:
                 it.state, it.input = "waiting", None
             elif it.task:
-                it.state, it.why, it.output = _live(s, it, driven, refused=it.task in refused)
+                it.state, it.why, it.output = _live(s, it, driven, refused=it.task in refused,
+                                                    run_stopped=it.task in run_stopped)
             if "#e" not in key and hit not in there:
                 counted.add(one)
             items.append(it)
@@ -1094,14 +1099,16 @@ def _stop_skipped(run: Run) -> list[str]:
     return out
 
 
-def _live(stage: dict, it: Item, driven: bool = False, refused: bool = False) -> tuple[str, str, object]:
+def _live(stage: dict, it: Item, driven: bool = False, refused: bool = False,
+          run_stopped: bool = False) -> tuple[str, str, object]:
     """A started item's state from its task, before the driver has taken its end. ``driven``:
     the run is open, its driver starting what follows: there a code item Claude took over is no
     longer the run's (not_run, never an escalation's null), as its review phase read as done and
     the next stage reviewed, approved or sent a refix to the unfinished diff Claude was editing
     (#1471, the #1373 audit, 2026-11-26), and a code item stopped from outside (_outside) runs on,
     as _held holds it, unless the driver's last resume of it was refused otherwise (``refused``:
-    its null, Claude's checkpoint). Read as null, an item the day cap stopped mid-round under
+    its null, Claude's checkpoint), and so does one wb run stop stopped (``run_stopped``, _held's
+    too). Read as null, an item the day cap stopped mid-round under
     --overnight ended its stage and the run in the pass that held it for midnight, and in
     fix-escalate started the next role's attempt beside it (#1581, 2026-11-26). Once the run has
     ended (stopped, at review, closed) its report keeps the item as it was."""
@@ -1115,7 +1122,7 @@ def _live(stage: dict, it: Item, driven: bool = False, refused: bool = False) ->
     if is_code(stage):
         if phase in ("review", "accepted"):
             return "done", "", {"task": it.task, "round": st.get("round"), "item": it.input}
-        if phase in ("stuck", "failed") and driven and not refused and _outside(st):
+        if phase in ("stuck", "failed") and driven and _held_stop(st, refused, run_stopped):
             return "running", "", None
         if phase in ("stuck", "failed", "discarded"):
             return "null", st.get("last") or phase, None
@@ -1311,9 +1318,34 @@ def change_groups(run: Run, names) -> list[tuple[str, list[str]]]:
     return [(f"{sid}:{key}", g) for (sid, key), g in out.items()]
 
 
+def claude_work(names: list[str]) -> dict[str, str]:
+    """{try: how} for those of an item's escalation tries ``names`` (start order) that hold
+    Claude's work, each with how it got there: one taken over by name since the latest still
+    open try began (status ``chosen_at``; a choice the run escalated past counts for nothing),
+    or one at review (before any takeover, ``prior_phase``) whose files are none of the trees its
+    agent left (cli._edited_by_hand: Claude's small fixes by hand, no takeover). The one rule of
+    the hand-back (cli._attempts_line) and of kept_try: #1595 taught the hand-back alone, and wb
+    run report, run_done and wb run close went on naming the try Claude took over or fixed by
+    hand for wb discard, its edits deleted with its worktree (#1611, 2026-11-27)."""
+    from . import cli
+    live = [n for n in names if store.Task(n).status.get("phase") not in store.CLOSED]
+    if not live:
+        return {}
+    began = store.Task(live[-1]).spec.get("created_at") or 0
+    how = {}
+    for n in live:
+        st = store.Task(n).status
+        if (st.get("chosen_at") or 0) > began:
+            how[n] = f"wb takeover {n}"
+        elif (st.get("prior_phase") or st.get("phase")) == "review" and cli._edited_by_hand(store.Task(n)):
+            how[n] = "your edits since its review"
+    return how
+
+
 def kept_try(names: list[str], run: Run | None = None) -> str | None:
     """Which of an item's escalation tries ``names`` (start order) is the change to keep, the
-    hand-back's rule (cli._attempts_line): one accepted already; else the latest still open with a
+    hand-back's rule: one accepted already; else the one holding Claude's work (claude_work:
+    None when more than one does, Claude's pick, #1611); else the latest still open with a
     finished change (at review, or at review before a takeover, `prior_phase`), so a failed
     escalation keeps the cheap try its reviewer saw; None while none has one (#1597), or while a
     later try is still in flight or held (try_pending): its outcome isn't in yet (#1597's second
@@ -1321,8 +1353,10 @@ def kept_try(names: list[str], run: Run | None = None) -> str | None:
     sts = {n: store.Task(n).status for n in names}
     if acc := [n for n in names if sts[n].get("phase") == "accepted"]:
         return acc[-1]
-    done = [n for n in names if sts[n].get("phase") not in store.CLOSED
-            and (sts[n].get("prior_phase") or sts[n].get("phase")) == "review"]
+    if len(mine := claude_work(names)) > 1:
+        return None
+    done = list(mine) or [n for n in names if sts[n].get("phase") not in store.CLOSED
+                          and (sts[n].get("prior_phase") or sts[n].get("phase")) == "review"]
     if (p := try_pending(names, run)) and (not done or names.index(p[0]) > names.index(done[-1])):
         return None
     return done[-1] if done else None
@@ -1354,6 +1388,9 @@ def tries_said(names: list[str], keep: str | None, run: Run | None = None) -> st
             how = (f"held: wb run resume {run.name if run is not None else '<run>'} goes on" if p[1]
                    else "still running")
             return f"{p[0]} is {how}; decide once it ends"
+        if len(mine := claude_work(names)) > 1:  # Claude's pick: none named for wb discard (#1611)
+            return (f"your work is in {', '.join(f'{n} ({h})' for n, h in mine.items())}: accept only the "
+                    f"one you chose")
         return "none holds a finished change: keep at most one"
     if store.Task(keep).status.get("phase") == "accepted":
         return f"{keep} is accepted" + (f": wb discard {', '.join(rest)}" if rest else "")
@@ -1778,6 +1815,16 @@ def _run_stopped(run: Run, name: str) -> bool:
     return bool(kinds) and kinds[-1] == "stopped"
 
 
+def _held_stop(st: dict, refused: bool, run_stopped: bool) -> bool:
+    """Whether a stopped item waits where it stopped while the run is driven: one stopped from
+    outside its step (_outside) whose last resume wasn't refused, or one wb run stop stopped
+    (``run_stopped``, _run_stopped's), as _resumable takes both up. Only the first were held: a
+    wb run resume held at the run's budget (#1600) left wb run stop's items stopped, and the next
+    tick took a report item as null, its paid work discarded, and read a code item as null,
+    which escalated it to the next, paid role unasked (#1612, 2026-11-27)."""
+    return (not refused and _outside(st)) or (run_stopped and st.get("last") == STOPPED_BY_CLAUDE)
+
+
 def _resumable(run: Run, name: str, st: dict) -> bool:
     """Whether wb run resume takes item ``name`` up where it stopped: a stop from outside its step
     (_outside), or wb run stop's."""
@@ -1817,8 +1864,9 @@ def _resume_items(run: Run) -> list[str]:
 
 
 def _held(run: Run, stage: dict, it: Item) -> bool:
-    """Whether item ``it``, stopped from outside its step (_outside), goes on rather than being
-    taken as null: `wb resume`d here while the run runs; held for wb run resume while it doesn't.
+    """Whether item ``it``, stopped from outside its step (_outside) or by wb run stop (_held_stop,
+    #1612), goes on rather than being taken as null: `wb resume`d here while the run runs; held
+    for wb run resume while it doesn't.
     A resume refused with exit 3 (the day cap, which clears at midnight; a repo made local-only,
     Agents on the GPU: the user's to lift) holds it too, the run paused, or under --overnight
     tried again each pass while the cap's refusal stands. A second stop from outside after the
@@ -1828,14 +1876,14 @@ def _held(run: Run, stage: dict, it: Item) -> bool:
     --overnight waits past the day cap only, never past the run's own budget (#1600)."""
     from . import cli, runner
     st = store.Task(it.task).status
-    if not _outside(st):
+    if not _held_stop(st, False, _run_stopped(run, it.task)):  # wb run stop's too (#1612)
         return False
     if not _going(run.status):
         return True
     mine = [r for r in run.journal() if r.get("task") == it.task]
     why_out = cli.stopped_outside(st) or st.get("last") or "stopped"
-    if why_out != runner.SPEND and any(r.get("kind") == "resumed" and r.get("by") == "driver" and r.get("ok")
-                                for r in mine):
+    if _outside(st) and why_out != runner.SPEND and any(
+            r.get("kind") == "resumed" and r.get("by") == "driver" and r.get("ok") for r in mine):
         _checkpoint(run, f"{it.task} was stopped from outside again ({why_out}: {st.get('last') or ''}); "
                          f"its work is kept: wb run resume {run.name} takes it up again, or wb discard {it.task}")
         return True

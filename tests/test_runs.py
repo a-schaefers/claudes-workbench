@@ -1281,6 +1281,57 @@ class Runs(Base):
         self.assertEqual(self.wait_run("stp", ("review", "failed", "checkpoint"))["phase"], "review")
         self.assertEqual(runs.report_of("stp")["null"], [])
 
+    def test_a_resume_held_at_the_runs_budget_keeps_wb_run_stops_items_held_and_never_escalates_them(self):
+        # #1612 (bar loop #1030, 2026-11-27): #1600 held wb run resume at the run's budget, but
+        # _held and _live held only the items stopped from outside, so the next tick took wb run
+        # stop's report item as null, its paid work discarded, and read its code item as null,
+        # which escalated it to the paid role unasked
+        def held_then_resumed(name, task):
+            self.wait_item(task, lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+            run_wb("run", "stop", name)
+            run_wb("run", "amend", name, "--budget-min", "0")             # the budget spent meanwhile
+            self.assertIn(f"resumed {name}", run_wb("run", "resume", name))
+            self.assertEqual(self.wait_run(name, ("paused", "review", "failed", "checkpoint"))["phase"], "paused")
+            run = runs.Run(name)
+            deadline = time.time() + 10                                   # the driver's ticks while paused
+            while time.time() < deadline and not any(r.get("kind") in ("null", "escalate", "escalated")
+                                                      for r in run.journal()):
+                time.sleep(0.2)
+            self.assertEqual([r for r in run.journal() if r.get("kind") in ("null", "escalate", "escalated")], [])
+            self.assertEqual((store.Task(task).status["phase"], store.Task(task).status["last"]),
+                             ("stuck", runs.STOPPED_BY_CLAUDE))           # held where it stopped
+            self.assertEqual(runs.report_of(name)["null"], [])
+            # the paused driver goes first: it holds FAKE_SLEEP's 600, and its tick may resume the
+            # item before this resume does; the next driver takes the item up (still wb run stop's)
+            run_wb("run", "stop", name)
+            os.environ["FAKE_SLEEP"] = "0"
+            run_wb("run", "amend", name, "--budget-min", "100")
+            run_wb("run", "resume", name)
+            return run
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
+        os.environ["FAKE_SLEEP"] = "600"
+        run_wb("run", "start", "stp", "--plan", self.plan({**AUDIT, "name": "stp"}), "--param", "areas=a",
+               "--repo", str(self.repo))
+        run = held_then_resumed("stp", "stp-find-1")                     # (a) a report item
+        self.assertEqual(self.wait_run("stp", ("review", "failed", "checkpoint"))["phase"], "review")
+        self.assertEqual(runs.report_of("stp")["null"], [])
+        (found,) = runs.state(run)["find"]
+        self.assertEqual(found.state, "done")
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": {"verdict": "approve", "must_fix": [],
+                                                                        "nits": [], "summary": "good"}})
+        os.environ["FAKE_SLEEP"] = "600"
+        run_wb("run", "start", "fe", "--flow", "fix-escalate", "--param", 'findings=["answer.txt must hold 42"]',
+               "--repo", str(self.repo))
+        run = held_then_resumed("fe", "fe-code-1")                       # (b) a code item
+        self.wait_item("fe-code-1", lambda st: st.get("phase") == "review", timeout=60)
+        self.assertEqual([r["task"] for r in run.journal() if r.get("kind") == "item" and r.get("stage") == "code"],
+                         ["fe-code-1"])
+        self.assertEqual([r for r in run.journal() if r.get("kind") in ("escalate", "escalated")], [])
+        run_wb("run", "stop", "fe")
+        for n in runs.run_tasks(run):
+            if store.Task(n).exists and store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
     def test_a_driver_waiting_on_an_item_sleeps_rewriting_no_status(self):
         # the review of #1278 (2026-11-25): every pass wrote status.json in the run directory the
         # driver watches, so each wait returned at once: 20 rewrites a second while an item ran
@@ -1762,6 +1813,50 @@ class Runs(Base):
         self.assertNotIn("wb discard fxe-code-2", out)
         for n in runs.run_tasks(run):
             if store.Task(n).exists and store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
+    def test_the_run_report_and_close_keep_the_cheap_try_claude_took_over_or_edited_by_hand(self):
+        # #1611 (bar loop #1030, 2026-11-27): #1595 taught the hand-back to keep the try holding
+        # Claude's work, but kept_try kept the old rule, so wb run report, run_done and wb run close
+        # still had Claude wb discard the cheap try it took over or fixed by hand, edits and all
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))
+        self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
+
+        def said():
+            (alts,) = [ln for ln in run_wb("run", "report", "fxe").splitlines() if ln.startswith("  code:1: ")]
+            code, _, err = wb("run", "close", "fxe")
+            self.assertEqual(code, 1)
+            return alts, err
+        mine = store.Task("fxe-code-1").worktree / "claude_fix.py"
+        mine.write_text("print('mine')\n")                                # (a) edited by hand at review
+        alts, err = said()
+        self.assertIn("accept only fxe-code-1, then wb discard fxe-code-2", alts)
+        self.assertIn("(one change: accept only fxe-code-1, then wb discard fxe-code-2)", err)
+        self.assertNotIn("wb discard fxe-code-1", alts + err)
+        self.assertEqual({c["keep"] for c in runs.report_of("fxe")["code"]}, {"fxe-code-1"})
+        mine.unlink()
+        run_wb("takeover", "fxe-code-1")                                  # (b) taken over by name
+        alts, err = said()
+        self.assertIn("accept only fxe-code-1, then wb discard fxe-code-2", alts)
+        self.assertIn("(one change: accept only fxe-code-1, then wb discard fxe-code-2)", err)
+        self.assertNotIn("wb discard fxe-code-1", alts + err)
+        theirs = store.Task("fxe-code-2").worktree / "claude_fix.py"
+        theirs.write_text("print('mine too')\n")                          # (c) Claude's work in both
+        alts, err = said()
+        self.assertIn("your work is in fxe-code-1 (wb takeover fxe-code-1), fxe-code-2 (your edits since its "
+                      "review): accept only the one you chose", alts)
+        self.assertNotIn("wb discard fxe-code", alts + err)
+        theirs.unlink()                                                   # (d) chosen before the run escalated
+        store.Task("fxe-code-1").set_status(chosen_at=store.Task("fxe-code-2").spec["created_at"] - 1)
+        alts, err = said()
+        self.assertIn("accept only fxe-code-2, then wb discard fxe-code-1", alts)
+        self.assertNotIn("wb discard fxe-code-2", alts + err)
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
                 run_wb("discard", n)
 
     def test_an_items_role_follows_its_escalation_and_escalate_takes_distinct_roles(self):
