@@ -18,6 +18,55 @@ work, and OpenCode subagents via API or GPU write the code.
 <a href="https://github.com/a-schaefers/workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/workbench"></a>
 </p>
 
+```text
+                                   ┌──────────┐
+                                   │   YOU    │
+                                   └────┬─────┘
+                                        │ /workbench
+                         ┌──────────────┴──────────────┐
+                         │          pick one           │
+                ┌────────▼─────────┐          ┌────────▼─────────┐
+                │  Claude Code CLI │    OR    │   OpenCode CLI   │
+                │   + the mod      │          │   + its plugin   │
+                └────────┬─────────┘          └────────┬─────────┘
+                         └──────────────┬──────────────┘
+                                        ▼
+ ┌──────────────────────────────────────────────────────────┐        ┌────────────────────┐
+ │                     ORCHESTRATOR                         │◄──────►│   WEB APP  :1337   │
+ │  first time? (no setup.json) ─► setup questions          │        │  tasks · stats ·   │
+ │  plans · splits into steps · writes a test for each      │        │  settings · chat   │
+ │  reviews each result · merges on your word               │        │  (phone: Tailscale)│
+ └──────┬──────────────────────────────────────────▲────────┘        └────────────────────┘
+        │ one step + its test                      │ report: review / stuck / failed
+        ▼                                          │
+ ┌──────────────┐   roles                          │
+ │   router     │   significant ─► API, $5/day cap │
+ │ size → model │   trivial ────► GPU              │
+ └──────┬───────┘   writing ────► GPU              │
+        ▼                                          │
+ ┌─────────────────────────────────────────────────┴──────────────────────────┐
+ │  runner (detached, one per task)                                           │
+ │   GPU: lease + load model          API: provider slot + KEYHOLE (key here) │
+ │  ┌──────────────── SANDBOX (Landlock / Seatbelt) ─────────────────────┐    │
+ │  │  SUBAGENT (OpenCode) ─ writes code in its own worktree + branch    │    │
+ │  │     git read-only · shell allowlist · no keys · ask_reviewer ──────┼────┼─► orchestrator
+ │  │          │                                                         │    │
+ │  │          ▼                                                         │    │
+ │  │      run the test ── FAIL ──► error fed back, try again ──┐        │    │
+ │  │          │              ▲                                 │        │    │
+ │  │          │              └─────────────────────────────────┘        │    │
+ │  │          ▼ PASS ─► self-review ─► green tree kept                  │    │
+ │  └────────────────────────────────────────────────────────────────────┘    │
+ │  guards: stuck detector · day cap · rate-limit pause · fresh session       │
+ └────────────────────────────────────────────────────────────────────────────┘
+        │ after your OK
+        ▼
+   commit on your branch (your name + a trailer naming the model)
+        │
+        ▼
+   results ─► router · tuning · skill library ─► the next task's subagent does better
+```
+
 You describe a change to the orchestrator agent, which splits it into steps, writes a test for each
 one, and hands each step to a subagent running a cheaper model on your GPU or an API. Each subagent
 works on its own branch in a separate copy of the project. After each attempt the step's test runs;
