@@ -3687,7 +3687,10 @@ best, `wb accept` only it, `wb discard` the rest, which count as not chosen; tho
 whose pick is accepted, discard each), never a per-task accept each: a best-of hand-back once had
 Claude finish and merge all three (#1576). An escalation (`<item>#e<k>`) and the tries it escalated from
 are grouped the same way (`runs.tries_of`, by the key without `#e<k>`, then `#a<n>`): "the run escalated A
-to B", finish and accept only the latest try that was at `review` before Claude first took it over
+to B", finish and accept only the try Claude took over by name (status `chosen`, kept across later
+takeovers: with B at `review` too, the hand-back kept B and had Claude discard the try it chose and
+wrote in, #1595; more than one chosen, Claude finishes the one it chose and discards the rest), else
+the latest try that was at `review` before Claude first took it over
 (a finished change: status `prior_phase`, kept across a second hand-back, which read every try as
 `review` and kept the crashed escalation; a try Claude took over by name counts as at `review`, so its own edits are kept), else B, discard the others, never counted as not chosen (`runs._attempt_of` stays `#a`'s,
 for `not_chosen`); a fix-escalate hand-back had Claude finish and commit both, and then, its cheap try
@@ -10851,6 +10854,7 @@ off), not `wb start`'s.
 | `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output, or a build or test command of Claude's wrote (`runner._claude_built`), but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
 | `prior_phase` | `wb takeover` (`cli._take_over`): the phase before Claude first took the task over, kept by another takeover (a by-name `wb takeover <task>` records `review`: Claude chose to write that try; only `--all`'s own takeover records the phase it found); the hand-back's escalated item keeps the try that was at `review` then (`cli._attempts_line`, #1592); cleared by `spawn_runner` |
+| `chosen` | a by-name `wb takeover <task>` (`cli._take_over`), never `--all`'s: Claude chose to write that try, kept across later takeovers and runs; the hand-back's escalated item keeps it whatever the other tries' phases (`cli._attempts_line`, #1595) |
 | `branch_made` | the commit `runner.checkout` makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists: the only branch a cut-short cleanup deletes (#416) |
 | `failed_before` | `setup` or `load`: before the agent ran; the row copies it |
 | `stopping` | `cli._stop_runner`; cleared by `spawn_runner` and the runner's exit |

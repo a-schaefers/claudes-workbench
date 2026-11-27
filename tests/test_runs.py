@@ -1594,6 +1594,34 @@ class Runs(Base):
             if store.Task(n).status.get("phase") not in store.CLOSED:
                 run_wb("discard", n)
 
+    def test_a_hand_back_keeps_the_cheap_try_claude_took_over_and_edited_when_the_escalation_is_at_review_too(self):
+        # #1595 (2026-11-27): the escalation at review too, the hand-back kept it, the latest try
+        # at review, and had Claude wb discard the cheap try it took over by name and wrote in
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))
+        self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
+        run_wb("takeover", "fxe-code-1")                                  # Claude chose the cheap try
+        (store.Task("fxe-code-1").worktree / "claude_fix.py").write_text("print('mine')\n")
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertIn("and you chose fxe-code-1 (wb takeover fxe-code-1)", alts)
+        self.assertIn("Finish fxe-code-1 in its worktree and wb accept only it", alts)
+        self.assertTrue(alts.endswith("then wb discard fxe-code-2"), alts)
+        self.assertNotIn("wb discard fxe-code-1", out)
+        self.assertTrue(store.Task("fxe-code-1").status.get("chosen"))     # kept across the hand-back
+        # both taken over by name: Claude's pick, neither named for wb discard
+        run_wb("takeover", "fxe-code-2")
+        again = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in again.splitlines() if "alternatives" in ln]
+        self.assertIn("you took over fxe-code-1, fxe-code-2 by name. Finish the one you chose", alts)
+        self.assertNotIn("wb discard fxe-code", again)
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
     def test_an_items_role_follows_its_escalation_and_escalate_takes_distinct_roles(self):
         st = [{"id": "code", "kind": "code", "items": ["x"], "escalate": ["significant", "writing"]},
               {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 1},

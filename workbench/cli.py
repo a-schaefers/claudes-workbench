@@ -5040,8 +5040,12 @@ def _take_over(name: str, user: bool, hand_back: bool = False) -> tuple[store.Ta
     # (#1592's review, 2026-11-27); only --all's own takeover records the phase it found
     prior = (task.status.get("prior_phase") if task.status.get("taken_over") else None) \
         or (task.status.get("phase") if hand_back else "review")
+    # and marked Claude's choice, kept across later takeovers: with the escalation at review too,
+    # the hand-back kept the latest try at review and had Claude wb discard the one it took over
+    # and wrote in (#1595, 2026-11-27)
+    chosen = {} if hand_back else {"chosen": True}
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
-                    parked=None, prior_phase=prior)  # Claude's now (#698)
+                    parked=None, prior_phase=prior, **chosen)  # Claude's now (#698)
     _ack_all(task)
     return task, aside
 
@@ -5069,9 +5073,10 @@ def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
     """--all's one line for the tries it took over at one code item (runs.tries_of): a compare
     item's attempts (#1576), one kept, the rest discarded, which records them as not chosen
     (runs.not_chosen), never as rejected; or an escalation and the tries it escalated from
-    (#1592), the latest finished one kept (at review before Claude first took it over: status
-    ``prior_phase``, which _take_over keeps across another takeover), else the latest, the others
-    discarded, no pick to count them against."""
+    (#1592), the one Claude took over by name kept (status ``chosen``, #1595), else the latest
+    finished one (at review before Claude first took it over: status ``prior_phase``, which
+    _take_over keeps across another takeover), else the latest, the others discarded, no pick to
+    count them against."""
     tries = runs.tries_of(store.Task(names[0]))[3]
     rest = [t.name for t in tries if t.name not in names]
     kept = [n for n in rest if store.Task(n).status.get("phase") == "accepted"]
@@ -5093,9 +5098,19 @@ def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
         # kept at review (asks left after its refixes) whose escalation crashed was named to
         # discard, and Claude dropped the reviewed change to redo it in the crashed try's worktree
         # (#1592, the bar loop's M5, 2026-11-27)
-        keep = next((n for n in reversed(live) if phase[n] == "review"), live[-1])
+        # a try Claude took over by name (status ``chosen``) first, whatever the others' phases:
+        # the latest at review was kept and the one Claude chose and wrote in named for wb
+        # discard, its edits deleted with its worktree (#1595, 2026-11-27)
+        chosen = [n for n in live if store.Task(n).status.get("chosen")]
+        if len(chosen) > 1:  # Claude's own pick to make: none of them named for wb discard
+            return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for "
+                    f"one change, {where}: the run escalated {', '.join(live[:-1])} to {live[-1]}, and "
+                    f"you took over {', '.join(chosen)} by name. Finish the one you chose in its worktree "
+                    f"and wb accept only it -m \"…\" (it commits), then wb discard the rest")
+        keep = chosen[0] if chosen else next((n for n in reversed(live) if phase[n] == "review"), live[-1])
         drop = [n for n in live if n != keep]
         why = ("" if keep == live[-1] else
+               f", and you chose {keep} (wb takeover {keep})" if chosen else
                f", which {_PHASE_SAID.get(phase[live[-1]], 'never finished')}: {keep} holds the latest "
                f"finished change")
         return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for one "
