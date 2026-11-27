@@ -5042,8 +5042,10 @@ def _take_over(name: str, user: bool, hand_back: bool = False) -> tuple[store.Ta
         or (task.status.get("phase") if hand_back else "review")
     # and marked Claude's choice, kept across later takeovers: with the escalation at review too,
     # the hand-back kept the latest try at review and had Claude wb discard the one it took over
-    # and wrote in (#1595, 2026-11-27)
-    chosen = {} if hand_back else {"chosen": True}
+    # and wrote in (#1595, 2026-11-27). When, not whether: a choice the run escalated past (taken
+    # over while slow, handed back with wb feedback, then refixed and escalated) still won, and
+    # the hand-back had Claude discard the paid escalation (#1595's review, 2026-11-27)
+    chosen = {} if hand_back else {"chosen_at": store.now()}
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
                     parked=None, prior_phase=prior, **chosen)  # Claude's now (#698)
     _ack_all(task)
@@ -5069,11 +5071,32 @@ _PHASE_SAID = {"failed": "failed", "stuck": "got stuck", "queued": "never starte
                "running": "was still running", "testing": "was still testing", "asking": "was still asking"}
 
 
+def _edited_by_hand(task: store.Task) -> bool:
+    """Whether ``task``'s worktree holds edits made since its agent's last round: its files are
+    none of the trees its step's review notices kept (status `review_trees`, edits by hand that
+    wb rewind kept left out). False when it has no such tree, or the worktree can't be read: a
+    hand-back named the try Claude fixed by hand at review for wb discard (#1595, 2026-11-27)."""
+    st = task.status
+    steps = st.get("steps", 1)
+    trees = {v.get("tree") for v in (st.get("review_trees") or {}).values()
+             if v.get("step") == steps and not v.get("hand")}
+    trees.discard(None)
+    if not trees or not task.worktree.is_dir():
+        return False
+    try:  # as the review notice snapshots it: what accept would commit (#1259, #1593)
+        now = gitops.review_snapshot(task.worktree, force=runner.ignored_to_commit(task),
+                                     skip=runner.run_caches(task))[0]
+    except (gitops.GitError, OSError):
+        return False
+    return now not in trees
+
+
 def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
     """--all's one line for the tries it took over at one code item (runs.tries_of): a compare
     item's attempts (#1576), one kept, the rest discarded, which records them as not chosen
     (runs.not_chosen), never as rejected; or an escalation and the tries it escalated from
-    (#1592), the one Claude took over by name kept (status ``chosen``, #1595), else the latest
+    (#1592), the one holding Claude's work kept (taken over by name since the latest try began,
+    status ``chosen_at``, or edited by hand at review: _edited_by_hand, #1595), else the latest
     finished one (at review before Claude first took it over: status ``prior_phase``, which
     _take_over keeps across another takeover), else the latest, the others discarded, no pick to
     count them against."""
@@ -5098,19 +5121,30 @@ def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
         # kept at review (asks left after its refixes) whose escalation crashed was named to
         # discard, and Claude dropped the reviewed change to redo it in the crashed try's worktree
         # (#1592, the bar loop's M5, 2026-11-27)
-        # a try Claude took over by name (status ``chosen``) first, whatever the others' phases:
-        # the latest at review was kept and the one Claude chose and wrote in named for wb
-        # discard, its edits deleted with its worktree (#1595, 2026-11-27)
-        chosen = [n for n in live if store.Task(n).status.get("chosen")]
+        # Claude's own work first, whatever the others' phases: the latest at review was kept and
+        # the try Claude chose and wrote in named for wb discard, its edits deleted with its
+        # worktree (#1595, 2026-11-27). A try taken over by name since the latest try began
+        # (`chosen_at`; one taken earlier the run escalated past), or one at review whose files
+        # differ from every tree its agent left (Claude's edits by hand at review, SKILL.md's
+        # small fixes, with no takeover)
+        began = store.Task(live[-1]).spec.get("created_at") or 0
+        how = {}
+        for n in live:
+            if (store.Task(n).status.get("chosen_at") or 0) > began:
+                how[n] = f"wb takeover {n}"
+            elif phase[n] == "review" and _edited_by_hand(store.Task(n)):
+                how[n] = "your edits since its review"
+        chosen = [n for n in live if n in how]
         if len(chosen) > 1:  # Claude's own pick to make: none of them named for wb discard
             return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for "
                     f"one change, {where}: the run escalated {', '.join(live[:-1])} to {live[-1]}, and "
-                    f"you took over {', '.join(chosen)} by name. Finish the one you chose in its worktree "
-                    f"and wb accept only it -m \"…\" (it commits), then wb discard the rest")
+                    f"your work is in {', '.join(f'{n} ({how[n]})' for n in chosen)}. Finish the one "
+                    f"you chose in its worktree and wb accept only it -m \"…\" (it commits), then wb "
+                    f"discard the rest")
         keep = chosen[0] if chosen else next((n for n in reversed(live) if phase[n] == "review"), live[-1])
         drop = [n for n in live if n != keep]
         why = ("" if keep == live[-1] else
-               f", and you chose {keep} (wb takeover {keep})" if chosen else
+               f", and you chose {keep} ({how[keep]})" if chosen else
                f", which {_PHASE_SAID.get(phase[live[-1]], 'never finished')}: {keep} holds the latest "
                f"finished change")
         return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for one "

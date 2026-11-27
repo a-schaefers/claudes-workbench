@@ -1611,15 +1611,75 @@ class Runs(Base):
         self.assertIn("Finish fxe-code-1 in its worktree and wb accept only it", alts)
         self.assertTrue(alts.endswith("then wb discard fxe-code-2"), alts)
         self.assertNotIn("wb discard fxe-code-1", out)
-        self.assertTrue(store.Task("fxe-code-1").status.get("chosen"))     # kept across the hand-back
+        self.assertTrue(store.Task("fxe-code-1").status.get("chosen_at"))  # kept across the hand-back
         # both taken over by name: Claude's pick, neither named for wb discard
         run_wb("takeover", "fxe-code-2")
         again = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
         (alts,) = [ln for ln in again.splitlines() if "alternatives" in ln]
-        self.assertIn("you took over fxe-code-1, fxe-code-2 by name. Finish the one you chose", alts)
+        self.assertIn("your work is in fxe-code-1 (wb takeover fxe-code-1), fxe-code-2 (wb takeover "
+                      "fxe-code-2). Finish the one you chose", alts)
         self.assertNotIn("wb discard fxe-code", again)
         for n in ("fxe-code-1", "fxe-code-2"):
             if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
+    def test_a_hand_back_keeps_the_cheap_try_claude_edited_by_hand_at_review_without_a_takeover(self):
+        # #1595, case (b) (2026-11-27): Claude fixed the cheap try by hand at review, as SKILL.md
+        # asks of small things, with no takeover; the hand-back kept the escalation, the latest try
+        # at review, and named the cheap try for wb discard, Claude's edits deleted with it
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))
+        self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
+        (store.Task("fxe-code-1").worktree / "claude_fix.py").write_text("print('mine')\n")
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertIn("and you chose fxe-code-1 (your edits since its review)", alts)
+        self.assertIn("Finish fxe-code-1 in its worktree and wb accept only it", alts)
+        self.assertTrue(alts.endswith("then wb discard fxe-code-2"), alts)
+        self.assertNotIn("wb discard fxe-code-1", out)
+        # both edited by hand: Claude's pick, neither named for wb discard
+        (store.Task("fxe-code-2").worktree / "claude_fix.py").write_text("print('mine too')\n")
+        again = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in again.splitlines() if "alternatives" in ln]
+        self.assertIn("your work is in fxe-code-1 (your edits since its review), fxe-code-2 (your edits "
+                      "since its review). Finish the one you chose", alts)
+        self.assertNotIn("wb discard fxe-code", again)
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
+    def test_a_hand_back_keeps_the_escalation_when_claude_took_over_the_cheap_try_before_the_run_escalated(self):
+        # #1595's review (2026-11-27): Claude took over the slow cheap try by name and handed it
+        # back with wb feedback; the run refixed it twice and escalated to the paid role, and the
+        # hand-back still kept the cheap try Claude chose earlier and had it discard the escalation
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"fxe-code-1": "slow"})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.wait_item("fxe-code-1", lambda st: bool(st.get("session")) and runner.checked_out(store.Task("fxe-code-1")),
+                       timeout=60)
+        run_wb("takeover", "fxe-code-1")                                  # Claude chose it, then
+        msg = Path(self.tmp.name) / "m.txt"
+        msg.write_text("carry on\n")
+        run_wb("feedback", "fxe-code-1", "--message", str(msg))           # handed it back
+        self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"), timeout=180)
+        run = runs.Run("fxe")
+        self.assertEqual([r["task"] for r in run.journal() if r.get("kind") == "item"
+                          and r.get("stage") == "code"], ["fxe-code-1", "fxe-code-2"])  # escalated past it
+        self.assertTrue(store.Task("fxe-code-1").status.get("chosen_at"))
+        self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertNotIn("you chose", alts)
+        self.assertIn("Finish fxe-code-2 in its worktree and wb accept only it", alts)
+        self.assertTrue(alts.endswith("then wb discard fxe-code-1"), alts)
+        self.assertNotIn("wb discard fxe-code-2", out)
+        for n in runs.run_tasks(run):
+            if store.Task(n).exists and store.Task(n).status.get("phase") not in store.CLOSED:
                 run_wb("discard", n)
 
     def test_an_items_role_follows_its_escalation_and_escalate_takes_distinct_roles(self):
