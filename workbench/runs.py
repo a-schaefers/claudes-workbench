@@ -2155,8 +2155,12 @@ def estimate(flow: dict, params: dict, exists: dict | None = None) -> tuple[floa
         n = min(n, int(s.get("max_items") or MAX_ITEMS)) * int(s.get("attempts") or 1)
         if (s.get("batch") or 1) > 1:
             n = math.ceil(n / s["batch"])
+        # a code stage with no card is a coding task as the build card's (a flow wb flow import
+        # made, a plan's "kind": "code"): counted as nothing, an API run read "estimate $0" and
+        # spent its budget (#1590, 2026-11-27)
         try:
-            est = cards.load(s["card"]).est if s.get("card") else {}
+            est = cards.load(s["card"]).est if s.get("card") else \
+                cards.load("build").est if s.get("kind") == "code" else {}
         except RuntimeError:
             est = {}
         m = stage_model(s)
@@ -2166,6 +2170,9 @@ def estimate(flow: dict, params: dict, exists: dict | None = None) -> tuple[floa
         p = meter.price(m)
         if not p:
             priced = priced and (meter.is_plan(m) or meter.is_free(m))
+            continue
+        if n > 0 and not (est.get("in") or est.get("out")):
+            priced = False  # a paid stage with no tokens to count (a card with no est): unpriced, never $0
             continue
         usd += n * (float(est.get("in") or 0) * p[0]["input"] + float(est.get("out") or 0) * p[0]["output"]) / 1e6
     return (round(usd, 4) if priced else None), mins, later

@@ -1920,6 +1920,35 @@ class RunsApi(Base):
         self.assertEqual([r["kind"] for r in self.notices("nopr")], ["run_done"])
         self.assertEqual(runs.report_of("nopr")["not_run"][0]["key"], "find:1")
 
+    def test_a_code_stage_without_a_card_on_an_api_role_is_estimated_not_free(self):
+        # #1590 (bar loop #1030, 2026-11-27): estimate counted a stage with no card as nothing,
+        # so a flow wb flow import made (one code task per item) printed "estimate $0" on a paid
+        # role, Claude said the run was free, and it spent up to its budget
+        cardless = {"v": 1, "name": "c", "stages": [{"id": "run", "kind": "code", "role": "significant",
+                                                     "items": ["a", "b"], "prompt": "{item}"}]}
+        built = json.loads(json.dumps(cardless))
+        built["stages"][0]["card"] = "build"
+        usd, _, _ = runs.estimate(cardless, {})
+        self.assertGreater(usd, 0)
+        self.assertEqual(usd, runs.estimate(built, {})[0])              # a coding task, as the build card's
+        report = {"v": 1, "name": "r", "stages": [{"id": "run", "role": "significant", "items": ["a"],
+                                                   "prompt": "{item}"}]}
+        self.assertIsNone(runs.estimate(report, {})[0])                  # no est to count: unpriced, never $0
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5,
+                                                         "roles": {"significant": {"via": "gpu"}}})
+        meter._CAP.clear()
+        self.assertEqual(runs.estimate(cardless, {})[1], runs.estimate(built, {})[1])
+        self.assertGreater(runs.estimate(cardless, {})[1], 0)           # its GPU minutes too
+        self.roles(SPEND_FLASH, 5)
+        plan = Path(self.tmp.name) / "tidy.json"
+        plan.write_text(json.dumps(runs.import_command("Tidy $ARGUMENTS", "tidy")))
+        code, out, err = wb("run", "start", "tidy", "--plan", str(plan), "--param", "items=a,b,c",
+                            "--repo", str(self.repo), "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("run: code on significant (API) · 3 item(s)", out)
+        self.assertNotIn("estimate $0 ·", out)
+        self.assertRegex(out, r"\nestimate \$\d+\.\d*[1-9]\d* · budget")
+
     def test_a_code_item_refused_at_its_start_is_no_change_at_review_and_names_no_task(self):
         # #1531 (2026-11-26): _start logs the item's task before wb start runs, so a code item
         # refused there (a role with no key, here no price: the same exit 3) read "1 change(s)

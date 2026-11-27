@@ -10277,7 +10277,10 @@ budget it pauses the run as a start does, and while the run isn't going, `runs._
 each pass, so the first pass after `wb run amend --budget-usd N` and `wb run resume` sends it; sent at once, each
 refix paid a coding round past the budget, while the run read `paused`, #1586): items already running finish
 their rounds, so a run can end past `--budget-usd` by what they spend (the day cap still stops every one).
-The estimate: each card's `est` × `meter.price` for the stages whose items are known (`runs.estimate`).
+The estimate: each card's `est` × `meter.price` for the stages whose items are known (`runs.estimate`); a code
+stage with no card (`wb flow import`'s, a plan's `"kind": "code"`) counts as the build card's `est`, and a stage
+on a paid API model with no `in` or `out` to count (a card with no `est`) makes it `unpriced`, never `$0`: a
+cardless code stage read `estimate $0` on a paid role, and spent its budget (#1590).
 
 **Notices** (`runs.Run.notify`; *Waking Claude, exactly once*): `run_checkpoint`, `run_done`, `run_paused`,
 `run_stopped`, `run_failed`, each text the wake whole, opening `[workbench] Run `<run>` <headline>:`
