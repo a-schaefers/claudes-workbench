@@ -10170,13 +10170,22 @@ def parser() -> argparse.ArgumentParser:
             x.add_argument("--force", action="store_true", help="replace a copy of yours already there")
         x.set_defaults(f=runs.cmd_flow_copy)
     x = fs.add_parser("import", help="a command's Markdown (its prompt, $ARGUMENTS as each item) as a flow "
-                      "of yours: one task per item of --param items")
-    x.add_argument("file", help="the command's .md (Claude Code's .claude/commands/, OpenCode's command/)")
+                      "of yours: one task per item of --param items; or a bundle (wb flow export), scanned "
+                      "for Claude to read, then --install")
+    x.add_argument("file", help="the command's .md (Claude Code's .claude/commands/, OpenCode's command/), "
+                   "or a bundle's directory, git URL or owner/repo")
+    x.add_argument("--install", action="store_true", help="a bundle's directory, read: its flows, cards and schemas "
+                   "into yours (its skills each through wb skill import)")
     x.add_argument("--name", help="the flow's name (default: the file's)")
     x.add_argument("--card", help="a role card for its stage (default: a code task)")
     x.add_argument("--out", metavar="FILE", help="where to write it (default: $WB_FLOWS/<name>.json)")
     x.add_argument("--force", action="store_true", help="replace a flow file already there")
     x.set_defaults(f=runs.cmd_flow_import)
+    x = fs.add_parser("export", help="a flow as a bundle to share: the flow, your cards and schemas it names, "
+                      "and the library skills those cards name (#1463 P7)")
+    x.add_argument("name")
+    x.add_argument("--to", metavar="DIR", help="a new directory (default: ./<name>)")
+    x.set_defaults(f=runs.cmd_flow_export)
     s = sub.add_parser("card", help="role cards (#1278): list them, copy a shipped one to customize, or "
                        "reset yours; --schema for the schemas")
     cs = s.add_subparsers(dest="card_cmd", required=True)

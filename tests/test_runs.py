@@ -658,6 +658,50 @@ class Customized(Base):
         code, out, _ = wb("run", "flows", "--repo", str(self.repo))
         self.assertIn("tests (yours) /tests-for: ", out)
 
+    def test_a_flow_exported_as_a_bundle_imports_scanned_for_claude_and_installs_only_on_install_1463(self):
+        # #1463 P7: a flow shared with its own cards, schemas and skills; no marketplace, never
+        # taken unread, a shipped card named and not copied, a skill only through the library
+        tmp = Path(self.tmp.name)
+        lib = tmp / "skills"
+        (lib / "terse").mkdir(parents=True)
+        (lib / "terse" / "SKILL.md").write_text("---\nname: terse\ndescription: short reports\n---\nBe short.\n")
+        roles = Path(os.environ["WB_ROLES"])
+        roles.mkdir()
+        (roles / "lint.md").write_text("---\ndescription: lints\ntools: read\nschema: findings\nskills: terse\n---\nLint it.\n")
+        mine = Path(os.environ["WB_FLOWS"])
+        mine.mkdir()
+        (mine / "lint.json").write_text(json.dumps({"v": 1, "name": "lint", "params": {"areas": "list"}, "stages": [
+            {"id": "find", "card": "lint", "items": "{params.areas}", "prompt": "{item}"},
+            {"id": "verify", "card": "verify", "from": "find", "split": "findings",
+             "keep": {"path": "verdict", "in": ["confirmed"]}, "prompt": "{item}"},
+            {"id": "claude", "final": True, "from": "verify"}]}))
+        with mock.patch.dict(os.environ, {"WB_SKILLS": str(lib)}):
+            code, out, err = wb("flow", "export", "lint", "--to", str(tmp / "b"))
+        self.assertEqual(code, 0, err)
+        self.assertIn("flow lint; cards lint (yours); skills terse; shipped cards named, not copied: verify", out)
+        self.assertEqual(json.loads((tmp / "b" / "bundle.json").read_text())["skills"], ["terse"])
+        self.assertTrue((tmp / "b" / "skills" / "terse" / "SKILL.md").is_file())
+        self.assertFalse((tmp / "b" / "roles" / "verify.md").exists())
+        self.assertNotEqual(wb("flow", "export", "lint", "--to", str(tmp / "b"))[0], 0)  # never into a full one
+        # the receiver: fresh roles and flows
+        with mock.patch.dict(os.environ, {"WB_FLOWS": str(tmp / "theirs-flows"), "WB_ROLES": str(tmp / "theirs-roles")}):
+            code, out, err = wb("flow", "import", str(tmp / "b"))
+            self.assertEqual(code, 0, err)
+            self.assertIn("scan: ", out)
+            self.assertIn(f"read it all: {tmp / 'b'}\nthen take it: wb flow import {tmp / 'b'} --install", out)
+            self.assertFalse((tmp / "theirs-flows").exists())     # nothing taken before Claude reads it
+            code, out, err = wb("flow", "import", str(tmp / "b"), "--install")
+            self.assertEqual(code, 0, err)
+            self.assertTrue((tmp / "theirs-flows" / "lint.json").is_file())
+            self.assertTrue((tmp / "theirs-roles" / "lint.md").is_file())
+            self.assertIn("skill terse: wb skill import", out)
+            self.assertEqual(runs.validate(runs.load_flow("lint")), [])
+            self.assertEqual(wb("flow", "import", str(tmp / "b"), "--install")[0], 1)   # yours already
+        (tmp / "b" / "roles" / "evil.md").symlink_to("/etc/passwd")
+        code, _, err = wb("flow", "import", str(tmp / "b"))
+        self.assertEqual(code, 1)
+        self.assertIn("roles/evil.md is a link", err)
+
     def test_a_shipped_card_or_flow_copied_is_yours_says_it_shadows_and_when_the_shipped_one_moved_and_reset_sets_it_aside(self):
         code, out, err = wb("card", "copy", "find")
         self.assertEqual(code, 0, err)
