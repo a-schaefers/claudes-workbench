@@ -33,7 +33,7 @@ work, and OpenCode subagents via API or GPU write the code.
                                         ▼
  ┌──────────────────────────────────────────────────────────┐        ┌────────────────────┐
  │                     ORCHESTRATOR                         │◄──────►│   WEB APP  :1337   │
- │  first time? (no setup.json) ─► setup questions          │        │  tasks · stats ·   │
+ │  first time? ─► setup questions                          │        │  tasks · stats ·   │
  │  plans · splits into steps · writes a test for each      │        │  settings · chat   │
  │  reviews each result · merges on your word               │        │  (phone: Tailscale)│
  └──────┬──────────────────────────────────────────▲────────┘        └────────────────────┘
@@ -148,8 +148,7 @@ these limits and the spending cap.
 
 Subagents on your own GPU don't send your code to any provider. A subagent on an API model sends
 what it reads to that model's provider. The orchestrator agent sends what it reads to its own
-model's provider, unless that model is local. To keep a repository's subagents off every API, [mark
-it](ARCHITECTURE.md#privacy-for-api-roles) `local_only` in `~/.config/workbench/commands.json`.
+model's provider, unless that model is local.
 
 ## What else it does
 
