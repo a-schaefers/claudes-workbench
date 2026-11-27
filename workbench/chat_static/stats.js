@@ -56,15 +56,18 @@
         return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no known cost';
     }
     // The words one model or provider goes by (the pane's Names): a GPU model by its label, an API
-    // model as `API <the id's last part> (<provider's name>)`, as the task strip says it (taskOn:
-    // Stats said `API deepinfra Fast-Coder-1` of the strip's `API Fast-Coder-1 (DeepInfra)`, #1339),
-    // a provider by its name; an id nothing named stays the id. From the roles and models /api/stats carries, and wb top's rack.
+    // model as the task sheet's note says it (app.ts's taskNote): `API · <catalog name, else the id's
+    // last part> · <provider's name>`. Stats said `API deepinfra Fast-Coder-1` where the strip said
+    // `API · DeepSeek V4.1 Flash` (#1339, 2026-11-26); the catalog name is `models.api`'s `name`, the
+    // one chat.model_label gives the strip. A provider by its name; an id nothing named stays the id.
+    // From the roles and models /api/stats carries, and wb top's rack.
     const providerWord = (id, n) => n.providers[id] || id;
     function modelWord(id, api, n) {
         if (!api)
             return n.models[id] || id;
         const cut = id.indexOf('/'); // the provider ends at the first /
-        return cut > 0 ? `API ${id.split('/').pop()} (${providerWord(id.slice(0, cut), n)})` : `API ${id}`;
+        const name = n.apis[id] || id.split('/').pop();
+        return cut > 0 ? `API · ${name} · ${providerWord(id.slice(0, cut), n)}` : `API · ${name}`;
     }
     function apiPeriod(a, n) {
         const money = apiMoney(a);
@@ -319,7 +322,7 @@
     let feed = null, routes = null, models = null, statsWhy = '', statsCtrl = null, statsTimer = 0;
     let snap = null, busy = {}, topWhy = '', topCtrl = null, topTimer = 0, topFails = 0;
     function names() {
-        const n = { models: {}, providers: {} };
+        const n = { models: {}, providers: {}, apis: {} };
         for (const g of (models && models.gpu) || [])
             if (g && g.label)
                 n.models[g.id] = g.label;
@@ -335,6 +338,9 @@
         for (const a of (models && models.api) || [])
             if (a && a.provider && a.provider_name && !n.providers[a.provider])
                 n.providers[a.provider] = a.provider_name;
+        for (const a of (models && models.api) || [])
+            if (a && typeof a.id === 'string' && typeof a.name === 'string' && a.name)
+                n.apis[a.id] = a.name;
         return n;
     }
     const live = () => !!(feed && feed.settings && feed.settings.live === true);

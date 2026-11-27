@@ -12,7 +12,7 @@
   const TOP_RETRY_MS = [5000, 10000, 20000, 40000, 60000]  // a stream that gave nothing, again
   const SVG = 'http://www.w3.org/2000/svg'
   // the words a model or provider goes by (names()), and one row of the history (statsRows)
-  interface Names { models: Record<string, string>; providers: Record<string, string> }
+  interface Names { models: Record<string, string>; providers: Record<string, string>; apis: Record<string, string> }
   interface StatRow { label: string; text: string; trend?: number[] | null; retry?: boolean; stale?: boolean; empty?: boolean }
   const NB = ' '
 
@@ -52,14 +52,17 @@
     return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no known cost'
   }
   // The words one model or provider goes by (the pane's Names): a GPU model by its label, an API
-  // model as `API <the id's last part> (<provider's name>)`, as the task strip says it (taskOn:
-  // Stats said `API deepinfra Fast-Coder-1` of the strip's `API Fast-Coder-1 (DeepInfra)`, #1339),
-  // a provider by its name; an id nothing named stays the id. From the roles and models /api/stats carries, and wb top's rack.
+  // model as the task sheet's note says it (app.ts's taskNote): `API · <catalog name, else the id's
+  // last part> · <provider's name>`. Stats said `API deepinfra Fast-Coder-1` where the strip said
+  // `API · DeepSeek V4.1 Flash` (#1339, 2026-11-26); the catalog name is `models.api`'s `name`, the
+  // one chat.model_label gives the strip. A provider by its name; an id nothing named stays the id.
+  // From the roles and models /api/stats carries, and wb top's rack.
   const providerWord = (id: string, n: Names) => n.providers[id] || id
   function modelWord(id: string, api: boolean, n: Names) {
     if (!api) return n.models[id] || id
     const cut = id.indexOf('/')  // the provider ends at the first /
-    return cut > 0 ? `API ${id.split('/').pop()} (${providerWord(id.slice(0, cut), n)})` : `API ${id}`
+    const name = n.apis[id] || id.split('/').pop()
+    return cut > 0 ? `API · ${name} · ${providerWord(id.slice(0, cut), n)}` : `API · ${name}`
   }
   function apiPeriod(a: Json, n: Names) {
     const money = apiMoney(a)
@@ -294,12 +297,13 @@
   let feed: Json = null, routes: Json = null, models: Json = null, statsWhy = '', statsCtrl: AbortController | null = null, statsTimer = 0
   let snap: Json = null, busy: Record<string, number[]> = {}, topWhy = '', topCtrl: AbortController | null = null, topTimer = 0, topFails = 0
   function names() {
-    const n: Names = { models: {}, providers: {} }
+    const n: Names = { models: {}, providers: {}, apis: {} }
     for (const g of (models && models.gpu) || []) if (g && g.label) n.models[g.id] = g.label
     for (const m of (snap && snap.rack) || []) if (m && m.label && !n.models[m.model]) n.models[m.model] = m.label
     for (const r of (snap && snap.running) || []) if (r && r.via !== 'api' && r.label && !n.models[r.model]) n.models[r.model] = r.label
     for (const [id, p] of Object.entries<Json>((routes && routes.providers) || {})) if (p && p.name) n.providers[id] = p.name
     for (const a of (models && models.api) || []) if (a && a.provider && a.provider_name && !n.providers[a.provider]) n.providers[a.provider] = a.provider_name
+    for (const a of (models && models.api) || []) if (a && typeof a.id === 'string' && typeof a.name === 'string' && a.name) n.apis[a.id] = a.name
     return n
   }
   const live = () => !!(feed && feed.settings && feed.settings.live === true)

@@ -7547,10 +7547,10 @@ the mean rounds, `1 round` or `2.5 rounds`, minutes; each one's write trend an S
 size (each role by `wb route --json`'s `label`, `routes.LABELS`, Settings' names; `ROLE_LABELS`, a copy, while unread, #1339), What stopped agents (`GUARD_WORDS`;
 `spend` is `the API day cap`), What helps, Bench, Optimized; with no section, `No finished tasks
 yet: delegate one with /workbench, and how it went shows here.` The names follow the pane's
-`Names` (`modelWord`, `providerWord`, `usd`, `apiPeriod`; an API model `API <id's last part> (<provider>)`, as the
-task strip's `taskOn` says it, #1339): GPU labels from `models.gpu` and
+`Names` (`modelWord`, `providerWord`, `usd`, `apiPeriod`; an API model `API · <catalog name> · <provider>`, as the
+task sheet's note, `taskNote`, says it, the catalog name the strip's too, else the id's last part, #1339): GPU labels from `models.gpu` and
 `wb top`'s rack and running rows, provider names from `routes.providers` and `models.api`'s
-`provider_name`; `usd` is `meter.usd`'s rule. No score, saving, spec-gap discards, energy, streak,
+`provider_name`, API models' catalog names from `models.api`'s `name`; `usd` is `meter.usd`'s rule. No score, saving, spec-gap discards, energy, streak,
 work absorbed, questions, Claude's tokens a task, 30 days' bars, bests or milestone: #1322 took
 them from the feed and the pane. The charts are inline SVG built in `stats.ts` (no library, so the CSP holds),
 coloured by the page's tokens (`--accent`, `--accent-soft`, `--line`, `--ok`, `--warn`, `--bad`) in
