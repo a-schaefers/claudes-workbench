@@ -50,7 +50,7 @@ DRIVERS: dict[str, dict[str, str]] = {
 # whose bytes the mod's tests and the phone's pushes know), `receipt.*` (a message's meta),
 # `lane` (Settings' How the chat works, beside `rule.terminal` and `rule.settings`: the three lines
 # that said "prompts wait in the terminal" five times over three cards, the web app's review,
-# 2026-11-26), `doc.rule` (the docs' block), `link.*` (wb's own
+# 2026-11-26), `link.*` (wb's own
 # lines on where the web app is: wb setup, wb chat on, wb doctor), `moved.deepmode` (`wb deepmode
 # --moved`'s one line, which both hosts toast once: a 2.1 Dynamic workflows on starts 2.2 off,
 # #1507), `refusal.*` (what a host tells
@@ -93,10 +93,6 @@ TEXTS: dict[str, str] = {
     "receipt.blocked": "Waiting behind the prompt in the terminal",
     "lane": "This chat is a second lane to {who}, not a copy of the terminal: {who} answers here with what "
             "matters, and most work can run from here, more so with {who} run with permissions granted.",
-    "doc.rule": "The terminal is where {who} lives (locally, or over `ssh` + `tmux`), and a prompt it raises "
-                "is answered there. Most work can still run from the web app's chat, more so with {who} run "
-                "with permissions granted. The web app's Settings are the source of truth: {who} changes one "
-                "only on your ask and yes, and never undoes a change you made.",
     "link.where": "Open the web app to message {who} from anywhere and change your settings: its link is on the "
                   "/workbench pane's modeline, and `wb chat url` prints it (the token in it is the key: keep it private).",
     "link.reach": "To open it on your phone over Tailscale: `wb chat reach tailnet`.",
@@ -144,7 +140,6 @@ PAGE: tuple[str, ...] = ("purpose", "rule.terminal", "rule.settings", "receipt.b
 # `<!-- story:KEY[:driver] -->` and `<!-- /story -->`.
 # The skill's blocks are Claude Code's text; on OpenCode skill.ts puts the host module's in their place.
 DOCS: dict[str, tuple[tuple[str, str], ...]] = {
-    "README.md": (("doc.rule", "any"),),
     "skill/workbench/SKILL.md": (("skill.rule", "claude-code"),),
     "skill/workbench/reference/driving.md": (("skill.prompts", "claude-code"),),
 }
