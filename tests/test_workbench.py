@@ -32004,6 +32004,45 @@ class WebChat(Base):
                 time.sleep(0.05)
         self.assertTrue(execs)                                           # re-exec'd, not exit 75
 
+    def test_the_stream_sends_a_tasks_new_phase_at_once_and_wakes_for_nothing_on_its_steps(self):
+        # #1559 (2026-11-26): the hub watched chat/ alone, so a task gone from running to review
+        # reached the page's strip and open sheet at the 60 s idle bump, 57 s late; it watches
+        # each task's status.json and task.json now, never its events.jsonl (every step)
+        import http.client
+        t = store.Task("fix-hub")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "fix-hub", "model": "m", "created_at": store.now()})
+        t.set_status(phase="running", round=1)
+        tok, hub = self.chat.token(), self.srv.RequestHandlerClass.hub
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/api/stream", headers={"Host": "localhost", "Authorization": f"Bearer {tok}"})
+        r = c.getresponse()
+
+        def event():
+            lines = []
+            while True:
+                line = r.fp.readline().decode().rstrip("\n")
+                if not line:
+                    if lines:
+                        return lines
+                    continue
+                if not line.startswith(":"):  # a ping
+                    lines.append(line)
+        first = event()
+        self.assertEqual([x["phase"] for x in json.loads(first[1][6:])["tasks"]], ["running"])
+        time.sleep(0.3)                                  # the hub's watches are in place
+        seen = hub.version
+        t.event({"kind": "tool", "round": 1, "tool": "read", "brief": "x", "ts": store.now()})
+        time.sleep(0.5)                                  # a claim that a step wakes nothing
+        self.assertEqual(hub.version, seen)
+        began = time.monotonic()
+        t.set_status(phase="review")
+        patch = event()
+        self.assertEqual(patch[0], "event: patch")
+        self.assertEqual([x["phase"] for x in json.loads(patch[1][6:])["tasks"]], ["review"])
+        self.assertLess(time.monotonic() - began, 5)     # not the idle bump's 60 s
+        c.close()
+
     def test_the_stream_sends_the_whole_state_then_what_changed(self):
         import http.client
         tok = self.chat.token()

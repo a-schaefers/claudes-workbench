@@ -130,7 +130,7 @@ export type ChatOpen = { messages?: Record<string, ChatMsg> }
 export type ChatLink = { state: 'up' | 'started' | 'off' | 'blocked' | 'failed'; url?: string; why?: string }
 
 /** chat.open_tasks: the strip's and the task sheet's */
-export type OpenTask = { name: string; phase: string; model?: string; label?: string; via?: string; provider_name?: string }
+export type OpenTask = { name: string; phase: string; model?: string; label?: string; via?: string; provider_name?: string; updated_at?: number }
 /** chat.open_runs: the runs strip's (runs.snapshot's rows, #1278): each stage's counts by state */
 export type OpenRun = {
   run: string; flow?: string | null; phase?: string | null; why?: string

@@ -735,6 +735,13 @@ async function run(engine: string, device?: string) {
         return { text: l.textContent, end: l.scrollHeight - l.scrollTop - l.clientHeight, over: l.scrollHeight > l.clientHeight } })
       if (!log.text!.includes('r1 read     src/f39.py\n') || log.text!.includes('/worktree/')) throw new Error('the log says: ' + log.text!.slice(0, 200))
       if (!log.over || log.end > 2) throw new Error('the log is not at its newest row: ' + JSON.stringify(log))
+      // #1559: a task's own status write wakes the stream, no chat write needed, and the open Log
+      // follows its new rows, still at its end
+      appendFileSync(join(t, 'events.jsonl'), JSON.stringify({ kind: 'tool', round: 1, tool: 'bash', brief: 'pytest -q again', ok: true, ts: Date.now() / 1000 }) + '\n')
+      writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'review', round: 1, last: 'tests pass', updated_at: Date.now() / 1000 }))
+      await until(async () => (await page.textContent('#ts-body')).includes('r1 bash     pytest -q again'), 10000)
+      if (await page.evaluate(() => { const l = document.querySelector<HTMLElement>('.ts-log')!; return l.scrollHeight - l.scrollTop - l.clientHeight }) > 2)
+        throw new Error('the Log left its newest row')
       if (await page.evaluate(() => window.pwned)) throw new Error('agent text ran as markup')
       if (!(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))) throw new Error('the page scrolls sideways')
       // #1339: Reply is pinned to the sheet's foot, and under it the next steps of a task in review

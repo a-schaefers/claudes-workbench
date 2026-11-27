@@ -566,7 +566,9 @@
     // ---- the task sheet (#1201): a tap on the strip lists the open tasks; a tap on one shows its
     // summary (GET /api/task: wb status's row and wb report), its Diff and Log tabs fetched when
     // opened. Nothing polls: a change in the stream's `tasks` re-fetches only the view that is open,
-    // and Refresh asks again. Its report, diff and log are agent-written text, drawn with
+    // and Refresh asks again. The server wakes the stream on a task's own status write (#1559, the
+    // hub's TASK_NEWS), each row carrying its `updated_at`, so the strip and the open sheet follow a
+    // task as it moves, and a running task's Log follows its steps. Its report, diff and log are agent-written text, drawn with
     // textContent alone, never as markup: this page holds the user's key and changes their
     // Settings, so markup an agent wrote would be a way to both. Steering is Claude's: "Reply about this task" tags the
     // next message with the task (`about: {task}`), and Claude decides on wb steer.
@@ -597,9 +599,11 @@
         x.textContent = text; return x; };
     const btn = (cls, text, fn) => { const b = mk('button', cls, text); b.type = 'button'; b.onclick = fn; return b; };
     const agoSecs = (s) => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d`;
-    // the stream's `tasks` changed: the list redrawn, or the open task's view fetched again
+    // the stream's `tasks` changed: the list redrawn, or the open task's view fetched again, only
+    // for a change of its own row: another task's steps fetched this one's diff again (#1559)
+    const sheetKey = () => JSON.stringify(tsTask ? (state.tasks || []).find(t => t.name === tsTask) || null : state.tasks || []);
     function sheetNews() {
-        const key = JSON.stringify(state.tasks || []);
+        const key = sheetKey();
         if (key === tsSeen)
             return;
         tsSeen = key;
@@ -607,6 +611,7 @@
             drawTaskSheet({ quiet: true });
     }
     function drawTaskSheet({ quiet = false } = {}) {
+        tsSeen = sheetKey();
         $('ts-list').hidden = !!tsTask;
         $('ts-one').hidden = !tsTask;
         if (tsTask)

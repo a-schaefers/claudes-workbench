@@ -579,6 +579,9 @@ A **message** (`messages`, `replies`, `message`):
   that holds a body's last bytes until more come (WebKit, past 8 KB) hands the event over.
 - `: ping` (a comment) after 15 s with nothing to send.
 
+A patch comes when the thread, the listener or the driver's state changes, and when an open task's
+status does (its phase, or the step it is on: each `tasks` row's `updated_at`), within a moment.
+
 ## Versions
 
 `api` in `/api/state` and `/api/health` is this API's version. A change that breaks a client

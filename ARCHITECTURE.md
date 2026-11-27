@@ -7293,7 +7293,7 @@ address (#534).
   savings (`chat.week_saved`: `wb savings --json` over 7 days, no `period`; its `api` adds each
   provider's name, `names`, #1022), uploads (`{file,
   message, files}`), build, expire (`MESSAGE_EXPIRE` in seconds), tasks (`chat.open_tasks`, #1016: `[{name,
-  phase, model, label, via, provider_name}]` for each open task, no bench replay and none parked (`store.parked`,
+  phase, model, label, via, provider_name, updated_at}]` for each open task, no bench replay and none parked (`store.parked`,
   as `wb status`, #1097); `label` is `chat.model_label`, the web app's one name for the model (#1339:
   task.json `model_label` for a GPU model, the label Stats and `wb top` give it; an API model's
   catalog name, `models.catalog_title`, from hosted.json as it is, never rebuilt; "" for none, and
@@ -7311,8 +7311,12 @@ address (#534).
   names, `4 need Claude: fix-parser, add-login, rename-flag +1`, the models left to the sheet, its
   ▾ outside the ellipsis): three lines left the thread 26 to 34% of a portrait phone, and none in
   landscape with the keyboard up (#1339); the
-  stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
-  task's own status write; a tap on the strip opens the task sheet, `GET /api/task` below), runs
+  stream sends it when the hub wakes it: a chat file, or a task's own status or spec (`TASK_NEWS`:
+  `status.json`, `task.json`, or a task's directory made or gone; never `events.jsonl`, written on each
+  step), else at the hub's idle bump (`IDLE_BUMP_S`, 60 s, counted from the last wake) (#1559: a
+  task's phase reached the page up to 60 s late); each row's `updated_at` (its status's last write)
+  is the page's mark to fetch an open task's view again; a tap on the strip opens the task sheet,
+  `GET /api/task` below), runs
   (`chat.open_runs`, #1278's S12: `runs.snapshot(live=False)`'s rows without `session`, `cwd` or `alive`, a
   `ps` each on macOS on every state built, `[{run, flow, phase, why, stages: {id: {done, running, null,
   filtered, not_run}}, spent_usd, budget_usd, budget_min, gpu_min}]`
@@ -7356,10 +7360,13 @@ address (#534).
   (WebKit hands a streamed body over only to the first 8 KB of a read until more bytes come: a state
   past 8 KB waited 15 s for the ping, the #1284 review), `: ping` after 15 s idle. `MAX_STREAMS` 16: the oldest gives way (`evicted`),
   the new one waits 5 s (503), since phones drop streams silently. Linux: `TCP_USER_TIMEOUT`
-  `UNACKED_MS` 45 s. One `Hub` thread watches `chat/` and a pidfd on the listener and wakes every
-  stream; without inotify it wakes them only for a change, the listener's pid failing `kill 0`, or
-  `IDLE_BUMP_S` 60 s (#841). A `_watch` failure restarts a second later. It keeps its `chat/`
-  (`Hub.dir`) and stops at `close()` (#134), which ends every stream before another snapshot: one
+  `UNACKED_MS` 45 s. One `Hub` thread watches `chat/`, `tasks/` and each open task's directory
+  (`TASK_SKIP`: nothing below one, no closed task's, as `wb events`) and a pidfd on the listener, and
+  wakes every stream for a chat file, a task's `TASK_NEWS` (`status.json`, `task.json`, a task's
+  directory made or gone: `Hub._news`; never `events.jsonl`, #1559) or the listener's end; without
+  inotify it wakes them only for those, the listener's pid failing `kill 0`, or `IDLE_BUMP_S` 60 s
+  (#841), counted from the last wake. A `_watch` failure restarts a second later. It keeps its `chat/`
+  and `tasks/` (`Hub.dir`, `Hub.tasks`, made at its start, never by its thread) and stops at `close()` (#134), which ends every stream before another snapshot: one
   woken by a test's close made it in the next test's `WB_HOME` (nightly run 45577067512).
 - `POST /api/send`: JSON (415), ≤ 32 KB (413), `{text: ≤ 8000 (empty with files), cid?: ≤ 64,
   about?: {task, n} | {audio, n} | {task}, files?: ≤ 10 ids}` (400 "no such screenshots", "no such take",
@@ -7535,8 +7542,10 @@ opens `#task-sheet` under it in `#view-chat` (closed by Esc, a tap outside, a st
 another view shown): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
 Diff and Log tabs fetch `GET /api/task` when opened (the diff's stat first, "Show the whole diff",
 one file at a time when it is `cut`; the Log scrolled to its newest row, and kept there by a quiet
-refetch unless the reader scrolled up, #1339). Nothing polls: a change in the stream's `tasks` (`sheetNews`)
-re-fetches only the open view, quietly, and Refresh asks again; a task gone says it is no longer
+refetch unless the reader scrolled up, #1339). Nothing polls: a change in the stream's `tasks` (`sheetNews`;
+for an open task, its own row's alone, `sheetKey`) re-fetches only the open view, quietly, and Refresh
+asks again; the stream wakes on a task's own status write (`TASK_NEWS`, #1559), so the strip and the
+open sheet follow a task as it moves, and a running task's Log its steps; a task gone says it is no longer
 open. Its report, diff and log are agent-written, drawn with `textContent` and `<pre>` alone, never
 markup: the page holds the user's token, which changes their Settings, so markup an agent wrote
 would be a way to both. The Summary leads with the phase, a failed or stuck task's `happened` line,

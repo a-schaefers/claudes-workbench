@@ -1048,7 +1048,8 @@ def snapshot() -> dict:
 def open_tasks() -> list[dict]:
     """The open tasks for the page's strip over the thread (#1016): while away, the chat is all
     the user sees, and it named no model (robustness minor 8). From task.json and status.json:
-    `{name, phase, model, label, via, provider_name}`; a bench replay is no one's task, and a parked one
+    `{name, phase, model, label, via, provider_name, updated_at}` (`updated_at`, its status's last
+    write: the page's mark to fetch an open task's view again, #1559); a bench replay is no one's task, and a parked one
     (`wb stop --all`) is left out as `wb status` leaves it: the quit's tasks filled the strip for
     good (#1097, 2026-11-23)."""
     out = []
@@ -1058,7 +1059,7 @@ def open_tasks() -> list[dict]:
             continue
         out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
                     "label": model_label(sp), "via": sp.get("via") or "gpu",
-                    "provider_name": sp.get("provider_name") or ""})
+                    "provider_name": sp.get("provider_name") or "", "updated_at": t.status.get("updated_at")})
     return out
 
 
@@ -2143,6 +2144,13 @@ def writer_driver() -> dict | None:
 
 
 IDLE_BUMP_S = 60  # without inotify, nothing changed: the streams wake this often all the same (#841)
+# A task's own news (#1559, 2026-11-26): the hub watches tasks/ and each task's directory (never
+# below it: its worktree, tree, rounds, its agent's OpenCode home), and wakes the streams only for
+# these two files, its status (written on each phase and each tool call's `last`) and its spec;
+# events.jsonl, written on every step, would rebuild every open stream's snapshot. Without it the
+# strip and the open sheet heard of a task's phase up to IDLE_BUMP_S late
+TASK_NEWS = ("status.json", "task.json")
+TASK_SKIP = ("*/*",)  # Watcher skips, below tasks/: every directory inside a task's
 
 
 def _answers(pid) -> bool:
@@ -2157,8 +2165,9 @@ def _answers(pid) -> bool:
 
 
 class Hub:
-    """One watcher for every open stream: it wakes them the moment a chat file changes or the
-    listening session's process ends (a pidfd), so nothing polls."""
+    """One watcher for every open stream: it wakes them the moment a chat file changes, a task's
+    status or spec does (TASK_NEWS), or the listening session's process ends (a pidfd), so
+    nothing polls."""
 
     def __init__(self):
         self.cond = threading.Condition()
@@ -2167,6 +2176,9 @@ class Hub:
         # the directory it started with: resolved again on each restart, a hub outliving its
         # server (a test's) made the next WB_HOME's chat/ before that test's setUp did (#134)
         self.dir = chat_dir()
+        # tasks/ made here, beside chat/ and for the same reason, never by the watching thread
+        self.tasks = store.home() / "tasks"
+        self.tasks.mkdir(parents=True, exist_ok=True)
         self.closed = threading.Event()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -2193,8 +2205,17 @@ class Hub:
                 time.sleep(1)
             self.bump()
 
+    def _news(self, changed: list) -> bool:
+        """Whether a task's changes are news for the page: its status or spec (TASK_NEWS), or a
+        task's directory made or gone."""
+        return any(p.name in TASK_NEWS or p.parent == self.tasks for p in changed)
+
     def _watch(self) -> None:
         w = Watcher(self.dir)
+        # a closed task's directory is left out, as wb events leaves it: a thousand of them were
+        # a thousand watches for nothing (the 2026-11-16 audit)
+        closed = tuple(t.name for t in store.all_tasks() if t.status.get("phase") in store.CLOSED)
+        tw = Watcher(self.tasks, recursive=True, skip=TASK_SKIP + closed)
         pid, pidfd = None, None
         last, said_gone = time.monotonic(), None
         try:
@@ -2208,28 +2229,37 @@ class Hub:
                         pidfd = os.pidfd_open(int(pid)) if pid else None
                     except (OSError, ValueError, AttributeError):
                         pidfd = None
-                if not w.native or w.polled:  # no inotify, or chat/ fell back to looking
+                if not w.native or w.polled or tw.polled:  # no inotify, or a directory fell back to looking
                     # a wake only for a change, the listener's process ending (`kill 0`, no `ps`)
                     # or IDLE_BUMP_S, as the native select's timeout: every open stream rebuilt
                     # its whole snapshot each second, a `ps` fork each on macOS, with nothing new
                     # (#841)
-                    changed, gone = w.wait(1), False
+                    changed, news, gone = w.wait(1), self._news(tw.wait(0)), False
                     if pid and pid != said_gone and not _answers(pid):
                         gone, said_gone = True, pid
-                    if not changed and not gone and time.monotonic() - last < IDLE_BUMP_S:
+                    if not changed and not news and not gone and time.monotonic() - last < IDLE_BUMP_S:
                         continue
                 else:
-                    ready, _, _ = select.select([w.fd] + ([pidfd] if pidfd is not None else []), [], [], 60)
+                    # the idle bump counted from the last wake: a task's steps (no news) wake the
+                    # select often, and a timeout restarted at each would never come
+                    wait = max(0.0, IDLE_BUMP_S - (time.monotonic() - last))
+                    ready, _, _ = select.select([w.fd, tw.fd] + ([pidfd] if pidfd is not None else []), [], [], wait)
                     w.read()
-                    if pidfd is not None and pidfd in ready:  # the listener is gone
+                    tasks = tw.read()
+                    gone = pidfd is not None and pidfd in ready
+                    if gone:  # the listener is gone
                         os.close(pidfd)
                         pidfd = None
                     time.sleep(0.02)  # gather a burst of writes into one wake
                     w.read()
+                    tasks += tw.read()
+                    if ready and w.fd not in ready and not gone and not self._news(tasks):
+                        continue  # a task's step, its events or its worktree: nothing the page shows
                 last = time.monotonic()
                 self.bump()
         finally:
             w.close()
+            tw.close()
             if pidfd is not None:
                 os.close(pidfd)
 
