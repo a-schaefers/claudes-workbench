@@ -2094,8 +2094,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # told at 40 calls on the GPU to "make the first edit now", stopped at 80 (#1489, 2026-11-26).
     # Its repeat and error guards, the wall and silence hold it.
     explore_limit = float("inf") if spec.get("report") else no_edit_limit(st.get("window"), api=api_task(task))
+    edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     detector = StuckDetector(**{"no_edit": explore_limit, **spec.get("stuck", {})},
-                             worktree=task.worktree, workdir=task.workdir)
+                             worktree=task.worktree, workdir=task.workdir, mark=edit_mark)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past its call's `timeout` it does, and
     # the turn ends waiting on it) prints nothing until it is done: a long test suite counted as
@@ -2113,7 +2114,6 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     bg_jobs: list[str] = []  # what OpenCode waits on once the turn is over
     nudged = False
     renudge = renudged(st, n)
-    edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
     prior = float(task.status.get("active_s") or 0)  # earlier rounds' active work
@@ -2311,10 +2311,17 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 provider.on_retry(raw, now)
                 task.set_status(last=f"OpenCode retries a request: {row['text']}"[:200])
             task.event(row)
-            why = detector.feed({**row, "sig": sig}) if sig else None
+            # an ok edit's tree, one git diff an edit: the detector counts a tree it has seen
+            # this round as no change, whatever reads or test runs sit between (#1584)
+            tree = {"mark": gitops.mark(task.worktree)} if sig and row["kind"] == "tool" \
+                and row["tool"] in EDIT_TOOLS and row["ok"] else {}
+            why = detector.feed({**row, "sig": sig, **tree}) if sig else None
             if why:
                 m = gitops.mark(task.worktree)
-                if detector.guard == "no_edit" and m != edit_mark:  # a shell edit: an edit, not a repeat
+                # a shell edit to a new tree: an edit, not a repeat; one back to a tree seen this
+                # round (a flip done with sed) is none (#1584)
+                if detector.guard == "no_edit" and m not in detector.seen:
+                    detector.seen.add(m)
                     edit_mark, detector.since_edit, why = m, 0, None
             if why and detector.guard == "no_edit":
                 # The first trip in a session nudges (EXPLORE_NUDGE, sent below unless a

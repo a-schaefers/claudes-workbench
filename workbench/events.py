@@ -335,7 +335,7 @@ class StuckDetector:
     limits are the runner's (it owns the clock); this looks only at the stream of tool calls.
     """
 
-    def __init__(self, repeat=4, error_streak=6, no_edit=40, worktree=None, workdir=None):
+    def __init__(self, repeat=4, error_streak=6, no_edit=40, worktree=None, workdir=None, mark=None):
         self.repeat, self.error_streak, self.no_edit = repeat, error_streak, no_edit
         self.worktree = os.path.realpath(worktree) if worktree else None
         # a relative path is OpenCode's directory's, the package in a monorepo (#1148)
@@ -345,6 +345,11 @@ class StuckDetector:
         # times; and each path's last write, for a write of the text it already had (#1575)
         self.calls = deque(maxlen=max(CYCLE) * repeat)
         self.wrote = {}
+        # The trees (gitops.mark) seen this round, its start's first: an edit row the runner gave
+        # one (`mark`) is a change only when its tree is new. A line flipped A->B, B->A with a
+        # read and a test run between (a block of 6, past CYCLE) reset the count at every edit
+        # and ran each round to its 40-minute wall (#1584, 2026-11-26)
+        self.seen = {mark} if mark else set()
         self.errors = 0
         self.since_edit = 0
         self.guard = None
@@ -359,6 +364,9 @@ class StuckDetector:
             self._ours(p) and self.wrote.get(self._key(p)) != row["sig"] for p in written(row) or [None])
         if row["tool"] in EDIT_TOOLS and row["ok"]:
             self.wrote.update((self._key(p), row["sig"]) for p in written(row))
+            if row.get("mark"):
+                changed = changed and row["mark"] not in self.seen
+                self.seen.add(row["mark"])
         self.since_edit = 0 if changed else self.since_edit + 1
         # .guard names the one that fired, for the Stats tab's "what stops agents" (#404)
         if len(self.recent) == self.repeat and len(set(self.recent)) == 1:

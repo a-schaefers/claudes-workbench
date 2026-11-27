@@ -2750,6 +2750,15 @@ class Lifecycle(Base):
         self.assertIn("same call", st["last"])
         self.assertIn("STOPPED", run_wb("report", "t-loop"))
 
+    def test_an_agent_flipping_a_line_with_reads_and_test_runs_between_is_stopped_by_a_guard_not_the_wall(self):
+        # #1584 (the bar loop, 2026-11-26): read, edit 41 -> 43, test, read, edit 43 -> 41, test:
+        # each edit reset the explore count and no block repeated in CYCLE, so every round ran to
+        # its 40-minute wall. The runner judges an edit by the tree it leaves
+        self.start("t-flip", "flip", "--round-timeout", "40")
+        st = wait_phase("t-flip", {"stuck"}, timeout=90)
+        self.assertEqual((st["last"], st["nudges"]),
+                         ("40 tool calls without changing a file in the task, even after a nudge", 1))
+
     def test_silence_is_stopped(self):
         self.start("t-hang", "hang", "--silence-timeout", "2")
         st = wait_phase("t-hang", {"stuck"}, timeout=40)
@@ -35743,6 +35752,31 @@ class Detector(unittest.TestCase):
         self.assertEqual(d.since_edit, 0)                        # the old text back: a change too
         d.feed(tool({"filePath": "/w/b.txt", "content": "41\n"}))
         self.assertEqual(d.since_edit, 0)                        # another file
+
+    def test_an_edit_flipped_back_and_forth_with_reads_and_test_runs_between_is_no_edit_by_its_tree(self):
+        # #1584 (the bar loop, 2026-11-26): read, A->B, test, read, B->A, test: a block of 6 no
+        # CYCLE saw, every edit a real change by its text, so 1200 calls and no stop. The runner
+        # gives each ok edit its tree (gitops.mark): a tree seen this round is no change
+        tool = lambda name, inp: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": name, "state": {"status": "completed", "input": inp}}}, 1)
+        read, run = tool("read", {"filePath": "/w/a.py"}), tool("bash", {"command": "python3 -m unittest"})
+        flip = lambda a, b: {**tool("edit", {"filePath": "/w/a.py", "oldString": a, "newString": b}),  # noqa: E731
+                             "mark": f"tree-{b}"}
+        for block in ([read, flip("x", "y"), run, read, flip("y", "x"), run],
+                      [flip("x", "y"), run, flip("y", "x"), run, read]):
+            d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-x")
+            whys = [d.feed(row) for row in block * 40]
+            stop = next(i for i, why in enumerate(whys) if why)
+            self.assertLess(stop, 100, block)
+            self.assertEqual((d.guard, whys[stop]), ("no_edit", "40 tool calls without changing a file in the task"))
+        # an edit to a tree not seen yet is still a change, a tree undone to the start's is none
+        d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-x")
+        d.feed(flip("x", "y"))
+        self.assertEqual(d.since_edit, 0)
+        d.feed(flip("y", "x"))
+        self.assertEqual(d.since_edit, 1)
+        d.feed(flip("x", "z"))
+        self.assertEqual(d.since_edit, 0)
 
     def test_a_suspend_is_neither_silence_nor_the_rounds_time(self):
         # On the wall clock a laptop shut for 20 minutes woke to a round stopped for silence
