@@ -8173,9 +8173,10 @@ class Context(Base):
         self.assertTrue(st["tests"]["ok"])
         self.assertNotIn("errors", st.get("guards") or {})
 
-    def assert_set_aside(self, name, st, said):
-        """A self-review stopped on a tree it changed, its tests failing there: the green tree
-        put back and tested, the unfinished files kept as review tree `2s`, a review (#1572)."""
+    def assert_set_aside(self, name, st, said, tests="fail", left="43"):
+        """A self-review ended on a tree other than its green one: the green tree put back and
+        tested, the unfinished files kept as review tree `2s`, a review whose line says how it
+        ended and what its tests said there (#1572, #1582)."""
         t = store.Task(name)
         self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
         self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "42\n")
@@ -8187,13 +8188,15 @@ class Context(Base):
         self.assertEqual(trees["1"]["tree"], trees["2"]["tree"])   # the tree under review
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == name]
         self.assertEqual([r["kind"] for r in rows], ["review"])
-        self.assertIn(f"self-review stopped mid-check ({said}", rows[0]["text"])
+        self.assertIn(f"self-review {said}", rows[0]["text"])
+        self.assertIn(f"; its edits set aside (the tests {tests} on them), the tree its tests passed "
+                      "on put back", rows[0]["text"])
         self.assertIn(f"wb rewind {name} 2s brings them back", rows[0]["text"])
         self.assertIn("tests: PASS", rows[0]["text"])
         from workbench import results
         self.assertFalse(results.step(t, landed=False)["stuck"])  # the router's
         run_wb("rewind", name, "2s")
-        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "43\n")   # the unfinished edit
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), f"{left}\n")   # the unfinished edit
 
     def test_a_self_review_stopped_by_the_repeat_guard_on_a_tree_it_broke_is_set_aside_for_the_green_tree(self):
         # #1572 (bar loop #1030 round 2, M1, 2026-11-26): a 9B's self-review copied a broken
@@ -8202,7 +8205,7 @@ class Context(Base):
         os.environ.update(FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
         self.start("t-srx", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srx", {"review", "stuck", "failed"}, timeout=60)
-        self.assert_set_aside("t-srx", st, "the same call 4 times in a row")
+        self.assert_set_aside("t-srx", st, "stopped mid-check (the same call 4 times in a row")
 
     def test_a_self_review_whose_opencode_exits_on_its_servers_error_on_the_green_tree_goes_to_review(self):
         # #1270 (bar loop round 7, 2026-11-24): a GPU server's 500 in the self-review (Ollama's
@@ -8224,7 +8227,76 @@ class Context(Base):
         os.environ.update(FAKE_SELF_CRASH="1", FAKE_READS="1", FAKE_SELF_KEEP="1")
         self.start("t-srck", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srck", {"review", "stuck", "failed"}, timeout=60)
-        self.assert_set_aside("t-srck", st, "opencode exited 1")
+        self.assert_set_aside("t-srck", st, "stopped mid-check (opencode exited 1")
+
+    def test_a_self_review_stopped_mid_check_whose_tests_still_pass_is_set_aside_for_the_green_tree(self):
+        # #1582 (bar loop #1030 round 3, M3, 2026-11-26): #1572 set aside only a stop whose tests
+        # then failed, so the repeat guard's stop on "43", which the tests also took, went to
+        # review on the unfinished tree under a bare `tests: PASS`, nothing naming the green one
+        os.environ.update(FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
+        self.start("t-srp", "selfreads", "--test", "grep -qE '^4[23]$' answer.txt", "--self-review")
+        st = wait_phase("t-srp", {"review", "stuck", "failed"}, timeout=60)
+        self.assert_set_aside("t-srp", st, "stopped mid-check (the same call 4 times in a row", tests="pass")
+
+    def test_a_self_review_that_finishes_on_its_own_with_its_tests_failing_is_set_aside_with_no_auto_fix(self):
+        # #1582: its own finish on a check left broken (a real 2.4.1 run, 2026-11-26) took an
+        # auto-fix round, a paid one on an API role, and never named the green tree kept for it
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="0", FAKE_SELF_DONE="1")
+        self.start("t-srd", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srd", {"review", "stuck", "failed"}, timeout=60)
+        self.assert_set_aside("t-srd", st, "finished on its own")
+        self.assertFalse(st.get("auto_fixes"))
+        self.assertFalse([e for e in store.read_jsonl(store.Task("t-srd").dir / "events.jsonl")[0]
+                          if e.get("kind") == "autofix"])
+
+    def test_a_self_review_that_finishes_on_its_own_with_its_tests_passing_goes_to_review_on_its_tree(self):
+        # #1582's one exception: a finish of its own, its tests passing, is the change to review
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="0", FAKE_SELF_DONE="1")
+        self.start("t-srf", "selfreads", "--test", "grep -qE '^4[23]$' answer.txt", "--self-review")
+        st = wait_phase("t-srf", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+        self.assertEqual(store.Task("t-srf").worktree.joinpath("answer.txt").read_text(), "43\n")
+        self.assertNotIn("2s", st["review_trees"])
+        self.assertNotIn("set aside", run_wb("takeover", "t-srf"))  # no live round: its finish stands
+        self.assertEqual(store.Task("t-srf").worktree.joinpath("answer.txt").read_text(), "43\n")
+
+    def mid_check(self, name):
+        """A self-review stalled mid-check, "41" on disk (FAKE_SELF_STALL, no nudge)."""
+        os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
+        self.start(name, "selfreads", "--test", TEST_CMD, "--self-review", "--think-timeout", "120",
+                   "--silence-timeout", "120")
+        t = store.Task(name)
+        deadline = time.time() + 30
+        while not (t.status.get("round") == 2 and (t.worktree / "answer.txt").is_file()
+                   and (t.worktree / "answer.txt").read_text() == "41\n"):
+            self.assertLess(time.time(), deadline, "the self-review never began its check")
+            time.sleep(POLL)
+        return t
+
+    def assert_green_back(self, t, out, how):
+        self.assertIn(f"self-review stopped mid-check ({how}); its edits set aside (the tests "
+                      f"weren't run on them), the tree its tests passed on put back: wb rewind "
+                      f"{t.name} 2s brings them back", out)
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "42\n")
+        self.assertEqual(t.status["review_trees"]["2s"]["reviewed"], False)
+        self.assertEqual((t.status["tests"]["ok"], t.status["tests"]["round"]), (True, 1))  # the green round's
+        run_wb("rewind", t.name, "2s")
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "41\n")
+
+    def test_a_takeover_mid_self_review_check_puts_the_green_tree_back(self):
+        # #1582: wb takeover mid-check left "41" under tests:ok, and wb accept committed it
+        t = self.mid_check("t-sto")
+        out = run_wb("takeover", "t-sto")
+        self.assertTrue(out.startswith("took over t-sto"), out)
+        self.assertEqual(t.status["phase"], "review")
+        self.assert_green_back(t, out, "wb takeover")
+
+    def test_a_wb_stop_mid_self_review_check_puts_the_green_tree_back_and_names_the_rewind(self):
+        # #1582: wb stop the same, stuck, with no rewind line
+        t = self.mid_check("t-sst")
+        out = run_wb("stop", "t-sst")
+        self.assertEqual(t.status["phase"], "stuck")
+        self.assert_green_back(t, out, "wb stop")
 
     def quiet_self_review(self, name, *flags, **env):
         """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
@@ -8282,7 +8354,7 @@ class Context(Base):
         # and is set aside since its tests fail there (#1572)
         st, rows = self.quiet_self_review("t-sqk", "--silence-timeout", "4", "--think-timeout", "120",
                                           FAKE_SELF_KEEP="1")
-        self.assert_set_aside("t-sqk", st, "no output for 0 minutes")
+        self.assert_set_aside("t-sqk", st, "stopped mid-check (no output for 0 minutes")
 
     def test_every_guards_stop_settles_on_a_self_reviews_green_tree_and_only_there(self):
         # #1261: one mechanism for any guard (the provider's, the spend cap's, drive's handover
@@ -8302,12 +8374,12 @@ class Context(Base):
         self.assertEqual(out["settled"], "no tool call or word for 7 minutes")
         self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green))  # nothing stopped
         t.set_status(self_review_tree="another tree")
-        # another tree: a nudge stays the guard's; a stop settles to the tests, mid-check (#1572)
+        # another tree: a nudge stays the guard's; a stop settles to the tests, then the green
+        # tree goes back (drive's set_aside, #1572, #1582)
         self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green, "a nudge", stopped=False))
         out = {"stuck": "silence's stop", "guard": "silence"}
         self.assertTrue(runner.settle(t, 2, out, green))
-        self.assertEqual(out, {"stuck": None, "guard": None, "settled": "silence's stop",
-                               "mid_check": "another tree"})
+        self.assertEqual(out, {"stuck": None, "guard": None, "settled": "silence's stop"})
         out = {"stuck": "silence's stop", "guard": "silence"}
         t.set_status(round_for="feedback", self_review_tree=green)
         self.assertFalse(runner.settle(t, 2, out, green))

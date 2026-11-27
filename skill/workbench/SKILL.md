@@ -656,8 +656,9 @@ When a later round made things worse, `wb rewind <name> <round>` puts the files 
 reviewed round of this step (the round its review notice named), then accept or send feedback
 from there; it prints that round's test verdict, and the next feedback starts a fresh session.
 Edits made by hand since the last review are kept: its line names the `wb rewind <name> <N>h`
-that brings them back. A self-review stopped mid-check with its tests failing is set aside the
-same way (`wb rewind <name> <N>s`): the review is of the tree its tests passed on.
+that brings them back. A self-review that ended off the tree its tests passed on (stopped
+mid-check by a guard, `wb stop` or `wb takeover`, or its own finish with the tests failing) is set
+aside the same way, its line saying why (`wb rewind <name> <N>s`): the review is of that tree.
 Files it names as `left as they are` or `not as round N's files` are not that round's: check them
 before you accept.
 **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree

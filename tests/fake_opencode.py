@@ -61,7 +61,8 @@
          or restores it, by turns, and fills 76% of a 32K window: the sixth, past HANDOVER_MAX,
          on the green tree (#1261). FAKE_SELF_CRASH: after its reads the self-review's run
          ends on its server's error (a provider.http 500, as Ollama's runner killed out of
-         memory), exit 1, the server still up (#1270)
+         memory), exit 1, the server still up (#1270). FAKE_SELF_DONE: after its reads it ends
+         its turn there, exit 0, on the tree it left (#1582)
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -1174,7 +1175,11 @@ elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copie
         emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
     if os.environ.get("FAKE_SELF_CRASH"):  # #1270: the server answers 500 and OpenCode exits 1
         fail("provider.http", "model runner has unexpectedly stopped", 500)
-    time.sleep(3600)
+    if os.environ.get("FAKE_SELF_DONE"):  # #1582: its own finish, whatever tree it left
+        emit("text", text="Self-review done.")
+        finish()
+    else:
+        time.sleep(3600)
 elif scenario == "probing":  # #857: probe in a compound line, a long file read whole and in part
     with open("long.py", "w") as fh:
         fh.write("x = 1\n" * 400)
