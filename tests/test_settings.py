@@ -594,6 +594,13 @@ class OneWriter(Rows):
         self.assertEqual(settings.key_for(["route", "driver", "ollama/x#high"]), ("driver", "ollama/x#high"))
         self.assertEqual(settings.key_for(["route", "trivial", "--api=deepseek/x"]), ("api-trivial", "deepseek/x"))
 
+    def test_optimizes_button_changes_no_setting_and_is_never_logged_as_off_to_start(self):
+        # the web app's review (2026-11-26): Recent changes said "Optimize: off → start", a value that never was
+        self.assertIsNone(settings.logged("optimize", "start", None, "optimize: measuring"))
+        self.assertEqual(self.changes(), [])
+        tw.run_wb("coding", "ask")                                    # a setting's own change still is
+        self.assertEqual([c["key"] for c in self.changes()], ["coding"])
+
     def test_a_read_a_dry_run_or_a_combined_line_is_no_rows_write(self):
         for argv in (["route"], ["route", "--json"], ["route", "--dry-run", "cap", "5"], ["route", "trivial"],
                      ["route", "significant", "api", "--api", "x"], ["route", "trivial", "fallback", "gpu"],

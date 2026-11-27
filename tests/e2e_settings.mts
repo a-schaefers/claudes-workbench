@@ -256,7 +256,7 @@ export async function check(page: any, ctx: E2eCtx) {
       await until(async () => await lit() === 'ask')
     })
 
-    await ctx.check('a change Claude makes (wb settings set under Claude Code) is drawn with no reload, stamped by Claude, listed in Recent changes and toasted (#1355)', async () => {
+    await ctx.check('a change Claude makes (wb settings set under Claude Code) is drawn with no reload, stamped by Claude, listed in Recent changes and toasted by its choice labels (#1355)', async () => {
       unmock()
       const lit = async () => await row('coding').locator('[aria-checked="true"]').getAttribute('data-value')
       const asClaude = (value: string) => new Promise<void>((resolve, reject) => execFile(join(ROOT, 'bin', 'wb'),
@@ -270,9 +270,10 @@ export async function check(page: any, ctx: E2eCtx) {
       if (await page.evaluate(() => (window as any).__wbNoReload) !== 1) throw new Error('the page reloaded')
       const stamp = await row('coding').locator('.set-changed').textContent()
       if (!stamp.startsWith('Changed by Claude')) throw new Error(stamp)
-      await until(async () => (await toast()).includes('set to ask by Claude')).catch(async () => { throw new Error('toast: ' + await toast()) })
+      // by the row's choice labels, the raw value only for a row not drawn (the web app's review, 2026-11-26)
+      await until(async () => (await toast()).includes('Claude coding set to Ask me first by Claude')).catch(async () => { throw new Error('toast: ' + await toast()) })
       const listed = await page.locator('#settings-rows .set-changes').textContent()
-      if (!listed.includes('decide → ask, by Claude')) throw new Error(listed)
+      if (!listed.includes('Claude coding: Let Claude decide → Ask me first, by Claude')) throw new Error(listed)
       await asClaude('decide')                               // as it was
       await until(async () => await lit() === 'decide', 3000)
     })

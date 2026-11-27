@@ -60,7 +60,6 @@
     // who made a change, as settings-changes.jsonl's `by` says (store.caller_kind, or the web's click)
     const BY = { web: 'the web app', claude: 'Claude', opencode: 'OpenCode', terminal: 'the terminal', agent: 'an agent' };
     const byWord = (by) => BY[by] || by || 'someone';
-    const valueWord = (v) => v == null || v === '' ? 'off' : String(v);
     const ago = (ts) => {
         const s = Math.max(0, Date.now() / 1000 - ts);
         return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} d ago`;
@@ -145,6 +144,12 @@
             parts.push(helpSaid());
         return parts.map(sentence).join(' ');
     }
+    // a change in Recent changes: its values as its row's choices name them ('My tailnet', not
+    // 'tailnet': the web app's review, 2026-11-26), the raw value for a row not drawn
+    const changeWords = (c) => {
+        const row = rows ? rows.find(x => x.key === c.key) : undefined;
+        return `${c.label || c.key}: ${valueLabel(row, c.from)} → ${valueLabel(row, c.to)}`;
+    };
     async function pump() {
         if (busy || !queue.length)
             return;
@@ -486,7 +491,7 @@
                 card.append(el('h3', '', 'Recent changes'));
                 const list = el('ul', 'set-change-list');
                 for (const c of changes)
-                    list.append(el('li', 'small', `${c.label || c.key}: ${valueWord(c.from)} → ${valueWord(c.to)}, by ${byWord(c.by)} · ${ago(c.ts)}`));
+                    list.append(el('li', 'small', `${changeWords(c)}, by ${byWord(c.by)} · ${ago(c.ts)}`));
                 card.append(list);
                 out.append(card);
             }
@@ -555,8 +560,11 @@
         if (showing)
             load();
         const mine = r && r.by === 'web' && (busy || Date.now() - lastWrite < 5000);
-        if (r && !mine)
-            WB.toast(`${r.label || r.key} set to ${valueWord(r.to)} by ${byWord(r.by)}`);
+        if (r && !mine) {
+            const row = rows ? rows.find(x => x.key === r.key) : undefined;
+            WB.toast(row && row.kind === 'action' ? `${row.label}: ${valueLabel(row, r.to)}, by ${byWord(r.by)}`
+                : `${r.label || r.key} set to ${valueLabel(row, r.to)} by ${byWord(r.by)}`);
+        }
     });
     // the runs strip's tap (app.ts): Settings at the workflows group, where each run's row is.
     // Drawn now only when Settings shows: the tap's go('settings') shows it on a later hashchange,

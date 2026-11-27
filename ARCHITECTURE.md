@@ -7624,7 +7624,8 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 - `record(before, key, value, done, by)`: the change's row of `settings-changes.jsonl`, and
   chat/settings-rev.json's stamp of it; None, nothing written, for a `choice` or `number` set to
   the value it had (#1355), or a key in `NOT_RECORDED` (`run-`: a run's Stop or Summary changes no
-  setting; its Stop is a notice, and `key_for` names no run command). Its one caller is `logged` (*One log writer*, below).
+  setting; its Stop is a notice, and `key_for` names no run command; `optimize`: Measure now is a button,
+  logged `Optimize: off → start` from a value that never was, the web app's review, 2026-11-26). Its one caller is `logged` (*One log writer*, below).
 - **One log writer** (#1355): `cli.main` runs a Settings row's own command line inside
   `cli._SettingWrite`, whoever runs it (the web app's child, `wb settings set`'s child, an OpenCode
   driver's shell, the user's terminal): `key_for(argv) -> (key, value) | None`, `_argv`'s inverse
@@ -7810,10 +7811,13 @@ alone, and a generic renderer: a new setting touches only Python.
   before a write ended is dropped (`reads`, `wrote`), since the write's own rows are newer.
 - **Who changed what** (#1355): a row with `changed` says `Changed by <who> · <when>`
   (`.set-changed`; who from its `by`: the web app, Claude, OpenCode, the terminal, an agent), and a
-  *Recent changes* card (`.set-changes`, no group's `.set-card`) lists GET's `changes`, `label: from → to, by <who>`. A
+  *Recent changes* card (`.set-changes`, no group's `.set-card`) lists GET's `changes`, `label: from → to, by <who>`,
+  each value by its row's choice label (" (default)" dropped; `$N/day` for the cap), the raw value for a row
+  not drawn: the rows said "My tailnet" where the list said `tailnet` (the web app's review, 2026-11-26). A
   change made anywhere moves the chat state's `settings` (chat/settings-rev.json, *The driver's
   state line*): the view shown reads its rows again with no reload (a draft being typed kept, as any
-  redraw keeps it), and any view toasts `<label> set to <value> by <who>`, unless it is this page's
+  redraw keeps it), and any view toasts `<label> set to <value> by <who>` (the value by its choice label),
+  unless it is this page's
   own write (`by: "web"` while a POST waits or within 5 s of one). The first state only sets the
   mark. Last writer wins: no lock.
 - **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
