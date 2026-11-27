@@ -4161,7 +4161,7 @@ in the task sheet's note, #1339): while away, the chat is all the user sees.
 - **The pane** (opened by `/workbench`, or once per load when a task runs) is the Tasks view alone
   (#1283: no tabs, no `1`-`3` keys, no Stats or Settings). Its last row is the modeline (`modeline`,
   `mod/hooks/modeline.ts`): `[•_•] Claude's Workbench - <the web app's link>` (`FACE.rest`,
-  `MODELINE`) on the theme's `claude` colour with bold `inverseText`, from the `chat` atom's `link`
+  `MODELINE`; `[•_•] Claude's Workbench [deepcode] - …` while deepmode is on, `DEEP_BADGE`, #1628) on the theme's `claude` colour with bold `inverseText`, from the `chat` atom's `link`
   (`chat-5`): `up` or `started` the link; `checking` `… - starting the web app…`; `off` `… - web app
   off (wb chat on)`; `blocked` or `failed` `… - web app down: <why>`, the why cut to the room with
   `…`. The room is the pane's `bodyColumns` less its padding of 1 each side. Too narrow for the whole
@@ -6659,14 +6659,19 @@ Claude's `ultracode`. `deepcode` adds `wb deepmode --rule` (`runs.DEEPCODE_RULE`
 `DEEPCODE_FALLBACK` from a wb without it) to that prompt: the hidden `context` entry in the terminal, the text
 (`chatPrompt`'s `about`) for a web message, as a plugin's prompt has no context. `deepmode on|off` is the user's
 yes: the mod runs `wb deepmode on|off`, toasts its line, and a prompt of toggles alone is dropped with that
-line (no turn; `sayRules`' row tells Claude); else the rest goes on. `/deepmode [on|off]` (the mod's
-`DEEPMODE`, the one command not named `workbench-*`: the user's word) sets or shows it. In OpenCode
+line (no turn; `sayRules`' row tells Claude); else the rest goes on. `/workbench-deepmode [on|off]` (the
+mod's `WORKBENCH_DEEPMODE`, #1628) sets or shows it, and `/deepmode` (`DEEPMODE`, the user's word) is its
+alias, the one command not named `workbench-*`; while it is on both hosts' modelines wear `[deepcode]`
+(`DEEP_BADGE`, after the name and dropped with it when the pane is narrow, as Claude Code's `/effort` shows
+ultracode): the mod reads workflows.json each poll (30 s apart when idle, `SAFETY_MS`) and at once after the command
+(`readDeep`, `mem.deepmode`), so a switch from the web app or a terminal shows too, and the minimized strip opens with `deepcode`; the
+OpenCode panel reads it with the task files (`PaneData.tasks`' `deep`). In OpenCode
 (`opencode-plugin/deep.ts`, its prompt hook registered before upkeep's so that a toggle is in workflows.json
 when upkeep reads it): the session `prompt` hook reads a typed prompt (no metadata) or the chat's delivery of
 the user's (`chat.SOURCE`, `[web chat]`), never a subagent's (a session with a `parentID`: OpenCode's
 subagent prompt comes unmarked too, #1325), runs wb as the session, and the `context` hook adds the rule, or the
 toggle's `TOGGLED` line, as system parts to that prompt's requests (while it is the newest user message, by
-the requests' message ids; to the next prompt without them); `/deepmode` is a server command (`command.transform`),
+the requests' message ids; to the next prompt without them); `/workbench-deepmode` and `/deepmode` are server commands (`command.transform`),
 said with a `synthetic` message that starts no turn.
 
 ## Experiments
@@ -8933,6 +8938,7 @@ drivers on one machine: *Both drivers on one machine*.
 | `/workbench [request]`: the skill, the mode on, the pane | `/workbench [request]`, a server command: the driver pin applied, the session switched to the Workbench agent, whose prompt is the procedure; the panel opens on that switch, and as a TUI comes to a session already on it (`opencode -s`, a new TUI); run again in a session already on it, it publishes no switch and opens nothing (the footer's `⚒ wb` or the palette does) | `pane.ts`, `agent.ts`, *The driver* |
 | `/workbench` on a fresh install (core.ts's `freshInstall`), a request or none: the skill with `FIRSTRUN_NOTE` after it, so *First run* starts at once, the request after it (#1190, #1606) | the same rule (`freshAt`: the same files) and the same note, the story's `firstrun.note`, sent as the session's prompt after the switch, after the request in the same prompt when there is one (#1574, #1606) | `pane.ts` |
 | `/workbench-quit`, `/workbench-quit-and-hand-back-claude`, `/workbench-models`, `/workbench-update` | `/workbench-quit`, `/workbench-quit-and-hand-back` (switching to Build ends the mode and closes the panel), `/workbench-models`, `/workbench-update` | `commands.ts` |
+| `/workbench-deepmode [on|off]` and its alias `/deepmode`; `[deepcode]` on the modeline while on (#1628) | the same two, server commands; `[deepcode]` on the panel's modeline | `register.tsx`, `deep.ts`, `modeline.ts` |
 | SKILL.md and `reference/`, read through the skill link | the same files rendered for OpenCode when the plugin starts (`skill.ts`): the agent's prompt, the `workbench` skill and one `workbench-<name>` skill per reference file, Claude Code's lines replaced by OpenCode's facts | `skill.ts`, `agent.ts` |
 | `wb` recipes typed in Bash | typed tools in the `workbench` namespace (`workbench_start`, `_status`, `_diff`, `_feedback`, `_accept`, `_discard`, `_wait`), the shell for the rest | `tools.ts` |
 | The pane "Claude's Workbench": Tasks, the modeline, the splash and the apprentice, the `⚒ wb ·` status line, the minimized strip | the panel "Workbench" (beside the session at 108 columns or more, fullscreen narrower), the sidebar section, the footer item; one Tasks view (`mod/hooks/tasks.ts`) and one animation for both | `pane.tsx`, `pane-view.ts`, `spans.ts`, `splash.tsx` |

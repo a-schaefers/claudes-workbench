@@ -229,7 +229,7 @@ function Page(props: { readonly host: Host; readonly feed: Feed; readonly panel:
     const c = state()?.cap
     return c ? capRow(tasks(), c.spent, c.cap, cols(), undefined, c.est) : null
   }
-  const ml = () => modelineOf(props.feed.link[0](), cols())
+  const ml = () => modelineOf(props.feed.link[0](), cols(), state()?.deep === true)
   // while the panel has the keyboard beside the prompt, the way back to it, as OpenCode's diff
   // panel says it (#1509): Esc alone closed the panel
   const back = () => {

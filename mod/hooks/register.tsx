@@ -553,6 +553,8 @@ const HAND_BACK = 'workbench-quit-and-hand-back-claude'
 // The one that doesn't: /deepmode is the user's own word for Dynamic workflows (#1278), as
 // `deepmode on` typed on a line of its own is
 const DEEPMODE = 'deepmode'
+// /workbench-deepmode, as the family's other commands are named (#1628); /deepmode stays its alias
+const WORKBENCH_DEEPMODE = 'workbench-deepmode'
 
 // Claude coding (#92), the user's choice (`wb coding`): when Claude may write code for a delegated
 // task. "decide" (no saved choice) adds nothing, so Claude works as before there was a choice.
@@ -1527,6 +1529,7 @@ const mem = {
   chatChecking: false, // a `wb chat url --json` under way (chatLink)
   chatAgain: false, // asked for again meanwhile: once more after it
   switchKey: '', // chat/switch.json as last read: changed (`wb chat on|off`), the link is looked up now
+  deepmode: false, // workflows.json's deepmode on, as last read (readDeep): the modeline's badge (#1628)
   settingsKey: '', // settings-changes.jsonl's size@mtime when last read (settingsTurns)
   settingsSeen: new Set<string>(), // its rows this load delivered (ts:key)
   routesStamp: undefined as number | undefined, // the newest role stamp when the roles were last told (unsaid)
@@ -2153,6 +2156,7 @@ async function poll($: any) {
     await rewake($, now, list)
     await listen($, now)
     await readSwitch($)
+    await readDeep($)
     await settingsTurns($, now)
     await awayEnded($)
   } finally {
@@ -2333,6 +2337,21 @@ async function alive($: any, pid: number, start?: string): Promise<boolean | nul
   if (!now || /^\d+$/.test(now) !== /^\d+$/.test(start) || now === start) return true
   // a ps date recorded before #848, in local time, is still that process
   return !/^\d+$/.test(now) && (await psStart($, pid, false)) === start
+}
+
+// Deepmode as workflows.json says (workflowsMode), each poll and after /deepmode: the modeline's
+// `[deepcode]` badge and the strip's word, however it was turned on or off (#1628)
+async function readDeep($: any) {
+  mem.deepmode = (await workflowsMode($)) === 'on'
+}
+
+// /workbench-deepmode and its alias /deepmode: `wb deepmode [on|off]`, the badge read again at once
+async function deepmodeCommand($: any, e: any) {
+  const arg = String(e.args ?? '').trim().toLowerCase()
+  if (arg && arg !== 'on' && arg !== 'off') return { text: `workbench: /${e.command} on, /${e.command} off, or /${e.command} alone to see it` }
+  const { ok, out } = await runWb($, ['deepmode', ...(arg ? [arg] : [])])
+  await readDeep($) // the badge at once, not at the next poll
+  return { text: ok ? out : `workbench: wb deepmode failed: ${out}` } // a change reaches Claude as sayRules' row
 }
 
 // The web chat's switch (chat/switch.json, `wb chat on|off`): changed, the link is looked up now,
@@ -3313,8 +3332,12 @@ export const register: Register = (on, options) => {
       description: 'Stop this session\'s delegated agents now, finishing nothing',
     })
     await $.command.register({
+      name: WORKBENCH_DEEPMODE,
+      description: 'Deepmode (dynamic workflows): on or off, alone to see it; on, substantive requests run as deep workflows and the pane shows [deepcode]',
+    })
+    await $.command.register({
       name: DEEPMODE,
-      description: 'Dynamic workflows (deepmode): /deepmode on or off, alone to see it; on, substantive requests run as deep workflows',
+      description: 'Deepmode (dynamic workflows), as /workbench-deepmode: on or off, alone to see it',
     })
     await $.command.register({
       name: HAND_BACK,
@@ -3507,12 +3530,8 @@ export const register: Register = (on, options) => {
     return next({ ...e, context: [...(e.context ?? []), await deepcodeRule($)] })
   })
 
-  on('command.run', { command: DEEPMODE }, async ($, e) => {
-    const arg = String(e.args ?? '').trim().toLowerCase()
-    if (arg && arg !== 'on' && arg !== 'off') return { text: 'workbench: /deepmode on, /deepmode off, or /deepmode alone to see it' }
-    const { ok, out } = await runWb($, ['deepmode', ...(arg ? [arg] : [])])
-    return { text: ok ? out : `workbench: wb deepmode failed: ${out}` } // a change reaches Claude as sayRules' row
-  })
+  on('command.run', { command: WORKBENCH_DEEPMODE }, deepmodeCommand)
+  on('command.run', { command: DEEPMODE }, deepmodeCommand)
 
   // A flow's own slash command (#1295): the turn that starts it, queued, as a command never starts
   // one itself; any other command goes on
@@ -3686,7 +3705,7 @@ export const register: Register = (on, options) => {
         <Box flexShrink={0}>
           <Button key="restore" label="▸ Workbench" plain onPress={() => { void restorePane($) }} />
         </Box>
-        <Text dimColor wrap="truncate-end">{parts.length ? `${parts.join(' · ')} · ${STRIP_HINT}` : STRIP_HINT}</Text>
+        <Text dimColor wrap="truncate-end">{[...(mem.deepmode ? ['deepcode'] : []), ...parts, STRIP_HINT].join(' · ')}</Text>
       </Box>
     )
   })
@@ -3735,7 +3754,7 @@ export const register: Register = (on, options) => {
     // theme's own colours so it reads on a dark or a light terminal (the user, 2026-11-21); in a
     // narrow pane the link alone, or the link on rows of its own under the name (modeline.ts)
     const bodyCols = Number(((e.props ?? {}) as Row).bodyColumns ?? 0) || Number(e.viewport?.columns ?? 0) || 60
-    const ml = modeline(link, bodyCols)
+    const ml = modeline(link, bodyCols, undefined, mem.deepmode)
     const header = (
       <Box key="modeline" flexDirection="column">
         <Box backgroundColor="claude" paddingX={1}>

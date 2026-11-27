@@ -42,7 +42,11 @@ export type PaneTask = TaskFacts & {
   readonly session: string; readonly driver: string; readonly cwd: string; readonly repo: string; readonly subdir: string
 }
 export interface Cap { readonly spent: number; readonly cap: number | null; readonly est: boolean }
-export interface Tasks { readonly now: number; readonly home: string; readonly tasks: PaneTask[]; readonly cap: Cap | null }
+export interface Tasks {
+  readonly now: number; readonly home: string; readonly tasks: PaneTask[]; readonly cap: Cap | null
+  /** workflows.json `deepmode: on`: the modeline's `[deepcode]` badge (#1628) */
+  readonly deep?: boolean
+}
 export type Line = Readonly<WatchLine>
 export interface Live { readonly task: string; readonly lines: Line[]; readonly why?: string }
 export type { Link }
@@ -206,7 +210,8 @@ export class PaneData {
       }
       cap = this.roles.cap
     }
-    return { now, home: this.home, tasks, cap }
+    const deep = json<{ deepmode?: string }>(this.files.read(join(this.home, 'workflows.json'))).deepmode === 'on'
+    return { now, home: this.home, tasks, cap, deep }
   }
 
   // The transcript of `task`: a stopped one read again when its status moved; a running one every

@@ -216,7 +216,7 @@ export function panelRows(tasks: readonly PaneTask[], cols: number, rows: number
 
 /** The modeline (#1283's, as Claude Code's): `[•_•] Workbench - <the web app's link>`, the link
  * on rows of its own when it doesn't fit. */
-export const modelineOf = (link: Link, cols: number) => modeline(link, cols, NAME)
+export const modelineOf = (link: Link, cols: number, deep = false) => modeline(link, cols, NAME, deep)
 
 /** Whether the apprentice is drawn in pixels: rows and columns enough for it beside its bubble
  * (the mod's rule: 20 rows, 40 columns), else its face on the line. */
