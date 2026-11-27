@@ -95,6 +95,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "stack": spec.get("stack"),
            **({"role": spec["role"]} if spec.get("role") else {}),  # router.of_role (#1025)
+           **({"like": spec["like"]} if spec.get("like") else {}),  # a custom role's (#1625): tuning.work
            **({"subdir": spec["subdir"]} if spec.get("subdir") else {}),  # the package (#820)
            "rounds": st.get("round", 1),
            "auto_fixes": st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
@@ -182,7 +183,7 @@ def _with_route(task: store.Task, row: dict) -> dict:
     machine's GPU, untrue for a provider's servers)."""
     spec = task.spec
     kind, model = task_kind(spec), str(spec.get("model") or "")
-    row = {**row, "kind": kind, "role": spec.get("role"),
+    row = {**row, "kind": kind, "role": spec.get("role"), **({"like": spec["like"]} if spec.get("like") else {}),
            "provider": spec.get("provider") or (model.split("/", 1)[0] if "/" in model else None),
            # on the role's fallback (#1196): `model` is the one that finished, which the router,
            # slices and tuning credit; the role's API model it stood in for keeps its stats

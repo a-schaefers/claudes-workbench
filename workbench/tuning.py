@@ -204,7 +204,7 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
     --test scored 0 or 1 though it ran alike under both, and could turn self-review off (#816).
     Nor a writing task's: off by its role, its prose would turn the coding check off (#1025)."""
     k = KNOBS[name]
-    if k.passed and row.get("role") == "writing":  # off by its role, not chosen: no evidence (#1025)
+    if k.passed and "writing" in (row.get("role"), row.get("like")):  # off by its role, not chosen: no evidence (#1025)
         return False
     if k.passed:
         due = row.get("self_review_due")
@@ -236,7 +236,7 @@ def work(row: dict) -> str | None:
     (#1025). A coding task is routed and sliced at its size (router.record_role), so it is filed
     there too: `--role trivial --size significant` ran on the significant pick and moved only its
     trivial record (#1398, 2026-11-25)."""
-    if row.get("role") == "writing":
+    if "writing" in (row.get("role"), row.get("like")):  # a custom role working as writing too (#1625)
         return "writing"
     return row.get("size") or row.get("role")
 

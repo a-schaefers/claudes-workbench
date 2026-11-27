@@ -5839,7 +5839,7 @@ def _fallback_move(task: store.Task, n: int, rnd: dict, before: bool = False) ->
     from . import router, routes
     spec = task.spec
     role = spec.get("role")
-    if spec.get("fallback") or spec.get("via") != "api" or spec.get("busy") or role not in routes.ROLES \
+    if spec.get("fallback") or spec.get("via") != "api" or spec.get("busy") or role not in routes.all_roles() \
             or (spec.get("said") or "").startswith("asked for"):
         return None
     try:

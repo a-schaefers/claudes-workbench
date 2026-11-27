@@ -567,6 +567,43 @@ export async function check(page: any, ctx: E2eCtx) {
       if (await row('role-writing').locator('.set-pick').count()) throw new Error('the list stayed open')
     })
 
+    await ctx.check('a role of the user\'s own has its card after the built-ins\', by its label, and Add a role posts its fields as one JSON string (#1625)', async () => {
+      const rows: SettingRow[] = [
+        ...MOCK_ROWS,
+        { key: 'role-docs-fr', group: 'docs-fr', label: 'French docs', card: 'French docs', kind: 'choice', value: 'gpu', other: false,
+          says: 'On the GPU.', choices: [{ value: 'gpu', label: 'GPU', says: 'On the GPU.' }, { value: 'api', label: 'API', says: 'On API.' }] },
+        { key: 'add-role', group: 'shared', label: 'Add a role', kind: 'form', text: 'A role of your own.',
+          fields: [{ name: 'name', label: 'Name', kind: 'text', pattern: '^[a-z][a-z0-9-]{1,23}$', hint: 'lowercase, as tests' },
+            { name: 'label', label: 'Label', kind: 'text' },
+            { name: 'like', label: 'Works as', kind: 'select', choices: [{ value: 'significant', label: 'Complex coding' }, { value: 'trivial', label: 'Trivial coding' }] },
+            { name: 'about', label: 'What it\'s for', kind: 'text', optional: true }],
+          choices: [{ value: 'add', label: 'Add' }] }]
+      const posts: any[] = []
+      unmock()
+      mock(async (method: string, body: any) => {
+        if (method !== 'POST') return answer(200, { rows, ts: 1 })
+        posts.push(body)
+        return answer(200, { ok: true, said: 'changed', rows })
+      })
+      await reshow()
+      await until(async () => (await row('role-docs-fr').count()) === 1)
+      const cards = await page.locator('#settings-rows .set-card').evaluateAll((cs: Element[]) => cs.map(c => (c as HTMLElement).dataset.group))
+      if (cards.indexOf('docs-fr') !== cards.indexOf('writing') + 1) throw new Error(cards.join(' '))
+      const title = await page.locator('#settings-rows .set-card[data-group="docs-fr"] h3').textContent()
+      if (title !== 'French docs') throw new Error(String(title))
+      const form = row('add-role')
+      await form.locator('[data-field="name"]').fill('Bad Name')
+      await form.locator('[data-field="label"]').fill('Tests')
+      await form.locator('button').click()
+      if (posts.length || !(await form.locator('.set-note').isVisible())) throw new Error('a bad name was sent, or unsaid')
+      await form.locator('[data-field="name"]').fill('tests')
+      await form.locator('[data-field="like"]').selectOption('trivial')
+      await form.locator('button').click()
+      await until(() => posts.length === 1)
+      if (posts[0].key !== 'add-role' || JSON.stringify(JSON.parse(posts[0].value)) !==
+          JSON.stringify({ name: 'tests', label: 'Tests', like: 'trivial', about: '' })) throw new Error(JSON.stringify(posts))
+    })
+
     await ctx.check('the toast hides by its look, never display:none, lasts 60 ms a character (3.5 s at least), and waits while hovered', async () => {
       // the web app's review (2026-11-26): a live region that starts display:none is missed by some
       // screen readers, and a 236-character refusal went in 3.5 s (#1563)

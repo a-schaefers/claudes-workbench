@@ -1014,12 +1014,22 @@ components:
           type: string
         group:
           type: string
-          enum: [significant, trivial, writing, shared, gpu, api, setup, workflows, terminal, experimental]
+          description: a built-in role's card, a role of the user's own by its name (#1625), or one of the rest
+          examples: [significant, trivial, writing, shared, gpu, api, setup, workflows, terminal, experimental]
+        card:
+          type: string
+          description: a role of the user's own's row, its card's title (#1625)
+        fields:
+          type: array
+          description: a form row's fields (Add a role, #1625), posted together as one JSON string
+          items:
+            type: object
+            additionalProperties: true
         label:
           type: string
         kind:
           type: string
-          enum: [choice, number, info, action, note]
+          enum: [choice, number, info, action, note, form]
         more:
           type: boolean
           description: drawn under its card's More (a role's GPU and API model and thinking, #1553)

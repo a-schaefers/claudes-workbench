@@ -187,14 +187,14 @@ def agents_models(doc: dict | None = None) -> dict[str, list[str]]:
     except routes.RoutesError:
         return {}
     out: dict[str, list[str]] = {}
-    for r in routes.ROLES:
+    for r in routes.roles_of(doc):
         row = doc["roles"][r]
         if routes.effective_via(doc, r) == "api":
             mid = row.get("api")
         elif row["gpu"] != routes.AUTO:
             mid = row["gpu"]
         else:
-            top, _ = router.choose(routes.role_and_size(r, None)[1], role=r)
+            top, _ = router.choose(routes.role_and_size(r, None)[1], role=routes.kind_of(r, doc))
             mid = top.model.id if top else None
         if mid:
             out.setdefault(mid, []).append(r)

@@ -119,14 +119,15 @@ def protocol_for(spec: dict) -> str:
     about to write there."""
     if spec.get("report"):
         return REPORT_PROTOCOL
-    return WRITING_PROTOCOL if spec.get("role") == WRITING else PROTOCOL
+    # a custom role working as writing (task.json `like`, #1625) writes as the writing role does
+    return WRITING_PROTOCOL if WRITING in (spec.get("role"), spec.get("like")) else PROTOCOL
 
 
 def self_review(asked: bool | None, role: str | None) -> bool | None:
     """task.json `self_review`: --self-review/--no-self-review, else None (the tuning's pick).
     A writing task's is off unless asked: its check is a code check, mutating tests a prose task
     hasn't, a round spent (on an API model, paid) for nothing (#1025)."""
-    return False if asked is None and role == WRITING else asked
+    return False if asked is None and routes.kind_of(role) == WRITING else asked
 
 
 def test_line(test: str | None) -> str:
@@ -793,7 +794,7 @@ def _routed_keys(routed: dict) -> dict:
     when the busy opt-in sent it there (#1023); `fallback` and `fallback_from` (the role's API model
     it stands in for) on the role's fallback, either side (#1196); `thinking_review` when the role's
     is on (#1059: runner.with_thinking gives the task its `review_model`)."""
-    keys = ("via", "role", "fallback", "fallback_from") + (
+    keys = ("via", "role", "like", "fallback", "fallback_from") + (
         ("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy", "thinking_review")
         if routed.get("via") == "api" else ())
     return {k: routed[k] for k in keys if routed.get(k) is not None}
@@ -1889,6 +1890,8 @@ def cmd_start(a):
     stack = gitops.stack(repo, _package(repo, Path(a.repo).resolve(), a.base))
     # the role (#1016): --role, else from --size; routes.json read there, never as all GPU
     # (that would move the user off their API choice unsaid, #1014)
+    if a.role is not None and a.role not in (roles := routes.all_roles()):  # argparse's choices once (#1625)
+        die(f"no role {a.role!r}: the roles are {', '.join(roles)} (wb route shows them)", 2)
     role, size = routes.role_and_size(a.role, a.size)
     _local_only_check(a, repo, role, _package(repo, Path(a.repo).resolve(), a.base))  # #1021
     # round 1's first request, input and all, for the day cap's look ahead: without its input a
@@ -2019,7 +2022,7 @@ def cmd_start(a):
     # off where it can't help: no file in a language probe reads over PROBE_FILE_LINES in the
     # repo, so the task runs as with probe off (the owner, #857). On is large files only, one
     # setting: its levels went (the owner, 2026-11-22, #857: off and on, on is large files only)
-    if exps.get("probe") and role == WRITING:  # prose has no code to find its way in (#1025)
+    if exps.get("probe") and routes.kind_of(role) == WRITING:  # prose has no code to find its way in (#1025)
         exps, off = {**exps, "probe": False}, {"probe": context.PROBE_OFF_WRITING}
     elif exps.get("probe") and (no_probe := context.probe_off(spec_text, repo, sub, base))[0]:
         exps, off = {**exps, "probe": False}, {"probe": no_probe[0]}
@@ -2027,7 +2030,8 @@ def cmd_start(a):
         probe = {"probe_files": no_probe[1]}  # the long files the spec names, in probe's languages
     if report:  # the lane reads rules/<task>/, the ask server too (submit_result's inputSchema)
         store.write_json(context.rules_dir(task) / SCHEMA_FILE, report["schema"])
-    prompt = spec_text.rstrip() + protocol_for({"role": role, "report": bool(report)}).format(
+    prompt = spec_text.rstrip() + protocol_for({"role": role, "like": routes.kind_of(role),
+                                                "report": bool(report)}).format(
         branch=gitops.branch_name(a.name), test_line=test_line(a.test), budget=budget,
         experiment_protocol=context.experiment_protocol(experiments=exps),
         spec=task.round_dir(1) / "prompt.md", schema=context.rules_dir(task) / SCHEMA_FILE)
@@ -2060,6 +2064,8 @@ def cmd_start(a):
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": models.task_label(m),
         "opencode_model": m.id, "route": why, "size": size, "stack": stack,
         **_routed_keys(routed),  # via, role; an API model's provider, thinking, said (#1016)
+        # a custom role's: the built-in it works as (#1625), its prompt, handbook and record's
+        **({"like": routes.kind_of(role)} if role not in routes.ROLES else {}),
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
         **({"local_only": True} if a.local_only else {}),  # this task's alone (#1021)
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
@@ -4031,8 +4037,12 @@ def settings_lines(rows: list[dict]) -> list[str]:
     for r in rows:
         if r["group"] != group:
             group = r["group"]
-            out.append(SETTINGS_GROUPS.get(group, group))
+            out.append(SETTINGS_GROUPS.get(group) or routes.label(group))  # a role of the user's own by its label
         kind = r["kind"]
+        if kind == "form":  # Add a role (#1625)
+            out.append(f"  {r['key']}: {r['label']}: wb route add <name> --label TEXT --like "
+                       "trivial|significant|writing [--about TEXT], on the user's ask")
+            continue
         if kind == "note":
             out.append(f"  {r['text']}")
             continue
@@ -4382,14 +4392,14 @@ def _route_show(as_json: bool) -> None:
     doc = routes.with_thinks(doc, cached=as_json)
     if as_json:
         out = {**doc, "summary": routes.summary(doc), "roles": {}, **_route_pane()}
-        for r in routes.ROLES:
+        for r in routes.roles_of(doc):
             row = doc["roles"][r]
             # the cached catalog: the pane draws from this, and never waits on OpenCode (#1023)
             m = models.lookup(row["api"], cached=True) if row.get("api") else None
             api = None if not row.get("api") else \
                 {"available": False, "resident": False, "why": models.unlisted_why(row["api"])} \
                 if m is None else models.status(m)
-            out["roles"][r] = {**row, "label": routes.LABELS[r], "api_status": api,
+            out["roles"][r] = {**row, "label": routes.label(r, doc), "api_status": api,
                                "gpu_found": None if row["gpu"] == routes.AUTO else row["gpu"] in models.discover()}
         print(json.dumps(out, indent=2))
         return
@@ -4397,8 +4407,8 @@ def _route_show(as_json: bool) -> None:
         print(line)
     _say("When the GPU is busy: a role with an API model starts on it (wb route busy wait: queue "
          "instead)" if doc["busy"] == "api" else "")
-    width = max(map(len, routes.ROLES)) + 2
-    for r in routes.ROLES:
+    width = max(map(len, routes.roles_of(doc))) + 2
+    for r in routes.roles_of(doc):
         row = doc["roles"][r]
         gone = row.get("api") and models.lookup(row["api"]) is None
         gone = gone and f" ({models.unlisted_why(row['api'])})"  # a missing key says so (#1529)
@@ -4572,13 +4582,16 @@ def cmd_route(a):
         return _route_show(a.json)
     if what == "driver":
         return _route_driver(a)
-    if what in routes.ROLES and target == "fallback":
+    if what in ("add", "remove"):  # the user's own roles (#1625)
+        return _route_custom(a)
+    roles = routes.all_roles()
+    if what in roles and target == "fallback":
         return _route_fallback(a)
     if a.more:
         return _route_pairs(a)
     role, via, api, gpu, day, use = None, None, a.api, a.gpu, a.day_usd, None
     order = privacy.parse_order(a.order) if a.order is not None else None
-    if a.order is not None and (what not in routes.ROLES or not order):
+    if a.order is not None and (what not in roles or not order):
         die("--order names an OpenRouter role's backends: wb route <role> openrouter/<model> --order <name>[,<name>]")
     busy = None
     if what == "cap":
@@ -4604,7 +4617,7 @@ def cmd_route(a):
             die("wb route all gpu|api|both: the Agents switch, every role on the GPU, every role on its API "
                 "model, or each role as set")
         use = target  # the Agents switch: no role's own via changes (#1016)
-    elif what in routes.ROLES:
+    elif what in roles:
         role = what
         if target in ("gpu", "api"):
             via = target
@@ -4613,7 +4626,8 @@ def cmd_route(a):
                 die(f"two API models: {target} and --api {a.api}")
             api, via = target, "api"
     else:
-        die(f"no role {what!r}: the roles are {', '.join(routes.ROLES)} (or all, cap, busy or driver)")
+        die(f"no role {what!r}: the roles are {', '.join(roles)} (or all, cap, busy or driver; "
+            "wb route add <name> --label … --like trivial|significant|writing adds one)")
     if api is not None:
         api = _route_api(api, role).id
     if gpu is not None:
@@ -4638,11 +4652,39 @@ def cmd_route(a):
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
         # one it may run
-        for r in routes.ROLES:
+        for r in routes.roles_of(ch.doc):
             if routes.effective_via(ch.doc, r) == "api" and (kept := ch.doc["roles"][r].get("api")) \
                     and kept != api and routes.effective_via(doc, r) != "api":
                 _route_api(kept, r)
         return ch
+
+    _route_apply(a, argv, changed)
+
+
+def _route_custom(a) -> None:
+    """`wb route add <name> --label TEXT --like trivial|significant|writing [--about TEXT]` and
+    `wb route remove <name>` (#1625): a role of the user's own, through _route_apply as any change
+    (its dry run, the lock, the log); neither sends code anywhere, so neither takes the dialog."""
+    name = a.target
+    if not name or a.more or a.gpu or a.api or a.thinking or a.thinking_review or a.order is not None \
+            or a.day_usd is not None:
+        die("wb route add <name> --label TEXT --like trivial|significant|writing [--about TEXT], or wb route "
+            "remove <name>: in a wb route of its own; then wb route <name> gpu|api|<provider/model> as any role")
+    if a.what == "add":
+        if not a.label or not a.like:
+            die("wb route add <name> takes --label (its name in Settings) and --like (the built-in it works as)")
+        argv = ["route", "add", name, "--label", a.label, "--like", a.like, *(["--about", a.about] if a.about else [])]
+    else:
+        if a.label or a.like or a.about:
+            die("wb route remove <name> takes the name alone")
+        argv = ["route", "remove", name]
+
+    def changed(doc) -> routes.Change:
+        try:
+            return routes.add_change(doc, name, a.label, a.like, a.about) if a.what == "add" \
+                else routes.remove_change(doc, name)
+        except routes.RoutesError as e:
+            die(str(e), 3)
 
     _route_apply(a, argv, changed)
 
@@ -4725,8 +4767,8 @@ def _route_pairs(a) -> None:
         die(f"{words[-1]} has no choice: wb route <role> gpu|api|<provider/model> <role> …")
     pairs: list = []
     for role, target in zip(words[::2], words[1::2]):
-        if role not in routes.ROLES:
-            die(f"no role {role!r}: the roles are {', '.join(routes.ROLES)}")
+        if role not in (roles := routes.all_roles()):
+            die(f"no role {role!r}: the roles are {', '.join(roles)}")
         if any(role == p[0] for p in pairs):
             die(f"{role} is named twice: one choice a role")
         if target in ("gpu", "api"):
@@ -6235,7 +6277,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
         doc_r = routes.read()
     except routes.RoutesError:
         doc_r = None
-    on_api = [r for r in routes.ROLES if routes.effective_via(doc_r, r) == "api"] if doc_r else []
+    on_api = [r for r in routes.roles_of(doc_r) if routes.effective_via(doc_r, r) == "api"] if doc_r else []
     # the catalog is read again (two OpenCode starts, a hung one CATALOG_TIMEOUT) only for a user
     # of API: a GPU-only user's wb models reads hosted.json as it is, and waits as before (#1026's
     # review: 4 s on a slow read, every HOSTED_TTL)
@@ -6262,7 +6304,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
     if not doc_r:
         lines.append("  roles: routes.json can't be read: wb route sets them again")
     else:
-        for role in routes.ROLES:
+        for role in routes.roles_of(doc_r):
             r = doc_r["roles"][role]
             when = _set_on(r.get("ts"))
             if routes.effective_via(doc_r, role) == "api":
@@ -6764,12 +6806,12 @@ def scout_api_lines() -> list[str]:
     except routes.RoutesError as e:
         return ["", routes.unreadable(e)]
     hosted = models.hosted()
-    mids = list(dict.fromkeys(doc["roles"][r]["api"] for r in routes.ROLES if doc["roles"][r].get("api")))
+    mids = list(dict.fromkeys(doc["roles"][r]["api"] for r in routes.roles_of(doc) if doc["roles"][r].get("api")))
     if not hosted and not mids:
         return []
     out = ["", "roles" + (f" ({line})" if (line := _agents_line(doc)) else "")]
     doc = routes.with_thinks(doc)  # hosted.json's, as the rest (#1263)
-    out += [f"  {r:<12} {_role_where(doc, r)}" for r in routes.ROLES]
+    out += [f"  {r:<12} {_role_where(doc, r)}" for r in routes.roles_of(doc)]
     now = store.now()
     if mids:
         out.append(f"api models in roles (the last {SCOUT_API_DAYS} days)")
@@ -8484,7 +8526,7 @@ def api_key_lines(keys: dict | None) -> list[str]:
         doc = routes.read()
     except routes.RoutesError:
         doc = None
-    uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.ROLES
+    uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.roles_of(doc)
                                    if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")
                                    and _holds_key(doc["roles"][r]["api"])}
     # a provider a role on API uses with no key at all: required, not NO_KEY's "optional" (#1067)
@@ -8580,7 +8622,7 @@ def first_run(host: str = "claude-code") -> list[str]:
     keys = models.connected() if good else None  # an API key makes a local model optional (#1024)
     try:  # and so does every role on API, key or not: the key line then says it is required (#1067)
         doc = routes.read()
-        api_only = all(routes.effective_via(doc, r) == "api" for r in routes.ROLES)
+        api_only = all(routes.effective_via(doc, r) == "api" for r in routes.ROLES)  # the built-ins: a custom role is extra
     except routes.RoutesError:
         api_only = False
     stored = not found and (api_only or any(models.key_runs(p, k["key"]) for p, k in (keys or {}).items()))
@@ -9160,7 +9202,7 @@ def _api_role_lines(doc: dict) -> list[tuple[bool, str]]:
     whether the API roles could run or not (#1067, 2026-11-23). No request to a provider: the
     catalog as wb start reads it, the key's source and api-health.json (models.status)."""
     out = []
-    for role in routes.ROLES:
+    for role in routes.roles_of(doc):
         if routes.effective_via(doc, role) != "api":
             continue
         try:
@@ -9247,7 +9289,7 @@ def cmd_doctor(a):
         roles_doc = None  # said BAD with the roles below
     # every role on API: the GPU's lines inform, as wb setup's first run says them; a healthy
     # API-only setup read BAD twice and exit 1, the same verdict as one whose key was gone (#1067)
-    on_gpu = roles_doc is None or any(routes.effective_via(roles_doc, r) == "gpu" for r in routes.ROLES)
+    on_gpu = roles_doc is None or any(routes.effective_via(roles_doc, r) == "gpu" for r in routes.roles_of(roles_doc))
     try:
         models.read_config()
         if files or on_gpu:
@@ -9440,7 +9482,7 @@ def cmd_doctor(a):
     else:
         for good, said in _api_role_lines(doc):  # whether each API role can start now (#1067)
             line(good, said)
-        if any(routes.effective_via(doc, r) == "api" for r in routes.ROLES) and (keys := models.connected()):
+        if any(routes.effective_via(doc, r) == "api" for r in routes.roles_of(doc)) and (keys := models.connected()):
             for said in api_key_lines(keys):
                 print(said)
     try:  # every wb command makes it: a fresh home has no ~/.local/state yet (the 2026-11-16 audit)
@@ -9719,9 +9761,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--spec", required=True, help="spec file, or - for stdin")
     _image_flag(s)
     s.add_argument("--repo", default=".")
-    s.add_argument("--role", choices=routes.ROLES,
-                   help="the kind of work, whose model the user set (wb route): GPU or API; default: "
-                   "from --size (trivial, else significant)")
+    s.add_argument("--role", metavar="ROLE",
+                   help="the kind of work, whose model the user set (wb route): significant, trivial, "
+                   "writing or a role of the user's own (#1625); default: from --size (trivial, else significant)")
     s.add_argument("--size", choices=["trivial", "significant"],
                    help="the slice and the GPU router's size; default: from --role (trivial for the "
                    "trivial role, else significant)")
@@ -10150,9 +10192,10 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cards.cmd_card)
     s = sub.add_parser("route", help="the roles: which model each kind of work goes to (show, or "
                        "change one on the user's yes)")
-    s.add_argument("what", nargs="?", metavar="role|all|cap|busy|driver",
-                   help="significant, trivial, writing; all (the Agents switch); cap (the day cap); busy "
-                   "(when the GPU is busy); driver (the OpenCode path's standing driver, #1316)")
+    s.add_argument("what", nargs="?", metavar="role|all|cap|busy|driver|add|remove",
+                   help="significant, trivial, writing or a role of the user's own; all (the Agents switch); "
+                   "cap (the day cap); busy (when the GPU is busy); driver (the OpenCode path's standing "
+                   "driver, #1316); add <name> or remove <name>: a role of the user's own (#1625)")
     s.add_argument("target", nargs="?", metavar="gpu|api|both|wait|fallback|<provider/model>|<usd>",
                    help="a role: gpu or api flips its selector, an API model's exact id sets it and goes to "
                    "API, fallback <provider/model>|gpu|none sets where its tasks go when its API model's "
@@ -10173,6 +10216,11 @@ def parser() -> argparse.ArgumentParser:
                    "thinking (off by default, #1059)")
     s.add_argument("--order", metavar="NAME[,NAME]", help="an OpenRouter role's backends, which every "
                    "request goes to alone (the model's Providers tab on openrouter.ai): the user's choice")
+    s.add_argument("--label", metavar="TEXT", help="add: the role's name as Settings shows it")
+    s.add_argument("--like", choices=routes.ROLES, help="add: the built-in the role works as: its prompt, "
+                   "slice size and the GPU router's record (trivial or significant coding, or writing)")
+    s.add_argument("--about", metavar="TEXT", help="add: what the role is for, which the orchestrator agent "
+                   "picks it by")
     s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars ($"
                    f"{routes.DAY_USD_SUGGEST:g} when the first role goes to API, unless set)")
     s.add_argument("--json", action="store_true", help="show: the roles as JSON, each API model's "

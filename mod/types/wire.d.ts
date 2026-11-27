@@ -186,10 +186,17 @@ export type SettingChoice = { value: string; label: string; says?: string; needs
  * card (#1553), `more` a row drawn under that card's More; `hidden` a row the page doesn't draw while it
  * can do nothing, `fixed` a choice drawn as its `says` alone; `ask` a row with a problem or a request, given
  * an "Ask <driver>" link (true: the page words it; a string: that request) */
+/** one field of a `form` row (#1625): text (its `pattern`, `max`, `hint`) or a select of `choices` */
+export type SettingField = { name: string; label: string; kind: 'text' | 'select'; pattern?: string; max?: number
+  hint?: string; optional?: boolean; choices?: SettingChoice[] }
 export type SettingRow = {
   key: string; group: string; kind: string; label: string; value?: string | number | null; text?: string
   says?: string; choices?: SettingChoice[]; other?: boolean; unit?: string; more?: boolean; hidden?: boolean; fixed?: boolean
   ask?: boolean | string; help?: string
+  /** a role of the user's own's row (#1625): its card's title, the role's label */
+  card?: string
+  /** kind `form` (Add a role, #1625): its fields, posted together as one JSON string */
+  fields?: SettingField[]
   /** what a folded card's one-line summary says of it ("" nothing; without it a choice's `label: choice`) */
   brief?: string
   /** its newest change within a week (settings.changed, #1355): when, and who (web, claude, opencode, terminal, agent) */
@@ -222,8 +229,10 @@ export type RouteJson = {
   busy: 'wait' | 'api'
   day_usd: number | null
   /** `thinks`: what the role's API model does with each thinking setting (routes.with_thinks, #1263) */
-  roles: Record<'significant' | 'trivial' | 'writing', { via: 'gpu' | 'api'; gpu: string; api?: string;
-    thinking: 'off' | 'on'; label: string; thinks?: { api: string; off: string; on: string } }>
+  // the built-ins, then the user's own (#1625: `custom`, its `like` and `about`)
+  roles: Record<string, { via: 'gpu' | 'api'; gpu: string; api?: string;
+    thinking: 'off' | 'on'; label: string; thinks?: { api: string; off: string; on: string }
+    custom?: true; like?: 'significant' | 'trivial' | 'writing'; about?: string }>
   /** `prices`: the dollars' basis (meter.basis, #1135): catalog (an estimate, ≈), yours (wb model price), provider */
   spend_today: { usd: number; prices?: 'catalog' | 'yours' | 'provider'; by_provider: Record<string, number> }
   // runs: a key in the environment the keyhole reads (#1189), which runs tasks as a stored one does;

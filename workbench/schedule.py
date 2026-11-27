@@ -506,7 +506,7 @@ def _env_key_notes() -> list[str]:
     except routes.RoutesError:
         return []
     out = []
-    for role in routes.ROLES:
+    for role in routes.roles_of(doc):
         mid = doc["roles"][role].get("api")
         if routes.effective_via(doc, role) != "api" or not mid:
             continue
@@ -643,7 +643,7 @@ def spend_skip(roles=None) -> str | None:
         doc = routes.read()
     except routes.RoutesError as e:
         return f"routes.json can't be read ({e})"
-    for role in routes.ROLES:
+    for role in routes.roles_of(doc):
         if roles is not None and role not in roles:
             continue
         mid = doc["roles"][role].get("api")

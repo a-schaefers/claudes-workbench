@@ -29,6 +29,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,20 @@ OPENROUTER_ANY = "via OpenRouter to its choice of backend"
 ROLES = ("significant", "trivial", "writing")
 # how the pane names them (#1023); files and commands keep the role names
 LABELS = {"significant": "Complex coding", "trivial": "Trivial coding", "writing": "English writing"}
+# The user's own roles (#1625, the owner, 2026-11-27: "unable to create my own new roles, locked to
+# only having the three default ones"): routes.json `roles.<name>` with `custom: true`, a `label`,
+# `like` (the built-in it works as: its prompt, slice size and the GPU router's record, as a
+# `--size` would) and an optional `about` (what it is for: the orchestrator agent picks it by
+# that). Each has a side, its models, thinking and a fallback as a built-in's, and the day cap,
+# local_only and the keyhole apply alike. The built-ins can't be removed; a custom one is added
+# on the GPU (nothing spends) and removed whole. ROLES stays the built-ins: roles_of(doc) is all.
+CUSTOM_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
+CUSTOM_MAX = 12
+LABEL_MAX = 40
+ABOUT_MAX = 200
+# words a role can't be named: wb route's own (all, cap, busy, driver, add, remove) and its sides
+RESERVED = frozenset({"all", "cap", "busy", "driver", "add", "remove", "gpu", "api", "both", "auto", "none",
+                      "fallback", "use", "off", "on"})
 VIAS = ("gpu", "api")
 # the Agents switch (#1016, #1023): routes.json `use`, over every role's own `via`; missing is
 # "both", each role as set. `wb route all gpu|api|both` sets it, never a role's via, so going
@@ -134,6 +149,58 @@ def default_role() -> dict:
     return {"via": "gpu", "gpu": AUTO, "thinking": "off"}
 
 
+def custom_why(name: str, label, like, about=None) -> str:
+    """Why a custom role can't be ``name`` with these, or "" (wb route add and normalize alike)."""
+    if not isinstance(name, str) or not CUSTOM_RE.match(name):
+        return f"a role's name is 2 to 24 lowercase letters, digits or dashes, starting with a letter, not {name!r}"
+    if name in ROLES or name in RESERVED:
+        return f"{name} is taken: a built-in role or a word of wb route's"
+    if not isinstance(label, str) or not label.strip() or len(label.strip()) > LABEL_MAX:
+        return f"{name}'s label is 1 to {LABEL_MAX} characters, not {label!r}"
+    if like not in ROLES:
+        return f"{name}'s like is one of {', '.join(ROLES)}, not {like!r}"
+    if about is not None and (not isinstance(about, str) or len(about) > ABOUT_MAX):
+        return f"{name}'s about is up to {ABOUT_MAX} characters"
+    return ""
+
+
+def roles_of(doc: dict) -> tuple:
+    """Every role of a normalized ``doc``: the built-ins, then the user's own in the file's order."""
+    return ROLES + tuple(r for r, row in (doc.get("roles") or {}).items()
+                         if r not in ROLES and isinstance(row, dict) and row.get("custom"))
+
+
+def all_roles() -> tuple:
+    """roles_of routes.json as it is now; the built-ins alone while it can't be read."""
+    try:
+        return roles_of(read())
+    except RoutesError:
+        return ROLES
+
+
+def label(role: str, doc: dict | None = None) -> str:
+    """How Settings and the pane name ``role``: a built-in's LABELS, a custom one's own label."""
+    if role in LABELS:
+        return LABELS[role]
+    try:
+        row = ((doc if doc is not None else read()).get("roles") or {}).get(role) or {}
+    except RoutesError:
+        row = {}
+    return str(row.get("label") or role)
+
+
+def kind_of(role: str | None, doc: dict | None = None) -> str | None:
+    """The built-in role ``role`` works as: itself, or a custom role's `like`; None for None.
+    What a role's prompt, slice size and the GPU router's record go by (#1625)."""
+    if role is None or role in ROLES:
+        return role
+    try:
+        row = ((doc if doc is not None else read()).get("roles") or {}).get(role) or {}
+    except RoutesError:
+        row = {}
+    return row.get("like") if row.get("like") in ROLES else "significant"
+
+
 def _cap(v):
     if v is None:
         return None
@@ -151,14 +218,24 @@ def normalize(doc) -> dict:
     roles = doc.get("roles", {})
     if not isinstance(roles, dict):
         raise RoutesError("roles is not an object")
-    if extra := sorted(set(roles) - set(ROLES)):
-        raise RoutesError(f"unknown role {extra[0]!r} (the roles: {', '.join(ROLES)})")
+    custom = [r for r in roles if r not in ROLES]
+    for r in custom:  # the user's own (#1625): anything else is a hand edit's typo, refused by name
+        e = roles[r]
+        if not isinstance(e, dict) or e.get("custom") is not True:
+            raise RoutesError(f"unknown role {r!r} (the roles: {', '.join(ROLES)}, or one wb route add made)")
+        if why := custom_why(r, e.get("label"), e.get("like"), e.get("about")):
+            raise RoutesError(why)
+    if len(custom) > CUSTOM_MAX:
+        raise RoutesError(f"{len(custom)} roles of the user's own, past {CUSTOM_MAX}")
     out = {}
-    for r in ROLES:
+    for r in (*ROLES, *custom):
         e = roles.get(r, {})
         if not isinstance(e, dict):
             raise RoutesError(f"{r} is not an object")
         row = default_role()
+        if r not in ROLES:
+            row.update(custom=True, label=e["label"].strip(), like=e["like"],
+                       **({"about": e["about"].strip()} if e.get("about") else {}))
         for key, allowed in (("via", VIAS), ("thinking", THINKING), ("thinking_review", THINKING)):
             if key in e:
                 if e[key] not in allowed:
@@ -237,7 +314,7 @@ def busy_api(doc: dict, role: str) -> str | None:
 
 def busy_api_any(doc: dict) -> bool:
     """Whether the busy opt-in can send any role to API now (busy_api for some role)."""
-    return any(busy_api(doc, r) for r in ROLES)
+    return any(busy_api(doc, r) for r in roles_of(doc))
 
 
 def fallback_of(doc: dict, role: str) -> str | None:
@@ -260,7 +337,7 @@ def fallback_name(fb: str, gpu: str = AUTO) -> str:
 def _busy_newly(doc: dict, new: dict) -> list:
     """The roles the busy opt-in can newly send to an API model (busy_api), one they didn't
     already run on: what a change opens to spending while `busy` stays api."""
-    return [r for r in ROLES if (mid := busy_api(new, r)) and _sent(new, r, mid) != _sent(doc, r, busy_api(doc, r))
+    return [r for r in roles_of(new) if (mid := busy_api(new, r)) and _sent(new, r, mid) != _sent(doc, r, busy_api(doc, r))
             and not (effective_via(doc, r) == "api" and _sent(doc, r, doc["roles"][r].get("api")) == _sent(new, r, mid))]
 
 
@@ -492,7 +569,7 @@ def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda m
         return "", False
     if now == "wait":
         return "When the GPU is busy: the role's API model → wait (queue, as before)", False
-    has = [r for r in ROLES if new["roles"][r].get("api")]
+    has = [r for r in roles_of(new) if new["roles"][r].get("api")]
     if cap is None and _priced(has, new, free):
         raise _NoCap()
     what = ([f"a role with an API model ({', '.join(has)}) starts on it while the GPU is busy",
@@ -686,17 +763,17 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str],
     was, use = doc.get("use", "both"), new["use"]
     if was == use:
         return "", False, []
-    moved = [r for r in ROLES if effective_via(doc, r) != effective_via(new, r)]
+    moved = [r for r in roles_of(new) if r in doc["roles"] and effective_via(doc, r) != effective_via(new, r)]
     to_api = [r for r in moved if effective_via(new, r) == "api" and new["roles"][r].get("api")]
     if use == "gpu":
         what = [f"every role on the GPU; {AGENTS_STOPS}; each role's own choice is kept for Both"]
     elif use == "api":
         what = ["every role on its API model"]
-        if none := [r for r in ROLES if not new["roles"][r].get("api")]:
+        if none := [r for r in roles_of(new) if not new["roles"][r].get("api")]:
             what.append(f"{', '.join(none)} {'has' if len(none) == 1 else 'have'} no API model and "
                         "can't start")
     else:
-        what = ["each role as set: " + ", ".join(f"{r} {_side(new['roles'][r])}" for r in ROLES)]
+        what = ["each role as set: " + ", ".join(f"{r} {_side(new['roles'][r])}" for r in roles_of(new))]
     if to_api:
         what += [_goes_to(to_api, new, who), *_free_part(to_api, new, free), *_thinking_on(to_api, new, thinks)]
         if cap is not None:
@@ -752,6 +829,36 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
     return _change(doc, day_usd=DAY_USD_SUGGEST, **args)
 
 
+def add_change(doc: dict, name: str, label: str, like: str, about: str | None = None) -> Change:
+    """`wb route add <name> --label … --like …` (#1625): a role of the user's own, on the GPU with
+    the router picking and thinking off, so nothing spends and no yes is taken; its side and models
+    are then set as a built-in's. RoutesError for a name taken, one past CUSTOM_MAX, or a bad
+    label, like or about."""
+    if name in doc["roles"]:
+        raise RoutesError(f"{name} is a role already (wb route shows them)")
+    if why := custom_why(name, label, like, about):
+        raise RoutesError(why)
+    if len(roles_of(doc)) - len(ROLES) >= CUSTOM_MAX:
+        raise RoutesError(f"{CUSTOM_MAX} roles of your own at most: wb route remove <name> one first")
+    new = copy.deepcopy(doc)
+    new["roles"][name] = {**default_role(), "custom": True, "label": label.strip(), "like": like,
+                          **({"about": about.strip()} if about and about.strip() else {})}
+    return Change(new, f"{name}: added, {label.strip()}, working as {like}, on the GPU (the router picks)",
+                  False, [name])
+
+
+def remove_change(doc: dict, name: str) -> Change:
+    """`wb route remove <name>` (#1625): a role of the user's own, gone whole; its tasks keep what
+    they started on. Removing sends nothing anywhere, so it takes no yes. The built-ins stay."""
+    if name in ROLES:
+        raise RoutesError(f"{name} is a built-in role: it can't be removed (wb route {name} gpu keeps it off API)")
+    if name not in doc["roles"]:
+        raise RoutesError(f"no role {name!r}: the roles are {', '.join(roles_of(doc))}")
+    new = copy.deepcopy(doc)
+    del new["roles"][name]
+    return Change(new, f"{name}: removed", False, [name])
+
+
 def _change(doc: dict, role: str | None, via: str | None, gpu: str | None, api: str | None,
             thinking: str | None, day_usd, who: Callable[[str], str], use: str | None,
             order: list[str] | None, busy: str | None, fallback: str | None,
@@ -774,7 +881,9 @@ def _change(doc: dict, role: str | None, via: str | None, gpu: str | None, api: 
         new["busy"] = busy
     cap, was = _cap_was(new), _cap_was(doc)
     parts, gated, changed = [], False, []
-    for r in (ROLES if role == "all" else (role,) if role else ()):
+    if role not in (None, "all") and role not in doc["roles"]:
+        raise RoutesError(f"no role {role!r}: the roles are {', '.join(roles_of(doc))}")
+    for r in (roles_of(doc) if role == "all" else (role,) if role else ()):
         old = doc["roles"][r]
         row = dict(old)
         if api is not None:
@@ -816,7 +925,7 @@ def _change(doc: dict, role: str | None, via: str | None, gpu: str | None, api: 
         gated |= g
         changed += [r for r in moved if r not in changed]
     # a role newly sent to an API model, by its own change or the switch
-    newly = [r for r in ROLES if effective_via(new, r) == "api" and new["roles"][r].get("api")
+    newly = [r for r in roles_of(new) if effective_via(new, r) == "api" and new["roles"][r].get("api")
              and (effective_via(doc, r) != "api" or doc["roles"][r].get("api") != new["roles"][r].get("api"))]
     to_api = bool(newly)
     # every one on a free model: no cap to take, as the guard keeps none for it (#1193); a
@@ -922,7 +1031,7 @@ def stamp(ch: Change, by: str, now: float | None = None) -> dict:
     pin on a role on API rewrote `by` to claude and `said` to the pin's line, so the user's own
     yes to send that role's code read as Claude's (2026-11-23 review)."""
     ts = store.now() if now is None else now
-    for r in ch.roles:
+    for r in (r for r in ch.roles if r in ch.doc["roles"]):  # a removed role has none (#1625)
         ch.doc["roles"][r].update(dict(said=ch.line, by=by, ts=ts) if ch.gated else dict(gpu_by=by, gpu_ts=ts))
     return ch.doc
 
@@ -961,17 +1070,21 @@ def summary(doc: dict) -> str:
     """The roles in one line, from the document alone (the mod's routesSummary says the same:
     Couplings): what the context block and the [workbench] echo tell Claude."""
     out = []
-    for r in ROLES:
+    for r in roles_of(doc):
         row = doc["roles"][r]
+        # a role of the user's own (#1625): its label, the built-in it works as and what it is for,
+        # which the orchestrator agent picks it by (`wb start --role <name>`)
+        own = (f" (the user's own, \"{row['label']}\", works as {row['like']}"
+               + (f": {row['about']}" if row.get("about") else "") + ")") if row.get("custom") else ""
         # an OpenRouter role's backends (`order`, #1021) are where its code goes: left out, a
         # change of them alone reached the conversation as nothing (#1126, 2026-11-23)
         backends = f", backends {', '.join(row['order'])}" if row.get("api") and row.get("order") else ""
         # the role's fallback (#1196): where its code may go too, so a change of it alone is a row
         fb = f", fallback {'GPU' if row['fallback'] == FALLBACK_GPU else row['fallback']}" if row.get("fallback") else ""
         if row["via"] == "api":
-            out.append(f"{r} API {row['api']}{backends}, {thinking_said(row)}{fb}")
+            out.append(f"{r}{own} API {row['api']}{backends}, {thinking_said(row)}{fb}")
             continue
-        text = f"{r} GPU " + ("(the router picks)" if row["gpu"] == AUTO else row["gpu"])
+        text = f"{r}{own} GPU " + ("(the router picks)" if row["gpu"] == AUTO else row["gpu"])
         if row.get("api"):
             text += f", API kept: {row['api']}{backends}"
         if row["thinking"] == "on":
@@ -986,7 +1099,7 @@ def summary(doc: dict) -> str:
 
 
 def any_api(doc: dict) -> bool:
-    return any(doc["roles"][r].get("api") for r in ROLES)
+    return any(doc["roles"][r].get("api") for r in roles_of(doc))
 
 
 def approved(expect: dict) -> dict | None:
@@ -1017,8 +1130,8 @@ def role_and_size(role: str | None, size: str | None) -> tuple[str, str]:
     size."""
     if role is None:
         role = "trivial" if size == "trivial" else "significant"
-    if size is None:
-        size = "trivial" if role == "trivial" else "significant"
+    if size is None:  # a custom role's like's (#1625)
+        size = "trivial" if kind_of(role) == "trivial" else "significant"
     return role, size
 
 
