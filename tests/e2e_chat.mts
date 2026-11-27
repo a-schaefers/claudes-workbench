@@ -1597,10 +1597,11 @@ async function run(engine: string, device?: string) {
       })
       if (got.p !== got.card || got.margins !== `${got.p} ${got.p}` || got.code !== got.p || got.introCode !== got.intro) throw new Error(JSON.stringify(got))
     })
-    if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px', async () => {
+    if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px, Settings\' as CSS columns, short cards under short ones', async () => {
       await goTo('settings')
+      // CSS columns, not a grid: a grid row as tall as its taller card left 1,000 px empty (the web app's review, 2026-11-26)
       const got = await page.evaluate(() => ({ w: document.querySelector('#view-settings .view-in')!.getBoundingClientRect().width,
-        cols: getComputedStyle(document.getElementById('settings')!).gridTemplateColumns.split(' ').length }))
+        cols: Number(getComputedStyle(document.getElementById('settings')!).columnCount) || 1 }))
       if (got.w > 1041 || got.cols !== 2) throw new Error(JSON.stringify(got))
       await goTo('chat')
     })

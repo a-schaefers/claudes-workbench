@@ -7827,7 +7827,9 @@ alone, and a generic renderer: a new setting touches only Python.
   unless it is this page's
   own write (`by: "web"` while a POST waits or within 5 s of one). The first state only sets the
   mark. Last writer wins: no lock.
-- **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
+- **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` box (from 1100 px two CSS
+  columns, `columns: 2`, each card `break-inside: avoid`, the device cards' too: a grid row as tall as its
+  taller card left about 1,000 px empty beside Agents and roles, the web app's review, 2026-11-26), in `GROUPS`
   order with their names: a card per role first (#1553), `significant` "Complex coding", `trivial` "Trivial
   coding", `writing` "English writing" (`routes.LABELS`' words), its `role-<role>` row on top with no label of
   its own (a row whose label is its card's name is drawn without it) and its `more` rows under a closed

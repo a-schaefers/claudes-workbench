@@ -59,6 +59,12 @@ body[data-view="stats"] #view-stats, body[data-view="settings"] #view-settings {
 .cards { display: grid; gap: 12px; align-items: start; }
 #stats-body:not(:empty), #settings-rows:not(:empty) { margin-bottom: 12px; }
 @media (min-width: 1100px) { .cards { grid-template-columns: 1fr 1fr; } }
+/* Settings' cards in two CSS columns, short ones under short ones: a grid row as tall as its taller
+   card left about 1,000 px empty beside Agents and roles (the web app's review, 2026-11-26) */
+@media (min-width: 1100px) {
+  #view-settings .cards { display: block; columns: 2; column-gap: 12px; }
+  #view-settings .cards > .card { break-inside: avoid; margin-bottom: 12px; }
+}
 /* the card views' own: scoped to .view-in, never .view, since #view-chat is a .view too and its
    rows, their <p> and <code>, and the intro's <code> kept their sizes (#1284 review) */
 .view-in .card { min-width: 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line);

@@ -133,7 +133,7 @@ export async function check(page: any, ctx: E2eCtx) {
         .filter(({ r }) => r.width && (r.left < w.left - 1 || r.right > w.right + 1))
         .map(({ e, r }) => `${e.className || e.tagName} ${Math.round(r.left)}..${Math.round(r.right)}`)
       return { width: innerWidth, out, scroll: v.scrollWidth - v.clientWidth, page: document.documentElement.scrollWidth - innerWidth,
-        cols: getComputedStyle(document.querySelector('#settings-rows .set-cards')!).gridTemplateColumns.split(' ').length }
+        cols: Number(getComputedStyle(document.querySelector('#settings-rows .set-cards')!).columnCount) || 1 }  // CSS columns on a desktop
     })
     if (got.width !== width || got.out.length || got.scroll > 0 || got.page > 0) throw new Error(JSON.stringify(got))
     return got
