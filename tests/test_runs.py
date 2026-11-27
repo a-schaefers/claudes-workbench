@@ -947,8 +947,9 @@ class Runs(Base):
         self.assertIn("wb discard bo5-review-1 drops it (wb run close bo5 does that)", rev)
         self.assertNotIn("(it commits)", rev)
         self.assertNotIn("wb accept bo5-review-1", rev)  # it wrote no result to keep
-        for n in runs.run_tasks(runs.Run("bo5")):
-            run_wb("discard", n)
+        for n in runs.run_tasks(runs.Run("bo5")):  # one the journal names may not exist yet
+            if store.Task(n).exists:
+                run_wb("discard", n)
 
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
