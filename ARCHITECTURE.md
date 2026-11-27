@@ -7867,7 +7867,7 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   `changed`), and the stamp (*The Settings view (settings.ts)*, who changed what).
 
 **A row** is JSON-safe: `key`, `group`, `label`, `kind`, `more` (true: drawn under its card's More, a role's
-GPU and API model and thinking, #1553), `hidden` (true: the page doesn't draw it while it can do nothing; `wb
+model for the side it isn't on, and thinking, #1553; the side it runs on has its model on the card, #1626), `hidden` (true: the page doesn't draw it while it can do nothing; `wb
 settings` lists it still), `fixed` (true: a choice the page draws as its `says` alone), `ask` (a row with a
 problem or a request: true, or a string, the request itself; the page gives it an Ask link: a role that can't
 run, `api-connected` with a provider that has no key it can run on, `flows`), `brief` (what a folded card's
@@ -7896,8 +7896,9 @@ ask before an offer over an hour old (#1557's review): a key added to `HELP` nee
 - *a role's card* (`significant`, `trivial`, `writing`, #1553: one role's settings were spread over three cards,
   its API model 2,000 px below the choice that needed it): `role-<role>` → `wb route <role> gpu|api` (a role on
   API whose `api_status` says it can't run says `<Label> can't run on <id>: <why>.`, #1529; with no API model its
-  API choice, "API (pick its model)", `needs` `api-<role>`, #1558); then, `more`:
-  `gpu-<role>` → `wb route <role> --gpu <id>|auto` (with GPU models); `api-<role>` (`_api_stops`: every model of
+  API choice, "API (pick its model)", `needs` `api-<role>`, #1558); then, on the card for the side the role
+  runs on and `more` for the other (#1626, the owner, 2026-11-27: under More the GPU model read as Claude's
+  or Optimize's to pick): `gpu-<role>` → `wb route <role> --gpu <id>|auto` (with GPU models); `api-<role>` (`_api_stops`: every model of
   `wb models --json`'s `api`, each choice with its `group`: the role's model, the others', those used first, `IN_USE`
   "In use", then one group per provider, its `provider_name`, by name, its models by name; a cap of 12 had shown the
   owner's 111 as DeepSeek and 11 Claude models, no xAI, #1617) → `wb route <role> --api <id>`,
