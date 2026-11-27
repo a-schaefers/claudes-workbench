@@ -67,7 +67,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { WbChat, WbLine, WbLive, WbPane, WbSaid, WbTask } from '../types'
-import type { ChatOpen, ListenerClaim, ModelsJson as WbModels, NoticeRow, RouteJson as WbRoutes, StatusFile, TaskFile } from '../types/wire.js'
+import type { ChatOpen, ListenerClaim, ModelsJson as WbModels, NoticeRow, RouteJson as WbRoutes, SettingsHelp, StatusFile, TaskFile } from '../types/wire.js'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
@@ -2405,7 +2405,8 @@ async function chatLink($: any): Promise<void> {
 // without help older than OLDEST_WAKE_MS is no news; one with help is due however old while it is
 // its setting's newest row (#1557, 2026-11-26: the page promises "your driver will offer to set it
 // up", and a change made from the phone with no session up lapsed after the hour, so a session
-// started later never offered; a later change of the same setting, anyone's, retires it). While the
+// started later never offered; a later change of the same setting, anyone's, retires it), and one
+// older than OLDEST_WAKE_MS only while wb still gives its key a note (helpStill). While the
 // user is away on the web chat the offer's turn says to answer there (#1555: it was made in the
 // terminal they had left). The newest delivered is kept in $.store, every session's, so a reload or
 // another session never says it again.
@@ -2421,6 +2422,20 @@ export function settingSaid(r: Row): string {
 }
 export const SETTING_HELP = (r: Row) => `[workbench] ${settingSaid(r)}\n${String(r.help).trim().slice(0, 4000)}\n` +
   'Offer to help with it, and install or change nothing without their yes.'
+// Whether a setting still needs the help an old web row asked for (#1557's review, 2026-11-26: a
+// row days old was offered after probe was set up, or `tailscale serve` run, outside the offer, an
+// untrue offer that started a paid turn): `wb settings help <key> --json`'s note, as it stands now.
+// undefined when wb couldn't say (an older wb, a failure).
+async function helpStill($: any, key: string): Promise<boolean | undefined> {
+  const r = await runWb($, ['settings', 'help', key, '--json'], 15_000)
+  if (!r.ok) return undefined
+  try {
+    const got = JSON.parse(r.out) as SettingsHelp | null
+    return got && typeof got === 'object' ? typeof got.help === 'string' && got.help.trim() !== '' : undefined
+  } catch {
+    return undefined
+  }
+}
 async function settingsTurns($: any, now: number) {
   const path = `${mem.root}/${SETTINGS_CHANGES}`
   const stat = await $.fs.stat(path).catch(() => undefined)
@@ -2444,8 +2459,11 @@ async function settingsTurns($: any, now: number) {
     if (r.by !== 'web' || ts <= mark || mem.settingsSeen.has(id)) continue
     const help = typeof r.help === 'string' && r.help.trim()
     if (help ? ts < (latest.get(String(r.key ?? '')) ?? 0) : ts * 1000 < now - OLDEST_WAKE_MS) continue
+    const still = help && ts * 1000 < now - OLDEST_WAKE_MS ? await helpStill($, String(r.key ?? '')) : true
+    if (still === undefined) continue // wb couldn't say: no offer it can't vouch for, nor a mark
     mem.settingsSeen.add(id)
     newest = Math.max(newest, ts)
+    if (help && !still) continue // done or moot since (set up outside the offer): retired, said never
     if (help) {
       $.ui.toast(`workbench: ${one(r.label, 80) || one(r.key, 80)} changed on the web app: Claude will offer to set it up`)
       mem.queued.push(await awayToo($, SETTING_HELP(r)))

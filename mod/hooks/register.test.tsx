@@ -6491,7 +6491,7 @@ test('#1557: a web change\'s offer made with no session up is still made by a se
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   on('ui.toast', () => ({ value: undefined }))
-  on('process.run', chatWb(files, () => ({ state: 'up', url: LINK })))
+  on('process.run', stillHelps(files, 'Offer to set probe up.'))   // probe still not set up
   const kept: Record<string, unknown> = {}
   on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
   on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
@@ -6506,6 +6506,38 @@ test('#1557: a web change\'s offer made with no session up is still made by a se
   await $.turn.complete(endTurn('t1'))
   await clock.advance(31_000)
   expect(woken.filter(t => t.includes('Agent code navigation'))).toHaveLength(1)
+})
+
+// chatWb, with `wb settings help <key> --json` answering ``help`` (null: the setting needs none now)
+const stillHelps = (files: Record<string, string>, help: string | null, runs: string[][] = []) => {
+  const wb = chatWb(files, () => ({ state: 'up', url: LINK }), runs)
+  return (h: any, e: any) => e.argv[1] === 'settings' && e.argv[2] === 'help'
+    ? (runs.push(e.argv), { value: { exitCode: 0, stdout: JSON.stringify({ key: e.argv[3], help }), stderr: '' } })
+    : wb(h, e)
+}
+
+test('#1557: an old web change\'s offer whose help no longer applies is never made, and is retired', async ($, on) => {
+  // review of #1557, 2026-11-26: a help row days old was offered after probe was set up outside
+  // the offer (from the other host, or by hand): "probe: on, but not set up", untrue, a paid turn
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  const runs: string[][] = []
+  on('process.run', stillHelps(files, null, runs))                // probe set up since: wb gives no note
+  const kept: Record<string, unknown> = {}
+  on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
+  on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  files['/wb/settings-changes.jsonl'] = JSON.stringify({ ts: ts0 - 3 * 86400, key: 'probe', label: 'Agent code navigation',
+    from: 'off', to: 'on', said: 'probe: on, but not set up', help: 'Offer to set probe up.', by: 'web' }) + '\n'
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  await clock.advance(31_000)
+  expect(runs.map(a => a.slice(1).join(' '))).toContain('settings help probe --json')          // asked wb, not the row
+  expect(woken.filter(t => t.includes('Agent code navigation'))).toEqual([])
+  expect(kept.settingsSeen).toBe(ts0 - 3 * 86400)                 // retired: never asked again
 })
 
 test('#1555: a web change\'s offer while the user is away on the web chat says to answer there', async ($, on) => {

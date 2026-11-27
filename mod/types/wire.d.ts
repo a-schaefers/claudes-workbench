@@ -192,6 +192,9 @@ export type SettingsOffers = {
   offers?: { ts: number; key: string; label: string; text: string; toast: string }[]
   notes?: { ts: number; key: string; text: string }[]
 }
+/** `wb settings help <key> --json` (settings.help_now): the note the setting needs its driver's help
+ * with now, or null; the mod asks it before an old web offer (#1557's review) */
+export type SettingsHelp = { key?: string; help?: string | null }
 
 // ---- wb's JSON outputs the panes read
 
