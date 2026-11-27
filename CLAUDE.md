@@ -101,7 +101,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   object, checked outside the lane (ARCHITECTURE.md, *Deep workflows*).
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
-- `spend.py`, `savings.py`: a task's cost to Claude, and against writing it (the score GPU-only; API dollars apart, `api_totals`). `meter.py`: an API
+- `spend.py`, `savings.py`: a task's cost to Claude, and `wb spend`'s sums: what was spent, never a saving (#1618; API dollars apart, `api_totals`). `meter.py`: an API
   task's money (the ledger `spend-api.jsonl`, the day cap, the `spend` guard: *Spend*). `bench.py`,
   `verify.py`, `optimize.py`, `top.py` (API tasks under RUNNING, never in rack or queue), `images.py`, `audio.py` (`media.py`, what those two
   share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the web

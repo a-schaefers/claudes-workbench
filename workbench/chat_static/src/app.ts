@@ -906,7 +906,7 @@
     if (s.build) build = s.build
     live = true; reachable = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
-    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], runs: s.runs || [], dictate: !!s.dictate,
+    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, spend: s.spend || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], runs: s.runs || [], dictate: !!s.dictate,
       driver: s.driver || null, settings: s.settings || null }
     drawTasks(); drawRuns(); drawMic(); drawStory()
     drawShown()
@@ -1703,30 +1703,21 @@
     drawPresence()
   }
 
-  // ---- settings: what the gear's sheet held, now cards in the Settings view; What it saved in Stats (#1284) ----
+  // ---- settings: what the gear's sheet held, now cards in the Settings view; Spend in Stats (#1284, #1618) ----
   const sheet = $('settings')
-  // `wb savings` for the week, from the state (chat.week_saved)
-  const tokens = (n: number) => Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e3)}K`
-  function drawSaved() {
-    const t = state.savings, s = t && t.score
-    $('badge').hidden = !s
-    // the badge's number and one line under it: the sentence and the paragraph said the same
-    // saving twice more (#1322)
-    if (s) {
-      const n = $('badge-n'); n.className = 'badge-n ' + s.color
-      n.textContent = String(s.score); n.append(Object.assign(document.createElement('small'), { textContent: ' / 100' }))
-      $('badge-s').textContent = t!.saved >= 0 ? `~${tokens(t!.saved)} Claude tokens saved this week` : `~${tokens(-t!.saved)} more Claude tokens this week`
-    }
-    // no API line: History's This week says the week's API money, and spend read under "saved"
-    // (counting trials, so 3 tasks against History's 2) misled (#1339's UX review, 2026-11-26)
+  // `wb spend` for the week, from the state (chat.week_spend): what was spent, stated, never a
+  // saving against an estimate (#1618: the score out of 100 and its badge were here). The API
+  // dollars are History's This week's, said once (#1339)
+  const tokens = (n: number) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e3)}K`
+  function drawSpend() {
+    const t = state.spend
     if (!t || !t.tasks) {
-      $('saved').textContent = 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.'
+      $('spend').textContent = 'Nothing spent yet this week.'
       return
     }
+    const claude = t.claude ? `Claude used ${tokens(t.claude)} tokens on the week's tasks.` : ''
     const gpu = t.wh ? `The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''  // no currency sign: the price is the user's, in theirs (#845, as #609)
-    // no badge (nothing written to compare against, only discards): the saving here instead
-    const saved = s ? '' : t.saved >= 0 ? `~${tokens(t.saved)} Claude tokens saved this week.` : `~${tokens(-t.saved)} more Claude tokens this week.`
-    $('saved').textContent = [saved, gpu].filter(Boolean).join(' ')
+    $('spend').textContent = [claude, gpu].filter(Boolean).join(' ') || 'No Claude tokens or GPU energy recorded this week.'
   }
   function drawSettings() {
     drawApp(); drawNotify()
@@ -1931,7 +1922,7 @@
   function reshowView() { const v = mods.get(curView); if (v && v.shown) call(v, 'show') }
   function drawShown() {  // what the old sheet drew while open, for the view that shows it
     if (curView === 'settings') drawSettings()
-    else if (curView === 'stats') drawSaved()
+    else if (curView === 'stats') drawSpend()
   }
   // The Chat tab's badge: Claude's messages (and waiting lines) newer than the moment the
   // thread was left, in the server's clock; held until a live state gives that clock when the

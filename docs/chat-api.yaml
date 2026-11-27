@@ -1072,8 +1072,9 @@ components:
           $ref: "#/components/schemas/Listener"
         push:
           type: object
-        savings:
+        spend:
           type: object
+          description: the week's spend (wb spend, #1618)
         uploads:
           type: object
         build:

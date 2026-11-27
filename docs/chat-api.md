@@ -221,7 +221,7 @@ curl -s "${auth[@]}" "$WORKBENCH_URL/api/wait?after=1795436900301-a1b2c3&timeout
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
   `messages` holds only its own messages and the driver's rows whose `to` names it. No
-  `push`, `savings`, `build`, `tasks`, `runs`, `dictate`, `driver` or `settings`: those are the user's. `/api/send`'s `state` is the same view.
+  `push`, `spend`, `build`, `tasks`, `runs`, `dictate`, `driver` or `settings`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
 - **Files:** `GET /api/upload/<id>` and `/api/file/<id>` answer only for a file it uploaded or one
@@ -304,10 +304,11 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
   the messages into that session, no `parent`; it listens while that server runs and no
   heartbeat of it taken since the claim leaves the session out (one deleted there).
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
-- `savings`: the week's `wb savings` totals and `score`, and `api`: the week's API tasks apart
-  (`tasks`, `cost` in dollars, `unknown`, `plan`, `trials`, `claude`, `self_est`, `by_provider`,
-  `by_day`, `prices`: `catalog` (an estimate, shown `≈`), `yours` or `provider`, the total's and each
-  provider's, and `names`: each provider's name), never part of the score.
+- `spend`: the week's `wb spend` (#1618; `savings` before it, with a score): `tasks`, every task's;
+  `claude`, Claude's weighted tokens on them; `wh` and `cost`, the GPU's energy and its cost at the
+  user's price (null with none); and `api`: the week's API tasks (`tasks`, `cost` in dollars,
+  `unknown`, `plan`, `trials`, `claude`, `by_provider`, `by_day`, `prices`: `catalog` (an estimate,
+  shown `≈`), `yours` or `provider`, the total's and each provider's, and `names`: each provider's name).
 - `uploads`: `{file, message, files}`: bytes per file, bytes per message, files per message.
 - `build`: the page files' stamp (a page whose stamp differs reloads).
 - `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, label, via: "gpu"|"api",
@@ -605,4 +606,6 @@ bumps it; adding a field or an endpoint doesn't (the admin endpoints, `/api/sett
   the same version (workbench 2.1): the `/api/v1/` paths, `code` on every error (`error` kept as
   the text), a revoked token's own code, `410 expired` from `/api/wait`, and `Idempotency-Key`;
   (workbench 2.2) `driver` on `/api/health`, the listener and each reply (*The driver*);
-  `/api/phone-qr.svg` came in 2.2 and went with #1616 (the web app listens on localhost only).
+  `/api/phone-qr.svg` came in 2.2 and went with #1616 (the web app listens on localhost only);
+  (workbench 2.3) the user's state's `savings`, with its score, became `spend` (#1618: what the tasks
+  spent, never a saving); only the user's token ever saw it.

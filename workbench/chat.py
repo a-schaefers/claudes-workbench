@@ -882,7 +882,7 @@ def snapshot() -> dict:
     return {"api": API_VERSION, "messages": rows, "listener": listener_view(lst), "driver": driver_state(lst, rows),
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
-            "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
+            "spend": week_spend(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
             "tasks": open_tasks(), "runs": open_runs(), "dictate": dictate_ready(), "settings": settings_rev(),
             "now": store.now()}
 
@@ -1171,16 +1171,18 @@ def patch(sent: dict, snap: dict) -> dict | None:
     return {**small, **out, "now": snap.get("now")}
 
 
-def week_saved() -> dict:
-    """The gear sheet's Savings: `wb savings` for the last 7 days (savings.totals)."""
+def week_spend() -> dict:
+    """Stats' Spend card: `wb spend` for the last 7 days (#1618: what was spent, never what was
+    saved against an estimate). `claude`, Claude's tokens on every task, GPU and API; `wh` and
+    `cost` the GPU's; `api`, the API tasks, whose dollars History's This week says (#1339)."""
     since = store.now() - savings.PERIODS["week"]
-    t = savings.totals(store.results(), since=since)
-    return {**t, "score": savings.score(t), "api": _week_api(since)}  # the badge (#101)
+    t, a = savings.totals(store.results(), since=since), _week_api(since)
+    return {**t, "claude": t["claude"] + a["claude"], "tasks": t["tasks"] + a["tasks"], "api": a}
 
 
 def _week_api(since: float) -> dict:
-    """The week's API tasks for the gear (#1022): savings.api_totals, each provider's name as
-    OpenCode gives it in `names`; never part of the score."""
+    """The week's API tasks (#1022): savings.api_totals, each provider's name as OpenCode gives
+    it in `names`."""
     a = savings.api_totals(store.results(trials=True), since)
     return {**a, "names": savings.provider_labels(a["by_provider"])}
 

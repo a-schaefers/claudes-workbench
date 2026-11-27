@@ -99,7 +99,7 @@
     }
     // ---- the history: statsLines, label for label; a row may carry a chart's numbers too ----
     // A model line's write trend (`trend`) is drawn, not spelled in block characters; every other
-    // row is its text. The score, the savings estimate, spec-gap discards, the energy and its cost,
+    // row is its text. The score, the savings estimate (gone since #1618), spec-gap discards, the energy and its cost,
     // the streak, the work absorbed, the questions, Claude's tokens a task, the 30 days, the bests and
     // the milestones were here too, as on the pane: precision nobody acted on, gone from the feed (#1322).
     function statsRows(f, why, n, roles = ROLE_LABELS) {

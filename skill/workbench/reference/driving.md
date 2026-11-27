@@ -181,7 +181,7 @@ run it as a backlog. Each task still gets the same review it would by day.
   still sleeps it; on WSL2 without interop nothing can:
   when `wb start` says so, tell the user to set Windows' sleep to Never for the night.
 - When the batch is done, run `wb backlog <name>` and post it with `wb chat reply`: each task's
-  outcome and branch, and the batch's saving. That is the morning summary.
+  outcome and branch, and what the batch spent. That is the morning summary.
 - A batch to run again and again with no session open (weekly maintenance, a nightly backlog):
   offer `wb schedule add <name> --file <backlog.md> --repo <dir> --at "Sun 02:00"` (the user's
   yes first: it writes their own systemd timer or launchd agent, and each run spends Claude's

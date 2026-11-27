@@ -140,7 +140,8 @@ export type OpenRun = {
 export type ApiCost = { tasks: number; unknown: number; plan?: number; cost: number; prices?: string }
 export type ApiWeek = ApiCost & { by_provider?: Record<string, ApiCost>; names?: Record<string, string> }
 /** chat.week_saved */
-export type Savings = { score?: { score: number; color: string } | null; saved: number; tasks?: number; wh?: number; cost?: number | null; api?: ApiWeek | null }
+/** chat.week_spend (#1618): the week's spend, stated; `claude` Claude's weighted tokens on every task */
+export type Spend = { tasks?: number; claude?: number; wh?: number; cost?: number | null; api?: ApiWeek | null }
 export type Limits = { file: number; message: number; files: number }
 /** chat.driver_state (#1355): the driver's state line, in the story's words. `driver` the story's
  * name (claude-code, opencode, any); `waiting` the dialog up in the terminal; `grant` only for a
@@ -153,7 +154,7 @@ export type DriverState = {
 /** chat/settings-rev.json (settings.record, #1355): the newest Settings change */
 export type SettingsRev = { ts: number; key: string; label: string; to?: unknown; by: string }
 export type ChatState = {
-  messages: ChatMsg[]; push: { key?: string; test?: number }; listener: Listener | null; savings?: Savings | null
+  messages: ChatMsg[]; push: { key?: string; test?: number }; listener: Listener | null; spend?: Spend | null
   expire?: number; uploads?: Limits | null; tasks?: OpenTask[]; runs?: OpenRun[]; dictate?: boolean
   driver?: DriverState | null; settings?: SettingsRev | null
   /** chat.API_VERSION */
