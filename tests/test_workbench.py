@@ -2750,6 +2750,15 @@ class Lifecycle(Base):
         self.assertIn("same call", st["last"])
         self.assertIn("STOPPED", run_wb("report", "t-loop"))
 
+    def test_an_agent_flipping_a_line_with_reads_and_test_runs_between_is_stopped_by_a_guard_not_the_wall(self):
+        # #1584 (the bar loop, 2026-11-26): read, edit 41 -> 43, test, read, edit 43 -> 41, test:
+        # each edit reset the explore count and no block repeated in CYCLE, so every round ran to
+        # its 40-minute wall. The runner judges an edit by the tree it leaves
+        self.start("t-flip", "flip", "--round-timeout", "40")
+        st = wait_phase("t-flip", {"stuck"}, timeout=90)
+        self.assertEqual((st["last"], st["nudges"]),
+                         ("40 tool calls without changing a file in the task, even after a nudge", 1))
+
     def test_silence_is_stopped(self):
         self.start("t-hang", "hang", "--silence-timeout", "2")
         st = wait_phase("t-hang", {"stuck"}, timeout=40)
@@ -3706,6 +3715,31 @@ class Lifecycle(Base):
         self.assertIn("accepted t-pyc", out)
         self.assertNotIn("note: git ignores", out)
         self.assertFalse((t.dir / "left-out").exists())
+
+    def test_accept_leaves_out_the_bytecode_of_a_test_run_in_the_worktree(self):
+        # #1580 (2026-11-26): in a repo that ignores no __pycache__, Claude's `python3 -m
+        # unittest` in the worktree before wb accept had the commit take the run's .pyc, which
+        # neither the review diff ("1 file changed") nor the accept line showed
+        (self.repo / "helper.py").write_text("N = 42\n")
+        (self.repo / "test_a.py").write_text(
+            "import unittest\nimport helper\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_n(self):\n        self.assertEqual(helper.N, 42)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "helper"], check=True)
+        self.start("t-run-pyc", "ok", "--test", TEST_CMD)
+        wait_phase("t-run-pyc", {"review"})
+        t = store.Task("t-run-pyc")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+        subprocess.run([sys.executable, "-m", "unittest", "-q"], cwd=t.worktree, env=env,
+                       check=True, capture_output=True)
+        self.assertTrue(list((t.worktree / "__pycache__").glob("*.pyc")))
+        out = run_wb("accept", "t-run-pyc", "-m", "feat: one")
+        self.assertIn("accepted t-run-pyc", out)
+        self.assertIn("note: the commit leaves out a run's caches, which nobody wrote: "
+                      "__pycache__/ (2 files)", out)
+        files = subprocess.run(["git", "-C", str(self.repo), "show", "--name-only", "--format=",
+                                "delegate/t-run-pyc"], check=True, capture_output=True, text=True)
+        self.assertEqual(files.stdout.split(), ["answer.txt"])
 
     def test_wb_next_names_an_ignored_file_its_step_commit_leaves_out(self):
         # #1179's review (2026-11-24): wb next's commit dropped what hand_written's filters took
@@ -8173,9 +8207,10 @@ class Context(Base):
         self.assertTrue(st["tests"]["ok"])
         self.assertNotIn("errors", st.get("guards") or {})
 
-    def assert_set_aside(self, name, st, said):
-        """A self-review stopped on a tree it changed, its tests failing there: the green tree
-        put back and tested, the unfinished files kept as review tree `2s`, a review (#1572)."""
+    def assert_set_aside(self, name, st, said, tests="fail", left="43"):
+        """A self-review ended on a tree other than its green one: the green tree put back and
+        tested, the unfinished files kept as review tree `2s`, a review whose line says how it
+        ended and what its tests said there (#1572, #1582)."""
         t = store.Task(name)
         self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
         self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "42\n")
@@ -8187,13 +8222,15 @@ class Context(Base):
         self.assertEqual(trees["1"]["tree"], trees["2"]["tree"])   # the tree under review
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == name]
         self.assertEqual([r["kind"] for r in rows], ["review"])
-        self.assertIn(f"self-review stopped mid-check ({said}", rows[0]["text"])
+        self.assertIn(f"self-review {said}", rows[0]["text"])
+        self.assertIn(f"; its edits set aside (the tests {tests} on them), the tree its tests passed "
+                      "on put back", rows[0]["text"])
         self.assertIn(f"wb rewind {name} 2s brings them back", rows[0]["text"])
         self.assertIn("tests: PASS", rows[0]["text"])
         from workbench import results
         self.assertFalse(results.step(t, landed=False)["stuck"])  # the router's
         run_wb("rewind", name, "2s")
-        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "43\n")   # the unfinished edit
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), f"{left}\n")   # the unfinished edit
 
     def test_a_self_review_stopped_by_the_repeat_guard_on_a_tree_it_broke_is_set_aside_for_the_green_tree(self):
         # #1572 (bar loop #1030 round 2, M1, 2026-11-26): a 9B's self-review copied a broken
@@ -8202,7 +8239,7 @@ class Context(Base):
         os.environ.update(FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
         self.start("t-srx", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srx", {"review", "stuck", "failed"}, timeout=60)
-        self.assert_set_aside("t-srx", st, "the same call 4 times in a row")
+        self.assert_set_aside("t-srx", st, "stopped mid-check (the same call 4 times in a row")
 
     def test_a_self_review_whose_opencode_exits_on_its_servers_error_on_the_green_tree_goes_to_review(self):
         # #1270 (bar loop round 7, 2026-11-24): a GPU server's 500 in the self-review (Ollama's
@@ -8224,7 +8261,97 @@ class Context(Base):
         os.environ.update(FAKE_SELF_CRASH="1", FAKE_READS="1", FAKE_SELF_KEEP="1")
         self.start("t-srck", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srck", {"review", "stuck", "failed"}, timeout=60)
-        self.assert_set_aside("t-srck", st, "opencode exited 1")
+        self.assert_set_aside("t-srck", st, "stopped mid-check (opencode exited 1")
+
+    def test_a_self_review_stopped_mid_check_whose_tests_still_pass_is_set_aside_for_the_green_tree(self):
+        # #1582 (bar loop #1030 round 3, M3, 2026-11-26): #1572 set aside only a stop whose tests
+        # then failed, so the repeat guard's stop on "43", which the tests also took, went to
+        # review on the unfinished tree under a bare `tests: PASS`, nothing naming the green one
+        os.environ.update(FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
+        self.start("t-srp", "selfreads", "--test", "grep -qE '^4[23]$' answer.txt", "--self-review")
+        st = wait_phase("t-srp", {"review", "stuck", "failed"}, timeout=60)
+        self.assert_set_aside("t-srp", st, "stopped mid-check (the same call 4 times in a row", tests="pass")
+
+    def test_a_self_review_that_finishes_on_its_own_with_its_tests_failing_is_set_aside_with_no_auto_fix(self):
+        # #1582: its own finish on a check left broken (a real 2.4.1 run, 2026-11-26) took an
+        # auto-fix round, a paid one on an API role, and never named the green tree kept for it
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="0", FAKE_SELF_DONE="1")
+        self.start("t-srd", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srd", {"review", "stuck", "failed"}, timeout=60)
+        self.assert_set_aside("t-srd", st, "finished on its own")
+        self.assertFalse(st.get("auto_fixes"))
+        self.assertFalse([e for e in store.read_jsonl(store.Task("t-srd").dir / "events.jsonl")[0]
+                          if e.get("kind") == "autofix"])
+
+    def test_a_self_review_that_finishes_on_its_own_with_its_tests_passing_goes_to_review_on_its_tree(self):
+        # #1582's one exception: a finish of its own, its tests passing, is the change to review
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="0", FAKE_SELF_DONE="1")
+        self.start("t-srf", "selfreads", "--test", "grep -qE '^4[23]$' answer.txt", "--self-review")
+        st = wait_phase("t-srf", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+        self.assertEqual(store.Task("t-srf").worktree.joinpath("answer.txt").read_text(), "43\n")
+        self.assertNotIn("2s", st["review_trees"])
+        self.assertNotIn("set aside", run_wb("takeover", "t-srf"))  # no live round: its finish stands
+        self.assertEqual(store.Task("t-srf").worktree.joinpath("answer.txt").read_text(), "43\n")
+
+    def mid_check(self, name):
+        """A self-review stalled mid-check, "41" on disk (FAKE_SELF_STALL, no nudge)."""
+        os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
+        self.start(name, "selfreads", "--test", TEST_CMD, "--self-review", "--think-timeout", "120",
+                   "--silence-timeout", "120")
+        t = store.Task(name)
+        deadline = time.time() + 30
+        while not (t.status.get("round") == 2 and (t.worktree / "answer.txt").is_file()
+                   and (t.worktree / "answer.txt").read_text() == "41\n"):
+            self.assertLess(time.time(), deadline, "the self-review never began its check")
+            time.sleep(POLL)
+        return t
+
+    def assert_green_back(self, t, out, how):
+        self.assertIn(f"self-review stopped mid-check ({how}); its edits set aside (the tests "
+                      f"weren't run on them), the tree its tests passed on put back: wb rewind "
+                      f"{t.name} 2s brings them back", out)
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "42\n")
+        self.assertEqual(t.status["review_trees"]["2s"]["reviewed"], False)
+        self.assertEqual((t.status["tests"]["ok"], t.status["tests"]["round"]), (True, 1))  # the green round's
+        run_wb("rewind", t.name, "2s")
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "41\n")
+
+    def test_a_takeover_mid_self_review_check_puts_the_green_tree_back(self):
+        # #1582: wb takeover mid-check left "41" under tests:ok, and wb accept committed it
+        t = self.mid_check("t-sto")
+        out = run_wb("takeover", "t-sto")
+        self.assertTrue(out.startswith("took over t-sto"), out)
+        self.assertEqual(t.status["phase"], "review")
+        self.assert_green_back(t, out, "wb takeover")
+
+    def test_a_wb_stop_mid_self_review_check_puts_the_green_tree_back_and_names_the_rewind(self):
+        # #1582: wb stop the same, stuck, with no rewind line
+        t = self.mid_check("t-sst")
+        out = run_wb("stop", "t-sst")
+        self.assertEqual(t.status["phase"], "stuck")
+        self.assert_green_back(t, out, "wb stop")
+
+    def test_a_takeover_of_a_self_review_an_update_stopped_mid_check_puts_the_green_tree_back(self):
+        # #1582 (2026-11-26): _stop_aside set aside only a live runner's round, so wb update
+        # --stop mid-check left a dead runner, stuck, and the takeover (or the hand-back) left
+        # "41" under the green round's tests:ok, which wb accept committed
+        t = self.mid_check("t-rupd")
+        cli._stop_for_update([t])
+        self.assertEqual((t.status["phase"], t.status["last"]), ("stuck", cli.UPDATE_STOP))
+        out = run_wb("takeover", "t-rupd")
+        self.assertEqual(t.status["phase"], "review")
+        self.assert_green_back(t, out, "wb takeover")
+
+    def test_a_takeover_of_a_self_review_whose_runner_a_signal_stopped_mid_check_puts_the_green_tree_back(self):
+        # #1582: a logout's SIGTERM, no `stopping` set: stuck on SIGNAL_STOP, the runner gone,
+        # and the takeover left "41" the same
+        t = self.mid_check("t-rsig")
+        os.kill(t.status["pid"], signal.SIGTERM)
+        st = wait_phase("t-rsig", {"stuck", "failed"}, timeout=30)
+        self.assertEqual(st["last"], runner.SIGNAL_STOP)
+        out = run_wb("takeover", "t-rsig")
+        self.assert_green_back(t, out, "wb takeover")
 
     def quiet_self_review(self, name, *flags, **env):
         """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
@@ -8282,7 +8409,7 @@ class Context(Base):
         # and is set aside since its tests fail there (#1572)
         st, rows = self.quiet_self_review("t-sqk", "--silence-timeout", "4", "--think-timeout", "120",
                                           FAKE_SELF_KEEP="1")
-        self.assert_set_aside("t-sqk", st, "no output for 0 minutes")
+        self.assert_set_aside("t-sqk", st, "stopped mid-check (no output for 0 minutes")
 
     def test_every_guards_stop_settles_on_a_self_reviews_green_tree_and_only_there(self):
         # #1261: one mechanism for any guard (the provider's, the spend cap's, drive's handover
@@ -8302,12 +8429,12 @@ class Context(Base):
         self.assertEqual(out["settled"], "no tool call or word for 7 minutes")
         self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green))  # nothing stopped
         t.set_status(self_review_tree="another tree")
-        # another tree: a nudge stays the guard's; a stop settles to the tests, mid-check (#1572)
+        # another tree: a nudge stays the guard's; a stop settles to the tests, then the green
+        # tree goes back (drive's set_aside, #1572, #1582)
         self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green, "a nudge", stopped=False))
         out = {"stuck": "silence's stop", "guard": "silence"}
         self.assertTrue(runner.settle(t, 2, out, green))
-        self.assertEqual(out, {"stuck": None, "guard": None, "settled": "silence's stop",
-                               "mid_check": "another tree"})
+        self.assertEqual(out, {"stuck": None, "guard": None, "settled": "silence's stop"})
         out = {"stuck": "silence's stop", "guard": "silence"}
         t.set_status(round_for="feedback", self_review_tree=green)
         self.assertFalse(runner.settle(t, 2, out, green))
@@ -14767,6 +14894,56 @@ class Lane(Base):
             shutil.rmtree(home / ".nimble")
             self.assertEqual(runner.lane_grant(f"{home}/.nimble/pkgs2/x-1.0/x.nim"),
                              f"{home}/.nimble/pkgs2")        # never its bin/
+
+    @home_outside_the_lane
+    def test_a_pnpm_projects_agent_is_given_the_users_store_in_the_lane_unless_they_set_one(self):
+        # #1583 (bar round 3 of 2.2, 2026-11-26): pnpm couldn't link in its data dir, so it put
+        # its store in <worktree>/.pnpm-store, and a setup's `pnpm install --frozen-lockfile`
+        # failed as unclean before round 1; on macOS ~/Library/pnpm/store wasn't in the lane.
+        # Its review: pnpm 11 and 12 read only `pnpm_config_store_dir`, 9 and 10 only `npm_`
+        self.start("t-1583", "ok")
+        wait_phase("t-1583", {"review"})
+        task = store.Task("t-1583")
+        home = self.fake_home()
+        for name in ("npm_config_store_dir", "pnpm_config_store_dir"):
+            self.assertNotIn(name, runner.agent_env(task))             # not pnpm's: npm warns
+        (task.worktree / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+
+        def given():
+            env = runner.agent_env(task)
+            return env.get("npm_config_store_dir"), context.writable(task)
+        for env, where in (({}, ".local/share/pnpm/store"), ({"XDG_DATA_HOME": str(home / "data")},
+                                                              "data/pnpm/store"),
+                           ({"PNPM_HOME": str(home / "pnpmhome"), "XDG_DATA_HOME": str(home / "data")},
+                            "pnpmhome/store")):
+            with mock.patch.dict(os.environ, env):
+                named, w = given()
+            self.assertEqual(named, str(home / where), env)            # made first, then named
+            with mock.patch.dict(os.environ, env):                      # pnpm 11's name too
+                self.assertEqual(runner.agent_env(task)["pnpm_config_store_dir"], named, env)
+            self.assertIn(str(home / where), w, env)
+        self.assertNotIn(str(home / "pnpmhome"), w)                    # its global bin stays out
+        with mock.patch.object(sys, "platform", "darwin"):
+            self.assertEqual(context.pnpm_store(task), home / "Library/pnpm/store")
+        (home / "Library/pnpm/store").mkdir(parents=True)
+        self.assertIn(str(home / "Library/pnpm/store"), context.writable(task))
+        # a store-dir the user set stands: their environment, their .npmrc, the repo's
+        with mock.patch.dict(os.environ, {"npm_config_store_dir": "/srv/pnpm-store"}):
+            self.assertEqual(given()[0], "/srv/pnpm-store")
+        for rc in (home / ".npmrc", task.worktree / ".npmrc"):
+            rc.write_text("registry=https://r.example/\nstore-dir = /srv/store\n")
+            self.assertIsNone(given()[0], rc)
+            rc.unlink()
+        # pnpm 11's global config.yaml, where its `pnpm config set store-dir` writes
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(home / "cfg")}):
+            (home / "cfg/pnpm").mkdir(parents=True)
+            (home / "cfg/pnpm/config.yaml").write_text("storeDir: /srv/store\n")
+            self.assertIsNone(given()[0])
+        with mock.patch.dict(os.environ, {"pnpm_config_store_dir": "/srv/pnpm-store"}):
+            env = runner.agent_env(task)
+            self.assertEqual(env["pnpm_config_store_dir"], "/srv/pnpm-store")
+            self.assertNotIn("npm_config_store_dir", env)
+        self.assertEqual(given()[0], str(home / ".local/share/pnpm/store"))
 
     @home_outside_the_lane
     def test_the_homes_of_the_tools_the_wider_allowlist_added_are_in_the_lane_not_their_settings(self):
@@ -35744,6 +35921,56 @@ class Detector(unittest.TestCase):
         d.feed(tool({"filePath": "/w/b.txt", "content": "41\n"}))
         self.assertEqual(d.since_edit, 0)                        # another file
 
+    def test_an_edit_flipped_back_and_forth_with_reads_and_test_runs_between_is_no_edit_by_its_tree(self):
+        # #1584 (the bar loop, 2026-11-26): read, A->B, test, read, B->A, test: a block of 6 no
+        # CYCLE saw, every edit a real change by its text, so 1200 calls and no stop. The runner
+        # gives each ok edit its tree (gitops.mark): a tree seen this round is no change
+        tool = lambda name, inp: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": name, "state": {"status": "completed", "input": inp}}}, 1)
+        read, run = tool("read", {"filePath": "/w/a.py"}), tool("bash", {"command": "python3 -m unittest"})
+        flip = lambda a, b: {**tool("edit", {"filePath": "/w/a.py", "oldString": a, "newString": b}),  # noqa: E731
+                             "mark": f"tree-{b}"}
+        for block in ([read, flip("x", "y"), run, read, flip("y", "x"), run],
+                      [flip("x", "y"), run, flip("y", "x"), run, read]):
+            d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-x")
+            whys = [d.feed(row) for row in block * 40]
+            stop = next(i for i, why in enumerate(whys) if why)
+            self.assertLess(stop, 100, block)
+            self.assertEqual((d.guard, whys[stop]), ("no_edit", "40 tool calls without changing a file in the task"))
+        # an edit to a tree not seen yet is still a change, a tree undone to the start's is none
+        d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-x")
+        d.feed(flip("x", "y"))
+        self.assertEqual(d.since_edit, 0)
+        d.feed(flip("y", "x"))
+        self.assertEqual(d.since_edit, 1)
+        d.feed(flip("x", "z"))
+        self.assertEqual(d.since_edit, 0)
+
+    def test_an_agent_writing_a_file_git_ignores_with_reads_and_test_runs_between_is_never_stopped(self):
+        # #1584's review (2026-11-26): a repo ignoring lib/ (GitHub's Python template; #1179,
+        # #1259), its agent writing lib/util.py a function more each time: gitops.mark leaves
+        # ignored files out, so every edit left the start's tree, already seen, and the round
+        # was stopped at 40 calls as stuck. An edit leaving the last edit's tree is judged by text
+        tool = lambda name, inp: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": name, "state": {"status": "completed", "input": inp}}}, 1)
+        d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-start")
+        whys = []
+        for i in range(60):
+            text = "".join(f"def f{j}(): return {j}\n" for j in range(i + 1))
+            whys += [d.feed(tool("read", {"filePath": "/w/lib/util.py"})),
+                     d.feed({**tool("write", {"filePath": "/w/lib/util.py", "content": text}),
+                             "mark": "tree-start"}),
+                     d.feed(tool("bash", {"command": f"python3 -m pytest -k f{i}"}))]
+            self.assertEqual(d.since_edit, 1)
+        self.assertEqual([w for w in whys if w], [])
+        # the same text again is still no change, and a tracked edit back to a seen tree none
+        d.feed({**tool("write", {"filePath": "/w/lib/util.py", "content": text}), "mark": "tree-start"})
+        self.assertEqual(d.since_edit, 2)
+        d.feed({**tool("edit", {"filePath": "/w/a.py", "oldString": "x", "newString": "y"}), "mark": "tree-y"})
+        self.assertEqual(d.since_edit, 0)
+        d.feed({**tool("edit", {"filePath": "/w/a.py", "oldString": "y", "newString": "x"}), "mark": "tree-start"})
+        self.assertEqual(d.since_edit, 1)
+
     def test_a_suspend_is_neither_silence_nor_the_rounds_time(self):
         # On the wall clock a laptop shut for 20 minutes woke to a round stopped for silence
         # (the 2026-11-16 audit). The monotonic clock skips a suspend; a frozen pass is cut out.
@@ -44488,6 +44715,50 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertTrue(cli.routes.agents_gpu())
         with mock.patch.object(runner.meter, "for_task", lambda *a, **k: None):
             self.assertTrue(runner._go_on(task, 1, "auto-fix"))
+
+    def test_with_agents_on_gpu_only_the_first_api_task_stops_and_tells_and_the_rest_wait_queued_until_both(self):
+        # #1585 (the bar loop, 2026-11-26): each API task of a fan-out or backlog stopped with its
+        # own stuck notice, the same "Agents back to Both or API" ask, one wake and one wb resume
+        # a task. The first stop tells; the rest wait as queued behind it and go on at Both
+        for name in ("fan-1", "fan-2", "fan-3"):
+            self.start_api(name, "ok", "--no-base-check", spawn=False)
+        routes_json = Path(os.environ["WB_ROUTES"])
+        doc = store.read_json(routes_json)
+        store.write_json(routes_json, {**doc, "use": "gpu"})
+        agents = lambda: [r["task"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]  # noqa: E731
+                          if r.get("guard") == "agents"]
+        self.drive_here("fan-1")
+        self.assertEqual((store.Task("fan-1").status["phase"], agents()), ("stuck", ["fan-1"]))
+        two, three = store.Task("fan-2"), store.Task("fan-3")
+        driver = threading.Thread(target=self.drive_here, args=("fan-2",), daemon=True)  # before round 1
+        lease, went = mock.MagicMock(), []
+        between = threading.Thread(target=lambda: went.append(runner._go_on(three, 1, "auto-fix", lease)),
+                                   daemon=True)                                       # before its next round
+        for t in (driver, between):
+            t.start()
+            self.addCleanup(t.join, 60)
+        deadline = time.time() + 30
+        while not all(t.status.get("phase") == "queued" and str(t.status.get("last") or "").startswith(
+                "waiting: Agents is GPU, so nothing spends; fan-1's stop has asked the user") for t in (two, three)):
+            self.assertLess(time.time(), deadline, (two.status, three.status))
+            self.assertTrue(driver.is_alive() and between.is_alive(), (two.status, three.status))
+            time.sleep(POLL)
+        self.assertEqual(agents(), ["fan-1"])                     # no stop of their own
+        lease.__exit__.assert_called_once()                       # its provider slot let go
+        store.write_json(routes_json, {**doc, "use": "both"})     # the user's answer to fan-1's ask
+        driver.join(60)
+        between.join(60)
+        self.assertFalse(driver.is_alive() or between.is_alive())
+        self.assertEqual(two.status["phase"], "review", two.status)  # with no wb resume
+        self.assertEqual(went, [True])
+        lease.__enter__.assert_called_once()                      # and taken again
+        self.assertEqual(agents(), ["fan-1"])
+        self.assertEqual([r["task"] for r in store.notices() if r["kind"] == "stuck"], ["fan-1"])
+        # a stop told before the last switch holds no new task untold; a resumed one holds none
+        store.write_json(routes_json, {**doc, "use": "gpu"})
+        self.assertEqual((runner._agents_told(two), runner._agents_told(two, "fan-1")), ("", "fan-1"))
+        store.Task("fan-1").set_status(phase="running")
+        self.assertEqual(runner._agents_told(two, "fan-1"), "")
 
 
 # Catalog rows for thinking per task (#1018), shaped as OpenCode 2.3.2's `api model.list` prints

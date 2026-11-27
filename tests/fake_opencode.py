@@ -16,6 +16,9 @@
          (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
   loop   run the same failing command over and over (the stuck detector should stop it)
+  flip   reads answer.txt, edits it 41 -> 43, runs the test, reads, edits it 43 -> 41, runs the
+         test, 200 times, then an hour's wait: a line flipped back and forth, each edit a real
+         change and no block CYCLE sees (#1584)
   hang   print one event, then go silent (the silence timeout should stop it)
   crash  exit 1 with no events; with FAKE_DOWN (a file) it takes the model server down with it
          (creates the file) the first time, and behaves like ok after
@@ -61,7 +64,8 @@
          or restores it, by turns, and fills 76% of a 32K window: the sixth, past HANDOVER_MAX,
          on the green tree (#1261). FAKE_SELF_CRASH: after its reads the self-review's run
          ends on its server's error (a provider.http 500, as Ollama's runner killed out of
-         memory), exit 1, the server still up (#1270)
+         memory), exit 1, the server still up (#1270). FAKE_SELF_DONE: after its reads it ends
+         its turn there, exit 0, on the tree it left (#1582)
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -1016,6 +1020,17 @@ elif scenario == "loop":
         tool("bash", {"command": "make test"}, status="error", error="make: *** No rule")
         time.sleep(0.05)
     finish()
+elif scenario == "flip":
+    path = os.path.abspath("answer.txt")
+    for i in range(400):
+        a, b = ("41", "43") if i % 2 == 0 else ("43", "41")
+        tool("read", {"filePath": path})
+        with open(path, "w") as fh:
+            fh.write(b + "\n")
+        tool("edit", {"filePath": path, "oldString": a, "newString": b})
+        tool("bash", {"command": "grep -qx 42 answer.txt"})
+        time.sleep(0.02)
+    time.sleep(3600)
 elif scenario == "hang":
     time.sleep(3600)
 elif scenario == "spend":  # an API task spending: a priced step every FAKE_STEP_EVERY s, then quiet
@@ -1174,7 +1189,11 @@ elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copie
         emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
     if os.environ.get("FAKE_SELF_CRASH"):  # #1270: the server answers 500 and OpenCode exits 1
         fail("provider.http", "model runner has unexpectedly stopped", 500)
-    time.sleep(3600)
+    if os.environ.get("FAKE_SELF_DONE"):  # #1582: its own finish, whatever tree it left
+        emit("text", text="Self-review done.")
+        finish()
+    else:
+        time.sleep(3600)
 elif scenario == "probing":  # #857: probe in a compound line, a long file read whole and in part
     with open("long.py", "w") as fh:
         fh.write("x = 1\n" * 400)

@@ -2593,7 +2593,9 @@ def cmd_next(a):
                     commit = gitops.commit_all(
                         task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} (step {step})"
                         f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a), wrote,
-                        left)
+                        left, dropped := [])
+                    if dropped:  # a test run's __pycache__, said (#1580)
+                        print(gitops.run_caches_line(dropped))
                 if left:  # still in the worktree, for a later commit (#1179's review)
                     print(gitops.left_out_line(left, task.worktree))
         except gitops.GitError as e:
@@ -2675,7 +2677,10 @@ def _to_commit(task: store.Task, wrote=()) -> bool:
     gitlink hides them). Without those, once a wb next had committed a step, a step whose only
     change was in a submodule "had no changes", and wb accept exited 0 and removed the worktree,
     edit and all: #419's refusal only fired with something else to commit (#1307, 2026-11-24)."""
-    return bool(gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote)
+    # a run's caches alone aren't: commit_all leaves them out (#1580), so a step whose only
+    # change was a test run's __pycache__ died on "nothing to commit"
+    caches = gitops.run_caches(task.worktree, wrote) if task.worktree.is_dir() else []
+    return bool(gitops.changed(task.worktree, caches) or gitops.ignored_files(task.worktree, wrote)
                 or gitops.submodule_edits(task.worktree))
 
 
@@ -3346,6 +3351,26 @@ def _stop_runner(task):
 LIVE = ("queued", "running", "testing", "asking")
 
 
+def _stop_aside(task, how: str) -> str:
+    """_stop_runner, and for a runner stopped mid self-review off its green tree runner.set_aside's
+    one rule: its files kept as review tree `<n>s`, the green tree put back (status `tests`
+    stays the green round's: the tests aren't rerun, Claude's Bash stops at 2 minutes) and the
+    line naming `wb rewind <task> <n>s`, else "". wb stop, wb stop --all and wb takeover left the
+    unfinished tree, a check maybe still commented out, under a tests:ok that wb accept committed
+    without a word (#1582, bar loop #1030 round 3, 2026-11-26). Any round but one the runner
+    ended in review: only the runner sets review, after its own finish (its tests passing) or its
+    own set_aside, so a stuck or failed self-review is an outside stop. Gated on liveness, a
+    runner already dead (wb update --stop, a logout's SIGTERM: stuck, the runner gone) left the
+    unfinished tree to wb takeover and the hand-back under tests:ok, which wb accept committed
+    (#1582, 2026-11-26)."""
+    live = task.status.get("phase") != "review" or runner_alive(task)
+    _stop_runner(task)
+    if not live or not task.worktree.is_dir():
+        return ""
+    return runner.set_aside(task, int(task.status.get("round") or 1), None,
+                            f"stopped mid-check ({how})", None) or ""
+
+
 def _open_tasks():
     return [t for t in store.all_tasks()
             if t.status.get("phase") not in store.CLOSED
@@ -3366,14 +3391,14 @@ def stop_everything(tasks=None, ts=None) -> list[str]:
             if t.status.get("phase") in store.CLOSED or (t.status.get("pid") and store.elsewhere(
                     t.status) and runner_alive(t)):
                 continue  # another machine's live runner (#849): that machine's wb stops it
-            _stop_runner(t)
+            aside = _stop_aside(t, "wb stop --all")
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": "bail out: stopped by the user"})
             # `infra`: the user's quit (/workbench-quit), not the step's: as wb update --stop (#1260)
             t.set_status(phase="stuck", last=BAIL_OUT, pid=None, infra=BAILED,
                          parked=ts or store.now())  # out of the status line and new sessions (#541)
             _ack_all(t)
-            stopped.append(f"{t.name} (worktree kept: {t.worktree})")
+            stopped.append(f"{t.name} (worktree kept: {t.worktree}" + (f"; {aside}" if aside else "") + ")")
     return stopped
 
 
@@ -3429,11 +3454,12 @@ def cmd_stop(a):
     task = need(a.name)
     if task.status.get("phase") not in LIVE and not runner_alive(task):
         die(f"{a.name} is {task.status.get('phase')}, not running")
-    _stop_runner(task)
+    aside = _stop_aside(task, "wb stop")
     task.set_status(phase="stuck", last="stopped by the reviewer", pid=None)
     _ack_all(task)  # else the mod's safety net wakes Claude about the stop it just made
     print(f"stopped {a.name}; wb resume continues it in a fresh session, wb feedback with "
           "corrections, wb discard drops it")
+    _say(aside)
 
 
 ALL_SESSIONS = ("every Claude Code session's tasks (from Claude Code's Bash, the default is the "
@@ -4950,7 +4976,7 @@ def cmd_takeover(a):
                       f"or wb discard {t.name}")
                 continue
             try:
-                task = _take_over(t.name, a.user)
+                task, aside = _take_over(t.name, a.user)
             except SystemExit as e:
                 refused = max(refused, e.code if isinstance(e.code, int) else 1)
                 continue
@@ -4962,6 +4988,7 @@ def cmd_takeover(a):
                 attempts.setdefault((run.name, me.get("stage"), key.rsplit("#a", 1)[0]), []).append(task.name)
             else:
                 print(_took_over_line(task))
+            _say(aside)  # after its line: "took over" opens the line the mod and plugin key on
         for (run_name, stage, item), names in attempts.items():
             print(_attempts_line(run_name, stage, item, names))
         if held:
@@ -4975,11 +5002,14 @@ def cmd_takeover(a):
         die("--repo and --session go with --all")
     if not a.name:
         die("name a task, or --all")
-    print(_took_over_line(_take_over(a.name, getattr(a, "user", False))))
+    task, aside = _take_over(a.name, getattr(a, "user", False))
+    print(_took_over_line(task))
+    _say(aside)
 
 
-def _take_over(name: str, user: bool) -> store.Task:
-    """One task stopped and made Claude's (wb takeover <name>, and each of --all's)."""
+def _take_over(name: str, user: bool) -> tuple[store.Task, str]:
+    """One task stopped and made Claude's (wb takeover <name>, and each of --all's), and
+    _stop_aside's line ("" for none)."""
     task = need(name)
     if task.status.get("phase") in store.CLOSED:
         die(f"{name} is {task.status.get('phase')}")
@@ -4992,13 +5022,13 @@ def _take_over(name: str, user: bool) -> store.Task:
     if user and coding_mode() != "decide":  # the user's hand-back: Claude finishes it (the mod's
         _allow(task, "the whole task: the user handed it to Claude",  # gate reads this)
                "/workbench-quit-and-hand-back-claude")
-    _stop_runner(task)
+    aside = _stop_aside(task, "the user's hand-back" if user else "wb takeover")  # #1582
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
                 "text": "Claude took over"})
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
                     parked=None)  # Claude's now (#698)
     _ack_all(task)
-    return task
+    return task, aside
 
 
 def _took_over_line(task: store.Task) -> str:
@@ -5128,7 +5158,7 @@ def cmd_accept(a):
     # (#246, the audit of 1.2)
     close = st.get("closing")
     if (not close and was_live and st.get("steps", 1) == 1 and task.worktree.is_dir()
-            and not gitops.changed(task.worktree)):
+            and not gitops.changed(task.worktree, gitops.run_caches(task.worktree))):  # #1580
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
     checked = None if close else verify.note(task)  # before the commit: what Claude accepts it on (#97)
@@ -5161,7 +5191,9 @@ def cmd_accept(a):
                     left = _left_out(task, wrote, a.include)
                     if head == spec["base"] or _to_commit(task, wrote):
                         commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a),
-                                                   wrote, left)
+                                                   wrote, left, dropped := [])
+                        if dropped:  # a test run's __pycache__, said (#1580)
+                            print(gitops.run_caches_line(dropped))
                     else:  # nothing new: the branch's commits past the base are the work (the
                         # steps wb next committed, or Claude's own after a takeover: the audit)
                         commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
@@ -5337,7 +5369,10 @@ def _gained_work(task: store.Task, repo: Path, commit: str) -> bool:
     if not task.worktree.is_dir():
         return False
     try:
-        left = [ln for ln in gitops.changed(task.worktree).splitlines() if ln[:2].strip() != "D"]
+        # not the run caches the commit left out (#1580): a retry refused every accept of a
+        # task whose tests ran in the worktree
+        left = [ln for ln in gitops.changed(task.worktree, gitops.run_caches(task.worktree)).splitlines()
+                if ln[:2].strip() != "D"]
         head = gitops.git(task.worktree, "rev-parse", "HEAD", check=False).strip()
     except gitops.GitError:  # its .git removed (or not what it said): being removed
         return False

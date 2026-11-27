@@ -1710,6 +1710,48 @@ class RunsApi(Base):
         (told,) = self.notices("bud")
         self.assertTrue(told["text"].startswith("[workbench] Run `bud` is paused: paused at the run's budget"))
 
+    def test_a_review_at_the_runs_budget_holds_its_refix_until_amend_and_resume(self):
+        # #1586 (bar loop #1030, 2026-11-26): _take sent the refix, a new paid coding round, with no
+        # budget check, past --budget-usd and while the run said it was paused at it
+        seq = Path(self.tmp.name) / "seq.json"
+        seq.write_text(json.dumps([
+            {"verdict": "changes", "must_fix": ["name the answer file in the README"], "nits": [], "summary": "close"},
+            {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_SEQ=str(seq))
+        with mock.patch.object(runs, "spawn", return_value=0):
+            code, _, err = wb("run", "start", "bgr", "--flow", "build", "--param", "request=Write answer.txt.",
+                              "--repo", str(self.repo), "--budget-usd", "1")
+        self.assertEqual(code, 0, err)
+        run = runs.Run("bgr")
+        runs.tick(run)
+        self.wait_item("bgr-code-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        runs.tick(run)
+        self.wait_item("bgr-review-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.spent(1.0, "bgr-code-1")                                    # the run's budget, all spent
+        runs.tick(run)
+        coder = store.Task("bgr-code-1")
+        self.assertEqual(coder.status["round"], 1)
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "refix"])
+        self.assertEqual(run.status["phase"], "paused")
+        self.assertIn("the run's budget: $", run.status["why"])
+        (told,) = self.notices("bgr")
+        self.assertIn("wb run amend bgr --budget-usd N, then wb run resume bgr", told["text"])
+        runs.tick(run)                                                   # paused: still held, said once
+        self.assertEqual((coder.status["round"], len(self.notices("bgr"))), (1, 1))
+        self.assertEqual(wb("run", "amend", "bgr", "--budget-usd", "5")[0], 0)
+        runs.tick(run)                                                   # room now, but paused: no refix
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "refix"])
+        with mock.patch.object(runs, "spawn", return_value=0):
+            self.assertEqual(wb("run", "resume", "bgr")[0], 0)
+        runs.tick(run)
+        self.assertEqual([r["src"] for r in run.journal() if r.get("kind") == "refix"], ["1"])
+        self.assertIn("refix 1 sent to bgr-code-1",
+                      [r.get("why") for r in run.journal() if r.get("kind") == "output"])
+        self.wait_item("bgr-code-1", lambda st: (st.get("round") or 0) >= 2)
+        self.wait_item("bgr-code-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
+        run_wb("discard", "bgr-code-1")
+
     def test_the_day_cap_pauses_the_run_and_an_overnight_run_tries_again_with_no_wake(self):
         self.spent(5.03)                                                 # today at the $5 cap
         run, out = self.start("capr", "--budget-usd", "1")
@@ -1973,6 +2015,56 @@ class RunsApi(Base):
         self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
         self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
         self.assertEqual(runs.report_of("ovn")["null"], [])
+
+    OVERNIGHT_CODE = {"v": 1, "name": "ovc", "params": {"areas": "list"}, "stages": [
+        {"id": "code", "card": "build", "escalate": ["significant"], "items": "{params.areas}",
+         "prompt": "Write {item} to answer.txt."},
+        {"id": "claude", "final": True, "from": "code"}]}
+
+    def test_a_code_item_the_day_cap_stopped_mid_round_overnight_waits_for_midnight_with_no_null_nor_escalation(self):
+        # #1581 (bar loop #1030, 2026-11-26): _held held it for midnight, but _live read the stuck
+        # code task as null, so the same pass ended the run (run_done, 1 null) and an escalate
+        # role's attempt would start beside it; wb run resume refuses a run at review
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run, _ = self.start("ovc", "--budget-usd", "1", "--overnight", flow=self.OVERNIGHT_CODE)
+        why = f"significant role: API spend today is $5.03 of the $5.00 day cap ({meter.RESETS})"
+        task = self.stopped_mid_round(run, "ovc-code-1", phase="stuck", last=why, infra=runner.SPEND,
+                                      guard=runner.SPEND)
+        self.spent(5.03)                                                 # today at the cap
+        for _ in range(2):
+            self.assertTrue(runs.tick(run))
+        self.assertEqual(run.status["phase"], "running")
+        self.assertEqual(self.notices("ovc"), [])
+        self.assertEqual([r["kind"] for r in run.journal() if r.get("task") == task.name], ["item", "held"])
+        self.assertEqual([(i.key, i.state) for i in runs.state(run)["code"]], [("1", "running")])  # no 1#e1
+        self.assertFalse([r for r in run.journal() if r.get("kind") in ("null", "escalated")])
+        self.roles(SPEND_FLASH, 50)                                      # past midnight: room again
+        runs.tick(run)
+        self.assertEqual([r["by"] for r in run.journal() if r.get("kind") == "resumed"], ["driver"])
+        self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
+        self.assertEqual(runs.report_of("ovc")["null"], [])
+        run_wb("discard", task.name)
+
+    def test_a_held_code_item_whose_drivers_resume_fails_otherwise_is_still_its_null_and_claudes_checkpoint(self):
+        # #1581's gate: held while _outside says so, an item whose resume wb refused (exit 1) ran
+        # on unseen, the run never ended and each pass resumed it again
+        run, _ = self.start("ovf", "--budget-usd", "1", "--overnight", flow={**self.OVERNIGHT_CODE, "stages": [
+            {k: v for k, v in self.OVERNIGHT_CODE["stages"][0].items() if k != "escalate"},
+            self.OVERNIGHT_CODE["stages"][1]]})
+        task = self.stopped_mid_round(run, "ovf-code-1", phase="stuck", last="rate_limited: 429",
+                                      infra="provider", guard="rate_limited")
+        refused = subprocess.CompletedProcess([], 1, "", "wb: resume: no")
+        real = runs._wb
+        with mock.patch.object(runs, "_wb", side_effect=lambda argv, *a, **k:
+                               refused if argv[0] == "resume" else real(argv, *a, **k)):
+            runs.tick(run)
+        self.assertEqual([(r["by"], r["ok"]) for r in run.journal() if r.get("kind") == "resumed"],
+                         [("driver", False)])
+        self.assertEqual([(i.state, i.why) for i in runs.state(run)["code"]], [("null", "rate_limited: 429")])
+        self.assertEqual(run.status["phase"], "checkpoint")
+        self.assertEqual([r["kind"] for r in self.notices("ovf")], ["run_checkpoint"])
+        run_wb("discard", task.name)
 
     def test_without_overnight_the_cap_pauses_the_run_and_wb_run_resume_takes_the_item_up(self):
         os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_BY=json.dumps(
