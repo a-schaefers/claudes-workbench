@@ -575,11 +575,16 @@
     narrow.addEventListener('change', drawTasks);
     const strip = $('tasks'), tsheet = $('task-sheet'), tsBody = $('ts-body');
     let tsTask = null, tsPart = 'summary', tsDiff = null, tsSeen = '', tsAsked = 0; // tsDiff: null (the stat) or {path}
+    // At 1100 px and wider the sheet docks beside the chat as a column (#1554, 2026-11-26: over the
+    // chat it covered the thread, the screen empty on both sides): `body.ts-open` pads the chat for
+    // it, and a tap in the chat leaves it open, as the thread and the sheet are both in view
+    const docked = matchMedia('(min-width: 1100px)');
     function showTaskSheet(on) {
         if (on === !tsheet.hidden)
             return;
         tsheet.hidden = !on;
         strip.setAttribute('aria-expanded', String(on));
+        document.body.classList.toggle('ts-open', !!on);
         if (on) {
             tsTask = null;
             drawTaskSheet();
@@ -601,7 +606,7 @@
         if (inside)
             strip.focus();
     });
-    document.addEventListener('pointerdown', e => { if (!tsheet.hidden && !tsheet.contains(e.target) && !strip.contains(e.target))
+    document.addEventListener('pointerdown', e => { if (!tsheet.hidden && !docked.matches && !tsheet.contains(e.target) && !strip.contains(e.target))
         showTaskSheet(false); });
     const mk = (tag, cls, text) => { const x = document.createElement(tag); if (cls)
         x.className = cls; if (text != null)

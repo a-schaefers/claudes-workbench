@@ -458,9 +458,14 @@
   narrow.addEventListener('change', drawTasks)
   const strip = $('tasks'), tsheet = $('task-sheet'), tsBody = $('ts-body')
   let tsTask: string | null = null, tsPart = 'summary', tsDiff: { path: string } | null = null, tsSeen = '', tsAsked = 0  // tsDiff: null (the stat) or {path}
+  // At 1100 px and wider the sheet docks beside the chat as a column (#1554, 2026-11-26: over the
+  // chat it covered the thread, the screen empty on both sides): `body.ts-open` pads the chat for
+  // it, and a tap in the chat leaves it open, as the thread and the sheet are both in view
+  const docked = matchMedia('(min-width: 1100px)')
   function showTaskSheet(on: boolean | string) {  // string: `hidden`'s 'until-found', never set here
     if (on === !tsheet.hidden) return
     tsheet.hidden = !on; strip.setAttribute('aria-expanded', String(on))
+    document.body.classList.toggle('ts-open', !!on)
     if (on) { tsTask = null; drawTaskSheet() }
   }
   strip.onclick = () => showTaskSheet(tsheet.hidden)
@@ -474,7 +479,7 @@
     showTaskSheet(false)
     if (inside) strip.focus()
   })
-  document.addEventListener('pointerdown', e => { if (!tsheet.hidden && !tsheet.contains(e.target as Node) && !strip.contains(e.target as Node)) showTaskSheet(false) })
+  document.addEventListener('pointerdown', e => { if (!tsheet.hidden && !docked.matches && !tsheet.contains(e.target as Node) && !strip.contains(e.target as Node)) showTaskSheet(false) })
   const mk = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string | null, text?: string | null) => { const x = document.createElement(tag); if (cls) x.className = cls; if (text != null) x.textContent = text; return x }
   const btn = (cls: string | null, text: string | null, fn: () => void) => { const b = mk('button', cls, text); b.type = 'button'; b.onclick = fn; return b }
   const agoSecs = (s: number) => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d`

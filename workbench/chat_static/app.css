@@ -183,6 +183,16 @@ body.kb-open #tabbar, body.kb-open .purpose { display: none; }
   background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: 0 10px 24px rgb(0 0 0 / .12);
   animation: drop .2s ease-out; }
 .tasksheet[hidden], .tasksheet [hidden] { display: none; }
+/* docked beside the chat from 1100 px (#1554): a column at the view's right, the chat padded for
+   it; narrower it stays under the strip, over the thread */
+@media (min-width: 1100px) {
+  #view-chat { position: relative; }
+  body.ts-open #view-chat { padding-right: var(--dock); }
+  body.ts-open .tasksheet { position: absolute; top: 0; right: 0; bottom: 0; width: var(--dock); max-height: none;
+    border-bottom: 0; border-left: 1px solid var(--line); box-shadow: none; animation: none; }
+  body.ts-open .jump { right: calc(var(--dock) + 16px); }
+}
+:root { --dock: 400px; }
 .tasksheet > div { max-width: 760px; margin: 0 auto; }
 .ts-row { display: block; width: 100%; min-height: 44px; padding: 8px 2px; text-align: left; border: 0;
   border-bottom: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 14.5px;

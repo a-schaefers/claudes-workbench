@@ -732,6 +732,18 @@ async function run(engine: string, device?: string) {
       await page.click('.ts-row:has-text("fix-sheet")')
       await until(async () => (await page.textContent('#ts-body')).includes('Changed the README. <b id="bold">not bold</b>'))
       if (await page.locator('#bold').count()) throw new Error('the report was drawn as markup')
+      if (desktop) {
+        // #1554: from 1100 px the sheet is a column beside the chat, the thread and the box not under
+        // it, and a tap in the chat leaves it open
+        const g = await page.evaluate(() => { const r = (q: string) => document.querySelector(q)!.getBoundingClientRect().toJSON()
+          return { sheet: r('#task-sheet'), thread: r('#thread'), composer: r('#composer'), view: r('#view-chat') } })
+        const near = (a: number, b: number) => Math.abs(a - b) <= 2
+        if (g.sheet.left < g.thread.right - 1 || g.sheet.left < g.composer.right - 1 || !near(g.sheet.right, g.view.right)
+            || !near(g.sheet.top, g.view.top) || !near(g.sheet.bottom, g.view.bottom)) throw new Error('not docked: ' + JSON.stringify(g))
+        await page.click('#input')
+        await sleep(300)  // a claim that the tap closes nothing
+        if (await page.locator('#task-sheet').isHidden()) throw new Error('a tap in the chat closed the docked sheet')
+      }
       const sum = await page.textContent('#ts-body')
       if (!sum.includes('review · round 1 · GPU Qwen3 Coder 30B') || !sum.includes('tests pass') || !sum.includes('started 5m ago'))
         throw new Error('the summary says: ' + sum)

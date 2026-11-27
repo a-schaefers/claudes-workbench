@@ -7542,7 +7542,9 @@ light and dark. What it saved (`#saved-card`) stays below, drawn by `app.ts`.
 **The task sheet** (#1201, `app.ts`'s `showTaskSheet`): away, the strip's one line was all the
 user saw of the work, and "is it on track?" cost a message to Claude. A tap (or Enter) on `#tasks`
 opens `#task-sheet` under it in `#view-chat` (closed by Esc, a tap outside, a strip gone empty or
-another view shown): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
+another view shown); from 1100 px (`docked`) it is a `--dock` 400 px column at the view's right instead,
+the chat padded for it (`body.ts-open`, `#jump` moved left of it), and a tap in the chat leaves it open
+(#1554: over the chat it covered the thread, the screen empty on both sides): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
 Diff and Log tabs fetch `GET /api/task` when opened (the diff's stat first, "Show the whole diff",
 one file at a time when it is `cut`; the Log scrolled to its newest row, and kept there by a quiet
 refetch unless the reader scrolled up, #1339). Nothing polls: a change in the stream's `tasks` (`sheetNews`;
@@ -11298,7 +11300,8 @@ thread the hint shows, hides while the state line shows and once a message is se
 dismissed after a reload, and where every storage call throws it still shows and dismisses with no page error; a
 phone's strip is one line of counts and names, and a 844×390 window has a short header and, with the keyboard up,
 no rail column (#1339). The starter chips and the hint's ✕ are 44 px, and a tap 5 px past the state line's Copy lands on it (#1339). With
-`reducedMotion: 'reduce'`, `#jump` is at the end a frame after the tap (#1339). Sends land exactly once through
+`reducedMotion: 'reduce'`, `#jump` is at the end a frame after the tap (#1339). At 1280×800 the open sheet is a column
+beside the thread and the box, and a tap in the chat leaves it open (#1554). Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
 `/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
 `computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
