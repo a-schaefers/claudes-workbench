@@ -2,8 +2,8 @@
 
 # Workbench
 
-Workbench is a harness for OpenCode and Claude Code. The model you talk to plans and reviews the
-work, and OpenCode agents via API or GPU write the code.
+Workbench is a harness for OpenCode and Claude Code. The orchestrator agent you talk to plans and
+reviews the work, and OpenCode subagents via API or GPU write the code.
 
 <p align="center"><a href="https://github.com/sponsors/a-schaefers"><img alt="Sponsor me on GitHub" src="https://img.shields.io/badge/Sponsor%20me-on%20GitHub-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white"></a></p>
 
@@ -18,32 +18,30 @@ work, and OpenCode agents via API or GPU write the code.
 <a href="https://github.com/a-schaefers/workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/workbench"></a>
 </p>
 
-You describe a change to the model you talk to (the orchestrator), which splits it into steps,
-writes a test for each one, and hands each step to an agent running a cheaper model on your GPU or
-an API. Every agent works on its own branch, in its own copy of the project. After each attempt the
-step's test runs; if it fails, the agent gets the failure and tries again without involving the
-orchestrator. When the test passes, the orchestrator reviews the change and reports to you. Small
-models do well on short, tested steps, so each step is sized to the model that writes it
+You describe a change to the orchestrator agent, which splits it into steps, writes a test for each
+one, and hands each step to a subagent running a cheaper model on your GPU or an API. Each subagent
+works on its own branch in a separate copy of the project. After each attempt the step's test runs;
+if it fails, the subagent sees the error and tries again without involving the orchestrator agent.
+When the test passes, the orchestrator agent reviews the change and reports to you. Small models do
+well on short, tested steps, so each step is sized to the model that writes it
 ([why](ARCHITECTURE.md#why-its-built-this-way)).
 
 ## What you need
 
-- [OpenCode](https://opencode.ai) 2.3 or newer, even if you work in Claude Code, because the agents
-  run in it: `curl -fsSL https://opencode.ai/v2/install | bash`
+- [OpenCode](https://opencode.ai) 2.3 or newer, even if you work in Claude Code, because the
+  subagents run in it.
 - Git 2.34 and Python 3.11 or newer, on Linux, macOS or WSL2.
-- A model for the agents: an API provider connected in `opencode` with `/connect`, or a local model
-  with tool calls and a 32K context window (16K at the least). With neither, the orchestrator
-  suggests a model for your card and can install Ollama and pull it for you.
-- If you work in Claude Code, [Claude Code](https://claude.com/claude-code) with a Claude
-  subscription or an API key.
+- A model for the subagents: an API provider connected in `opencode` with `/connect`, or a local
+  model with tool calls and a 32K context window (at least 16K). If you have neither, the
+  orchestrator agent suggests a model for your GPU and can install Ollama and pull it for you.
+- To use it in [Claude Code](https://claude.com/claude-code), a Claude subscription or an API key.
 
 Workbench runs in the OpenCode TUI and the Claude Code CLI. Desktop apps and IDE extensions are not
 supported.
 
 ## Install
 
-Workbench is a plugin for OpenCode and for Claude Code. Install it in whichever one you already
-use.
+Install the plugin in whichever one you use.
 
 ### OpenCode
 
@@ -51,9 +49,8 @@ use.
 opencode plugin add 'github:a-schaefers/workbench#main'
 ```
 
-Open OpenCode in your project, pick the orchestrator's model in `/models`, and type `/workbench`.
-The orchestrator reviews every change, so choose the strongest model you have, local or API.
-OpenCode keeps the plugin up to date.
+Open OpenCode in your project, pick the strongest model you have, local or API, for the orchestrator
+agent in `/models`, and type `/workbench`. OpenCode keeps the plugin up to date.
 
 ### Claude Code
 
@@ -62,70 +59,72 @@ claude plugin marketplace add a-schaefers/workbench
 claude plugin install workbench@workbench
 ```
 
-Open Claude Code in your project, choose the strongest Claude model with `/model`, and type
-`/workbench`.
+Open Claude Code in your project, choose the strongest Claude model for the orchestrator agent with
+`/model`, and type `/workbench`.
 
 ## Using it
 
-After `/workbench`, work with the orchestrator as you normally would. The first time, it asks a few
-questions to set things up. Workbench shows a link to its web app, `http://localhost:1337/#token=…`,
-where you can follow the agents, see your stats and change settings.
+After `/workbench`, work with the orchestrator agent as you normally would. The first time, it asks
+a few questions to set things up. Workbench shows a link to its web app,
+`http://localhost:1337/#token=…`, where you can follow the subagents' tasks, see your stats and
+change settings.
 
 ## Models and cost
 
-Workbench is free and open source. A local GPU costs nothing per task; API models bill through your
-provider, under a daily cap. In Claude Code, handing a larger task to the agents costs Claude about
-half the tokens of writing it ([measured](ARCHITECTURE.md#what-a-handoff-costs-claude-measured)),
-while small tasks cost as much or more, so batch them.
+Workbench is free and open source. A task on a local GPU costs nothing. Your provider bills the
+subagents' API use. In Claude Code, handing a larger task off costs Claude about half the tokens of
+writing it ([measured](ARCHITECTURE.md#what-a-handoff-costs-claude-measured)). Small tasks cost as
+much or more, so batch them.
 
-Workbench sorts the agents' work into large steps, small steps and writing such as docs, and lets
+Workbench sorts the subagents' work into large steps, small steps and writing such as docs, and lets
 you give each of these [roles](ARCHITECTURE.md#roles-which-model-a-kind-of-work-goes-to) its own
-model. You might, for example, send large steps to an API model and keep the rest on your GPU.
+model. For example, large steps can go to an API model and the rest to your GPU.
 
 On a GPU, Workbench [detects your hardware](ARCHITECTURE.md#models-found-loaded-chosen) and learns
 from your results which local model suits each kind of work. Once a week it checks for better ones.
-Ollama has the fullest support, and any OpenAI-compatible server
-[works too](ARCHITECTURE.md#running-your-own-server), on this machine or another.
+Ollama has the fullest support. Any OpenAI-compatible server [works
+too](ARCHITECTURE.md#running-your-own-server), even one on another machine.
 
-Any provider you have connected in OpenCode with an API key works, and so does a GitHub Copilot
-sign-in. Paid API usage counts against one daily
-[spending cap](ARCHITECTURE.md#spend-what-an-api-task-costs) in dollars, across all providers; a
-plan such as Copilot uses its own quota instead. At the cap, running API tasks stop and queued
-ones wait.
+Any provider you have connected in OpenCode with an API key works for the subagents, as does a
+GitHub Copilot sign-in. Their paid API usage counts against one daily [spending
+cap](ARCHITECTURE.md#spend-what-an-api-task-costs) in dollars, across all providers; a plan such as
+Copilot uses its own quota instead. At the cap, running API tasks stop and queued ones wait.
 
 ## Safety and privacy
 
-The agents never touch your checkout, and their work is merged only when you say so. Each one runs
-in a [sandbox](ARCHITECTURE.md#what-the-agent-knows), Landlock on Linux and Seatbelt on macOS, that
-keeps its writes inside its copy of the project, lets it use git only to read, allows only listed
-commands, and keeps your API key out of reach. These limits, and the spending cap, are enforced by
-code, never left to a model. On a kernel without Landlock, only OpenCode's permission rules apply.
+The subagents never touch your checkout, and their work is merged only after you accept it. Each
+subagent runs in a [sandbox](ARCHITECTURE.md#what-the-agent-knows) that confines its writes to its
+copy of the project and never lets it see your API key. It can run only listed commands, and git
+only to read. The sandbox uses Landlock on Linux and Seatbelt on macOS; on a kernel without
+Landlock, only OpenCode's permission rules apply. Workbench's code enforces these limits and the
+spending cap.
 
-Agents on your own GPU send your code to no provider, though the orchestrator still sees what it
-reviews unless it is local too. With an API model, whatever the agent reads goes to that provider.
-To keep a repository off every API, [mark it](ARCHITECTURE.md#privacy-for-api-roles) `local_only` in
-`~/.config/workbench/commands.json`.
+Subagents on your own GPU don't send your code to any provider. A subagent on an API model sends
+what it reads to that model's provider. The orchestrator agent sends what it reads to its own
+model's provider, unless that model is local. To keep a repository's subagents off every API, [mark
+it](ARCHITECTURE.md#privacy-for-api-roles) `local_only` in `~/.config/workbench/commands.json`.
 
 ## What else it does
 
-- Add the word `deepcode` to a request and the orchestrator runs several agents in parallel that
-  check each other's work, then judges what they produce. Workbench ships
+- Add the word `deepcode` to a request and the orchestrator agent runs several subagents in parallel
+  that check each other's work, then judges what they produce. Workbench ships
   [flows](ARCHITECTURE.md#deep-workflows) for building, auditing, fixing and comparing attempts, and
   you can write your own.
-- You can [schedule](ARCHITECTURE.md#scheduled-runs) work to run on a timer, with neither OpenCode
-  nor Claude Code open.
+- You can [schedule](ARCHITECTURE.md#scheduled-runs) work to run on a timer, even with OpenCode and
+  Claude Code closed.
 - Tasks run in the background, survive a restart of OpenCode or Claude Code, and [keep the machine
-  from sleeping](ARCHITECTURE.md#kept-awake). After a reboot, ask the orchestrator to resume them.
+  from sleeping](ARCHITECTURE.md#kept-awake). After a reboot, ask the orchestrator agent to resume
+  them.
 - Accepted commits carry your name as author and a
   [trailer](ARCHITECTURE.md#git-commits-and-projects) naming the model that wrote the code.
-- The web app's [chat](ARCHITECTURE.md#the-web-chat) lets you talk to the orchestrator and follow
-  tasks from your phone over Tailscale, once you ask for it.
-- When a review turns up a lesson, the orchestrator records it as a
-  [skill](ARCHITECTURE.md#the-skill-library) and gives it to later agents.
-- The orchestrator can also direct local [image](ARCHITECTURE.md#images) and
+- The web app has a [chat](ARCHITECTURE.md#the-web-chat) for talking to the orchestrator agent and
+  following tasks. To use it from your phone over Tailscale, ask the orchestrator agent.
+- When a review turns up a lesson, the orchestrator agent records it as a
+  [skill](ARCHITECTURE.md#the-skill-library) and gives it to later subagents.
+- The orchestrator agent can also direct local [image](ARCHITECTURE.md#images) and
   [audio](ARCHITECTURE.md#audio) models to make a project's icons, artwork, voice lines, sound
   effects and music.
-- To have the orchestrator finish the agents' open tasks itself when you quit, use
+- To have the orchestrator agent finish the subagents' open tasks itself when you quit, use
   `/workbench-quit-and-hand-back` (in Claude Code, `/workbench-quit-and-hand-back-claude`).
 
 Every command, setting and file is described in [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -133,7 +132,7 @@ Every command, setting and file is described in [ARCHITECTURE.md](ARCHITECTURE.m
 ## Contributing
 
 Report bugs in the issue tracker. If you fix one yourself, Workbench keeps your fix across updates
-and can send it upstream as a pull request, or as a .zip you email if you'd rather not use GitHub.
+and can send it upstream as a pull request, or as a .zip to email instead of using GitHub.
 [CONTRIBUTING.md](CONTRIBUTING.md) shows how to set it up.
 
 ## License
