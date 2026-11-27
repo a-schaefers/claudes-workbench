@@ -39,7 +39,7 @@ GPU, the model server). Run what is at hand and mark the rest **skip** (#275, cl
 Every result by hand, in this section and the next, is recorded against the exact candidate:
 the SHA it ran (`git rev-parse --short HEAD` in the checkout used), the OS and the repo's
 filesystem, the versions (Python, git, OpenCode, Claude Code, the kernel and its Landlock ABI as
-`wb doctor` says it, and whatever the run is about: Docker, tailscale, Ollama), the hardware,
+`wb doctor` says it, and whatever the run is about: Docker, Ollama), the hardware,
 and the result: **pass**, **skip** with its reason, or **fail** with its issue. Where a table has
 only a Notes column, the notes hold them. A run on an earlier commit stays recorded as that SHA,
 and counts for the candidate only when `git diff <sha> <candidate>` touches nothing it
@@ -90,7 +90,7 @@ rest of this section: a skip is recorded with its reason, never a gate.
 | A repo with Git LFS files | | | | | | |
 | `wb bench run` with `wb events` running, on a kernel with an 8,192-watch limit (`fs.inotify.max_user_watches`) | | | | | | |
 | A `--test` suite using Docker, under Landlock ABI 9 or newer | | | | | | |
-| The web chat behind a real `tailscale serve --bg 1337`, on its https address, with the default chat.json (#448) | | | | | | |
+| The web chat behind a real https tunnel or proxy to `localhost:1337`, on its https address, its name in chat.json's `hosts` (#448, #1616) | | | | | | |
 | The web chat on an IPv6-only host | | | | | | |
 | The web chat on real phones: a request backgrounded, the server interrupted between writes, an old prompt answered, reconnecting | | | | | | |
 | A clean install on Debian or Ubuntu with Python 3.11 | | | | | | |

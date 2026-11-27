@@ -46,7 +46,7 @@ class ChatAdmin(Base):
         self.env = {**os.environ, "XDG_RUNTIME_DIR": str(tmp / "run"), "PATH": path}
         self.port = free_port()
         self.server = subprocess.Popen([sys.executable, str(ROOT / "bin" / "wb"), "chat", "serve", "--port",
-                                        str(self.port), "--bind", "127.0.0.1"], env=self.env,
+                                        str(self.port)], env=self.env,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.addCleanup(self.stop)
         deadline = time.time() + 20

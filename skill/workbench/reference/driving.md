@@ -73,9 +73,8 @@ While workbench mode is on in a session, the web chat is up: it is on by default
 turns it off (`wb chat off`; change it only when they ask). Its link is on the pane's modeline, and
 nothing else carries it. The terminal stays primary; the chat is a second lane, for while they're
 away, beside the web app's Settings and Stats (settings: SKILL.md, *Settings are the user's*). They can reach you from their phone
-(a server on port 1337; the link is localhost, and `wb chat reach tailnet`, also the Settings row
-Web app reach, opens it to their tailnet: on their ask and yes, as any setting; the https its notifications need is
-`tailscale serve`, which wb prints, run only on their yes). Their message arrives as a prompt that is
+(a server on port 1337 that listens on localhost only; from another device, through a tunnel or
+proxy of their own pointed at `localhost:1337`, the link's token still the key). Their message arrives as a prompt that is
 just `[web chat] <their words>` (or, while you're mid-turn, delivered into the turn by the mod,
 with one line saying so); it has the same authority as one typed here. A message may end with
 `[attached: <path> (<size>, <type>)]` lines: files they attached, saved on this machine. Read each

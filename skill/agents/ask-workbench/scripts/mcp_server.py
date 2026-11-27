@@ -12,7 +12,7 @@ waiting on the user's yes, queued, expired); list_requests() lists this agent's 
 Environment, as ask_workbench.py: WORKBENCH_URL (the chat's address, e.g. http://localhost:1337)
 and WORKBENCH_TOKEN (this agent's token, from `wb chat token add <name>`); CLAUDE_WB_URL and
 CLAUDE_WB_TOKEN, their names before 2.2, still work. Local only, by design: the
-URL must name this machine (localhost, 127.*, ::1, or an IP of its own), or every tool refuses
+URL must name this machine (localhost, 127.*, ::1), or every tool refuses
 and sends nothing; the chat refuses an agent token from any other machine anyway. It calls the
 chat's /api/v1/ paths (docs/chat-api.yaml), so it needs workbench 2.1 or later. Standard library
 only.
@@ -24,7 +24,6 @@ import ipaddress
 import json
 import os
 import re
-import socket
 import sys
 import threading
 import time
@@ -94,23 +93,10 @@ class Refusal(Exception):
     """A tool call that can't go ahead: its text is what the agent is told."""
 
 
-def _own(ip) -> bool:
-    """Whether ``ip`` is one of this machine's own addresses: a socket binds only to those."""
-    if ip.is_unspecified or ip.is_multicast:  # 0.0.0.0 and :: bind too, and name no machine
-        return False
-    try:
-        with socket.socket(socket.AF_INET6 if ip.version == 6 else socket.AF_INET) as sk:
-            sk.bind((str(ip), 0))
-        return True
-    except OSError:
-        return False
-
-
 def this_machine(url: str) -> bool:
     """Whether ``url`` names this machine, over http or https: localhost, 127.0.0.0/8 or ::1 (an
-    IPv4-mapped one too), or an address of its own (a chat bound only to the tailnet or LAN IP
-    serves no localhost, and an agent here reaches it there: the chat's #1274). Agents are the
-    user's own, on this machine (#1138's design intent): another address would send the token
+    IPv4-mapped one too), where the chat listens (#1616, 2026-11-27: localhost only). Agents are
+    the user's own, on this machine (#1138's design intent): another address would send the token
     off it."""
     try:
         parts = urlsplit(url)
@@ -128,7 +114,7 @@ def this_machine(url: str) -> bool:
         return False  # any other name: its address could be anywhere
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
-    return ip.is_loopback or _own(ip)
+    return ip.is_loopback
 
 
 def config() -> None:
@@ -139,8 +125,8 @@ def config() -> None:
                       "WORKBENCH_TOKEN (the user makes it: `wb chat token add <name>`) in this MCP "
                       "server's environment")
     if not this_machine(url):
-        raise Refusal(f"WORKBENCH_URL must be this machine's chat (localhost, 127.*, ::1, or an "
-                      f"address of its own), not {url[:200]}: agents work only from this machine. "
+        raise Refusal(f"WORKBENCH_URL must be this machine's chat (localhost, 127.*, ::1), "
+                      f"not {url[:200]}: agents work only from this machine. "
                       "Nothing was sent")
 
 

@@ -9,10 +9,9 @@ receipt (chat/receipts.jsonl) and submits each to Claude as a prompt. Claude ans
 What a message can do is what typing in the terminal can do, so the API wants a secret token
 (~/.config/workbench/chat-token, made on first use; `wb chat url` prints a link carrying it in
 the fragment, which never leaves the browser) and answers only to the host names it serves,
-which stops other web pages and DNS rebinding. It serves localhost unless the user says otherwise
-in ~/.config/workbench/chat.json (`bind`: addresses, `tailscale` for this machine's tailnet
-address, `0.0.0.0` for every interface; `hosts`: more names to answer to, `*` for any). The link
-it prints is always localhost; reaching it from a phone is the user's own setup.
+which stops other web pages and DNS rebinding. It listens on 127.0.0.1 only (#1616): another
+device reaches it through a tunnel or proxy of the user's own pointed at localhost, whose name
+~/.config/workbench/chat.json's `hosts` adds (`*` for any). The link it prints is always localhost.
 """
 from __future__ import annotations
 
@@ -43,7 +42,12 @@ from . import savings, store, story, webpush
 from .watch import Watcher
 
 PORT = 1337
-REPLAN_EVERY = 30       # seconds between looks at a skipped bind address
+BIND = "127.0.0.1"      # the one address it listens on (#1616, 2026-11-27)
+LOCAL_NAMES = ("localhost", "127.0.0.1", "::1")  # Host names always answered
+# Headers a proxy adds to what it forwards: behind one (a tunnel, Caddy, nginx) every peer is
+# 127.0.0.1, so these tell another device's request from this machine's (#1616, 2026-11-27)
+FORWARDED = ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded", "X-Real-IP", "Via",
+             "True-Client-IP", "Cf-Connecting-Ip", "Tailscale-User-Login")
 LISTENING_FOR = 15      # seconds: a listener.json older than this means nobody is listening
 MAX_TEXT = 8000
 MAX_BODY = 32 * 1024
@@ -64,10 +68,6 @@ RELOAD_EVERY = 10       # seconds between looks at the server's own code
 PUSH_DELAY = 10         # seconds news waits for an open page to show it before a push goes
 PUSH_WINDOW = 900       # only news this recent is pushed, never a backlog
 PUSH_RETRY = 30         # seconds before a device whose push failed for now is tried again
-# macOS's App Store and standalone Tailscale apps keep the CLI in the bundle, off PATH
-TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-# Tailscale for Windows' CLI under WSL's automount root, for a chat whose PATH lacks Windows' (#920)
-TAILSCALE_WINDOWS = "c/Program Files/Tailscale/tailscale.exe"
 API_VERSION = 1         # GET /api/state's and /api/health's `api`: bumped by a breaking change (docs/chat-api.md)
 AGENT_SENDS_PER_MIN = 30  # an agent token's POST /api/send per minute, then 429 with retry_after
 WAIT_DEFAULT = 300      # GET /api/wait's timeout when none is given, in seconds
@@ -100,17 +100,17 @@ class ConfigError(RuntimeError):
 
 
 def settings() -> dict:
-    """The user's choices for the server: {"bind": [...], "hosts": [...]}; {} for the defaults. A
-    string is a one-item list: iterated as a list, "0.0.0.0" became the binds '0' and '.' (#534)."""
+    """The user's choices for the server: {"hosts": [...]}; {} for the defaults. A string is a
+    one-item list: iterated as a list, "box.example.org" became the names 'b', 'o', ... (#534). An
+    old `bind` is ignored: the server listens on 127.0.0.1 only (#1616, 2026-11-27)."""
     conf = store.read_json(config_path(), {}) or {}
     if not isinstance(conf, dict):
-        raise ConfigError(f"{config_path()} isn't a JSON object: {{\"bind\": [...], \"hosts\": [...]}}")
-    for key in ("bind", "hosts"):
-        val = conf.get(key)
-        if isinstance(val, str):
-            conf[key] = [val]
-        elif val is not None and not (isinstance(val, list) and all(isinstance(v, str) for v in val)):
-            raise ConfigError(f"{config_path()}: {key} is a list of strings, not {json.dumps(val)[:60]}")
+        raise ConfigError(f"{config_path()} isn't a JSON object: {{\"hosts\": [...]}}")
+    val = conf.get("hosts")
+    if isinstance(val, str):
+        conf["hosts"] = [val]
+    elif val is not None and not (isinstance(val, list) and all(isinstance(v, str) for v in val)):
+        raise ConfigError(f"{config_path()}: hosts is a list of strings, not {json.dumps(val)[:60]}")
     return conf
 
 
@@ -150,8 +150,7 @@ AGENT_CANT = {"/api/push": "change notifications", "/api/active": "mark the user
               "/api/seen": "mark what the user has seen", "/api/latest": "read the user's notifications",
               "/api/shot": "read screenshots", "/api/audio": "read audio takes",
               "/api/transcribe/": "transcribe the user's voice clips",  # #1203
-              "/api/task": "read tasks",  # a task's diff and report are the user's work (#1201)
-              "/api/phone-qr.svg": "read the user's phone link"}  # it carries the user's token (#1552)
+              "/api/task": "read tasks"}  # a task's diff and report are the user's work (#1201)
 
 
 def _covers(rule: str, path: str) -> bool:
@@ -278,208 +277,6 @@ def _for_user(r: dict) -> bool:
 def _inbound(r: dict) -> bool:
     """A message to Claude: the user's, or an agent's (#1042)."""
     return r.get("from") == "user" or r.get("role") == "agent"
-
-
-def tailscale_cli(windows: bool = False) -> str | None:
-    """The tailscale CLI to ask: on PATH, else macOS' app bundle (`TAILSCALE_APP`); ``windows``:
-    under WSL with neither, Windows' tailscale.exe (tailscale()'s). None for none."""
-    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
-                                        and os.path.isfile(TAILSCALE_APP) else None)
-    if not cli and windows:
-        from . import hardware
-        cli = (hardware.windows_program("tailscale.exe", TAILSCALE_WINDOWS)
-               if hardware.system() == "wsl" else None)
-    return cli or None
-
-
-def listenable(ip: str) -> bool:
-    """Whether a server here can listen on ``ip``: an address one of this machine's interfaces
-    carries. Tailscale's userspace networking (Docker or LXC, no /dev/net/tun) reports a tailnet
-    address no interface has, and the chat bound to it failed EADDRNOTAVAIL, closed its localhost
-    server too and exited, every restart the same: the whole web app down (#1499, 2026-11-26).
-    Only that refusal counts: another (a port, a permission) is make_servers' to say."""
-    try:
-        with socket.socket(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((ip, 0))
-    except OSError as e:
-        return e.errno != errno.EADDRNOTAVAIL
-    return True
-
-
-def tailscale(windows: bool = False) -> dict:
-    """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up (no Self, or a
-    BackendState other than Running); {"missing": True} when there is no CLI to ask (said apart
-    from "not running": the 2026-11-16 audit). The ip is the IPv4 one, else the first IPv6: a node
-    with IPv4 turned off was reported "not running" and the chat bound localhost alone (#937).
-    ``windows``: under WSL with no Linux CLI, Windows' tailscale.exe (Tailscale's own setup for
-    WSL2), for the name `tailscale serve` passes in through Windows' localhost forwarding: `which`
-    never tries .exe, so the chat answered it 403 "unknown host" (#920). From PATH, else its
-    install under the automount root: wb-chat.service runs with the user manager's PATH, which
-    has none of Windows', as has appendWindowsPath=false (the review of #920). Not for the
-    address: in WSL's NAT networking, Windows' tailnet IP isn't on WSL's interfaces."""
-    cli = tailscale_cli(windows)
-    if not cli:
-        return {"missing": True}
-    try:
-        r = subprocess.run([cli, "status", "--json"], capture_output=True, text=True, timeout=5)
-        status = json.loads(r.stdout)
-        me = status["Self"]
-    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
-        return {}
-    if status.get("BackendState", "Running") != "Running":  # stopped or logged out: not up
-        return {}
-    ips = sorted(me.get("TailscaleIPs") or [], key=lambda ip: ":" in ip)  # IPv4 first
-    dns = (me.get("DNSName") or "").rstrip(".")
-    names = {n for n in (dns, dns.split(".")[0], me.get("HostName", "")) if n}
-    return {"ip": ips[0] if ips else None, "names": names, "dns": dns.lower()}
-
-
-# Phone reach (#1355): who opens the web app, `wb chat reach local|tailnet` and the Settings row
-# `reach`. `local` is chat.json without a `bind` (localhost, the default); `tailnet` binds this
-# machine's tailnet address too (`bind: ["127.0.0.1", "tailscale"]`), refused while Tailscale
-# isn't up here, so a phone on the user's tailnet opens the link by this machine's name. No LAN
-# option: a wildcard bind is the user's own chat.json edit (`custom`), and the token stays the key.
-# The running server rebinds by itself (serve's replan), so nothing restarts it. https, which push
-# and the home-screen app need, is `tailscale serve`'s, run only on the user's yes.
-REACH = ("local", "tailnet")
-TAILNET_BIND = ["127.0.0.1", "tailscale"]
-LOOPBACK = ("localhost", "127.0.0.1", "::1")
-
-
-def reach() -> str:
-    """Who opens the web app, from chat.json's `bind`: `tailnet` (it names `tailscale`), `local`
-    (none, or loopback only) or `custom` (an address of the user's own). ConfigError as settings()."""
-    binds = settings().get("bind") or []
-    if "tailscale" in binds:
-        return "tailnet"
-    return "local" if all(b in LOOPBACK for b in binds) else "custom"
-
-
-def set_reach(to: str, port: int = PORT) -> dict:
-    """Write chat.json's `bind` for ``to`` (REACH), its other keys kept: {"from", "to", "ts"?: the
-    tailscale() it checked}. ValueError, nothing written, for another value, or `tailnet` while
-    Tailscale isn't up here or its address can't be listened on (its reason, naming the
-    `tailscale serve --bg <port>` that works there)."""
-    if to not in REACH:
-        raise ValueError(f"reach is {' or '.join(REACH)}")
-    was = reach()
-    # the tailnet address plan() binds: this OS's own CLI, never Windows' under WSL (its address
-    # isn't on WSL's interfaces, so the bind would be skipped)
-    ts = tailscale() if to == "tailnet" else {}
-    if to == "tailnet" and ts.get("missing") and not (win := tailscale(windows=True)).get("missing"):
-        # WSL2 with Tailscale on Windows (#920's setup) was told to install Tailscale again and never
-        # shown the route that works there: Windows' serve, over its localhost forwarding (#1524, 2026-11-26)
-        raise ValueError(f"Tailscale runs on Windows here{'' if win else ' (not up: sign in to it)'}, and its "
-                         f"tailnet address isn't on WSL's interfaces: leave reach local and run `tailscale.exe "
-                         f"serve --bg {port}` (Windows'), which serves the web app to your tailnet over https")
-    if to == "tailnet" and not ts.get("ip"):
-        raise ValueError("no tailscale command here: install Tailscale (tailscale.com/download), sign in, then "
-                         "this again" if ts.get("missing") else
-                         "Tailscale isn't up here: `tailscale up`, then this again")
-    if to == "tailnet" and not listenable(ts["ip"]):  # plan() would skip it (#1499)
-        raise ValueError(f"this machine's tailnet address {ts['ip']} is on none of its interfaces (Tailscale's "
-                         f"userspace networking), so nothing can listen on it: leave reach local and run "
-                         f"`tailscale serve --bg {port}`, which serves the web app to your tailnet over https")
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # the user's file, edited in place under its lock (a link to their dotfiles stays one, #495)
-    with store.edit_config(path, lambda: dict(store.read_json(path, {}) or {})) as conf:
-        if to == "tailnet":
-            conf["bind"] = list(TAILNET_BIND)
-        else:
-            conf.pop("bind", None)
-    return {"from": was, "to": to, **({"ts": ts} if ts else {})}
-
-
-def https_served(port: int) -> bool | None:
-    """Whether `tailscale serve` puts https in front of the chat's ``port`` here: True, False, or
-    None when it can't be told (no CLI, an answer it can't read)."""
-    site = served_site(port)
-    return None if site is None else bool(site)
-
-
-def served_site(port: int) -> str | None:
-    """The `tailscale serve` site ("<name>:<https port>") proxying to the chat's ``port`` here, ""
-    for none, None when it can't be told. Reach `local` leaves it serving the tailnet, and wb said
-    "this machine only" (#1512, 2026-11-26): its callers name it and the command that stops it.
-    Under WSL, Windows' CLI too: its serve reaches the chat through Windows' localhost forwarding
-    and was never seen (#1524, 2026-11-26)."""
-    cli = tailscale_cli(windows=True)
-    if not cli:
-        return None
-    try:
-        r = subprocess.run([cli, "serve", "status", "--json"], capture_output=True, text=True, timeout=5)
-        doc = json.loads(r.stdout or "{}")
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
-    if not isinstance(doc, dict):
-        return None
-    targets = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    for name, site in (doc.get("Web") or {}).items():
-        for h in ((site or {}).get("Handlers") or {}).values() if isinstance(site, dict) else ():
-            proxy = str((h or {}).get("Proxy") or "") if isinstance(h, dict) else ""
-            if any(proxy.rstrip("/").endswith(t) for t in targets):
-                return str(name)
-    return ""
-
-
-def _served_base(port: int) -> str:
-    """`https://<name>[:<port>]` while `tailscale serve` serves this chat's ``port`` (served_site),
-    else "": phone_base's and phone_url's first answer."""
-    site = served_site(port)
-    if not site:
-        return ""
-    name, _, https = site.rpartition(":") if ":" in site else (site, "", "")
-    return f"https://{name}" + ("" if https in ("", "443") else f":{https}")
-
-
-def _on_tailnet() -> bool:
-    try:
-        return reach() == "tailnet"
-    except ConfigError:
-        return False
-
-
-def _tailnet_http(port: int) -> str:
-    """http://<this machine's tailnet name, else its IP>:<port>, "" while Tailscale isn't up."""
-    ts = tailscale()
-    name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts.get("ip") or ""
-    return f"http://{f'[{name}]' if ':' in name else name}:{port}" if name else ""
-
-
-def phone_base(port: int) -> str:
-    """The web app's address on the user's tailnet, for their phone (the web app's review,
-    2026-11-26: the phone needed a terminal trip, a host edited by hand and a 40-character token
-    carried over): its https name when `tailscale serve` serves this chat's ``port`` (served_site),
-    else http://<this machine's tailnet name>:<port>; "" while reach isn't `tailnet` or Tailscale
-    isn't up. No token: the page adds its own (Settings' reach row)."""
-    return (_served_base(port) or _tailnet_http(port)) if _on_tailnet() else ""
-
-
-_tailnet = {"at": float("-inf"), "name": ""}
-_tailnet_lock = threading.Lock()
-
-
-def tailnet_name() -> str:
-    """This machine's MagicDNS name (box.tailnet.ts.net), "" when Tailscale isn't up; asked at
-    most every REPLAN_EVERY seconds, so a request under an unknown name costs no subprocess.
-    `tailscale serve --bg 1337`, the https the gear advises, passes that name through as the Host,
-    and a chat bound to localhost answered every request 403 "unknown host" (#448). Only the full
-    name: it is the one serve's certificate has, and no other site's DNS can answer for it."""
-    with _tailnet_lock:
-        if time.monotonic() - _tailnet["at"] >= REPLAN_EVERY:
-            _tailnet.update(at=time.monotonic(), name=tailscale(windows=True).get("dns") or "")
-        return _tailnet["name"]
-
-
-def phone_url(port: int) -> str:
-    """The link a phone on the tailnet opens, the token in its fragment (#1552, 2026-11-26): at
-    `tailscale serve`'s https name when it serves ``port`` (served_site, whatever the reach: serve
-    proxies to localhost), else phone_base's (reach `tailnet`, this machine's tailnet name over
-    http); "" for neither (reach local, a bind of the user's own, Tailscale down). The second line
-    `wb chat url` prints, the QR code it draws at a terminal and GET /api/phone-qr.svg serves."""
-    base = _served_base(port) or (_tailnet_http(port) if _on_tailnet() else "")
-    return f"{base}/#token={token()}" if base else ""
 
 
 # ---- the thread ----
@@ -1688,36 +1485,24 @@ def identity(secret: str) -> str:
 
 
 def who_answers(port: int) -> str | None:
-    """Who answers on the port at an address this machine's plan binds: "workbench" (this
-    account's chat: its responses carry MARK keyed by this token), "other" (another program,
-    another account's chat, or one holding a token since replaced), or None. A bare connect
-    counted any program there as the chat, and `wb chat on` showed a link to it (#200, the
-    2026-11-19 audit)."""
-    found, mine = None, identity(token())
-    for addr in plan()["binds"]:
-        conn = http.client.HTTPConnection(_probe(addr), port, timeout=2)
-        try:
-            conn.request("GET", "/manifest.webmanifest", headers={"Host": "localhost"})
-            if hmac.compare_digest(conn.getresponse().getheader(MARK) or "", mine):
-                return "workbench"
-            found = "other"
-        except (OSError, http.client.HTTPException):
-            found = found or (_connects(addr, port) and "other") or None
-        finally:
-            conn.close()
-    return found
-
-
-def _probe(addr: str) -> str:
-    """Where to reach a bound address from here: a wildcard by its family's loopback. `::` was
-    probed at 127.0.0.1, which an IPv6-only socket (bindv6only=1) never answers, so a healthy
-    chat looked down and `wb chat on` started a second that failed on the port (#450)."""
-    return {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(addr, addr)
-
-
-def _connects(addr: str, port: int) -> bool:
+    """Who answers on the port at 127.0.0.1, where the chat listens: "workbench" (this account's
+    chat: its responses carry MARK keyed by this token), "other" (another program, another
+    account's chat, or one holding a token since replaced), or None. A bare connect counted any
+    program there as the chat, and `wb chat on` showed a link to it (#200, the 2026-11-19 audit)."""
+    conn = http.client.HTTPConnection(BIND, port, timeout=2)
     try:
-        with socket.create_connection((_probe(addr), port), timeout=1):
+        conn.request("GET", "/manifest.webmanifest", headers={"Host": "localhost"})
+        mark = conn.getresponse().getheader(MARK) or ""
+        return "workbench" if hmac.compare_digest(mark, identity(token())) else "other"
+    except (OSError, http.client.HTTPException):
+        return "other" if _connects(port) else None
+    finally:
+        conn.close()
+
+
+def _connects(port: int) -> bool:
+    try:
+        with socket.create_connection((BIND, port), timeout=1):
             return True
     except OSError:
         return False
@@ -1848,6 +1633,7 @@ def ensure(port: int) -> dict:
     from . import models  # as in stop_started
     out = {"url": ""}
     try:
+        settings()  # chat.json it can't follow: said here, as the server would exit 78 on it
         out["url"] = url(port)
         if not is_on():
             return {**out, "state": "off"}
@@ -2374,7 +2160,7 @@ def _mb(n: float) -> str:
 def upload_limits() -> dict:
     """{file, message, files}: bytes per file and per message (chat.json `upload_mb`,
     `upload_message_mb`, read on each call so a change needs no restart), files per message. Read
-    raw, not through settings(): a bad `bind` there raises ConfigError, and this is on every
+    raw, not through settings(): a bad `hosts` there raises ConfigError, and this is on every
     snapshot, so chat.json broken while the server runs would fail each request (#534 keeps serving)."""
     conf = store.read_json(config_path(), {})
     conf = conf if isinstance(conf, dict) else {}
@@ -2787,7 +2573,7 @@ API_V1 = "/api/v1/"  # every /api/<x> is also /api/v1/<x>, the same handler (#11
 # it (an agent's token on any path outside AGENT_MAY is 403, as it was)
 ROUTES = {"GET": ("/api/health", "/api/state", "/api/stream", "/api/wait", "/api/upload/", "/api/file/",
                   "/api/latest", "/api/shot", "/api/audio", "/api/task", "/api/settings", "/api/stats",
-                  "/api/top", "/api/phone-qr.svg"),
+                  "/api/top"),
           "PUT": ("/api/upload/",),
           "POST": ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings", "/api/transcribe/")}
 
@@ -3059,48 +2845,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def _desk(self) -> bool:
         """Whether the page was opened as this machine's own, by a loopback Host (the modeline's
-        localhost link). Never by the peer: `tailscale serve` proxies a phone from 127.0.0.1, and
-        passes its tailnet name as the Host (#1374)."""
+        localhost link) on a request no proxy forwarded. Never by the peer: a tunnel proxies a
+        phone from 127.0.0.1, and passes its own name as the Host (#1374)."""
         host = self._host()
-        return host in ("localhost", "::1") or host.startswith("127.")
+        return (host in ("localhost", "::1") or host.startswith("127.")) and not self._forwarded()
 
     def _allowed(self) -> bool:
         host = self._host()
-        if (self.hosts is not None and host not in self.hosts and not (host and host.split("%")[0] == self._local())
-                and not (host and host == tailnet_name())):
+        if self.hosts is not None and host not in self.hosts:
             self._json(403, {"error": f"unknown host {host[:100]}: add it to chat.json's hosts",
                              "code": "unknown_host"})
             return False
         return True
 
-    def _local(self) -> str:
-        """The address this connection came in on: on a wildcard bind, the LAN or tailnet IP a
-        phone typed. The names were worked out once at startup from the host name, which resolves
-        to 127.0.1.1 on Debian, Ubuntu and WSL, and missed an address gained later (a late Wi-Fi,
-        a VPN), so those IPs got 403 (#533). An address can't be rebound: DNS rebinding needs a
-        name, and the socket's own address is one this server bound."""
-        try:
-            addr = self.connection.getsockname()[0]
-        except (OSError, AttributeError, IndexError):
-            return ""
-        return addr.lower().removeprefix("::ffff:").split("%")[0]
-
     def _peer(self) -> str:
-        """The address the request came from, normalised as `_local` is."""
+        """The address the request came from, lowercased, without a v4-mapped prefix or a zone."""
         try:
             return str(self.client_address[0]).lower().removeprefix("::ffff:").split("%")[0]
         except (AttributeError, IndexError, TypeError):
             return ""
 
+    def _forwarded(self) -> bool:
+        """Whether a proxy says it forwarded this request (any of FORWARDED's headers)."""
+        return any(self.headers.get(h) is not None for h in FORWARDED)
+
     def _from_this_machine(self) -> bool:
-        """Whether the request came from this machine: the peer is a loopback address, or the very
-        address it connected to. A process reaching this machine's own LAN or tailnet IP comes
-        from that IP, not 127.*, so a chat bound only there (`bind: ["tailscale"]`, which serves
-        no localhost) refused every agent token, its own machine's too (#1274, 2026-11-24). No
-        other machine can come from it: a connection is TCP's, whose handshake answers the source
-        address, and the kernel drops an outside packet that claims one of its own."""
+        """Whether the request came from this machine: a loopback peer, with no proxy's forwarding
+        header. The chat listens on 127.0.0.1 only, so behind a tunnel or proxy every peer is 127.0.0.1, another device's too: the headers those
+        add tell it apart (#1616, 2026-11-27). An `ssh -L` adds none, so a forward over ssh still
+        looks local: that one is the user's own login."""
         peer = self._peer()
-        return peer == "::1" or peer.startswith("127.") or bool(peer) and peer == self._local()
+        return (peer == "::1" or peer.startswith("127.")) and not self._forwarded()
 
     def _authed(self) -> str | None:
         """Who calls: "user" for the user's token, "agent <name>" for an agent's (and ``agent``
@@ -3113,9 +2888,8 @@ class Handler(BaseHTTPRequestHandler):
         if got and (name := agent_for(got)):
             if not self._from_this_machine():
                 # agents are this machine's own (owner, 2026-11-23): an agent token sent from
-                # another machine (a tailnet or LAN peer of a chat bound for the user's phone) is
-                # refused, whatever the bind; the user's own token is unaffected. It named
-                # localhost, which a chat bound only to the tailnet doesn't serve (#1274)
+                # another device, through a tunnel or proxy to localhost (#1616), is refused; the
+                # user's own token is unaffected
                 self._json(403, {"error": "agent tokens work only from this machine, at the address"
                                           " `wb chat url` prints", "code": "not_local"})
                 return None
@@ -3279,14 +3053,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"feed": stats.feed(), **admin.reads()})
         if path == "/api/top":  # the Stats view's live part: wb top --json's ticks (TopFeed)
             return self._top()
-        if path == "/api/phone-qr.svg":  # the phone link as a QR code, for Settings' phone line (#1552)
-            from . import qr
-            link = phone_url(self.server.server_address[1])
-            if not link:
-                return self._json(404, {"error": "no phone link: the web app opens on this machine only "
-                                                 "(wb chat reach tailnet)"})
-            # the token is in it: _security_headers' no-store keeps it out of every cache
-            return self._send(200, qr.svg(link).encode(), "image/svg+xml")
         name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
         f = STATIC / name
         if "/" in name or f.suffix not in TYPES or not f.is_file():
@@ -3652,82 +3418,25 @@ class Handler(BaseHTTPRequestHandler):
         return msg
 
 
-WILDCARD = ("0.0.0.0", "::")
-
-
-def this_machine() -> set[str]:
-    """The names and addresses other devices may reach this machine by (for a wildcard bind)."""
-    name = socket.gethostname()
-    found = {name, name.split(".")[0], socket.getfqdn()}
-    try:
-        found |= {a[4][0] for a in socket.getaddrinfo(name, None)}
-    except OSError:
-        pass
-    return {n.lower() for n in found if n}
-
-
-def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict:
-    """Where to listen and which Host names to answer: {"binds", "hosts" (None: any), "names"
-    (to show), "skipped"}. Default localhost; the user's chat.json or --bind/--host say more."""
-    conf = settings()
-    binds = list(binds or conf.get("bind") or ["127.0.0.1"])
-    extra = [h.lower() for h in [*(conf.get("hosts") or []), *(hosts or [])]]
-    allowed = {"localhost", "127.0.0.1", "::1"}
-    out, names, skipped = [], [], []
-    for b in binds:
-        if b == "localhost":
-            b = "127.0.0.1"
-        if b == "tailscale":  # this machine's tailnet address, when there is one
-            ts = tailscale()
-            if not ts.get("ip"):
-                skipped.append("tailscale (CLI not found: put `tailscale` on PATH)" if ts.get("missing")
-                               else "tailscale (no Tailscale address)" if ts else "tailscale (not running)")
-                continue
-            if not listenable(ts["ip"]):  # userspace networking: binding it took localhost down too (#1499)
-                skipped.append("tailscale (its address isn't on this machine)")
-                continue
-            b = ts["ip"]
-            allowed |= {n.lower() for n in ts["names"]}
-            names += sorted(ts["names"], key=len, reverse=True)[:1]
-        if b in WILDCARD:
-            allowed |= this_machine()
-        else:
-            allowed.add(b)
-        if b not in out:
-            out.append(b)
-    # A wildcard covers the specific addresses of its family, and on Linux (bindv6only=0) `::`
-    # takes IPv4 too: each further socket on the port failed EADDRINUSE, so ["localhost",
-    # "0.0.0.0"] or ["0.0.0.0", "::"] never started, blamed on "another wb chat serve" (#534).
-    # Their names stay answered; `::` beside any IPv4 bind is made IPv6-only (IPV6_V6ONLY).
-    if "0.0.0.0" in out:
-        out = [b for b in out if b == "0.0.0.0" or ":" in b]
-    if "::" in out:
-        out = [b for b in out if b == "::" or ":" not in b]
-    return {"binds": out or ["127.0.0.1"], "hosts": None if "*" in extra else allowed | set(extra),
-            "names": names, "skipped": skipped,
-            "v6only": "::" in out and any(":" not in b for b in out)}
+def plan() -> dict:
+    """Where to listen and which Host names to answer: {"binds": [BIND], "hosts" (None: any)}.
+    Localhost only (#1616, 2026-11-27): a tunnel or proxy of the user's own points at it, and
+    passes its name as the Host, which chat.json's `hosts` adds (`*` for any)."""
+    extra = [h.lower() for h in settings().get("hosts") or []]
+    return {"binds": [BIND], "hosts": None if "*" in extra else set(LOCAL_NAMES) | set(extra)}
 
 
 class _Server(ThreadingHTTPServer):
-    v6only = False  # set for `::` beside an IPv4 bind, so the two can share the port (#534)
-
     def server_bind(self):
-        if self.v6only:
-            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         # HTTPServer's own also looks the address's host name up (socket.getfqdn), which nothing
         # here reads: on macOS that lookup stalled the start past wb chat on's wait (#236)
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
 
-class _Server6(_Server):
-    address_family = socket.AF_INET6
-
-
-def make_servers(port: int, binds: list[str] | None = None,
-                 hosts: list[str] | None = None) -> tuple[list[ThreadingHTTPServer], dict]:
-    """One server per address the plan names (localhost unless the user chose more)."""
-    p = plan(binds, hosts)
+def make_servers(port: int) -> tuple[list[ThreadingHTTPServer], dict]:
+    """The server on 127.0.0.1 (plan's), in a list."""
+    p = plan()
     handler = type("ChatHandler", (Handler,), {
         "hosts": p["hosts"], "secret": token(), "hub": Hub(),
         "streams": threading.BoundedSemaphore(MAX_STREAMS), "waits": threading.BoundedSemaphore(MAX_WAITS),
@@ -3735,26 +3444,20 @@ def make_servers(port: int, binds: list[str] | None = None,
     servers = []
     for addr in p["binds"]:
         try:
-            kind = (type("_Server6Only", (_Server6,), {"v6only": True}) if addr == "::" and p["v6only"]
-                    else _Server6 if ":" in addr else _Server)
-            srv = kind((addr, port), handler)
+            srv = _Server((addr, port), handler)
         except OSError as e:  # one line, not a traceback (the 2026-11-16 audit)
             for s in servers:
                 s.server_close()
-            why = (("the port is taken: by another address in the bind list (chat.json's bind, or "
-                    "--bind) or another program" if servers else
-                    f"the port is taken: another wb chat serve ({service_hint('status')}) or "
-                    "another program") + "; --port picks another" if e.errno == errno.EADDRINUSE else
-                   "that address isn't on this machine (chat.json's bind, or --bind)"
-                   if e.errno == errno.EADDRNOTAVAIL else e.strerror or str(e))
+            why = (f"the port is taken: another wb chat serve ({service_hint('status')}) or another "
+                   "program; --port picks another" if e.errno == errno.EADDRINUSE else e.strerror or str(e))
             raise RuntimeError(f"can't listen on {addr}:{port}: {why}") from None
         srv.daemon_threads = True
         servers.append(srv)
     return servers, p
 
 
-def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, say=print) -> None:
-    servers, p = make_servers(port, binds, hosts)
+def serve(port: int, say=print) -> None:
+    servers, p = make_servers(port)
     # the port it runs on, for `wb chat url` and the pane's link: they asked without one and got
     # the default, wrong for a server on the free port the CLI advises (#349, the audit of 1.4)
     store.write_json(chat_dir() / "port.json", {"port": servers[0].server_address[1] if servers
@@ -3762,33 +3465,12 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
                                                 "start": _started(os.getpid())})
     for srv in servers[1:]:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-    say(f"web chat on {', '.join(f'{s.server_address[0]}:{port}' for s in servers)}"
-        + (f" (http://{p['names'][0]}:{port} on the tailnet)" if p["names"] else "")
-        + (f"; skipped {', '.join(p['skipped'])}" if p["skipped"] else ""))
-    if any(b in WILDCARD for b in p["binds"]):
-        say("every interface: anyone who can reach this machine and has the link can use it")
+    say(f"web chat on {', '.join(f'{s.server_address[0]}:{port}' for s in servers)}")
     if p["hosts"] is None:
         say("answering to any host name (hosts: *): the token is the only lock")
     def restart(why: str):  # the same command again, in this process: systemd and launchd see
         say(why)            # no exit, and a server wb chat on started has no supervisor to rerun it
         os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
-    if not binds or p["skipped"]:
-        # an address that comes and goes (tailscaled after login, a VPN): once the plan's set
-        # changes, rebind. Only a longer list was noticed, so a tailscale-only chat on loopback
-        # stayed there when the tailnet came up; and it exited 75, which ended a chat with no
-        # service manager (#200, the 2026-11-19 audit). A chat bound by chat.json alone (no
-        # --bind) also rebinds when the user's choice there changes: `wb chat reach` writes it,
-        # and its server runs on with nothing to restart it (#1355)
-        def replan():
-            while True:
-                time.sleep(REPLAN_EVERY)
-                try:
-                    now = set(plan(binds, hosts)["binds"])
-                except ConfigError:  # chat.json broken while it runs: keep serving what it bound
-                    continue
-                if now != set(p["binds"]):
-                    restart("the addresses to listen on changed: restarting to bind them")
-        threading.Thread(target=replan, daemon=True).start()
     def move(new: Path):  # OpenCode installed a newer generation beside this one's (#1525)
         say(f"a newer workbench is installed at {new}: restarting from it")
         os.chdir(new)
@@ -3880,12 +3562,5 @@ def port() -> int:
 
 def url(port: int) -> str:
     """The one link to open: localhost, the token in the fragment. Reaching it from another
-    device (Tailscale, a tunnel) is the user's own setup: they change the host in the link. A bind
-    list without loopback or a wildcard gets its first address instead: localhost reached nothing
-    there (#534)."""
-    host = "localhost"
-    binds = settings().get("bind") or []
-    if binds and not any(b in ("localhost", "127.0.0.1", "::1", *WILDCARD) for b in binds):
-        first = plan()["binds"][0]
-        host = f"[{first}]" if ":" in first else first
-    return f"http://{host}:{port}/#token={token()}"
+    device is a tunnel or proxy of the user's own to localhost: they change the host in the link."""
+    return f"http://localhost:{port}/#token={token()}"

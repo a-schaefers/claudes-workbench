@@ -41,7 +41,7 @@ const ctxFor = (device?: string) => device ? (devices[device] || pw.devices[devi
 
 let server!: ChildProcess  // started by run() before any use
 function startServer() {
-  server = spawn(join(ROOT, 'bin', 'wb'), ['chat', 'serve', '--port', String(PORT), '--bind', '127.0.0.1'],
+  server = spawn(join(ROOT, 'bin', 'wb'), ['chat', 'serve', '--port', String(PORT)],
     { env, stdio: 'ignore' })
 }
 async function stopServer() {
@@ -567,7 +567,7 @@ async function run(engine: string, device?: string) {
     // its command as code, never its backticks as text (#1323), on the port this chat runs on: this
     // test's 13371, where the card said 1337 whatever the port (#1562)
     const cmd = await page.$$eval('#app code', (c: Element[]) => c.map(x => x.textContent))
-    if (JSON.stringify(cmd) !== JSON.stringify([`tailscale serve --bg ${PORT}`]) || (await page.textContent('#app')).includes('`'))
+    if (JSON.stringify(cmd) !== JSON.stringify([`localhost:${PORT}`]) || (await page.textContent('#app')).includes('`'))
       throw new Error('the install card: ' + await page.textContent('#app'))
     const notify = await page.textContent('#notify')
     if (engine === 'webkit' ? !notify.includes('installed app') : !(await page.locator('#push').count())) throw new Error('notifications: ' + notify)
@@ -1582,7 +1582,7 @@ async function run(engine: string, device?: string) {
       if (await waiting(p)) throw new Error('the clip is still waiting')
       await p.fill('#input', '')
       writeFileSync(env.WB_AUDIO, JSON.stringify({ ear: { kind: 'listen', gpu: false, command: 'sh -c "echo Run the tests again." sh {in}' } }))
-      // a proxy's 5xx (tailscale serve while the chat restarts) is in the way, not the listener's
+      // a proxy's 5xx (a tunnel's while the chat restarts) is in the way, not the listener's
       // verdict: kept and asked again. A page route sees no request a service worker makes
       const vc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
       try {

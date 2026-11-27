@@ -36,10 +36,10 @@ from urllib.parse import quote, urlencode
 
 WAIT_EACH = 300  # seconds one GET /api/wait may hold (the server's default)
 # A wait cut by the server going away for a moment (it re-execs itself on a code change, `wb
-# update`, a rebind or a restart of its unit; a proxy in front answers 502 to 504 meanwhile) is
+# update` or a restart of its unit; a proxy in front answers 502 to 504 meanwhile) is
 # asked again after a pause growing from RETRY_FIRST to RETRY_MOST seconds: it ended the client at
 # once with a bare error and no `--after` id (#1107, 2026-11-23). A chat cut longer than any
-# restart takes (OUTAGE_MOST seconds in a row: `wb chat off`, the machine asleep, the tailnet down)
+# restart takes (OUTAGE_MOST seconds in a row: `wb chat off`, the machine asleep, a tunnel down)
 # ends it with exit 2 and the `--after` id, never a wait to the deadline (an hour by default:
 # the #1107 review, 2026-11-23)
 TRANSIENT = (502, 503, 504)

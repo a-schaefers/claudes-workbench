@@ -141,7 +141,7 @@ class ChatDefault(Base):
         port, servers = free_port(), []
 
         def unit():  # systemd starting wb-chat.service: a server on the unit's port
-            srv = chat.make_servers(port, ["127.0.0.1"])[0][0]
+            srv = chat.make_servers(port)[0][0]
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             servers.append(srv)
         self.addCleanup(lambda: [(s.shutdown(), s.server_close(), s.RequestHandlerClass.hub.close())

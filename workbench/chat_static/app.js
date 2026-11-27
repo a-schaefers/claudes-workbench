@@ -305,7 +305,7 @@
             return 'Yesterday';
         return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
     }
-    // navigator.clipboard exists only in a secure context: over plain http at a LAN or tailnet
+    // navigator.clipboard exists only in a secure context: over plain http through a tunnel's
     // address it is undefined and every copy said "copy failed" (#745). There a selected textarea
     // and execCommand('copy') still work, inside the tap's user gesture.
     async function copyText(text) {
@@ -2505,8 +2505,9 @@
     // the server's; the cards said 1337 whatever it was, and `--bg 1337` served nothing, or another
     // account's chat (#1562, 2026-11-26)
     const servePort = () => location.port || '1337';
+    // the way to https names no product: any tunnel or proxy the user trusts, pointed at localhost (#1616)
     const HTTPS = () => "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
-        `on the computer, \`tailscale serve --bg ${servePort()}\` gives the chat an https address on your tailnet.`;
+        `point an https tunnel or proxy you trust at \`localhost:${servePort()}\` on the computer.`;
     function drawApp() {
         const box = $('app');
         box.replaceChildren();
@@ -2517,7 +2518,7 @@
             return paraCode(box, HTTPS(), 'small');
         if (!https)
             return paraCode(box, 'The app installs from the https address, so the one app works on every device: ' +
-                `on the computer, \`tailscale serve --bg ${servePort()}\` gives the chat one on your tailnet.`, 'small');
+                `point an https tunnel or proxy you trust at \`localhost:${servePort()}\` on the computer.`, 'small');
         if (installEvt) {
             const b = document.createElement('button');
             b.type = 'button';

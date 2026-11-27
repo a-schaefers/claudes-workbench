@@ -239,7 +239,7 @@ class ReleaseGates(unittest.TestCase):
         # #482 (the audit of 1.8): the by-hand runs that would earn 9/10, each on the exact SHA
         checklist = (ROOT / "docs" / "release-checklist.md").read_text()
         self.assertIn("| Run | Result | SHA | OS, filesystem | Versions | Hardware |", checklist)
-        for want in ("--no-sign", "blobless", "LFS", "8,192", "Landlock ABI 9", "tailscale serve",
+        for want in ("--no-sign", "blobless", "LFS", "8,192", "Landlock ABI 9", "https tunnel or proxy",
                      "IPv6-only", "real phones", "Python 3.11", "1.7 state directory", "Metal",
                      "mounted Windows volume", "AMD", "NVIDIA", "shared Ollama", "never a gate"):
             self.assertIn(want, checklist)

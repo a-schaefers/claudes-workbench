@@ -170,8 +170,8 @@ model's provider, unless that model is local.
   them.
 - Accepted commits carry your name as author and a
   [trailer](ARCHITECTURE.md#git-commits-and-projects) naming the model that wrote the code.
-- To reach the web app and its [chat](ARCHITECTURE.md#the-web-chat) from your phone or another
-  computer, over Tailscale or any network you choose, ask the orchestrator agent.
+- To reach the web app and its [chat](ARCHITECTURE.md#the-web-chat) from another device, point a
+  tunnel or proxy you trust at it, or ask the orchestrator agent.
 - When a review turns up a lesson, the orchestrator agent records it as a
   [skill](ARCHITECTURE.md#the-skill-library) and gives it to later subagents.
 - The orchestrator agent can also direct local [image](ARCHITECTURE.md#images) and

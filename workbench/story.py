@@ -96,7 +96,6 @@ TEXTS: dict[str, str] = {
             "matters, and most work can run from here, more so with {who} run with permissions granted.",
     "link.where": "Open the web app to message {who} from anywhere and change your settings: its link is on the "
                   "/workbench pane's modeline, and `wb chat url` prints it (the token in it is the key: keep it private).",
-    "link.reach": "To open it on your phone over Tailscale: `wb chat reach tailnet`.",
     "moved.deepmode": "Deepmode is off: in 2.2, on runs every substantive request as a deep workflow (wb run) on "
                       "your agents, within the day cap, so 2.1's Dynamic workflows on didn't carry over. "
                       "/deepmode on turns it on.",
