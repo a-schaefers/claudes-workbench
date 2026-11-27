@@ -2328,13 +2328,15 @@ def cmd_feedback(a):
     pictures = _keep_images(task, shown, n)
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
-                    # an infra stop's resume carries a self-review on as wb resume's does (#1228)
-                    # and after an env skip: no review counted, the pane's "resumed" (#1257)
-                    # but not past a set-aside or a rewind (`rewound_to`): that self-review is
-                    # over, and held to its tree, Claude's edits since were set aside (#1610)
+                    # an infra stop's or an env skip's: no review counted, the pane's "resumed"
+                    # (#1228, #1257), but never a self-review's green tree carried on: this round
+                    # is Claude's ask, not the self-review's. Carried, a quit on the green tree
+                    # (nothing set aside, no `rewound_to`) held the feedback round to it, and its
+                    # failing tests set the asked change aside as the self-review's under a
+                    # tests: PASS notice, which wb accept committed without (#1610, 2026-11-27);
+                    # wb resume, the carry-on itself, still carries it
                     **({} if unsent else {"round_for": "feedback"} if not (resumed or env) else
-                       {"round_for": "resume",
-                        "self_review_tree": None if back else runner.carried_tree(task)}),
+                       {"round_for": "resume", "self_review_tree": None}),
                     **({"step_note": None} if step else {}),  # #1300
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0, **pictures)

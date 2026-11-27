@@ -1809,8 +1809,9 @@ SELF_REVIEW_ROUNDS = ("self_review", "fresh", "steer", "resume")
 def carried_tree(task: store.Task) -> str | None:
     """Status `self_review_tree` for the next round when it carries on this one (a handover, a
     steer round, a resume), None when this round is no part of a self-review: what _full_round,
-    _steer_round, wb resume and wb feedback's infra resume write, so the key outlives only the
-    rounds that carry a self-review on."""
+    _steer_round and wb resume write, so the key outlives only the rounds that carry a
+    self-review on. Never wb feedback's: its round is Claude's ask, held to no green tree
+    (#1610, 2026-11-27)."""
     st = task.status
     return st.get("self_review_tree") if st.get("round_for") in SELF_REVIEW_ROUNDS else None
 

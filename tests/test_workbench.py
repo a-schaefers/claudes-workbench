@@ -8582,8 +8582,11 @@ class Context(Base):
         # aside, but the takeover kept its green tree and the hand-back resumed under it: its
         # tests failing on Claude's unfinished edits, drive set them aside as the self-review's,
         # no auto-fix, a tests: PASS notice, and wb accept committed without feature.txt. The
-        # same after a quit on the green tree (nothing set aside), and with no takeover at all
-        for name, green, take in (("t-qtf", False, True), ("t-qtg", True, True), ("t-qtn", False, False)):
+        # same after a quit on the green tree (nothing set aside), and with no takeover at all;
+        # on the green tree with no takeover (no `rewound_to`, round_for still self_review) the
+        # feedback round carried the green tree on until it never did (#1610's review)
+        for name, green, take in (("t-qtf", False, True), ("t-qtg", True, True), ("t-qtn", False, False),
+                                  ("t-qgn", True, False)):
             with self.subTest(green=green, takeover=take):
                 os.environ["FAKE_SELF_STALL"] = "1"
                 t = self.mid_check(name, "grep -qx 42 answer.txt && ! grep -qs broken notes.txt")
@@ -8872,7 +8875,9 @@ class Context(Base):
     def test_a_resume_keeps_a_self_reviews_green_tree_and_drops_any_other_rounds(self):
         # #1228: the update path, a self-review written as round 2 and stopped before it ran, then
         # wb resume; a resume after a resume; a resume of a feedback round, its key a stale one;
-        # and wb feedback after an infra stop of a self-review, the other round_for `resume`
+        # and wb feedback after an infra stop of a self-review, the other round_for `resume`, held
+        # to no green tree: it is Claude's ask, whose failing tests set the asked change aside as
+        # the self-review's (#1610, 2026-11-27)
         self.start("t-srz", "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
         wait_phase("t-srz", {"review"})
         t = store.Task("t-srz")
@@ -8897,7 +8902,8 @@ class Context(Base):
         with mock.patch.object(cli, "spawn_runner"):
             run_wb("feedback", "t-srz", "--text", "carry on")
         self.assertEqual((t.status["round"], t.status["round_for"], runner.green_tree(t, "began")),
-                         (6, "resume", "green"))
+                         (6, "resume", None))
+        self.assertIsNone(t.status["self_review_tree"])
 
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
         self.start("t-nsr", "ok", "--test", TEST_CMD)
