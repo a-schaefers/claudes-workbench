@@ -20,7 +20,7 @@ def expected(key: str, value) -> list[str]:
     """The pane's wb call for each row, written out apart from settings._argv."""
     head, _, rest = key.partition("-")
     fixed = {"agents": ["route", "all", value], "busy": ["route", "busy", value], "coding": ["coding", value],
-             "workflows": ["workflows", value],
+             "workflows": ["workflows", value], "deep-side": ["workflows", "side", value],  # #1627
              "progress": ["progress", value], "splash": ["splash", value],
              "probe": ["experiment", "probe", value], "optimize": ["optimize", "start"],
              "cap": ["route", "cap", value], "driver": ["route", "driver", value]}
@@ -143,6 +143,15 @@ class Settings(Rows):
         self.assertEqual(json.loads(self.routes.read_text())["roles"]["tests"]["label"], "Tests")
         self.assertTrue(any(ln.startswith("  add-role: Add a role: wb route add <name> --label TEXT")
                             for ln in cli.settings_lines(settings.rows(fresh=True))))
+
+    def test_deep_workflows_side_is_a_row_of_the_workflows_card_and_its_command_is_logged_1627(self):
+        by = {r["key"]: r for r in settings.rows(fresh=True)}
+        row = by["deep-side"]
+        self.assertEqual((row["group"], row["value"]), ("workflows", "roles"))
+        self.assertEqual([c["value"] for c in row["choices"]], list(routes.RUN_SIDES))
+        self.assertEqual(settings._argv(row, "gpu"), ["workflows", "side", "gpu"])
+        for cmd in ("workflows", "deepmode"):
+            self.assertEqual(settings.key_for([cmd, "side", "api"]), ("deep-side", "api"))
 
     def test_each_role_has_a_card_its_own_sides_model_on_it_the_other_and_thinking_under_more_1553_1626(self):
         # #1553 (2026-11-26): a role's GPU|API, GPU model, API model and thinking were in three

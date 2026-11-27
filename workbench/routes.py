@@ -294,6 +294,31 @@ def effective_via(doc: dict, role: str) -> str:
     return use if use != "both" else doc["roles"][role]["via"]
 
 
+# Which side a deep workflow's items run on (#1627, the owner, 2026-11-27: "enforce what type of
+# models get used in deepcode/deepmode via settings"): workflows.json `side`, Settings' Dynamic
+# workflows card or `wb deepmode side`. `roles`, each item on its role's own side (the default);
+# `gpu`, every item on the GPU, its role's pin or the router's pick, never a paid model; `api`,
+# every item on its role's API model, the Agents switch and the day cap still deciding. A model
+# per stage is the role's: a flow's stage names its role, and the role names its models. Read
+# live, so a change reaches the run's next item, its estimate and its budget checks alike.
+RUN_SIDES = ("roles", "gpu", "api")
+RUN_SIDE_SAID = {"gpu": "GPU only", "api": "API only"}
+
+
+def run_side() -> str:
+    doc = store.read_json(store.home() / "workflows.json", {})
+    v = doc.get("side") if isinstance(doc, dict) else None
+    return v if v in RUN_SIDES else "roles"
+
+
+def run_via(doc: dict, role: str, side: str) -> str:
+    """Where a run's item of ``role`` runs under ``side``: effective_via as each role says, else
+    the side asked for; API only with Agents on GPU reads the GPU, which resolve refuses."""
+    if side == "gpu" or (side == "api" and doc.get("use") == "gpu"):
+        return "gpu"
+    return "api" if side == "api" else effective_via(doc, role)
+
+
 def agents_gpu() -> bool:
     """Whether the Agents switch is GPU now, so no API task may begin a round (#1213). False for
     a routes.json that can't be read: wb start refuses that file, and a task already started
@@ -485,7 +510,7 @@ def _review(row: dict) -> dict:
 
 
 def fallback_pick(doc: dict, role: str, size: str, stack, name: str | None, primary, tokens: int | None = None,
-                  local: str = "") -> tuple | str:
+                  local: str = "", side: str = "roles") -> tuple | str:
     """The role's fallback for a task whose API model ``primary`` can't take it now (#1196):
     (model, state, why, routed), or the line saying why the fallback can't either ("" when the role
     has none). ``local``: why the task's code must stay on this machine (a local-only spot), which
@@ -497,6 +522,8 @@ def fallback_pick(doc: dict, role: str, size: str, stack, name: str | None, prim
     fb = fallback_of(doc, role)
     if not fb:
         return ""
+    if side == "api" and fb == FALLBACK_GPU:  # a run's item on API only never moves to the GPU (#1627)
+        return f"the {role} role's fallback is the GPU, and deep workflows run on API only (wb deepmode side)"
     row = doc["roles"][role]
     if fb == FALLBACK_GPU:
         if row["gpu"] != AUTO:
@@ -1213,7 +1240,7 @@ def model_line(model_id: str, routed: dict) -> str:
 
 
 def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None = None,
-            gate: Callable | None = None, tokens: int | None = None) -> tuple:
+            gate: Callable | None = None, tokens: int | None = None, side: str = "roles") -> tuple:
     """wb start's model: (model, state, why, routed), `routed` the task.json keys (`via`, `role`;
     for API `provider`, `provider_name`, `thinking`, `said`, `said_ts`). Refused, with the one
     line, for what can't run as asked. In order: routes.json must read (never as all GPU); a
@@ -1226,7 +1253,8 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     Either API path meets meter.refusal (no price, or today at the cap, #1019, or within one
     request at its worst of it, #1150, its input ``tokens``: round 1's, runner.first_tokens,
     #1173; None, a fresh session's least) first: the `--model` one before the dialog, the role's
-    (agreed to in `wb route`'s) before it starts."""
+    (agreed to in `wb route`'s) before it starts. ``side``: a deep workflow's item's (run_side,
+    #1627), which overrides the role's own side."""
     from . import meter, models, router  # they import more than routes needs at its import
     first = meter.FIRST_TOKENS if tokens is None else tokens
     try:
@@ -1252,7 +1280,16 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
             "thinking": "off", "thinking_shown": thinking_of(m, "off"),
             "said": "asked for" + (", approved in the dialog" if approved else "")}
     row = doc["roles"][role]
-    if effective_via(doc, role) == "gpu":
+    via = run_via(doc, role, side)
+    forced = side in RUN_SIDE_SAID and via != effective_via(doc, role)
+    if side == "api" and doc["use"] == "gpu":
+        raise Refused(f"deep workflows run on API only (wb deepmode side), but {AGENTS_GPU}. {AGENTS_BACK}, "
+                      "or set deep workflows to run as each role says (wb deepmode side roles)")
+    if forced and via == "api" and not row.get("api"):
+        raise Refused(f"{role} role has no API model, and deep workflows run on API only (wb deepmode side): "
+                      f"ask the user to pick one (wb route {role} --api <id>) or set deep workflows to run as "
+                      "each role says (wb deepmode side roles)")
+    if via == "gpu":
         if row["gpu"] != AUTO:  # the user's pin: that model, never the router's other pick
             # by its exact id, as wb route stored it and its listing finds it: models.resolve's
             # fragment match ran a retired qwen3:8b pin's role on qwen3:8b-q8_0, said as the pin,
@@ -1280,9 +1317,12 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     # a role on an unpriced model ran with no cap at all once #1016's path skipped this (wave 2's review)
     if why := meter.refusal(m, role, tokens=first):
         raise Refused(why)
+    said = row.get("said") or ""
+    if forced:  # the role is on the GPU: the run's API only sent it here (#1627)
+        said = f"{said}; deep workflows API only (wb deepmode side)" if said else "deep workflows API only (wb deepmode side)"
     routed = {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
               "thinking": row["thinking"],
-              "thinking_shown": thinking_of(m, row["thinking"], row.get("thinking_review")), **_review(row), "said": row.get("said") or "", "said_ts": row.get("ts")}
+              "thinking_shown": thinking_of(m, row["thinking"], row.get("thinking_review")), **_review(row), "said": said, "said_ts": row.get("ts")}
     # an OpenRouter role's backends (#1021): task.json's `order`, which the keyhole routes every
     # request by; the user agreed to them in the dialog, and once they never reached the task
     if row.get("order") and m.provider == OPENROUTER:

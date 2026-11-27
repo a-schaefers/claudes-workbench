@@ -758,7 +758,7 @@ def ago(ts) -> str:
 
 
 def pick_model(role: str, size: str, wanted: str | None, stack=(), name: str | None = None,
-               tokens: int | None = None) -> tuple[models.Model, dict, str, dict]:
+               tokens: int | None = None, side: str = "roles") -> tuple[models.Model, dict, str, dict]:
     """The task's model, its state, why, and how it was routed (task.json's `via`, `role` and an
     API model's keys): routes.resolve (#1016), the one asked for (an API one needs the user's yes in
     the mod's dialog, #1014, which cmd_start takes last: cli.start_gate), else the role's side: the router's choice on the evidence for the
@@ -770,7 +770,7 @@ def pick_model(role: str, size: str, wanted: str | None, stack=(), name: str | N
         if not API_RUNS:
             die(f"{m.id} {API_NOT_YET}", 3)
     try:
-        return routes.resolve(role, size, wanted, stack, name, gate=gate, tokens=tokens)
+        return routes.resolve(role, size, wanted, stack, name, gate=gate, tokens=tokens, side=side)
     except routes.Refused as e:
         die(str(e), e.code)
 
@@ -871,7 +871,8 @@ def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack,
         return ""
     local = ("this task is kept local (--local-only)" if a.local_only else
              f"{repo.name} is kept local ({kept})" if (kept := privacy.local_only(repo, sub)) else "")
-    got = routes.fallback_pick(doc, role, size, stack, getattr(a, "name", None), m, tokens, local)
+    got = routes.fallback_pick(doc, role, size, stack, getattr(a, "name", None), m, tokens, local,
+                               side=routes.run_side() if getattr(a, "run", None) else "roles")
     if not isinstance(got, tuple):
         return got
     fb = got[0]
@@ -1356,7 +1357,7 @@ def _local_only_check(a, repo: Path, role: str, sub: str | None) -> None:
     """Refuse an API model for a local-only spot before any model is picked (#1021): exit 3 with
     the choices (local_only_refusal); never the GPU instead."""
     if why := local_only_refusal(repo, sub, role, a.model, a.local_only, lane_places(repo, sub, a),
-                                 a.base):
+                                 a.base, side=routes.run_side() if getattr(a, "run", None) else "roles"):
         die(why, 3)
 
 
@@ -1381,7 +1382,7 @@ def lane_places(repo: Path, sub: str | None, a) -> list[tuple[str, str]]:
 
 
 def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None,
-                       this_task: bool = False, places=(), base: str | None = None) -> str:
+                       this_task: bool = False, places=(), base: str | None = None, side: str = "roles") -> str:
     """Why an API model may not take this spot (commands.json `repos.<path>.local_only`, or
     --local-only: ``this_task``), or '': ``model`` (--model) when it is an API id, else the
     role's side as it runs (routes.effective_via: the Agents switch over the role's own `via`).
@@ -1408,7 +1409,8 @@ def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None
         # the Agents switch over the role's own via: its `use: api` once sent a local-only repo's
         # code with the role's via on gpu, and `use: gpu` refused a start the GPU ran (wave 2's review)
         entry = doc["roles"].get(role) or {}
-        if routes.effective_via(doc, role) != "api" or not entry.get("api"):
+        # and a deep workflow's side over both (#1627): API only sends a GPU role's item there
+        if routes.run_via(doc, role, side) != "api" or not entry.get("api"):
             return ""
         model_id, asked = str(entry["api"]), False
     at = privacy.home_path(Path(key).expanduser() if key else repo)
@@ -1897,7 +1899,9 @@ def cmd_start(a):
     # round 1's first request, input and all, for the day cap's look ahead: without its input a
     # start within that of the cap passed, then the room refused that request at once (#1173)
     first = runner.first_tokens(prompt=spec_text, images=len(shown))  # each image too (#1199's review)
-    m, state, why, routed = pick_model(role, size, a.model, stack, a.name, tokens=first)
+    # a deep workflow's item: the side Settings' Dynamic workflows card holds them to (#1627)
+    m, state, why, routed = pick_model(role, size, a.model, stack, a.name, tokens=first,
+                                       side=routes.run_side() if getattr(a, "run", None) else "roles")
     # a rate limit or outage a task met on this provider (api-health.json) is no refusal: the
     # keyhole waits it out inside the round, which stops as rate_limited or outage if it holds.
     # One 503 any task saw blocked every start of the role for 60 s, --queue and --force too, and
@@ -4977,6 +4981,9 @@ WORKFLOWS_LABEL = "Dynamic workflows (deepmode)"
 # request did without the user asked. A 2.1 on starts 2.2 off, and `wb deepmode --moved` (each
 # host, once a load) says so once, the story's `moved.deepmode`.
 DEEPMODE_KEY = "deepmode"
+RUN_SIDE_LABEL = "Deep workflows run on"
+RUN_SIDES_SAID = {"roles": "each role's own side (default)", "gpu": "the GPU only: never a paid model",
+                  "api": "API only: each role's API model, within the day cap"}
 
 
 def workflows_mode() -> str:
@@ -5011,10 +5018,33 @@ def cmd_workflows(a):
         if line := deepmode_moved():
             print(line)
         return
+    path = store.home() / "workflows.json"
+    if a.state == "side":  # which side the runs' items take (#1627)
+        if a.side is None:
+            print(f"{RUN_SIDE_LABEL}: {RUN_SIDES_SAID[routes.run_side()]}")
+            return
+        # API only sends a GPU role's items to its API model: the user's own choice, made in the web
+        # app's Settings or a terminal, never by a model (no dialog asks for it)
+        if a.side == "api" and store.under_model():
+            die(f"{RUN_SIDE_LABEL} API only is the user's to set: in the web app's Settings "
+                "(Dynamic workflows) or a terminal (wb deepmode side api)", 3)
+        with store.locked(store.home() / "locks" / "workflows.lock"):
+            doc = store.read_json(path, {})
+            doc = doc if isinstance(doc, dict) else {}
+            store.write_json(path, {**doc, "side": a.side, "ts": store.now()})
+        print(f"{RUN_SIDE_LABEL}: {RUN_SIDES_SAID[routes.run_side()]}")
+        return
+    if a.side is not None:
+        die("a side goes with side: wb deepmode side roles|gpu|api")
     if a.state:
-        store.write_json(store.home() / "workflows.json", {DEEPMODE_KEY: a.state, "ts": store.now()})
+        with store.locked(store.home() / "locks" / "workflows.lock"):
+            doc = store.read_json(path, {})
+            keep = {"side": doc["side"]} if isinstance(doc, dict) and doc.get("side") in routes.RUN_SIDES else {}
+            store.write_json(path, {DEEPMODE_KEY: a.state, **keep, "ts": store.now()})
     label, why = WORKFLOWS[workflows_mode()]
-    print(f"{WORKFLOWS_LABEL}: {label}{' (default)' if label == 'Off' else ''}. {why}")
+    side = routes.RUN_SIDE_SAID.get(routes.run_side())
+    print(f"{WORKFLOWS_LABEL}: {label}{' (default)' if label == 'Off' else ''}. {why}"
+          + (f" Their items run {side} (wb deepmode side)." if side else ""))
 
 
 def cmd_run(a):
@@ -9729,8 +9759,8 @@ class _SettingWrite:
 
 def _setting_write(raw: list[str]) -> _SettingWrite | None:
     """The log of a Settings row's own command line (settings.key_for), or None for any other."""
-    if not raw or raw[0] not in ("route", "coding", "workflows", "progress", "splash", "experiment", "optimize",
-                                 "model", "image", "audio", "chat"):  # settings.LOGGED: no import for the rest
+    if not raw or raw[0] not in ("route", "coding", "workflows", "deepmode", "progress", "splash", "experiment",
+                                 "optimize", "model", "image", "audio", "chat"):  # settings.LOGGED: no import for the rest
         return None
     from . import settings  # it imports this module
     hit = settings.key_for(raw)
@@ -10104,7 +10134,10 @@ def parser() -> argparse.ArgumentParser:
         s = sub.add_parser(word, help="Dynamic workflows (deepmode): whether substantive requests run as "
                            "deep workflows (wb run): show, or set on or off (the default)"
                            if word == "deepmode" else "the same as wb deepmode")
-        s.add_argument("state", nargs="?", choices=["on", "off"])
+        s.add_argument("state", nargs="?", choices=["on", "off", "side"],
+                       help="on or off; side: which side deep workflows' items run on (#1627)")
+        s.add_argument("side", nargs="?", choices=list(routes.RUN_SIDES),
+                       help="side: roles (each role's own, the default), gpu (never a paid model) or api")
         s.add_argument("--rule", action="store_true", help="the rule a host adds when the user types deepcode")
         s.add_argument("--moved", action="store_true", help="once, for a host: the line saying a 2.1 Dynamic "
                        "workflows on starts 2.2 with deepmode off (#1507); nothing otherwise")

@@ -1182,7 +1182,8 @@ def stage_model(stage: dict, it: "Item | None" = None):
         doc = routes.read()
     except routes.RoutesError:
         return None
-    if routes.effective_via(doc, role) != "api" or not doc["roles"][role].get("api"):
+    # the side Settings holds deep workflows to (#1627), as wb start resolves the item
+    if routes.run_via(doc, role, routes.run_side()) != "api" or not doc["roles"][role].get("api"):
         return None
     m = models.lookup(doc["roles"][role]["api"], cached=True)
     return m if m is not None and m.kind == "api" else None
@@ -2316,6 +2317,7 @@ def report_of(name: str) -> dict:
     used = spent(run)
     rep["spend"] = {"usd": used["usd"], "budget_usd": run.spec.get("budget_usd"), "gpu_min": used["gpu_min"],
                     "budget_min": run.spec.get("budget_min")}
+    rep["side"] = routes.run_side()  # the side its next items take (#1627)
     return rep
 
 
@@ -2323,7 +2325,8 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
     """The report as Claude reads it: short lines, each result as JSON (data)."""
     out = [f"run {rep['run']} · flow {rep['flow']} · {rep['phase']} · {meter.usd(rep['spend']['usd'])}"
            + (f" of {meter.usd(rep['spend']['budget_usd'])}" if rep["spend"].get("budget_usd") is not None else "")
-           + (f" · GPU {rep['spend']['gpu_min']:g} min" if rep["spend"].get("gpu_min") else "")]
+           + (f" · GPU {rep['spend']['gpu_min']:g} min" if rep["spend"].get("gpu_min") else "")
+           + (f" · {routes.RUN_SIDE_SAID[rep['side']]}" if rep.get("side") in routes.RUN_SIDE_SAID else "")]
     def js(v):
         return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
     for what in ("final", "results", "filtered", "superseded", "null", "not_run", "pending"):
@@ -2626,6 +2629,7 @@ def cmd_start(a) -> None:
             # (#1541, 2026-11-26); null for a detached HEAD, tag or commit, as a task's
             "base_ref": a.base, "base_branch": gitops.start_branch(repo, a.base or "HEAD"), "cwd": os.getcwd(), "budget_usd": usd_, "budget_min": mins,
             "overnight": bool(a.overnight), "trial": bool(a.trial), "no_claude_md": bool(a.no_claude_md),
+            "side": routes.run_side(),  # as it started; the items read it live (#1627)
             "created": store.now(), "driver": {"python": sys.executable, "machine": store.machine()},
             **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
             # or an OpenCode driver session's (#1309, as wb start's task.json): `wb run stop` and
@@ -2639,7 +2643,9 @@ def cmd_start(a) -> None:
     run = Run(a.name)
     run.log(kind="start", flow=flow["name"], flow_sha=spec["flow_sha"])
     pid = spawn(run)
-    print(f"run {a.name}: flow {flow['name']} · {roles} · estimate {est}"
+    side = routes.RUN_SIDE_SAID.get(routes.run_side())
+    print(f"run {a.name}: flow {flow['name']} · {roles}" + (f" · {side} (wb deepmode side)" if side else "")
+          + f" · estimate {est}"
           + (f" (and {', '.join(later)} as their items come)" if later else "")
           + (f" · budget {meter.usd(usd_)}" if usd_ is not None else "") + f" · driver pid {pid}")
     for line in dirty + said:

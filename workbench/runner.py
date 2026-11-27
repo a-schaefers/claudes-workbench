@@ -5857,7 +5857,8 @@ def _fallback_move(task: store.Task, n: int, rnd: dict, before: bool = False) ->
     except Exception:  # an estimate: the fresh session's least
         tokens = None
     got = routes.fallback_pick(doc, role, spec.get("size") or "significant", spec.get("stack") or [],
-                               task.name, primary, tokens, local)
+                               task.name, primary, tokens, local,
+                               side=routes.run_side() if spec.get("run") else "roles")  # #1627
 
     def stays(why: str) -> None:
         text = f"{why}: " + (f"the round waits for {primary.provider}'s credit" if before

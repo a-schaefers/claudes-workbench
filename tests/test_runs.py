@@ -15,7 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from workbench import ask_mcp, cards, cli, context, lane, meter, models, runner, runs, schema, store
+from workbench import ask_mcp, cards, cli, context, lane, meter, models, routes, runner, runs, schema, store
 from workbench.watch import wait_exit
 from tests import test_workbench  # its Lane's helpers, never its classes here: they would run twice
 from tests.test_workbench import SPEND_FLASH, SPEND_FREE, SPEND_NONE, Base, home_outside_the_lane, run_wb, wait_phase
@@ -2359,6 +2359,54 @@ class RunsApi(Base):
         self.assertEqual(code, 0, err)
         self.assertIn("code trivial (GPU), then significant (API)", out)
         self.assertIn("code's escalations to significant (API)", out)
+
+    def test_settings_side_for_deep_workflows_holds_every_item_to_the_gpu_or_to_api_1627(self):
+        # #1627 (the owner, 2026-11-27): "enforce what type of models get used in deepcode/deepmode
+        # via settings": a run's items took their role's side with no say of the user's
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+            "trivial": {"via": "gpu", "api": SPEND_FLASH}, "significant": {"via": "api", "api": SPEND_FLASH}}})
+        meter._CAP.clear()
+        self.assertEqual(run_wb("deepmode", "side"), "Deep workflows run on: each role's own side (default)\n")
+        fix, audit = {"id": "tidy", "role": "trivial", "prompt": "Tidy it."}, runs.stages(AUDIT)[0]
+        self.assertEqual((runs.stage_role(fix), runs.stage_role(audit)), ("trivial", "significant"))
+        self.assertEqual((runs.stage_model(fix), runs.stage_model(audit).id), (None, SPEND_FLASH))
+        self.assertIn("the GPU only", run_wb("deepmode", "side", "gpu"))
+        self.assertEqual((runs.stage_model(fix), runs.stage_model(audit)), (None, None))   # nothing paid
+        run_wb("deepmode", "on")                                     # deepmode on keeps the side
+        self.assertEqual((cli.workflows_mode(), routes.run_side()), ("on", "gpu"))
+        self.assertIn("Their items run GPU only (wb deepmode side).", run_wb("deepmode"))
+        run, out = self.start("gpuonly")
+        self.assertIn("find significant (GPU), verify significant (GPU) · GPU only (wb deepmode side) · estimate $0", out)
+        self.assertIn("· GPU only", runs.report_lines(runs.report_of("gpuonly"))[0])
+        # API only: a GPU role's item goes to its API model, said so; never from a model's shell
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            code, _, err = wb("deepmode", "side", "api")
+        self.assertEqual(code, 3)
+        self.assertIn("API only is the user's to set: in the web app's Settings", err)
+        self.assertEqual(routes.run_side(), "gpu")
+        run_wb("deepmode", "side", "api")
+        self.assertEqual(runs.stage_model(fix).id, SPEND_FLASH)
+        m, _, _, routed = routes.resolve("trivial", "trivial", None, side="api")
+        self.assertEqual((m.id, routed["via"]), (SPEND_FLASH, "api"))
+        self.assertIn("deep workflows API only (wb deepmode side)", routed["said"])
+        self.assertEqual(routes.run_via(routes.read(), "trivial", "roles"), "gpu")     # a task of its own: the role's
+        self.assertIn("is local-only (--local-only)", cli.local_only_refusal(self.repo, None, "trivial", None, True, side="api"))
+        self.assertEqual(cli.local_only_refusal(self.repo, None, "trivial", None, True), "")
+        doc = routes.read()
+        doc["roles"]["significant"]["fallback"] = routes.FALLBACK_GPU
+        self.assertIn("deep workflows run on API only", routes.fallback_pick(
+            doc, "significant", "significant", [], "t", models.lookup(SPEND_FLASH), side="api"))
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {"trivial": {"via": "gpu"}}})
+        with self.assertRaises(routes.Refused) as no_api:
+            routes.resolve("trivial", "trivial", None, side="api")
+        self.assertIn("trivial role has no API model, and deep workflows run on API only", str(no_api.exception))
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "use": "gpu", "roles": {
+            "trivial": {"via": "gpu", "api": SPEND_FLASH}}})
+        with self.assertRaises(routes.Refused) as agents:
+            routes.resolve("trivial", "trivial", None, side="api")
+        self.assertIn(f"deep workflows run on API only (wb deepmode side), but {routes.AGENTS_GPU}", str(agents.exception))
+        run_wb("deepmode", "side", "roles")
+        self.assertEqual(store.read_json(store.home() / "workflows.json")["deepmode"], "on")
 
     def test_a_code_item_refused_at_its_start_is_no_change_at_review_and_names_no_task(self):
         # #1531 (2026-11-26): _start logs the item's task before wb start runs, so a code item
