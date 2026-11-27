@@ -608,7 +608,8 @@ class ClaudeSets(Rows):
                 # an API row's models past those in use are counted, not listed (#1617)
                 rest = [c for c in r.get("choices") or [] if r.get("other") and c["value"] != r["value"]
                         and c.get("group") not in (None, settings.IN_USE, "GPU")]
-                for c in r.get("choices") or []:
+                # a form's one button is its fields' submit, not a value to list (#1625)
+                for c in (r.get("choices") or []) if r["kind"] != "form" else []:
                     mark = "*" if r["kind"] == "choice" and c["value"] == r["value"] else " "
                     says = "" if r.get("other") else f". {c['says']}"
                     (self.assertNotIn if c in rest else self.assertIn)(f"    {mark} {c['value']}: {c['label']}{says}", lines)
@@ -729,6 +730,8 @@ class OneWriter(Rows):
         rows = [r for r in settings.rows() if r["kind"] not in ("info", "note")]
         self.assertGreater(len(rows), 15)
         for r in rows:
+            if r["kind"] == "form":  # its value is its fields as JSON: ..._agents_and_roles_adds_one_1625
+                continue
             values = ["6"] if r["kind"] == "number" else [c["value"] for c in r["choices"]]
             for v in values:
                 with self.subTest(key=r["key"], value=v):

@@ -56,7 +56,7 @@ from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savi
 # GPU or API, then its GPU model, API model and thinking under More (`more`), where one role's
 # settings were spread over three cards, its API model 2,000 px below its GPU|API choice
 GROUPS = (*routes.ROLES, "shared", "gpu", "api", "setup", "workflows", "terminal", "experimental")
-KINDS = ("choice", "number", "info", "action", "note")
+KINDS = ("choice", "number", "info", "action", "note", "form")  # form: Add a role's fields, #1625
 ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_apply)
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
 READ_TIMEOUT_S = 15  # wb route --json, wb models --json (the pane's 15 s)

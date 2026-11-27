@@ -50225,7 +50225,7 @@ class RoleResolution(Base):
                       routes.summary(routes.read()))
         # taken names, reserved words and a bad like are refused, nothing written
         for argv, said in ((("docs-fr", "--label", "x", "--like", "trivial"), "is a role already"),
-                           (("trivial", "--label", "x", "--like", "trivial"), "is taken"),
+                           (("trivial", "--label", "x", "--like", "trivial"), "is a role already"),
                            (("busy", "--label", "x", "--like", "trivial"), "is taken"),
                            (("Bad_Name", "--label", "x", "--like", "trivial"), "lowercase letters")):
             code, _, err = self.wb("route", "add", *argv)
