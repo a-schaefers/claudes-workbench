@@ -2422,9 +2422,9 @@ def cmd_rewind(a):
     # the ignored files the agent wrote, as the runner's review trees hold them (#1259): without
     # them every rewind from a reviewed round said "your edits … kept nowhere" and named the
     # restored file "not as round N's" (the merge of 2.1 into main, 2026-11-25)
-    ignored = runner.ignored_to_commit(task)
+    ignored, caches = runner.ignored_to_commit(task), runner.run_caches(task)  # as the trees (#1593)
     try:
-        now, now_left, now_keep = gitops.review_snapshot(wt, force=ignored)
+        now, now_left, now_keep = gitops.review_snapshot(wt, force=ignored, skip=caches)
     except (gitops.GitError, OSError) as e:
         die(f"can't read the worktree: {e}")
     saved = ""
@@ -2452,7 +2452,7 @@ def cmd_rewind(a):
         return
     try:
         done = gitops.restore_tree(wt, want["tree"], want.get("keep") or [], now=now,
-                                   now_keep=now_keep, force=ignored)
+                                   now_keep=now_keep, force=ignored, skip=caches)
     except (gitops.GitError, OSError) as e:
         die(f"the rewind stopped partway ({e}): wb rewind {a.name} {a.round} again")
     # the stat names no file left as it is: a grown file the tree has read as deleted (#1198)
@@ -3316,9 +3316,11 @@ def cmd_diff(a):
             f"git -C {repo} diff {task.spec['base'][:12]} {tip}")
     base = gitops.diff_base(task, a.all)  # the web chat's task sheet's too (#1201)
     try:
-        # the ignored files --include commits too, as the review diff shows them (#1259)
+        # the ignored files --include commits too, as the review diff shows them (#1259), and
+        # not the run caches it leaves out (#1593)
         print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths,
-                          force=runner.ignored_to_commit(task)) or "(no changes)")
+                          force=runner.ignored_to_commit(task), skip=runner.run_caches(task))
+              or "(no changes)")
     except gitops.GitError as e:
         die(f"{e}\nthe branch's commits: git -C {repo} diff {task.spec['base'][:12]} {tip}")
 

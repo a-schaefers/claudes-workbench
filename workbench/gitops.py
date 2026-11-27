@@ -7,6 +7,7 @@ import fcntl
 import functools
 import hashlib
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -932,13 +933,42 @@ def nested_line(repos: list[str]) -> str:
 
 
 def changed(worktree: Path, skip=()) -> str:
-    """git status's lines, but for the paths in ``skip`` (the run caches commit_all leaves out)."""
+    """git status's lines, but for the new files in ``skip`` (the run caches commit_all leaves
+    out). Left out here, not by pathspec: one exclude per cache file put 2.4 MB in argv for an
+    un-ignored venv's 30,000 .pyc, and wb accept died on "Argument list too long" (#1593)."""
     if not Path(worktree).is_dir():  # removed under us (an accept, a discard)
         return ""
     # porcelain: the `XY path` lines whatever the user's status.branch or colours say (a
     # status.branch=true put "## delegate/<task>" in every round's changed files: the audit)
-    return git(worktree, "status", "--porcelain", "--untracked-files=all",
-               *(["--", ".", *(":(exclude,literal)" + p for p in skip)] if skip else [])).rstrip()
+    out = git(worktree, "status", "--porcelain", "--untracked-files=all").rstrip()
+    if not skip:
+        return out
+    # each as git() reads it: a byte that isn't UTF-8 as U+FFFD
+    gone = {os.fsencode(p).decode("utf-8", "replace") for p in skip}
+    return "\n".join(ln for ln in out.splitlines()
+                     if not (ln.startswith("?? ") and _unquoted(ln[3:]) in gone))
+
+
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _unquoted(path: str) -> str:
+    """A path as git status prints it: C-quoted when it holds a space, a quote, a backslash or a
+    control character (core.quotePath=false keeps other bytes as they are)."""
+    if len(path) < 2 or path[0] != '"' or path[-1] != '"':
+        return path
+    out, s, i = bytearray(), path[1:-1], 0
+    while i < len(s):
+        if s[i] == "\\" and re.fullmatch(r"[0-7]{3}", s[i + 1:i + 4]):
+            out.append(int(s[i + 1:i + 4], 8))
+            i += 4
+        elif s[i] == "\\" and s[i + 1:i + 2] in _C_ESCAPES:
+            out.append(_C_ESCAPES[s[i + 1]])
+            i += 2
+        else:
+            out += s[i].encode("utf-8", "surrogatepass")
+            i += 1
+    return out.decode("utf-8", "replace")
 
 
 # A changed-file list goes into every report and check-in Claude reads: whole, a build/ the
@@ -970,6 +1000,36 @@ def run_caches(worktree: Path, written=()) -> list[str]:
                 and (p.endswith(RUN_CACHE_SUFFIXES) or not RUN_CACHES.isdisjoint(p.split("/")))):
             out.append(p)
     return sorted(out)
+
+
+def cache_specs(worktree: Path, caches: list[str]) -> list[str]:
+    """The pathspecs that leave ``caches`` (run_caches') out of a `git add -A`, for add_all's
+    ``specs``: one `:(exclude,literal)<dir>/` per outermost directory that holds nothing but
+    them (no tracked file, no other new file, none of ``written``, which run_caches already took
+    out), else the file itself: a loose .pyc beside a module. One per cache file was an argv of
+    2.4 MB for an un-ignored venv's 30,000 .pyc, and wb accept and wb next died on "Argument
+    list too long" (#1593, 2026-11-27). Never a glob such as `**/__pycache__/**`: that would
+    leave out an edit to a tracked file under such a name too."""
+    if not caches:
+        return []
+    mine = set(caches)
+    held = {""}  # the directories something else lives in, and theirs
+    for out in (git_bytes(worktree, "ls-files", "-z"),
+                git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z")):
+        for f in out.split(b"\0"):
+            p = os.fsdecode(f).rstrip("/")
+            if p and p not in mine:
+                while p := p.rpartition("/")[0]:
+                    if p in held:
+                        break
+                    held.add(p)
+    specs = []
+    for c in caches:
+        parts = c.split("/")
+        top = next(("/".join(parts[:i]) + "/" for i in range(1, len(parts))
+                    if "/".join(parts[:i]) not in held), c)
+        specs.append(":(exclude,literal)" + top)
+    return list(dict.fromkeys(specs))
 
 
 def run_caches_line(paths: list[str]) -> str:
@@ -1171,7 +1231,7 @@ def mark(worktree: Path) -> str:
 
 
 def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None,
-                   new: list[bytes] | None = None, force=()) -> str | None:
+                   new: list[bytes] | None = None, force=(), skip=()) -> str | None:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone. The
     scratch index starts as a copy of the worktree's, so sparse-checkout's skip-worktree entries
@@ -1182,7 +1242,9 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
     are added, beside the tracked files' changes (snapshot_left). ``force``: files git ignores
     added too (`add -f`), the ones wb accept commits with --include (runner.ignored_to_commit):
     left out, an agent's feedback-round edit of its lib/util.py read "the diff since your last
-    review: (no changes)" and --include committed code Claude never saw (#1259, 2026-11-24)."""
+    review: (no changes)" and --include committed code Claude never saw (#1259, 2026-11-24).
+    ``skip``: run caches (run_caches) left out, as the commit leaves them out: a test run's .pyc
+    read as the agent's new binary file in every later review (#1593)."""
     # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
     # an agent process still running could rewrite the index between `add -N` and the diff, so
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
@@ -1204,8 +1266,8 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
                 add_all(worktree, *([] if whole else ["-N"]), "--",
                         *(":(literal)" + os.fsdecode(p) for p in new), env=env)
         else:
-            skip = [f":(exclude){p}" for p in nested_repos(worktree)]
-            add_all(worktree, *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
+            out = [f":(exclude){p}" for p in nested_repos(worktree)] + cache_specs(worktree, list(skip))
+            add_all(worktree, *([] if whole else ["-N"]), specs=[".", *out] if out else None,
                     env=env)
         if force := [p for p in force if os.path.lexists(os.path.join(worktree, p))]:
             add_all(worktree, "-f", *([] if whole else ["-N"]), "--",
@@ -1215,15 +1277,22 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def add_all(worktree: Path, *args, env=None, pre=()) -> None:
+def add_all(worktree: Path, *args, env=None, pre=(), specs=None) -> None:
     """`git add -A <args>`, with `--sparse` when a sparse checkout refused it: a file the agent
     made outside the patterns (a new package beside the cone) made git 2.34+ exit 1, which crashed
     the round report and stopped wb diff, verify, next and accept on the task (#493, the audit of
-    1.90). Retried only after that refusal: a git older than --sparse neither has it nor refuses."""
-    r = _run(worktree, [*pre, "add", "-A", *args], env, check=False)
+    1.90). Retried only after that refusal: a git older than --sparse neither has it nor refuses.
+    ``specs``: the pathspecs, on stdin (--pathspec-from-file), never in argv, whatever their
+    number: the run caches' excludes overflowed it (#1593)."""
+    feed = None
+    if specs is not None:
+        args = (*args, "--pathspec-from-file=-", "--pathspec-file-nul")
+        feed = b"\0".join(os.fsencode(p) for p in specs)
+    r = _run(worktree, [*pre, "add", "-A", *args], env, check=False, input=feed)
     if r.returncode and git(worktree, "config", "--bool", "core.sparseCheckout",
                             check=False).strip() == "true":
-        if not _run(worktree, [*pre, "add", "-A", "--sparse", *args], env, check=False).returncode:
+        if not _run(worktree, [*pre, "add", "-A", "--sparse", *args], env, check=False,
+                    input=feed).returncode:
             return
     if r.returncode:
         err = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
@@ -1267,7 +1336,7 @@ def has_tree(cwd: Path, rev: str) -> bool:
     return not _run(cwd, ("cat-file", "-e", f"{rev}^{{tree}}"), check=False).returncode
 
 
-def snapshot_left(worktree: Path, landing: bool = False, force=()) -> tuple[str, list[str]]:
+def snapshot_left(worktree: Path, landing: bool = False, force=(), skip=()) -> tuple[str, list[str]]:
     """snapshot's tree, and what it left out ("build/ (400 new files)", "data.bin (3 MB)"; []
     when nothing): a new file of BINARY_MAX or more, the top-level directories with the most new
     files while there are more than NEW_FILES_MAX, then the biggest new files while the rest
@@ -1279,19 +1348,23 @@ def snapshot_left(worktree: Path, landing: bool = False, force=()) -> tuple[str,
     of BINARY_MAX or more and the directories past NEW_FILES_MAX, and a big text file, which
     accept commits, is kept: verify ran without a 1.1 MB text file its test read, said proven,
     and the test failed on main once accept had landed it (#642, Codex's audit of 1.90.6).
-    ``force``: ignored files it holds too (with_new_files, #1259)."""
-    return review_snapshot(worktree, landing, force)[:2]
+    ``force``: ignored files it holds too (with_new_files, #1259); ``skip``: run caches it
+    leaves out unsaid, as the commit does (#1593)."""
+    return review_snapshot(worktree, landing, force, skip)[:2]
 
 
 KEEP_MAX = 100  # the paths a review tree records as left out (keep) before they go by directory
 
 
-def review_snapshot(worktree: Path, landing: bool = False, force=()) -> tuple[str, list[str], list[str]]:
+def review_snapshot(worktree: Path, landing: bool = False, force=(),
+                    skip=()) -> tuple[str, list[str], list[str]]:
     """snapshot_left's tree and lines, and the paths it left out as wb rewind matches them
     (``keep``: `dir/` for a directory, else a file, as `shown` writes it; past KEEP_MAX by
     top-level directory): a rewind to the tree leaves them as they are, since the tree has no
     copy of them to put back (#1198)."""
-    files = _new_files(worktree)
+    every = _new_files(worktree)
+    skip = {os.fsencode(p) for p in skip}  # the run caches the commit leaves out (#1593)
+    files = [r for r in every if r[0] not in skip]
     if landing:
         big = [(p, n) for p, n in files if n >= BINARY_MAX and _binary(worktree, p)]
     else:
@@ -1309,7 +1382,7 @@ def review_snapshot(worktree: Path, landing: bool = False, force=()) -> tuple[st
     rest.sort(key=lambda r: r[1])
     while not landing and rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
         big.append(rest.pop())
-    if len(rest) == len(files):
+    if len(rest) == len(every):
         return with_new_files(worktree, "write-tree", whole=True, force=force).strip(), [], []
     keep += [shown(p) for p, _ in big]
     if len(keep) > KEEP_MAX:  # bounded in status.json; keeping more only deletes less
@@ -1405,7 +1478,7 @@ def _unlink_in(top: bytes, paths: list[bytes]) -> list[bytes]:
 
 
 def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
-                 now_keep=(), force=()) -> dict:
+                 now_keep=(), force=(), skip=()) -> dict:
     """Put the worktree's files back to ``tree``, a review snapshot (wb rewind, #1198). Only what
     differs from the worktree now (its own snapshot) is touched: a file the tree has and the
     worktree lacks or holds otherwise is written from a scratch index (`read-tree` and
@@ -1428,10 +1501,12 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
     worktree has, "left" what ``now_keep`` kept from being written, "unignored" the files deleted
     after the second snapshot, "differs" what is still not as the tree has it (beside "kept"
     and "left"): a file a link or a directory kept, or one too big for the second snapshot
-    that the tree lacks (one it has is as it has it: written, or alike in both snapshots)."""
+    that the tree lacks (one it has is as it has it: written, or alike in both snapshots).
+    ``skip``: the run caches the review trees leave out (#1593), in neither snapshot here, so
+    left as they are."""
     wt = Path(worktree)
     if now is None:
-        now, _, now_keep = review_snapshot(wt, force=force)
+        now, _, now_keep = review_snapshot(wt, force=force, skip=skip)
     out = {k: [] for k in ("written", "deleted", "kept", "left", "unignored", "differs")}
     if now == tree:
         return out
@@ -1453,7 +1528,7 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
             _run(wt, ("read-tree", tree), env=env)
             _run(wt, ("checkout-index", "-f", "-z", "--stdin"), env=env,
                  input=b"".join(p + b"\0" for p in write))
-    after, _, after_keep = review_snapshot(wt, force=force)
+    after, _, after_keep = review_snapshot(wt, force=force, skip=skip)
     unignored, differs = [], []
     if after != tree:
         seen, expected, new = {p for _, p in first}, set(kept) | set(left), []
@@ -1507,13 +1582,14 @@ def diff_tip(task: store.Task) -> str:
 
 
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None,
-         limit: int | None = None, force=()) -> str | None:
+         limit: int | None = None, force=(), skip=()) -> str | None:
     """The diff since ``base``, new files included. ``limit``: None when it is longer than that
     many characters, never held whole in memory (#348, the audit of 1.4). ``force``: ignored
-    files it shows too (with_new_files, #1259)."""
+    files it shows too (with_new_files, #1259); ``skip``: new files it leaves out, the run
+    caches the commit does (#1593)."""
     args = (["diff", "--no-ext-diff", "--no-color", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
             + ([f"--stat-count={stat_count}"] if stat_count else []) + (["--", *paths] if paths else []))
-    out = with_new_files(worktree, *args, limit=limit, force=force)
+    out = with_new_files(worktree, *args, limit=limit, force=force, skip=skip)
     return None if out is None else out.rstrip()
 
 
@@ -2067,8 +2143,8 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
         raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
                        f"{worktree}, or --include to commit it anyway")
     record_case_renames(worktree)
-    add_all(worktree, *(["--", ".", *(":(exclude,literal)" + p for p in caches)] if caches else []),
-            pre=NO_HOOKS)
+    add_all(worktree, pre=NO_HOOKS,
+            specs=[".", *cache_specs(worktree, caches)] if caches else None)  # #1593
     if dropped is not None:
         dropped.extend(caches)
     if ignored:

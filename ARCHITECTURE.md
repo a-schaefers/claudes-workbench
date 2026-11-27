@@ -1502,7 +1502,17 @@ or not, nor counted by `_bulk`, `cli._to_commit` or `cli._gained_work`: Claude's
 unittest` in the worktree had `wb accept` commit its `.pyc` in a repo that ignores no
 `__pycache__`, shown by neither the review nor the accept line (#1580). `wb next` and `wb accept`
 say "note: the commit leaves out a run's caches, which nobody wrote: `__pycache__/` (2 files)"
-(`gitops.run_caches_line`); they stay in the worktree, and go with it.
+(`gitops.run_caches_line`); they stay in the worktree, and go with it. The commit's `add -A` takes
+its pathspecs on stdin (`add_all`'s `specs`, `--pathspec-from-file`), one exclude per outermost
+directory holding nothing but caches (`gitops.cache_specs`: no tracked file, no other new file;
+else the file itself), and `gitops.changed` leaves them out of `git status`'s lines in Python: one
+exclude per file in argv failed every `wb accept` and `wb next` on "Argument list too long" for an
+un-ignored venv's 30,000 `.pyc` (#1593). The review leaves the same paths out (`runner.run_caches`:
+`accept_writes` are kept): the round report's "files changed" and the check-in's, the review
+snapshots (`review_snapshot`'s and `restore_tree`'s `skip`, so a rewind or a self-review's
+set-aside leaves them as they are), the review diff, `wb diff` and `wb verify`'s candidate; the
+report names them in one `run_caches_line`. Shown, the `.pyc` `wb next` left read as the agent's
+new binary file in every later review notice (#1593).
 
 **`run_round(task, n)`.** Writes the config layer and environment (*What the agent knows*),
 prepends `skills_note` to the prompt argument (not `prompt.md`), wraps the lane, starts in its own
@@ -6410,7 +6420,7 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   objects refused every accept, #889); an uncheckable one says "… can't be checked: … wb relocate"
   (#682), never skipped. The directories stay writable: in-tree builds write there.
 - **Commits are the user's** (`gitops.commit_all`: `add -A`, but for a run's caches nobody wrote,
-  `gitops.run_caches`, #1580; refused with nothing staged, a nested repo, or, without
+  `gitops.run_caches`, #1580, excluded by `gitops.cache_specs` on stdin, #1593; refused with nothing staged, a nested repo, or, without
   `--include`, a file git ignores). `wb accept` commits under the user's identity,
   no AI co-author line, only provenance:
   ```

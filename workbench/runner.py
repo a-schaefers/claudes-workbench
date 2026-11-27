@@ -1395,7 +1395,8 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float, active: floa
              f"now: {st.get('last') or '?'}"]
     if out["texts"]:
         lines.append("its latest words: " + out["texts"][-1].strip().replace("\n", " ")[:400])
-    lines.append("files changed so far: " + gitops.brief_paths(gitops.changed(task.worktree)))
+    lines.append("files changed so far: "  # not the run caches accept leaves out (#1593)
+                 + gitops.brief_paths(gitops.changed(task.worktree, run_caches(task))))
     return "\n".join(lines)
 
 
@@ -1988,7 +1989,8 @@ def keep_green(task: store.Task, n: int, green: str) -> None:
     check broken (#1572, 2026-11-26)."""
     steps = task.status.get("steps", 1)
     try:
-        tree, left, keep = gitops.review_snapshot(task.worktree, force=ignored_to_commit(task))
+        tree, left, keep = gitops.review_snapshot(task.worktree, force=ignored_to_commit(task),
+                                                  skip=run_caches(task))
     except (gitops.GitError, OSError):
         return
     trees = {k: v for k, v in (task.status.get("review_trees") or {}).items() if v.get("step") == steps}
@@ -2019,14 +2021,14 @@ def set_aside(task: store.Task, n: int, began: str | None, how: str, passed: boo
     kept = next((v for v in trees.values() if v.get("green") == green), None)
     if not kept or not gitops.has_tree(task.worktree, kept["tree"]):
         return None
-    force, key = ignored_to_commit(task), f"{n}s"
+    force, key, caches = ignored_to_commit(task), f"{n}s", run_caches(task)
     try:
-        now, left, keep = gitops.review_snapshot(task.worktree, force=force)
+        now, left, keep = gitops.review_snapshot(task.worktree, force=force, skip=caches)
         trees[key] = {"step": steps, "tree": now, "left": left, "keep": keep, "reviewed": False}
         gitops.keep_review(task.worktree, task.name, key, now)
         task.set_status(review_trees=trees)  # kept before anything is put back
         gitops.restore_tree(task.worktree, kept["tree"], kept.get("keep") or [], now=now,
-                            now_keep=keep, force=force)
+                            now_keep=keep, force=force, skip=caches)
     except (gitops.GitError, OSError):
         return None
     said = "weren't run" if passed is None else "pass" if passed else "fail"
@@ -3566,6 +3568,18 @@ def accept_writes(task: store.Task) -> list[str]:
     return agent_wrote(task) + hand_wrote(task) + shell_wrote(task)
 
 
+def run_caches(task: store.Task) -> list[str]:
+    """The run caches wb accept and wb next leave out (gitops.run_caches, nobody's work), which
+    the review leaves out too: its files, its diff and its snapshots, beside one line naming
+    them. A test run's .pyc that wb next left in the worktree read as the agent's new binary
+    file in every later review notice, a feedback round's too (#1593, 2026-11-27); [] when git
+    can't say."""
+    try:
+        return gitops.run_caches(task.worktree, accept_writes(task)) if task.worktree.is_dir() else []
+    except (gitops.GitError, OSError):
+        return []
+
+
 def ignored_to_commit(task: store.Task) -> list[str]:
     """Of accept_writes, the ones git ignores, which --include commits: what the review diff and
     wb diff show beside git's own view (gitops.diff's ``force``), so an agent's feedback-round
@@ -4648,8 +4662,9 @@ def review_diff(task: store.Task, rnd: int | None = None) -> str:
     props = [str(p.relative_to(task.worktree)) for _, p in proposals(task.worktree)]
     code = (".", *(f":(exclude,literal){p}" for p in props))
     force = ignored_to_commit(task)  # what --include commits, in the snapshot and the diffs (#1259)
+    skip = run_caches(task)  # what accept leaves out, out of both too (#1593)
     try:
-        tree, left, keep = gitops.review_snapshot(task.worktree, force=force)  # bulky new files left out (#431)
+        tree, left, keep = gitops.review_snapshot(task.worktree, force=force, skip=skip)  # bulky new files left out (#431)
         rnd = task.status.get("round", 1) if rnd is None else rnd
         trees = {k: v for k, v in (task.status.get("review_trees") or {}).items()
                  if v.get("step") == steps}  # a wb next cut short left the last step's
@@ -4664,7 +4679,8 @@ def review_diff(task: store.Task, rnd: int | None = None) -> str:
             since, gone = None, "\n\nthe last review's snapshot is gone (git gc pruned it): all of it again"
         if since:
             # bounded: a big diff is never read whole only to show its stat (#348, the audit of 1.4)
-            full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX, force=force)
+            full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX, force=force,
+                               skip=skip)
             same = not props or not gitops.diff(task.worktree, since,
                                                  paths=tuple(f":(literal){p}" for p in props))
             prop = ("\n\nthe agent's proposed instruction files: unchanged since your last review"
@@ -4675,7 +4691,8 @@ def review_diff(task: store.Task, rnd: int | None = None) -> str:
                 return (f"\n\nthe diff since your last review (wb diff {task.name} for all of "
                         f"it):\n{full}" + prop)
             base = since
-        full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX, force=force)
+        full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX, force=force,
+                           skip=skip)
         prop = proposal_diff(task) + left
         if full == "":
             return gone + "\n\nthe diff: (no changes)" + prop
@@ -4683,7 +4700,7 @@ def review_diff(task: store.Task, rnd: int | None = None) -> str:
             return (f"{gone}\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
                     f"\n{full}" + prop)
         return (f"{gone}\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
-                f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN, force=force)}" + prop)
+                f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN, force=force, skip=skip)}" + prop)
     except (gitops.GitError, OSError):
         return ""
 
@@ -4873,8 +4890,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     final = ("(the agent wrote no final message)" if final is None
              else cut_final(final, task.round_dir(n) / FINAL_MD))
     lines += ["", "agent's summary:", final, ""]
-    files = gitops.changed(task.worktree)
+    caches = run_caches(task)  # left out, as accept leaves them out, and named once (#1593)
+    files = gitops.changed(task.worktree, caches)
     lines += ["files changed:", "\n".join(gitops.brief(files.splitlines(), status=True)) or "(none)"]
+    if caches:
+        lines.append(gitops.run_caches_line(caches))
     for d, k in gitops.build_dirs(task.worktree, files)[:gitops.CHANGED_SHOWN]:
         lines.append(f"NOTE: {d} holds {k:,} new files the project doesn't ignore: build output?")
     if extra := outside_spec(task, files):
@@ -6875,7 +6895,7 @@ def report_text(task: store.Task, n: int, rnd: dict, obj, errs: list[str], src: 
 def report_end(task: store.Task, n: int, rnd: dict) -> bool:
     """A report round's end, in place of the tests: True when a repair round was written (the
     loop goes on), False when the task waits on Claude (review with its object, else failed)."""
-    files = gitops.changed(task.worktree).strip()
+    files = gitops.changed(task.worktree, run_caches(task)).strip()  # a run's caches: nobody's (#1593)
     if files:  # read-only held by the kernel where there is a lane; voided here where there isn't
         brief = ", ".join(gitops.brief(files.splitlines(), status=True)[:5])
         text = (report_text(task, n, rnd, None, [f"{REPORT_CHANGED} ({brief}): a report reads and "
