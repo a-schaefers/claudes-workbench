@@ -10631,7 +10631,8 @@ on an API model `kind: "api"` and `paid {cost, source}` (`bench.paid`, from `res
 
 ## Installing
 
-**Users** (README's quickstart):
+**Users** (the README's quickstart, Claude's Workbench; OpenCode Workbench's one line,
+`opencode plugin add 'github:a-schaefers/workbench#main'`: *The OpenCode plugin*):
 ```sh
 claude plugin marketplace add a-schaefers/workbench
 claude plugin install workbench@workbench

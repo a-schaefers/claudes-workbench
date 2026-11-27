@@ -17,15 +17,18 @@
 <a href="https://github.com/a-schaefers/workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/workbench"></a>
 </p>
 
-**TL;DR**
+**TL;DR.** A [harness](#whats-a-harness) is the setup agents work inside: what they know, what
+they may do, and how their work is checked.
 
 - **You** say what you want, and decide what lands in your checkout.
-- **The lead** is the model you talk to. Workbench calls it the *driver*: the model that plans and
-  reviews, while the agents write the code. It splits the work into small steps and reviews every
-  change.
+- **The lead** (Workbench calls it the *driver*) is the model you talk to: it splits the work into
+  small steps and reviews every change.
 - **The crew** are OpenCode agents, on your GPU or an API model. Each one works on its own copy of
   your project, on its own branch. Your tests run after each try, and a failure goes back to the
-  agent first, not to the lead. Your checkout is untouched until you say so.
+  agent first, not to the lead. The agents never touch your checkout: only what you accept is
+  merged.
+- **Which one:** Claude leading on your Claude subscription? Claude's Workbench. Otherwise,
+  OpenCode Workbench ([pick](#which-one-is-for-me)).
 
 **Contents:** [Which one is for me?](#which-one-is-for-me) · [Quickstart](#quickstart) ·
 [What it does](#what-it-does) · [Also in the box](#also-in-the-box) · [FAQ](#faq) ·
@@ -34,6 +37,8 @@
 ## Which one is for me?
 
 **Everyone needs [OpenCode](https://opencode.ai).** The agents that write the code run there.
+They need a model of their own: one on your GPU, or an API model you connected in OpenCode
+(`/connect`). Your Claude subscription, or the model you pick in `/models`, is only the lead.
 
 **Then one question: do you want Claude to lead, on your Claude subscription?**
 
@@ -55,7 +60,7 @@ Both run in the terminal: the OpenCode CLI and the Claude Code CLI.
 
 - [OpenCode](https://opencode.ai) 2.3 or newer: `curl -fsSL https://opencode.ai/v2/install | bash`
 - Git 2.34 and Python 3.11 or newer, on Linux, macOS, or Windows through WSL2
-- A model: one you connected in OpenCode (`/connect`), or a local one. None for the agents yet?
+- A model for the agents: one you connected in OpenCode (`/connect`), or a local one. None yet?
   The lead suggests one that fits your machine, and asks before installing anything.
 - For Claude's Workbench only: [Claude Code](https://claude.com/claude-code), with a Claude
   subscription or an API key
@@ -66,8 +71,9 @@ Both run in the terminal: the OpenCode CLI and the Claude Code CLI.
 opencode plugin add 'github:a-schaefers/workbench#main'
 ```
 
-Then open OpenCode in your project, pick the lead with `/models`, and type `/workbench`.
-That's the whole setup: the plugin brings Workbench with it, and OpenCode keeps it up to date.
+Then open OpenCode in your project, pick the lead with `/models`, and type `/workbench`. (No
+provider in `/models` yet? `/connect` it first.) That's the whole setup: the plugin brings
+Workbench with it, and OpenCode keeps it up to date.
 
 ### Claude's Workbench
 
@@ -83,40 +89,50 @@ skills and settings keep working, with the agents' tasks in a pane beside the ch
 
 ### Your first task
 
+First time? Type `/workbench` and say "show me it works": the lead checks what's missing, asks
+before installing anything, and runs a tiny sample task.
+
+Two things happen once, before the first real task:
+- On an API model, the lead proposes which of your provider's models the agents use and a day cap
+  ($5 suggested), and asks your yes in a dialog.
+- In a new project, the lead writes a short CLAUDE.md (the project's notes for the agents;
+  AGENTS.md links to it) and commits it.
+
+Then:
+
 1. **You ask** in plain words: "add a dark mode switch to the settings page".
 2. **The lead writes the steps**, each small, each with a test that proves it.
-3. **The test runs on your untouched code first**, so a test that can't run is caught before any
-   work starts.
-4. **An agent writes the step.** When the test fails, the failure goes back to the agent, not to
-   the lead.
-5. **The lead reviews** the passing change, after the agent has checked its own work.
-6. **You decide what lands.** Each good change is committed on its own branch, and merged into your
-   checkout when you say so.
-
-New to it? Say "show me it works": the lead checks what's missing, asks before installing anything,
-and runs a tiny sample task.
+3. **The test runs on your untouched code first**, to catch a test that can't run.
+4. **An agent writes the step**, and a failing test goes back to the agent, not the lead.
+5. **The lead reviews** the passing change. Meanwhile the task shows in the Workbench pane (Claude
+   Code) or panel (OpenCode), and the lead comes back with a report.
+6. **You decide what lands.** Each good change is committed on its own branch. Say "merge it", or say what
+   to change.
 
 When you're done:
 - `/workbench-quit` stops the agents and keeps their work for later.
 - `/workbench-quit-and-hand-back` (in Claude Code, `/workbench-quit-and-hand-back-claude`) has the
   lead finish their tasks itself.
-- `/workbench-update` installs the latest Workbench.
+- `/workbench-update` installs the latest Workbench in Claude Code. In OpenCode, OpenCode updates
+  it by itself.
 
 ### The web app
 
-Once Workbench is set up, the web app is running, its link on the modeline at the bottom of the pane:
-`[•_•] Claude's Workbench - http://localhost:1337/#token=…` in Claude Code, `[•_•] Workbench - …`
-in OpenCode's Workbench panel. Settings and Stats live in the web app (or ask the lead to change a
-setting for you). From its chat you message your driver from anywhere, a phone through your
-tailnet (`wb chat reach tailnet`, or the Web app reach row in Settings).
+Workbench also runs a web app. Its link is on the bottom line of the Workbench pane (Claude Code)
+or panel (OpenCode): `[•_•] Claude's Workbench - http://localhost:1337/#token=…` in Claude Code,
+`[•_•] Workbench - …` in OpenCode. Settings and Stats live in the web app (or ask the lead to
+change a setting for you). From its chat you message the lead from anywhere: from your phone over
+Tailscale (your tailnet), once the lead runs `wb chat reach tailnet` or you set the Web app reach
+row in Settings.
 <!-- story:doc.rule -->
 The terminal is where your driver lives (locally, or over `ssh` + `tmux`), and a prompt it raises is answered there. Most work can still run from the web app's chat, more so with your driver run with permissions granted. The web app's Settings are the source of truth: your driver changes one only on your ask and yes, and never undoes a change you made.
 <!-- /story -->
 
 ## What it does
 
-You talk to the lead. It runs Workbench for you, so you never need to learn its commands.
-Each line links to the detail in [ARCHITECTURE.md](ARCHITECTURE.md).
+You talk to the lead. It runs Workbench for you, so you never need to learn its commands: the
+`wb …` commands on this page are for the lead, so ask it to run one (from OpenCode's install, `wb`
+isn't in your own terminal). Each line links to the detail in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Say what you want, and get back a tested, reviewed change
 
@@ -140,7 +156,8 @@ Each line links to the detail in [ARCHITECTURE.md](ARCHITECTURE.md).
 - Put work on a timer, with no session open. ([Scheduled runs](ARCHITECTURE.md#scheduled-runs))
 - A provider's rate limit or outage is waited out, and a kind of work can fall back to another
   model. ([Roles](ARCHITECTURE.md#roles-which-model-a-kind-of-work-goes-to))
-- Tasks run in the background, carry on after a restart, and keep the machine awake while they run.
+- Tasks run in the background, carry on if OpenCode or Claude Code restarts (after a reboot, one
+  command resumes them), and keep the machine awake while they run.
   ([Kept awake](ARCHITECTURE.md#kept-awake))
 - From your phone, in the web app: talk to the lead, follow each task, and get notified.
   ([The web chat](ARCHITECTURE.md#the-web-chat))
@@ -178,8 +195,8 @@ Each line links to the detail in [ARCHITECTURE.md](ARCHITECTURE.md).
   ([Images](ARCHITECTURE.md#images), [Audio](ARCHITECTURE.md#audio))
 - **A sandbox for the agents** on Linux and macOS, with read-only git, and they never see your API
   key. ([What the agent knows](ARCHITECTURE.md#what-the-agent-knows))
-- **Fix Workbench yourself**, keep your fixes across updates, and send them upstream, with or
-  without GitHub. ([Contributing](#contributing))
+- **Fix Workbench yourself** from a clone of it, keep your fixes across updates, and send them
+  upstream, with or without GitHub. ([Contributing](#contributing))
 
 ## FAQ
 
@@ -222,7 +239,7 @@ work bigger than one conversation:
 | How big a job | What fits in one session | Small steps sized for each model, many tasks at once, whole flows with `deepcode` |
 | Checked how | You read what it did | Your tests on the untouched code, then after every try; then the lead's review |
 | Which model | One at a time | A model per kind of work, GPU or API, learned from your results |
-| Your checkout | Changed as it goes | Untouched until you say to merge |
+| Your checkout | Changed as it goes | Never touched by the agents; merged when you say so |
 | Getting better | Starts fresh each time | A skill library the lead writes and hands out |
 
 Your OpenCode stays as it is: its config, providers, keys, `/models` and `/connect`. Workbench is
@@ -238,10 +255,10 @@ lead reviews better. ([The driver](ARCHITECTURE.md#the-driver))
 #### Can I have it in Claude Code and OpenCode at once?
 
 Yes, both installed and `/workbench` open in each. They share one state directory: a task belongs
-to the session that started it, and only that session is woken for it. Either driver can accept a
-task you name. The GPU, the API slots and the day's spend cap are counted once for both. Each
-driver's yes in its consent dialog is its own, and the other driver's calls never use it up. Only
-the listening driver answers your phone. `wb doctor` lists each install and the `wb` it runs.
+to the session that started it, and only that session is woken for it. Either app's lead can
+accept a task you name. The GPU, the API slots and the day's spend cap are counted once for both.
+Each app's yes in its consent dialog is its own, and the other app's calls never use it up. Only
+the lead listening to the web app answers your phone. `wb doctor` lists each install and the `wb` it runs.
 ([Both drivers on one machine](ARCHITECTURE.md#both-drivers-on-one-machine))
 
 ### Hardware and models
@@ -300,7 +317,8 @@ Workbench adds models from each server; it never splits one model across machine
 A rate limit or an outage is waited out, and the task's clocks pause meanwhile. Held for 10
 minutes, the try stops and runs once more, then goes to its fallback model if you set one. Out of
 credit skips the wait: it goes to the fallback, or stops. A refused key stops at once, with one
-line naming the provider. Your day cap is never passed. ([Spend](ARCHITECTURE.md#spend-what-an-api-task-costs))
+line naming the provider. Your day cap holds: each running task can go over it by at most one
+request. ([Spend](ARCHITECTURE.md#spend-what-an-api-task-costs))
 
 #### Which OpenCode version, and how big a window?
 
@@ -343,9 +361,10 @@ OpenCode Workbench. ([Deep workflows](ARCHITECTURE.md#deep-workflows))
 - **On its own:** the agents' tries, the tests and automatic fixes, fresh sessions, the stuck
   guards, the lead's review, and committing a good change on its own branch.
 - **Your yes, in a dialog:** sending code to an API model (a change of where a kind of work runs,
-  or one task on an API model), and anything sent to GitHub (a push, a pull request, a comment).
+  or one task on an API model), and sending a fix to Workbench upstream (`wb patch send`).
 - **Your yes, asked first:** installing or downloading a model, a server or a tool; the weekly
-  model check's changes; giving an agent a command or a directory for good.
+  model check's changes; giving an agent a command or a directory for good; anything outward, such
+  as a push, a pull request or a comment.
 - **Yours alone:** merging into your checkout (only when you say to merge), lifting a repo's
   local-only mark, and the day cap.
 
@@ -385,7 +404,7 @@ on your machine as plain files. ([A task, start to finish](ARCHITECTURE.md#a-tas
 #### Can I use it from my phone?
 
 Yes, in the web app's chat: message the lead, follow each task, change settings, and get
-notified. Reach it through your tailnet (`wb chat reach tailnet`). To install it as an app and get
+notified. Reach it over Tailscale, your tailnet (`wb chat reach tailnet`). To install it as an app and get
 notifications, serve it over HTTPS, for example with `tailscale serve --bg 1337`, then "Add to Home
 Screen" on iPhone or "Install app" on Android. A prompt the lead raises in the terminal waits there.
 ([The web chat](ARCHITECTURE.md#the-web-chat))
@@ -394,8 +413,8 @@ Screen" on iPhone or "Install app" on Android. A prompt the lead raises in the t
 
 Yes, through the API. Make it a token (`wb chat token add <its name>`) and give it the skill in
 [`skill/agents/ask-workbench/`](skill/agents/ask-workbench/SKILL.md), or its MCP server. It hands
-your driver (Claude Code or OpenCode) a request over the web chat's API, waits for the report,
-and follows up, and it is told which driver answered. Its message is a teammate's request, never
+your lead (in Claude Code or OpenCode) a request over the web chat's API, waits for the report,
+and follows up, and it is told which app answered. Its message is a teammate's request, never
 your yes: spending, pushing or deleting still waits for you. The API:
 [docs/chat-api.md](docs/chat-api.md).
 
@@ -408,14 +427,17 @@ WSL2](ARCHITECTURE.md#a-server-on-windows-from-wsl2)).
 
 #### Updating, uninstalling, and where things live
 
-- **Updating:** `/workbench-update`, and Workbench tells you when there's a new one. OpenCode also
-  updates its own install of the plugin.
+- **Updating:** in OpenCode, OpenCode updates the plugin by itself. In Claude Code,
+  `/workbench-update`, and Workbench tells you when there's a new one.
 - **Where things live:** plain files. Tasks and their records in `~/.local/state/workbench`, your
   settings in `~/.config/workbench/`, the skill library in `~/.local/share/workbench/skills` (its
   own git repo). ([Files and formats](ARCHITECTURE.md#files-and-formats))
-- **Uninstalling:** turn the web app off (`wb chat off`), then remove the plugin as your app removes
-  one: Claude Code's `/plugin`, or Workbench's entry in OpenCode's `plugins`. Then delete those
-  directories if you like.
+- **Uninstalling:** ask the lead to turn the web app off (`wb chat off`), then remove the plugin as
+  your app removes one: Workbench's entry in OpenCode's `plugins`, or Claude Code's `/plugin`. In
+  Claude Code, also stop the web app's service (`systemctl --user disable --now wb-chat`; on macOS
+  `launchctl bootout gui/$(id -u)/workbench.chat`, then delete
+  `~/Library/LaunchAgents/workbench.chat.plist`) and delete the links `~/.local/bin/wb` and
+  `~/.claude/skills/workbench`. Then delete those directories if you like.
 
 #### Where does my code go?
 
@@ -428,7 +450,9 @@ to that provider, which you agreed to when you chose it. To keep a repo off ever
 
 Found a bug? Open an issue. Fixed one? Keep it as a local patch (`wb patch`), which survives
 updates, and send it upstream as a pull request, or as a .zip to email if you'd rather not use
-GitHub: [CONTRIBUTING.md](CONTRIBUTING.md).
+GitHub: [CONTRIBUTING.md](CONTRIBUTING.md). `wb patch` works on a clone of Workbench: on
+OpenCode's install, `git clone https://github.com/a-schaefers/workbench`, then
+`bin/wb setup --opencode` there.
 
 ## License
 

@@ -435,7 +435,7 @@ class DocsFor20(unittest.TestCase):
         self.assertIn("**Workbench is a harness: OpenCode agents via API or GPU write the code.**", readme)
         self.assertIn("Drive them from OpenCode with any model, or from Claude Code with `/workbench`.", readme)
         self.assertIn("**The crew** are OpenCode agents, on your GPU or an API model.", readme)
-        self.assertIn("- A model: one you connected in OpenCode (`/connect`), or a local one.", readme)
+        self.assertIn("- A model for the agents: one you connected in OpenCode (`/connect`), or a local one.", readme)
         self.assertNotIn("local LLM", readme)
         self.assertNotIn("subagent", readme)
 
