@@ -2992,13 +2992,17 @@ def _stop_driver(run: Run) -> None:
     while not driver_alive(run) and isinstance(sp := run.status.get("spawned"), int) and sp > 0 \
             and models._alive(sp) and time.time() < deadline:
         time.sleep(0.1)
-    if driver_alive(run) and not store.elsewhere(run.status):
+    # status.json is read once: the driver clears its pid as it ends, and a second read between
+    # the check and the kill handed wait_exit None (the WSL nightly, 2026-11-27)
+    st = run.status
+    pid = st.get("pid")
+    if driver_alive(run) and isinstance(pid, int) and pid > 0 and not store.elsewhere(st):
         try:
-            os.kill(run.status["pid"], signal.SIGTERM)
+            os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
         from .watch import wait_exit
-        wait_exit(run.status["pid"], 10)
+        wait_exit(pid, 10)
 
 
 def cmd_stop(a) -> None:

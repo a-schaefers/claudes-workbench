@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
-from workbench import chat, cli, store  # noqa: E402
+from workbench import chat, cli, schedule, store  # noqa: E402
 from tests.test_workbench import ROOT, Base, ThreadingHTTPServer, run_wb  # noqa: E402
 
 
@@ -224,7 +224,10 @@ class ChatDefault(Base):
 def service_lines(out: str) -> list[str]:
     """wb setup's lines about the web app's service: every line naming the web app but the story's
     `link.where`, where its link is, which setup ends with while the chat is on (#1355)."""
-    return [x for x in out.splitlines() if "web app" in x and not x.startswith("--  Open the web app")]
+    # on WSL setup adds schedule.WSL_IDLE under the service line (#1511): a note of its own, not the
+    # service's (the WSL nightly, 2026-11-27)
+    return [x for x in out.splitlines() if "web app" in x and not x.startswith("--  Open the web app")
+            and x != f"--  {schedule.WSL_IDLE}"]
 
 
 class SetupService(Base):
