@@ -52145,6 +52145,36 @@ class Rewind(Base):
         run_wb("rewind", name, "2")
         self.assertEqual((task.worktree / "half.txt").read_text(), "half done\n")
 
+    def test_a_rewind_over_hand_edits_keeps_them_for_a_rewind_back(self):
+        # #1566 (the bar loop, 2026-11-26): a hand fix in the worktree after round 2's review was
+        # undone by `wb rewind 1` and "kept nowhere", a new file gone for good
+        name = "t-rwh"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"answer.txt": "42\n", "lib/good.py": "def f():\n    return 2\n"})
+        (task.worktree / "NOTES.md").write_text("by hand\n")
+        (task.worktree / "answer.txt").write_text("43\n")
+        out = run_wb("rewind", name, "1")
+        self.assertIn(f"your edits since the last review are kept: wb rewind {name} 2h brings them back", out)
+        self.assertNotIn("kept nowhere", out)
+        self.assertFalse((task.worktree / "NOTES.md").exists())
+        st = task.status
+        self.assertEqual((st["review_trees"]["2h"]["reviewed"], st["review_trees"]["2h"]["hand"]), (False, True))
+        self.assertIn(f"refs/workbench/review/{name}/2h", self.refs(name))   # pinned: gc keeps it
+        subprocess.run(["git", "-C", str(self.repo), "prune", "--expire=now"], check=True)
+        out = run_wb("rewind", name, "2h")
+        self.assertIn(f"rewound {name} to round 2h's files (step 1)", out)
+        self.assertEqual((task.worktree / "NOTES.md").read_text(), "by hand\n")
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "43\n")
+        self.assertEqual((task.worktree / "lib/good.py").read_text(), "def f():\n    return 2\n")
+        self.assertEqual(task.status["rewound_to"], "2h")
+        self.assertIn("its reviewed rounds: 1, 2, 2h", self.refused("rewind", name, "3"))
+        (task.worktree / "NOTES.md").write_text("by hand, again\n")         # never over 2h's
+        self.assertIn(f"wb rewind {name} 2h2 brings them back", run_wb("rewind", name, "1"))
+        run_wb("rewind", name, "2h")
+        self.assertEqual((task.worktree / "NOTES.md").read_text(), "by hand\n")
+
     def test_a_rewind_leaves_a_file_the_snapshot_left_out_untouched_and_names_it(self):
         name = "t-rwk"
         self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
