@@ -108,7 +108,13 @@ RUN_DETAIL_CHARS = 16_000  # the Summary's text past this is cut: wb run report 
 # key prefixes whose action changes no setting (record): a run's Stop or Summary, and Optimize's
 # Measure now, a button logged "Optimize: off → start", from a value that never was (the web app's
 # review, 2026-11-26)
-NOT_RECORDED = ("run-",)
+NOT_RECORDED = ("run-", "mine-")
+# Customize (#1463 P6): a row per card and flow of the user's own, in the workflows group: its
+# mark (cards.shadow_mark), and for one that shadows a shipped one its Diff (wb card|flow diff,
+# drawn under the row as a run's Summary is) and Reset (yours moved aside to .bak, never lost).
+# An edit is Ask Claude's: the driver edits the file, as it would from the terminal; no editor here
+MINE_DIFF = ("diff", "Diff", "What yours changed from the shipped one, shown below.")
+MINE_RESET = ("reset", "Reset", "Uses the shipped one again; yours is kept beside it as a .bak file.")
 FLOWS_SAY = "Ask for one by name, or put deepcode in a message with your request."
 PROGRESS_OFF = ("off", "Off (default)", "No progress checks: each one wakes Claude, which spends its tokens.")
 THINK = [("off", "Off (default)", "Faster and cheaper; for tasks started after this."),
@@ -194,6 +200,9 @@ def label_of(key: str) -> str:
         return f"{rest} tasks"
     if head == "media":
         return next((lab for kind, lab, _ in MEDIA if kind == rest), key)
+    if head == "mine" and rest.partition("-")[0] in ("card", "flow"):
+        kind, _, name = rest.partition("-")
+        return f"{kind.title()} {name}"
     return key
 
 
@@ -546,6 +555,29 @@ def _run_rows() -> list[dict]:
     if names:
         out.append({**_info("flows", "workflows", "Flows", f"Flows: {', '.join(names)}. {FLOWS_SAY}"), "ask": True,
                     "brief": f"{len(names)} flow{'' if len(names) == 1 else 's'}"})
+    return out + _mine_rows()
+
+
+def _mine_rows() -> list[dict]:
+    """Customize (#1463 P6): the user's own cards and flows, each with its mark; Diff and Reset for
+    one that shadows a shipped one; Ask Claude to change it."""
+    from . import cards
+    try:
+        got = [("card", r) for r in cards.rows() if r["where"] == "yours"] + \
+              [("flow", r) for r in runs.flow_rows() if r.get("where") == "yours"]
+    except (OSError, ValueError, RuntimeError):
+        return []
+    out = []
+    for kind, r in got:
+        name, mark = r["name"], r.get("mark") or ""
+        where = cards.roles_dir() / f"{name}.md" if kind == "card" else runs.flows_dir() / f"{name}.json"
+        text = f"Yours{', ' + mark if mark else ', your own'}" + (f": {r['description']}" if r.get("description") else "")
+        row = {"key": f"mine-{kind}-{name}", "group": "workflows", "label": f"{kind.title()} {name}",
+               "kind": "action" if mark else "info", "text": text, "brief": f"{kind} {name}: {mark or 'yours'}",
+               "ask": f"Help me change my {kind} {name} ({where}): ", "more": True}
+        if mark:
+            row["choices"] = [{"value": v, "label": lab, "says": says} for v, lab, says in (MINE_DIFF, MINE_RESET)]
+        out.append(row)
     return out
 
 
@@ -814,6 +846,9 @@ def _argv(row: dict, value) -> list[str]:
         return ["route", "driver", value]
     if head == "run":
         return ["run", "stop" if value == "stop" else "report", rest]
+    if head == "mine":  # Customize (#1463 P6): mine-card-<name>, mine-flow-<name>
+        kind, _, name = rest.partition("-")
+        return [kind, "diff" if value == "diff" else "reset", name]
     if head == "remove":
         return ["route", "remove", rest]
     if head == "role":
@@ -863,6 +898,10 @@ def apply(key: str, value, by: str = "web") -> dict:
     result = {"ok": ok, "said": _said(argv, ok, out, err)}
     if line := page_line(key, result["said"], ok):
         result["page"] = line
+    if ok and argv[0] in ("card", "flow") and argv[1] == "diff":  # Customize's Diff, drawn under the row
+        text = out.strip()
+        result["said"] = text.splitlines()[0] if text else "no change"
+        result["detail"] = "\n".join(text.splitlines()[1:])
     if ok and argv[:2] == ["run", "report"]:  # a run's Summary: its report, drawn under the row
         text = out.strip()
         result["said"] = text.splitlines()[0] if text else "nothing in yet"
@@ -986,6 +1025,8 @@ def key_for(argv: list[str]) -> tuple[str, str] | None:
         return "probe", rest[1]
     if a == ["optimize", "start"]:
         return "optimize", "start"
+    if cmd in ("card", "flow") and len(rest) == 2 and rest[0] in ("diff", "reset"):
+        return f"mine-{cmd}-{rest[1]}", rest[0]
     if cmd == "model" and len(rest) >= 2 and rest[0] == "sizes" and not any(x.startswith("-") for x in rest):
         sizes = sorted(set(rest[2:]))
         return f"size-{rest[1]}", sizes[0] if len(sizes) == 1 else "all"
