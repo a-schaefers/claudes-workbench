@@ -184,9 +184,11 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
       const got = await page.evaluate(() => (window as any).e2eOpened)
       if (JSON.stringify(got) !== JSON.stringify([{ task: 'fix-api' }, { task: 'fix-api' }])) throw new Error(JSON.stringify(got))
       if (await page.evaluate(() => WB.current()) === 'stats') {
+        // the row's look: no button face, and its ▶ hangs at the card's edge, under the title, as before
         const look = await page.evaluate(() => { const b = document.querySelector<HTMLElement>('#stats-body .st-run button')!, s = getComputedStyle(b)
-          return { bg: s.backgroundColor, border: s.borderTopWidth, align: s.textAlign } })
-        if (look.border !== '0px' || look.align !== 'left' || !/rgba\(0, 0, 0, 0\)|transparent/.test(look.bg)) throw new Error(JSON.stringify(look))
+          return { bg: s.backgroundColor, border: s.borderTopWidth, align: s.textAlign,
+            mark: Math.round(b.querySelector('.st-mark')!.getBoundingClientRect().left), title: Math.round(document.querySelector('#stats-body .st-running h3')!.getBoundingClientRect().left) } })
+        if (look.border !== '0px' || look.align !== 'left' || !/rgba\(0, 0, 0, 0\)|transparent/.test(look.bg) || Math.abs(look.mark - look.title) > 1) throw new Error(JSON.stringify(look))
       }
     })
 

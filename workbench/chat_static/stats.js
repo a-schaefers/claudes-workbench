@@ -225,7 +225,7 @@
         const b = el('button', 'st-open', ...kids);
         b.type = 'button';
         Object.assign(b.style, { font: 'inherit', color: 'inherit', background: 'none', border: '0', padding: '0', margin: '0',
-            textAlign: 'left', textIndent: 'inherit', width: '100%', cursor: 'pointer' });
+            display: 'block', textAlign: 'left', textIndent: 'inherit', width: '100%', cursor: 'pointer' });
         b.addEventListener('click', () => dispatchEvent(new CustomEvent('wb:open-task', { detail: { task } })));
         return b;
     }
