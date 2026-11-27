@@ -66,8 +66,9 @@ STOP = keyhole.SPEND_REFUSED   # the keyhole's answer to OpenCode (a 400, which 
 # "the cap is reached" there had Claude resume into the same stop, a wake for nothing (#1150)
 NEAR = "too near the day's API spend cap for its next request"
 NO_PRICE = "OpenCode's catalog gives no price for it, so the day cap can't be kept"
-# routes.json without day_usd: #1014 refuses an API role without one, so only a hand-edited file
-# gets here, and an API task then spends nothing rather than without a limit
+# routes.json without day_usd and without the user's `no_cap` (uncapped): the first priced API role
+# takes DAY_USD_SUGGEST, so only a hand-edited file gets here, and an API task then spends nothing
+# rather than without a limit
 NO_CAP = "there is no API day cap (routes.json day_usd): ask the user for one (wb route cap <usd>)"
 # routes.json that can't be read (a hand edit, a value routes.normalize refuses): no cap is known,
 # so the task stops as for NO_CAP, but saying so: NO_CAP's advice there brought up the dialog
@@ -137,11 +138,21 @@ def cap() -> float | None:
         at = (str(path), None, None)
     if _CAP.get("at") != at:
         try:
-            v, err = routes.read().get("day_usd"), None
+            doc, err = routes.read(), None
         except routes.RoutesError as e:
-            v, err = None, str(e)
-        _CAP.update(at=at, cap=float(v) if _num(v) and v >= 0 else None, error=err)
+            doc, err = {}, str(e)
+        v = doc.get("day_usd")
+        _CAP.update(at=at, cap=float(v) if _num(v) and v >= 0 else None, error=err,
+                    off=v is None and doc.get("no_cap") is True)
     return _CAP["cap"]
+
+
+def uncapped() -> bool:
+    """The user turned the day cap off (routes.json `no_cap`, `wb route cap off`): API tasks spend
+    with no daily limit, each still metered and shown (#1624, 2026-11-27: the owner, "what if i
+    was rich and didnt care?"). No cap set at all is not this: such a task spends nothing."""
+    cap()
+    return bool(_CAP.get("off"))
 
 
 def no_cap() -> str:
@@ -486,7 +497,7 @@ def refusal(m, role: str | None = None, advice: bool = True, tokens: int = FIRST
     if price(m) is None:
         return f"{m.id}: {NO_PRICE}"
     if cap() is None:
-        return f"{who}: {no_cap()}"
+        return None if uncapped() else f"{who}: {no_cap()}"
     if (c := cap()) is not None and (t := today()["usd"]) >= c:
         return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap ({RESETS})"
                 + (_ask(role, "a higher cap", task, asked) if advice else ""))
@@ -548,7 +559,7 @@ def stop_reason(task, ahead: bool = False, tokens: int = FIRST_TOKENS) -> str | 
     if not mt.prices:  # however it started (refusal is wb start's): no cap can be kept for it
         return f"{mt.m.id}: {NO_PRICE}"
     if (c := cap()) is None:
-        return no_cap()
+        return None if uncapped() else no_cap()
     if (t := today()["usd"]) >= c:
         return f"{STOP}: {money(t, today()['basis'])} of {usd(c)} today"
     if ahead and (w := request_floor(mt.m, tokens)) and t + w > c:
@@ -762,6 +773,8 @@ class Meter:
             if not self.task.status.get("api_stop"):
                 self.task.set_status(api_stop={"guard": "spend", "text": f"{self.m.id}: {NO_PRICE}"})
             return -1.0
+        if c is None and uncapped():  # the user's choice: metered, never held (#1624)
+            return None
         if c is None:
             if not self.task.status.get("api_stop"):
                 self.task.set_status(api_stop={"guard": "spend", "text": no_cap()})

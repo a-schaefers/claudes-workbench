@@ -801,7 +801,10 @@ spend without limit unseen, and a cap cut mid-stream became OpenCode's retry loo
 limit (robustness M1). Now every API task is metered live into one ledger, and one day cap covers
 every API provider together: routes.json `day_usd` (the user's, #1014; read by `meter.cap`
 through `routes.read()`, `$WB_ROUTES`, again only when the file's mtime or size changes), for the
-local calendar day, reset at local midnight. A GPU task writes nothing here and costs nothing: `meter.for_task` is None for it (a
+local calendar day, reset at local midnight. The user may turn it off at any time (`wb route cap
+off`: `no_cap: true`, `meter.uncapped`, #1624): their API tasks then spend with no daily limit, still
+metered into the ledger and shown; `refusal`, `stop_reason` and the keyhole's `room` (None) hold
+nothing. No cap set at all is not that: a task then spends nothing (`NO_CAP`). A GPU task writes nothing here and costs nothing: `meter.for_task` is None for it (a
 task.json without `via` reads as GPU, as every task before #1016 does, until `runner.settle_via` writes one; drive hands it the model,
 else the cached catalog's, `models.lookup(cached=True)`).
 
@@ -5581,8 +5584,12 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   role holding an API model: `no role has an API model yet`; a role with none then can't start, and
   the line says so. `wb route all --thinking on|off` sets every role's thinking, `--thinking-review
   on|off` every role's `thinking_review`.
-- `wb route cap <usd>` sets the cap; `wb route cap off` clears it (#1023), refused while a role runs
-  on API or the busy opt-in could send one there (`the day cap stays while <roles> can spend on API`).
+- `wb route cap <usd>` sets the cap; `wb route cap off` turns it off (#1023), at any time, roles on API
+  or not (#1624, the owner, 2026-11-27: "what if i was rich and didnt care?"; it was refused while
+  a role or the busy opt-in could spend): routes.json `day_usd: null, no_cap: true`, the line `day cap
+  $5 → off: API tasks spend with no daily limit`, gated as every cap change. While it is off a role
+  sent to API takes no cap of its own (`routes.NO_LIMIT` in the change, said `no day cap`,
+  `cap_said`); a number puts one back and drops `no_cap`. `wb route` says `day cap off: …`.
 - `wb route busy wait|api` sets the busy opt-in (*When the GPU is busy*).
 - `wb route <role> fallback <provider/model>|gpu|none` sets or clears the role's fallback (*A fallback
   per role*), in a wb route of its own (with a flag, or beside pairs: exit 1).
@@ -5609,7 +5616,7 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   API is checked the same way.
 - The first role to go to API with no cap is none: the change takes `DAY_USD_SUGGEST` as its cap
   (`routes._NoCap`, made again with it; #1322). `routes.NO_CAP` is left for a change that took the
-  cap off itself. Not when every model the change newly puts on API is free (`routes.change`'s
+  cap off itself (the user's `no_cap`: the change keeps none, #1624). Not when every model the change newly puts on API is free (`routes.change`'s
   `free`, `cli._free`: `meter.is_free`; `routes._priced`, #1193): the spend guard keeps nothing for
   one, and a priced model set later takes the cap then.
 - No change: `unchanged: <summary>`, nothing written.
@@ -7632,7 +7639,9 @@ shown and hidden on each switch and on `visibilitychange`, and the view shown is
 second registration is ignored),
 `toast(text)` (`#toast`, a live region shown with `.on` and hidden by its look, faded and moved down, never
 `display: none`, which some screen readers miss; up `max(3.5 s, 60 ms a character)`, `TOAST_MS`, `TOAST_CHAR_MS`:
-a 236-character refusal went in 3.5 s, #1563; held while hovered or focused: the web app's review, 2026-11-26), `roving(event, items)` (a group's arrow keys: the focus to the next or previous item, round, Home and End to
+a 236-character refusal went in 3.5 s, #1563; held while hovered or focused: the web app's review, 2026-11-26;
+a refusal, `WB.toast(text, {error: true})`, `.toast.error`, `max(12 s, 90 ms a character)` and a tap closes it,
+#1624: the owner couldn't read the cap's), `roving(event, items)` (a group's arrow keys: the focus to the next or previous item, round, Home and End to
 the ends, nothing picked; the task sheet's tabs show the one it lands on), `ask(text)` (the Chat view, shown at once rather than at `hashchange`, a focus
 given to a hidden box going nowhere, with its box filled with `text` and focused, sent by the user, never by the
 call: Settings' Ask link), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
@@ -7825,8 +7834,7 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   `page_line(key, said, ok)`, by the row's label and `routes.LABELS` with no `wb:` and no command (cut at the
   first `` `…` `` or `wb …` it suggests): on a refusal always (a role put on API with no model: `Pick <Label>'s
   API model first: tap API, or under More.`, where it was told `wb route trivial <provider/model>`, a gated
-  command naming the key the row calls Trivial coding, #1558; the cap: `The day cap stays while <labels> can
-  spend on API: put it|them on the GPU first.`; else `<label> wasn't changed: <wb's reason>.`), on a change
+  command naming the key the row calls Trivial coding, #1558; else `<label> wasn't changed: <wb's reason>.`), on a change
   that went through only a note (`Set Agents to Both for this to apply.`); wb's whole line stays `said`, for
   the driver, which reads it): `KeyError` for no such row, `ValueError` for
   a value it doesn't take (a read-only row, a value off its choices, a number not positive; nothing
@@ -8064,7 +8072,8 @@ alone, and a generic renderer: a new setting touches only Python.
   Recent changes (`FOLD`) are `details.set-fold` cards, their `<summary>` the name and, closed, one line of
   their state (`.set-sum`: up to three of the rows' `brief`s, else a choice's `<label>: <its choice>`;
   Recent changes, how many and the newest); closed on a phone (600 px and narrower) and open wider, until
-  the user folds one. The role cards, Agents and roles (with the day cap and Progress checks), Web app and
+  the user folds one. The role cards, Agents and roles (with Progress checks; the day cap is the API card's, beside the
+  providers, `settings._cap_row`: `Off: API tasks spend with no daily limit` while `no_cap`, #1624), Web app and
   the device cards stay open. Each card's state, and each role's More (closed at first everywhere), is this
   device's: localStorage `wb-settings-open` (`{<group>|changes|more:<role>: bool}`, read at each show, inside
   try/catch, a page without it still working; only the user's toggle is stored, never a default). The runs
@@ -10746,7 +10755,7 @@ $WB_HOME (~/.local/state/workbench)
   roles/*.md ($WB_ROLES)         the user's role cards, before the shipped agent/roles/; roles/schemas/*.json, before agent/schemas/ (#1278); wb card
                                  copy [--schema] writes one with `from` (a card's frontmatter key, a schema's top-level key, dropped by schema.load), reset moves it to .bak (.bak.2, … when taken)
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
-                                 "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "roles": {"significant"|"trivial"|"writing":
+                                 "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "no_cap": true (the user turned the cap off, `wb route cap off`, #1624: API tasks spend with no daily limit; missing with day_usd null: none set yet, an API task spends nothing), "roles": {"significant"|"trivial"|"writing":
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
                                  "thinking_review": "on" (missing: off; the self-review alone thinks, #1059),
                                  "said": the gated change's line, "by": "dialog"|"pane"|"terminal"|"web", "ts", "gpu_by": "terminal"|"web"|"claude"|"opencode"|"agent", "gpu_ts"
@@ -11608,7 +11617,7 @@ view's (#1286): the groups in order, a card per role first, its role row unlabel
 closed More, then "Agents and roles" (#1553), above the device cards (the gear's old cards are
 `#settings`'s alone); the toasts in the page's words (`<label>: <choice>`, a refusal by the row's label, kept
 under the row past the toast, #1563); the toast hidden by its look, never `display: none`, up 60 ms a character
-(3.5 s at least) and held while hovered; with no API provider a role's sentence alone, a `hidden` row not drawn, and the line's Ask link filling the chat's box; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
+(3.5 s at least) and held while hovered; a refusal's past 5 s, marked `error`, a tap closing it (#1624); with no API provider a role's sentence alone, a `hidden` row not drawn, and the line's Ask link filling the chat's box; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the

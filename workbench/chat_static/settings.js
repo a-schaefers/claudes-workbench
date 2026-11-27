@@ -221,7 +221,7 @@
         if (went && then)
             send(then.key, then.value); // its toast is the next answer's
         else
-            WB.toast(said);
+            WB.toast(said, { error: !went }); // a refusal stays to be read (#1624)
         draw(); // from the answer's rows: a refusal reverts the control
         if (lost && !queue.length)
             load(); // the change may have landed all the same: ask
