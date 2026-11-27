@@ -685,6 +685,25 @@ def allow_always(key: str, items: list[str]) -> None:
         conf[key] = have + [x for x in items if x not in have]
 
 
+def users_denied_skills() -> list[str]:
+    """The global OpenCode skills the user turned off for agents (commands.json `denied_skills`,
+    `wb skill opencode <name> off`, Settings' toggles, #1463 P4): every one is on by default."""
+    return list(commands_conf().get("denied_skills") or [])
+
+
+def set_opencode_skill(name: str, on: bool) -> None:
+    """Turn a global OpenCode skill on or off for agents, from the tasks started after this:
+    commands.json `denied_skills`, under its lock and through a link, its other keys kept."""
+    with store.edit_config(commands_path(), commands_conf) as conf:
+        have = [n for n in conf.get("denied_skills") or [] if n != name]
+        if not on:
+            have.append(name)
+        if have:
+            conf["denied_skills"] = have
+        else:
+            conf.pop("denied_skills", None)
+
+
 def with_repo_test(standing: str | None, test: str | None, at: str = "") -> str | None:
     """The acceptance command a task runs: commands.json `repos.<path>.test`, the repo's standing
     one (a team's lint and format, which NO_HOOKS keeps from running as a pre-commit hook), then
@@ -748,6 +767,9 @@ def commands_conf() -> dict:
         raise RuntimeError(f'{path}: "ports" must be a list of TCP port numbers, e.g. [9229]')
     if why := mcp_list_refusal(conf.get("mcp")):
         raise RuntimeError(f"{path}: {why}")
+    v = conf.get("denied_skills")  # the global OpenCode skills the user turned off (#1463 P4)
+    if v is not None and not (isinstance(v, list) and all(isinstance(x, str) and x for x in v)):
+        raise RuntimeError(f'{path}: "denied_skills" must be a list of skill names, e.g. ["my-skill"]')
     repos = conf.get("repos")
     if repos is not None and not isinstance(repos, dict):
         raise RuntimeError(f'{path}: "repos" must map a repo\'s path to its settings, e.g. '
@@ -4165,6 +4187,23 @@ def home_short(p) -> str:
     return "~" + s[len(h):] if s == h or s.startswith(h.rstrip(os.sep) + os.sep) else s
 
 
+def opencode_skills() -> dict[str, Path]:
+    """The user's global OpenCode skills, the ones in OpenCode's config directories (opencode_dirs,
+    `skill/` and `skills/`, nested as OpenCode lists them): {name: its directory}, by the name
+    OpenCode's skill tool takes, so a toggle denies what it lists (#1463 P4)."""
+    out: dict[str, Path] = {}
+    for d in opencode_dirs():
+        for sub in ("skill", "skills"):
+            root = d / sub
+            for md in sorted(root.rglob("SKILL.md")) if root.is_dir() else ():
+                try:
+                    name = str(skills.parse(md).get("name") or md.parent.name)
+                except (OSError, UnicodeDecodeError):
+                    continue
+                out.setdefault(name, md.parent)
+    return out
+
+
 def opencode_dirs() -> list[Path]:
     """The config directories the agent's OpenCode reads skills and plugins from: the system's,
     the global one ($XDG_CONFIG_HOME/opencode) and $OPENCODE_CONFIG_DIR's (OpenCode 2.4's
@@ -4379,7 +4418,8 @@ def agent_setup(task: store.Task | None = None) -> list[dict]:
     own = project_skill_dirs(task) if task is not None else []
     have = skills.available()
     mine = [n for n in (task.status.get("skills") or []) if n in have] if task is not None else []
-    extra = list(task.spec.get("deny_skills") or ()) if task is not None else []
+    # the user's own off list (#1463 P4): a task's fixed at its start, else the file's now
+    extra = list(task.spec.get("deny_skills") or ()) if task is not None else users_denied_skills()
     # as the layer denies them: a handed skill keeps its name, but `workbench` and deny_skills
     denied = (set(denied_skills(extra, own)) - set(mine)) | {"workbench", *extra}
     seen: set[str] = set()

@@ -6327,6 +6327,39 @@ class AgentSetup(Base):
             cli.main(["doctor"])
         self.assertIn("--  agents get the handbook", buf.getvalue())
 
+    def test_the_sweep_lists_the_users_own_setup_and_a_global_opencode_skill_turns_off_for_agents_1463(self):
+        # #1463 P4: bring a user's own setup in once; each global OpenCode skill on by default
+        write_skill(self.oc / "skills" / "oc-skill", "oc-skill", "Use when OC.")
+        write_skill(self.home / ".claude" / "skills" / "mine", "mine", "Claude's own.")
+        (self.home / ".claude" / "agents").mkdir(parents=True)
+        (self.home / ".claude" / "agents" / "review.md").write_text("---\ndescription: Reviews a diff.\n---\nBe strict.\n")
+        (self.oc / "commands").mkdir()
+        (self.oc / "commands" / "ship-it.md").write_text("Ship $ARGUMENTS.\n")
+        found = {x["name"]: x for x in json.loads(run_wb("skill", "import", "--sweep", "--json"))}
+        self.assertEqual({n: x["kind"] for n, x in found.items()},
+                         {"oc-skill": "skill", "mine": "skill", "review": "agent", "ship-it": "command"})
+        self.assertEqual(found["review"]["description"], "Reviews a diff.")
+        self.assertEqual(found["review"]["twin"], "role card review")       # a shipped card's name
+        self.assertEqual(found["ship-it"]["description"], "Ship $ARGUMENTS.")
+        out = run_wb("skill", "import", "--sweep")
+        self.assertIn("agents (1; each as a role card", out)
+        self.assertIn("review  ~/.claude/agents/review.md: Reviews a diff. · has a twin here: role card review", out)
+        self.assertEqual(run_wb("skill", "opencode").strip(), "oc-skill: on (~/.config/opencode/skills/oc-skill)")
+        self.assertEqual(self.by()["skill oc-skill"]["state"], "reaches")
+        self.assertIn("oc-skill: off", run_wb("skill", "opencode", "oc-skill", "off"))
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["denied_skills"], ["oc-skill"])
+        self.assertEqual(self.by()["skill oc-skill"]["state"], "denied")
+        self.start("t-off", "ok")
+        task = store.Task("t-off")
+        self.assertEqual(task.spec["deny_skills"], ["oc-skill"])
+        wait_phase("t-off", ("review", "failed", "stuck"))
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertIn({"action": "skill", "resource": "oc-skill", "effect": "deny"}, layer["permissions"])
+        run_wb("skill", "opencode", "oc-skill", "on")
+        self.assertNotIn("denied_skills", json.loads(Path(os.environ["WB_COMMANDS"]).read_text()))
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("skill", "opencode", "nope", "off")
+
     def test_a_global_skill_or_agents_md_counts_in_the_fixed_prompt(self):
         # #1295 P1: a 32K window was judged without what the user's global OpenCode setup adds
         self.start("t-before", "ok")
@@ -11882,6 +11915,38 @@ class UsersMcpServers(Base):
                                "oauth": False, "headers": {}}})
         self.start("t-clean-remote", "ok")
         wait_phase("t-clean-remote", {"review"})
+
+    def test_a_role_cards_mcp_narrows_the_repos_servers_and_never_adds_one_1463(self):
+        # #1463 P8: a card names the servers its role may use, from #1202's allow-list
+        self.commands({"mcp": ["docs", "other"]})
+        mine = Path(self.tmp.name) / "roles"
+        mine.mkdir()
+        (mine / "docs-only.md").write_text("---\ntools: code\nmcp: [docs, vault]\n---\nUse the docs.\n")
+        (mine / "no-mcp.md").write_text("---\ntools: code\nmcp: []\n---\nNo servers.\n")
+        (mine / "any.md").write_text("---\ntools: code\n---\nAs the repo says.\n")
+        os.environ["WB_ROLES"] = str(mine)
+        out = self.start("t-docs", "ok", "--card", "docs-only")
+        self.assertIn('MCP: docs (commands.json "mcp", card docs-only)', out)
+        self.assertIn('note: card docs-only names MCP server(s) vault that commands.json "mcp" doesn\'t give '
+                      "this repo: left out", out)
+        self.assertEqual(store.Task("t-docs").spec["mcp"], ["docs"])
+        out = self.start("t-none", "ok", "--card", "no-mcp")
+        self.assertNotIn("MCP:", out)
+        self.assertNotIn("mcp", store.Task("t-none").spec)
+        self.start("t-any", "ok", "--card", "any")
+        self.assertEqual(store.Task("t-any").spec["mcp"], ["docs", "other"])
+        # a server a card leaves out is never refused for its credential: it isn't given
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "other": {"type": "local", "command": self.server, "environment": {"TOKEN": "CANARY"}}})
+        self.start("t-docs2", "ok", "--card", "docs-only")
+        self.assertEqual(store.Task("t-docs2").spec["mcp"], ["docs"])
+        (mine / "bad.md").write_text("---\ntools: code\nmcp: 3\n---\nx\n")
+        from workbench import cards
+        with self.assertRaises(RuntimeError) as e:
+            cards.load("bad")
+        self.assertIn("mcp is a list", str(e.exception))
+        for n in ("t-docs", "t-none", "t-any", "t-docs2"):
+            wait_phase(n, ("review", "failed", "stuck"))
 
     def test_commands_json_mcp_takes_a_list_of_server_names_and_never_workbenchs_own(self):
         for bad in ("docs", ["docs", 3], ["my_docs"], ["workbench"], ["opencode"], ["a worktree"],

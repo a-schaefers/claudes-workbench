@@ -1953,7 +1953,11 @@ def cmd_start(a):
     setup = _worktree_setup(repo, a, sub, m.kind)
     # the user's MCP servers commands.json names for this repo (#1202): one that holds a
     # credential is refused by name and key, never its value, like a token file (API_HIDDEN)
-    mcp = context.mcp_names(repo, sub)
+    # a card narrows them to its own (#1463 P8), before the refusal: one it leaves out isn't given
+    mcp, unlisted = cards.narrow_mcp(card, context.mcp_names(repo, sub))
+    if unlisted:
+        print(f"note: card {card.name} names MCP server(s) {', '.join(unlisted)} that commands.json "
+              "\"mcp\" doesn't give this repo: left out")
     if bad := context.mcp_servers(mcp)[1]:
         die(bad[0], 3)
     checkout_bytes = _disk_room(repo, a.base, setup)
@@ -2074,6 +2078,8 @@ def cmd_start(a):
         **({"local_only": True} if a.local_only else {}),  # this task's alone (#1021)
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"mcp": mcp} if mcp else {}),  # the user's MCP servers its agent gets (#1202)
+        # the global OpenCode skills the user turned off, fixed for the task (#1463 P4)
+        **({"deny_skills": denied} if (denied := context.users_denied_skills()) else {}),
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
         # the next start counts it as taken until the runner has made it (#676)
@@ -2131,8 +2137,9 @@ def cmd_start(a):
     elif card:
         print(f"card: {card.name} (its role's text after the handbook)")
     if mcp:  # each server's tools go into every request: prefill on the GPU (#1202)
-        print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\"): each server's tools go into every "
-              "request")
+        print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\""
+              + (f", card {card.name}" if card is not None and card.mcp is not None else "")
+              + "): each server's tools go into every request")
         # only where a lane hides the checkout (Landlock, or Seatbelt on macOS: #1194): with none
         # or the lane off the server reads it, and the note had Claude tell the user to change a
         # config that works (#1202's review, 2026-11-24; api_hidden_note's gate, #1156)
@@ -7004,6 +7011,8 @@ def cmd_skill(a):
     if a.action == "import":
         cmd_skill_import(a)
         return
+    if a.action == "opencode":
+        return _skill_opencode(a)
     if a.action == "retire":
         try:
             skills.retire(a.name, a.message)
@@ -7054,10 +7063,112 @@ def _skill_failure(e: Exception) -> str:
     return str(e).splitlines()[0] if str(e) else type(e).__name__
 
 
+SWEEP_WHAT = {"skill": "a library skill: wb skill import <path>, read it, wb skill add",
+              "agent": "a role card in ~/.config/workbench/roles/ (wb card list)",
+              "command": "a flow: wb flow import <file>"}
+
+
+def _sweep_desc(md: Path) -> str:
+    """The description in a skill's, agent's or command's frontmatter, one line, else its first
+    line of text."""
+    try:
+        text = md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    front, body = cards.parse(text)
+    desc = front.get("description") if isinstance(front, dict) else None
+    line = str(desc) if desc else next((ln.strip("# ").strip() for ln in body.splitlines() if ln.strip()), "")
+    return " ".join(line.split())[:140]
+
+
+def skill_sweep(repo: Path | None = None) -> list[dict]:
+    """`wb skill import --sweep` (#1463 P4): the user's own skills, agents and commands from the
+    other tools' places, each {kind, name, path, description, twin?}, for Claude to bring the ones
+    worth keeping into the library, the role cards or the flows, once and with the user's yes to
+    each. `twin`: what already has its name here (a library skill, a card, a flow). Nothing is
+    read past the frontmatter, copied or changed. ``repo``: the project whose .claude/agents count."""
+    home, ch = Path.home(), context.claude_home()
+    oc = context.opencode_dirs()
+    places = [("skill", d, "*/SKILL.md") for d in dict.fromkeys([ch / "skills", home / ".claude" / "skills",
+                                                                  home / ".agents" / "skills"])]
+    places += [("skill", d / sub, "**/SKILL.md") for d in oc for sub in ("skill", "skills")]
+    places += [("agent", d, "*.md") for d in dict.fromkeys([ch / "agents", home / ".claude" / "agents",
+                                                            *([repo / ".claude" / "agents"] if repo else [])])]
+    places += [("agent", d / sub, "*.md") for d in oc for sub in ("agent", "agents")]
+    places += [("command", d, "*.md") for d in dict.fromkeys([ch / "commands", home / ".claude" / "commands"])]
+    places += [("command", d / sub, "*.md") for d in oc for sub in ("command", "commands")]
+    lib, have_cards = skills.available(), set(cards.names())
+    have_flows = {n for n, _, _ in runs.flow_names(repo)}
+    out, seen = [], set()
+    for kind, d, pat in places:
+        for md in sorted(d.glob(pat)) if d.is_dir() else ():
+            real = os.path.realpath(md)
+            if real in seen or not md.is_file():
+                continue
+            seen.add(real)
+            name = md.parent.name if kind == "skill" else md.stem
+            twin = (f"library skill {name}" if kind == "skill" and name in lib
+                    else f"role card {name}" if kind == "agent" and name in have_cards
+                    else f"flow {name}" if kind == "command" and name in have_flows else None)
+            out.append({"kind": kind, "name": name, "path": str(md.parent if kind == "skill" else md),
+                        "description": _sweep_desc(md), **({"twin": twin} if twin else {})})
+    return out
+
+
+def _skill_sweep(a) -> None:
+    try:
+        repo = gitops.toplevel(Path.cwd())
+    except gitops.GitError:  # NotARepo too: no project's .claude/agents then
+        repo = None
+    found = skill_sweep(repo)
+    if a.json:
+        print(json.dumps(found))
+        return
+    if not found:
+        print("nothing to bring in: no skill, agent or command of yours in Claude Code's or OpenCode's places")
+        return
+    for kind in ("skill", "agent", "command"):
+        items = [x for x in found if x["kind"] == kind]
+        if items:
+            print(f"{kind}s ({len(items)}; each as {SWEEP_WHAT[kind]}):")
+        for x in items:
+            print(f"  {x['name']}  {context.home_short(x['path'])}: {x['description'] or '(no description)'}"
+                  + (f" · has a twin here: {x['twin']}" if x.get("twin") else ""))
+    print("read each one worth keeping, rewrite it in our format, and ask the user before adding each; "
+          "a global OpenCode skill reaches every agent until turned off: wb skill opencode <name> off")
+
+
+def _skill_opencode(a) -> None:
+    """`wb skill opencode [<name> on|off]` (#1463 P4): the user's global OpenCode skills, each
+    reaching every agent until turned off (commands.json `denied_skills`, for tasks started
+    after this; context.set_opencode_skill)."""
+    have, off = context.opencode_skills(), set(context.users_denied_skills())
+    if not a.name:
+        if not have:
+            print("no global OpenCode skill (OpenCode's skills/ directories are empty)")
+        for n, d in have.items():
+            print(f"{n}: {'off' if n in off else 'on'} ({context.home_short(d)})")
+        return
+    if not a.state:
+        die(f"wb skill opencode {a.name} on|off")
+    if a.name not in have and a.state == "off" and a.name not in off:
+        die(f"no global OpenCode skill {a.name} (wb skill opencode lists them)")
+    try:
+        context.set_opencode_skill(a.name, a.state == "on")
+    except RuntimeError as e:
+        die(str(e))
+    print(f"{a.name}: {a.state} for agents, from the next task started")
+
+
 def cmd_skill_import(a):
     """Fetch a skill from outside (a git URL, owner/repo on GitHub, or a path) for Claude to read.
     Nothing enters the library here: a dangerous one is refused and removed; anything else
-    waits in the state directory until Claude has read it, made it ours and added it."""
+    waits in the state directory until Claude has read it, made it ours and added it. `--sweep`
+    lists the user's own setup in the other tools' places instead (skill_sweep, #1463 P4)."""
+    if a.sweep:
+        return _skill_sweep(a)
+    if not a.src:
+        die("wb skill import <git URL | owner/repo | path> [--path DIR], or --sweep")
     try:
         root, meta, found = skills.fetch(a.src, a.path)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
@@ -9757,7 +9868,7 @@ class _SettingWrite:
 def _setting_write(raw: list[str]) -> _SettingWrite | None:
     """The log of a Settings row's own command line (settings.key_for), or None for any other."""
     if not raw or raw[0] not in ("route", "coding", "workflows", "deepmode", "progress", "splash", "experiment",
-                                 "optimize", "model", "image", "audio", "chat"):  # settings.LOGGED: no import for the rest
+                                 "optimize", "model", "image", "audio", "chat", "skill"):  # settings.LOGGED: no import for the rest
         return None
     from . import settings  # it imports this module
     hit = settings.key_for(raw)
@@ -9940,9 +10051,14 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--message", "-m", required=True, help="why: what review taught")
     x.add_argument("--lesson", action="append", metavar="ID", help="the lessons this takes in (wb lessons)")
     x = ss.add_parser("import", help="fetch a skill from outside for Claude to read: scanned, never added by itself")
-    x.add_argument("src", help="a git URL, owner/repo (GitHub), or a local path")
+    x.add_argument("src", nargs="?", help="a git URL, owner/repo (GitHub), or a local path")
     x.add_argument("--path", help="the skill's directory inside it")
     x.add_argument("--as", dest="name", help="the name it would take here")
+    x.add_argument("--sweep", action="store_true", help="list your own skills, agents and commands in "
+                   "Claude Code's and OpenCode's places, and which have a twin here (#1463)")
+    x.add_argument("--json", action="store_true", help="with --sweep: as JSON")
+    x = ss.add_parser("opencode", help="your global OpenCode skills, on or off for agents (all on by default)")
+    x.add_argument("name", nargs="?"); x.add_argument("state", nargs="?", choices=("on", "off"))
     x = ss.add_parser("scan", help="the security scan, for a library skill or any path")
     x.add_argument("name")
     x = ss.add_parser("retire"); x.add_argument("name")
@@ -10201,13 +10317,22 @@ def parser() -> argparse.ArgumentParser:
             x.add_argument("--force", action="store_true", help="replace a copy of yours already there")
         x.set_defaults(f=runs.cmd_flow_copy)
     x = fs.add_parser("import", help="a command's Markdown (its prompt, $ARGUMENTS as each item) as a flow "
-                      "of yours: one task per item of --param items")
-    x.add_argument("file", help="the command's .md (Claude Code's .claude/commands/, OpenCode's command/)")
+                      "of yours: one task per item of --param items; or a bundle (wb flow export), scanned "
+                      "for Claude to read, then --install")
+    x.add_argument("file", help="the command's .md (Claude Code's .claude/commands/, OpenCode's command/), "
+                   "or a bundle's directory, git URL or owner/repo")
+    x.add_argument("--install", action="store_true", help="a bundle's directory, read: its flows, cards and schemas "
+                   "into yours (its skills each through wb skill import)")
     x.add_argument("--name", help="the flow's name (default: the file's)")
     x.add_argument("--card", help="a role card for its stage (default: a code task)")
     x.add_argument("--out", metavar="FILE", help="where to write it (default: $WB_FLOWS/<name>.json)")
     x.add_argument("--force", action="store_true", help="replace a flow file already there")
     x.set_defaults(f=runs.cmd_flow_import)
+    x = fs.add_parser("export", help="a flow as a bundle to share: the flow, your cards and schemas it names, "
+                      "and the library skills those cards name (#1463 P7)")
+    x.add_argument("name")
+    x.add_argument("--to", metavar="DIR", help="a new directory (default: ./<name>)")
+    x.set_defaults(f=runs.cmd_flow_export)
     s = sub.add_parser("card", help="role cards (#1278): list them, copy a shipped one to customize, or "
                        "reset yours; --schema for the schemas")
     cs = s.add_subparsers(dest="card_cmd", required=True)

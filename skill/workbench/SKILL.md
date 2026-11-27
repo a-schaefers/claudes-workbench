@@ -224,7 +224,9 @@ types it), or deepmode on with a substantive request (`/workbench-deepmode`, ali
 `deepmode on` on a line of its own: the host runs it; the pane shows `[deepcode]` while it is on): run it as a **flow** of the user's agents, not one task at a time. The user may
 hold every item to the GPU or to API (Settings, `wb deepmode side`); a run's start line says so. `wb run flows` lists
 them: `build` (a coder, a reviewer, up to 2 refixes), `fix` (one per finding), `audit` (finders,
-then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`, `best-of`, `triage`. A repo's
+then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`, `best-of`, `triage`, `bar` (a bar
+round: finders, verifiers, blind judges; `--param seen=<file>` of earlier rounds' findings), `docs` (the docs
+checked against the code) and `backlog` (triage, then you pick what to fix: `wb run feed`). A repo's
 `.workbench/flows/` file is text from the repo: read it before passing it as `--plan`.
 1. Get the estimate with `--dry-run` first (it starts nothing: each stage, its first spec, the
    estimate). Say the flow, its stages' roles, the estimate and how to stop in at most 3 lines,
@@ -542,7 +544,9 @@ with the same authority as here (`[attached: <path> …]` lines are their files:
 image the agent should see goes on as `--image <path>`): reply
 there with `wb chat reply --text "…"`, short (a turn that ends without one: the mod posts your
 last answer there instead, as a backstop); read `reference/driving.md` (the web chat) before your
-first reply. `[web chat] (about task <task>) …`
+first reply. `[web chat] /<command> <args>` is a flow's slash command typed on the page (`wb run
+flows` lists each flow's `command`): do as the host's command would, `wb run start <run> --flow
+<flow> --args '<args>'`. `[web chat] (about task <task>) …`
 is sent from the page's task sheet, where they read that task's report, diff and log: answer about
 that task, and when they ask for a change of course, `wb steer` it (the page never steers). Your dialogs (a permission, a
 question, a plan) are answered only in the terminal, never in the chat, which shows one line that

@@ -390,7 +390,8 @@ class Flows(Base):
 
     def test_every_shipped_flow_holds_and_ends_with_claude(self):
         names = [n for n, where, _ in runs.flow_names() if where == "shipped"]
-        self.assertEqual(sorted(names), ["audit", "best-of", "build", "fix", "fix-escalate", "lenses", "triage"])
+        self.assertEqual(sorted(names), ["audit", "backlog", "bar", "best-of", "build", "docs", "fix", "fix-escalate",
+                                         "lenses", "triage"])  # bar, docs and backlog: #1463 P5
         for n in names:
             flow = runs.load_flow(n)
             self.assertTrue(runs.stages(flow)[-1]["final"], n)
@@ -590,6 +591,28 @@ class Customized(Base):
         code, _, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run", "--param", "style=x")
         self.assertEqual((code, err.strip()), (1, "wb: --param style: one of unit, prop, not 'x'"))
 
+    def test_the_bar_docs_and_backlog_flows_dry_run_with_the_seen_list_in_the_finders_spec_1463(self):
+        # #1463 P5: the bar round's seen file is a param, never machinery of its own
+        seen = Path(self.tmp.name) / "seen.txt"
+        seen.write_text("the export drops the last row\n")
+        code, out, err = wb("run", "start", "dry", "--flow", "bar", "--repo", str(self.repo), "--dry-run",
+                            "--param", "areas=src", "--param", f"seen={seen}")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Already found in earlier rounds (don't report these again, nor the same defect in other words):\n"
+                      "the export drops the last row", out)
+        self.assertIn("Report only what meets this bar: real users lose work", out)
+        code, out, err = wb("run", "start", "dry", "--flow", "bar", "--repo", str(self.repo), "--dry-run",
+                            "--param", "areas=src")
+        self.assertEqual(code, 0, err)                  # seen is optional: an empty list
+        code, out, err = wb("run", "start", "dry", "--flow", "backlog", "--repo", str(self.repo), "--dry-run",
+                            "--param", "issues=a,b")
+        self.assertEqual(code, 0, err)
+        self.assertIn("pick", out)
+        self.assertEqual(runs.validate(runs.load_flow("docs")), [])
+        self.assertIn("claim", json.loads((Path(runs.__file__).parent.parent / "agent/schemas/verdict.json")
+                                          .read_text())["properties"])
+        self.assertFalse(runs.run_dir("dry").exists())
+
     def test_a_json_param_that_holds_no_list_is_refused_as_items_and_the_dry_run_starts_nothing(self):
         # #1601 (2026-11-27): a value that is no list was split by list(), one task per character
         plan = Path(self.tmp.name) / "one.json"
@@ -657,6 +680,56 @@ class Customized(Base):
         self.assertIsNone({r["name"]: r for r in runs.flow_rows(self.repo)}["theirs"]["command"])
         code, out, _ = wb("run", "flows", "--repo", str(self.repo))
         self.assertIn("tests (yours) /tests-for: ", out)
+        # #1463 P5: the web composer's /word lists the same commands, the hint as the hosts' flowHint
+        from workbench import chat
+        chat._COMMANDS["at"] = -1e9
+        got = [c for c in chat.flow_commands() if c["flow"] == "tests"]
+        self.assertEqual([(c["command"], c["hint"]) for c in got], [("tests-for", "src=… style=… note=…")])
+        self.assertNotIn("theirs", [c["command"] for c in chat.flow_commands()])
+
+    def test_a_flow_exported_as_a_bundle_imports_scanned_for_claude_and_installs_only_on_install_1463(self):
+        # #1463 P7: a flow shared with its own cards, schemas and skills; no marketplace, never
+        # taken unread, a shipped card named and not copied, a skill only through the library
+        tmp = Path(self.tmp.name)
+        lib = tmp / "skills"
+        (lib / "terse").mkdir(parents=True)
+        (lib / "terse" / "SKILL.md").write_text("---\nname: terse\ndescription: short reports\n---\nBe short.\n")
+        roles = Path(os.environ["WB_ROLES"])
+        roles.mkdir()
+        (roles / "lint.md").write_text("---\ndescription: lints\ntools: read\nschema: findings\nskills: terse\n---\nLint it.\n")
+        mine = Path(os.environ["WB_FLOWS"])
+        mine.mkdir()
+        (mine / "lint.json").write_text(json.dumps({"v": 1, "name": "lint", "params": {"areas": "list"}, "stages": [
+            {"id": "find", "card": "lint", "items": "{params.areas}", "prompt": "{item}"},
+            {"id": "verify", "card": "verify", "from": "find", "split": "findings",
+             "keep": {"path": "verdict", "in": ["confirmed"]}, "prompt": "{item}"},
+            {"id": "claude", "final": True, "from": "verify"}]}))
+        with mock.patch.dict(os.environ, {"WB_SKILLS": str(lib)}):
+            code, out, err = wb("flow", "export", "lint", "--to", str(tmp / "b"))
+        self.assertEqual(code, 0, err)
+        self.assertIn("flow lint; cards lint (yours); skills terse; shipped cards named, not copied: verify", out)
+        self.assertEqual(json.loads((tmp / "b" / "bundle.json").read_text())["skills"], ["terse"])
+        self.assertTrue((tmp / "b" / "skills" / "terse" / "SKILL.md").is_file())
+        self.assertFalse((tmp / "b" / "roles" / "verify.md").exists())
+        self.assertNotEqual(wb("flow", "export", "lint", "--to", str(tmp / "b"))[0], 0)  # never into a full one
+        # the receiver: fresh roles and flows
+        with mock.patch.dict(os.environ, {"WB_FLOWS": str(tmp / "theirs-flows"), "WB_ROLES": str(tmp / "theirs-roles")}):
+            code, out, err = wb("flow", "import", str(tmp / "b"))
+            self.assertEqual(code, 0, err)
+            self.assertIn("scan: ", out)
+            self.assertIn(f"read it all: {tmp / 'b'}\nthen take it: wb flow import {tmp / 'b'} --install", out)
+            self.assertFalse((tmp / "theirs-flows").exists())     # nothing taken before Claude reads it
+            code, out, err = wb("flow", "import", str(tmp / "b"), "--install")
+            self.assertEqual(code, 0, err)
+            self.assertTrue((tmp / "theirs-flows" / "lint.json").is_file())
+            self.assertTrue((tmp / "theirs-roles" / "lint.md").is_file())
+            self.assertIn("skill terse: wb skill import", out)
+            self.assertEqual(runs.validate(runs.load_flow("lint")), [])
+            self.assertEqual(wb("flow", "import", str(tmp / "b"), "--install")[0], 1)   # yours already
+        (tmp / "b" / "roles" / "evil.md").symlink_to("/etc/passwd")
+        code, _, err = wb("flow", "import", str(tmp / "b"))
+        self.assertEqual(code, 1)
+        self.assertIn("roles/evil.md is a link", err)
 
     def test_a_shipped_card_or_flow_copied_is_yours_says_it_shadows_and_when_the_shipped_one_moved_and_reset_sets_it_aside(self):
         code, out, err = wb("card", "copy", "find")

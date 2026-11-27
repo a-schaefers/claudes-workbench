@@ -1,0 +1,52 @@
+{
+  "v": 1,
+  "name": "bar",
+  "description": "A bar round: finders read each area, a skeptic verifies each finding against the code, blind judges apply the bar to the confirmed in batches, Claude decides; the seen list keeps earlier rounds' findings out",
+  "params": {
+    "areas": "list",
+    "bar": {
+      "type": "string",
+      "default": "real users lose work, get a false result, are blocked on a core path, or see an action they didn't ask for",
+      "description": "what a finding must meet"
+    },
+    "seen": {
+      "type": "file",
+      "optional": true,
+      "description": "earlier rounds' findings, one per line: not reported again"
+    }
+  },
+  "stages": [
+    {
+      "id": "find",
+      "card": "find",
+      "items": "{params.areas}",
+      "prompt": "Audit this area of the repository: {item}\n\nReport only what meets this bar: {params.bar}\n\nAlready found in earlier rounds (don't report these again, nor the same defect in other words):\n{params.seen}\n\n{context}"
+    },
+    {
+      "id": "verify",
+      "card": "verify",
+      "from": "find",
+      "split": "findings",
+      "keep": {
+        "path": "verdict",
+        "in": [
+          "confirmed"
+        ]
+      },
+      "prompt": "Check this finding against the code at {base}; reproduce it if you can:\n\n{item}"
+    },
+    {
+      "id": "judge",
+      "card": "judge",
+      "from": "verify",
+      "flow": "barrier",
+      "batch": 6,
+      "prompt": "The bar: {params.bar}\n\nJudge each of these confirmed findings (its claim and the skeptic's evidence) against it:\n\n{item}"
+    },
+    {
+      "id": "claude",
+      "final": true,
+      "from": "judge"
+    }
+  ]
+}

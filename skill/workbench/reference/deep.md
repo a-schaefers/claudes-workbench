@@ -74,10 +74,22 @@ a `claude` checkpoint) waits for you in the morning.
 `--param items=a,b`, `$ARGUMENTS` as `{item}`; a code task, or card C's report. A positional `$1`
 is refused: write that flow yourself.
 
+## Sharing a flow
+`wb flow export <name> [--to DIR]` writes a bundle: `bundle.json` (`flow`, `cards`, `schemas`,
+`skills`, `shipped_cards`), `flows/<name>.json`, the user's own cards (`roles/<card>.md`) and
+schemas (`roles/schemas/`), and the library skills those cards name (`skills/<skill>/`); a
+shipped card is named, never copied. Share the directory or a git repo of it: no marketplace.
+`wb flow import <dir|git URL|owner/repo>` fetches it, refuses a link, a file outside those names
+or more than 2 MB, scans it as `wb skill import` does, and lists it: read every file, then `wb
+flow import <dir> --install` (`--force` over the user's own). Its skills go through the library,
+each its own `wb skill import`, read and `wb skill add`. A Claude Code or Agent Plugins repo (no
+`bundle.json`) gives its skills only: the import lists a `wb skill import --path` for each.
+
 ## Role cards
 Markdown with a frontmatter: `description`, `tools` (read, none, code), `schema`, `steps`,
 `skills`, `ask` (0 for reports), `role`, `est` (`{in, out, min}`: one item's tokens and minutes,
-for the estimate; without one, a paid API stage reads `unpriced`). A card's text is at most 3,000 bytes. A user's own go in
+for the estimate; without one, a paid API stage reads `unpriced`), `mcp` (the user's MCP servers the role
+may use, of those their commands.json gives the repo; missing, all of them; `[]`, none). A card's text is at most 3,000 bytes. A user's own go in
 `~/.config/workbench/roles/` (`$WB_ROLES`), schemas in its `schemas/`; a card can't set a model or
 permissions (dropped, said). Shipped: find, verify, judge (no tools), review, choose, critic; build, fix.
 

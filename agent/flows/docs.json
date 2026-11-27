@@ -1,0 +1,38 @@
+{
+  "v": 1,
+  "name": "docs",
+  "description": "A docs sweep: a finder per doc file checks what it says against the code, a skeptic verifies each finding, only the confirmed reach Claude",
+  "params": {
+    "docs": {
+      "type": "files",
+      "default": "*.md",
+      "description": "the doc files, a pathspec"
+    }
+  },
+  "stages": [
+    {
+      "id": "find",
+      "card": "find",
+      "items": "{params.docs}",
+      "prompt": "Read {item.file} and check each thing it says against the code: a command, flag, default, file, key or behaviour it names that the code no longer has or does differently. Report each as a finding, the doc's line and the code's, with no style or wording notes.\n\n{context}"
+    },
+    {
+      "id": "verify",
+      "card": "verify",
+      "from": "find",
+      "split": "findings",
+      "keep": {
+        "path": "verdict",
+        "in": [
+          "confirmed"
+        ]
+      },
+      "prompt": "Check this finding about a doc against the code at {base}:\n\n{item}"
+    },
+    {
+      "id": "claude",
+      "final": true,
+      "from": "verify"
+    }
+  ]
+}

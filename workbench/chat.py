@@ -883,7 +883,8 @@ def snapshot() -> dict:
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "spend": week_spend(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
-            "tasks": open_tasks(), "runs": open_runs(), "dictate": dictate_ready(), "settings": settings_rev(),
+            "tasks": open_tasks(), "runs": open_runs(), "commands": flow_commands(), "dictate": dictate_ready(),
+            "settings": settings_rev(),
             "now": store.now()}
 
 
@@ -918,6 +919,34 @@ def model_label(sp: dict) -> str:
 
 
 RUN_FIELDS = ("run", "flow", "phase", "why", "stages", "spent_usd", "budget_usd", "budget_min", "gpu_min")
+
+
+_COMMANDS: dict = {"at": -1e9, "rows": []}
+COMMANDS_S = 30  # the flows' commands, read again after this: each read validates every flow
+
+
+def flow_commands() -> list[dict]:
+    """The flows with a slash command, for the composer's `/word` (#1463 P5): `[{command, flow,
+    description, hint}]`, as both hosts register them (runs.flow_rows: the user's and the shipped,
+    each valid). The page sends `/<command> <args>` as typed; the driver takes it as that command
+    (SKILL.md). Read at most every COMMANDS_S."""
+    from . import runs
+    now = time.monotonic()
+    if now - _COMMANDS["at"] >= COMMANDS_S:
+        try:
+            rows = runs.flow_rows()
+        except (OSError, ValueError, RuntimeError):
+            rows = []
+        out, seen = [], set()
+        for r in rows:
+            c = r.get("command")
+            if c and c not in seen:
+                seen.add(c)
+                names = list(r.get("params") or {})
+                out.append({"command": c, "flow": r["name"], "description": r.get("description") or "",
+                            "hint": f"<{names[0]}>" if len(names) == 1 else " ".join(f"{n}=…" for n in names)})
+        _COMMANDS.update(at=now, rows=out)
+    return list(_COMMANDS["rows"])
 
 
 def open_runs() -> list[dict]:
