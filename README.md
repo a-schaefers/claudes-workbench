@@ -2,8 +2,8 @@
 
 # Workbench
 
-Workbench is a harness for OpenCode and Claude Code. The orchestrator agent you talk to plans and
-reviews the work, and OpenCode subagents via API or GPU write the code.
+Workbench is a harness for OpenCode and Claude Code. An orchestrator agent plans and reviews the
+work, and OpenCode subagents via API or GPU write the code.
 
 <p align="center"><a href="https://github.com/sponsors/a-schaefers"><img alt="Sponsor me on GitHub" src="https://img.shields.io/badge/Sponsor%20me-on%20GitHub-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white"></a></p>
 

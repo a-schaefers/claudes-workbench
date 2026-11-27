@@ -434,7 +434,7 @@ class DocsFor20(unittest.TestCase):
         # "orchestrator agent vs subagents throughout" (lifting 2026-11-23's "agents, not subagents")
         readme = (ROOT / "README.md").read_text()
         pitch = readme.split("\n# ", 1)[1].split("\n\n")[1]
-        self.assertIn("The orchestrator agent you talk to", pitch)
+        self.assertIn("An orchestrator agent plans and reviews the work", " ".join(pitch.split()))
         self.assertIn("OpenCode subagents via API or GPU write the code", pitch)
         self.assertIn("OpenCode and Claude Code", pitch)
         self.assertLess(len(pitch), 200)                     # it is the About text too
