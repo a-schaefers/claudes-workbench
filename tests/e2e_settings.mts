@@ -49,7 +49,7 @@ const MOCK_ROWS: SettingRow[] = [
   // a choice beside the note, as settings.py sends it (the media rows after the no-GPU line): both drawn
   { key: 'media-images', group: 'gpu', label: 'Image generation', kind: 'choice', value: 'off', other: false, says: 'No images.',
     choices: [{ value: 'off', label: 'Off (default)', says: 'No images.' }, { value: 'on', label: 'On', says: 'Images.' }] },
-  { key: 'api-connected', group: 'api', label: 'Connected', kind: 'info', text: 'Connected: Provider (key stored)' },
+  { key: 'api-connected', group: 'api', label: 'Connected', kind: 'info', text: 'Connected: Provider (key stored), run `opencode auth login p`' },
   { key: 'api-writing', group: 'api', label: 'English writing API model', kind: 'choice', value: null, other: true,
     says: 'English writing has no API model: it runs on the GPU.',
     choices: [{ value: 'prov/a', label: 'A model whose name runs long · A provider with a long name too (1049K) · $0.27/$1.10 per M · free',
@@ -353,6 +353,9 @@ export async function check(page: any, ctx: E2eCtx) {
       if (!gpu.includes('No GPU model found') || kinds !== 'note,choice' || await row('media-images').locator('[role="radio"]').count() !== 2)
         throw new Error(`${gpu} [${kinds}]`)
       if (!(await row('api-connected').textContent()).includes('Connected: Provider')) throw new Error('no info line')
+      // a `…` span is code, the backticks gone (the web app's review, 2026-11-26)
+      const code = await row('api-connected').locator('p code').allTextContents()
+      if (code.join() !== 'opencode auth login p' || (await row('api-connected').textContent()).includes('`')) throw new Error('code: ' + code.join())
       await fits(page.viewportSize().width)               // a select's long option stays inside (WebKit counted it past the view)
       const sel = row('api-writing').locator('select')
       const labels = await sel.locator('option').allTextContents()

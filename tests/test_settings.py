@@ -206,7 +206,7 @@ class Settings(Rows):
         self.assertIn("team 0.", by["setup-skills"]["text"])
         self.assertIn("and what Claude hands a task from the skill library (0)", by["setup-skills"]["text"])
         self.assertEqual(by["setup-kept"]["text"],
-                         "Kept from agents: 1 skill denied by name (Claude's, ~/.agents', `workbench`).")
+                         "Kept from agents: 1 skill kept out by name (Claude's, ~/.agents and workbench's own).")
         self.assertRegex(by["setup-size"]["text"], r"^About \d+\.\dK tokens, with OpenCode's own")
         self.assertNotIn("setup-plugins", by)  # none: no row
         with self.assertRaises(ValueError):

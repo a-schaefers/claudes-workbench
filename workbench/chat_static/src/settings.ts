@@ -73,6 +73,14 @@
     if (text != null) e.textContent = String(text)
     return e
   }
+  // a row's line, its `…` a command or an id drawn as code (text nodes and <code>, never markup: the
+  // rows carry agent-written and wb's words): three personas saw literal backticks (the web app's
+  // review, 2026-11-26), as app.ts's paraCode once fixed the install card's (#1323)
+  const para = (cls: string, text: unknown) => {
+    const p = el('p', cls)
+    String(text).split(/`([^`]+)`/).forEach((part, i) => p.append(i % 2 ? el('code', '', part) : part))
+    return p
+  }
   // what the page shows for a key: its newest queued value over the server's (the choice lit at once)
   const pending = (key?: string) => { for (let i = queue.length - 1; i >= 0; i--) if (queue[i].key === key) return queue[i]; return null }
   const shown = (row: SettingRow) => { const p = pending(row.key); return p ? p.value : row.value }
@@ -241,7 +249,7 @@
       box.append(selectOf(row, value, row.key, v => send(row.key, v)))
     }
     const says = lit && pending(row.key) ? lit.says : row.says
-    if (says) box.append(el('p', 'small set-says', says))
+    if (says) box.append(para('small set-says', says))
   }
 
   function number(row: SettingRow, box: HTMLElement) {
@@ -275,11 +283,11 @@
     b.addEventListener('click', () => send(row.key, null))
     line.append(b)
     box.append(line)
-    if (row.says) box.append(el('p', 'small set-says', row.says))
+    if (row.says) box.append(para('small set-says', row.says))
   }
 
   function action(row: SettingRow, box: HTMLElement) {
-    if (row.text) box.append(el('p', 'small set-says', row.text))
+    if (row.text) box.append(para('small set-says', row.text))
     const line = el('div', 'set-actions')
     for (const c of Array.isArray(row.choices) ? row.choices : []) {
       const b = el('button', 'plain', c.label)
@@ -300,21 +308,21 @@
     box.dataset.key = row.key
     box.dataset.kind = row.kind
     const ask = (line: string) => { const a = askLink(row, title, line); if (a) box.append(a); return box }
-    if (row.kind === 'info') { box.append(el('p', 'small set-info', row.text || row.label)); return ask(row.text || row.label) }
+    if (row.kind === 'info') { box.append(para('small set-info', row.text || row.label)); return ask(row.text || row.label) }
     // a line in its place, the group's other rows drawn too: with the routes unreadable the shared
     // group's note sits beside Claude coding and the rest, still the owner's to change (#1286's review)
-    if (row.kind === 'note') { box.append(el('p', 'small set-note', row.text || row.label)); return ask(row.text || row.label) }
+    if (row.kind === 'note') { box.append(para('small set-note', row.text || row.label)); return ask(row.text || row.label) }
     // a role's GPU|API with no API provider: its sentence alone (the shared group's line says how to add one)
-    if (row.fixed) { if (row.says) box.append(el('p', 'small set-says', row.says)); return box }
+    if (row.fixed) { if (row.says) box.append(para('small set-says', row.says)); return box }
     if (row.label && row.label !== title) box.append(el('div', 'set-label', row.label))  // a role's own row: its card's name
     if (row.kind === 'choice') choice(row, box)
     else if (row.kind === 'number') number(row, box)
     else if (row.kind === 'action') action(row, box)
-    else if (row.text) box.append(el('p', 'small', row.text))
+    else if (row.text) box.append(para('small', row.text))
     if (row.changed) box.append(el('p', 'small set-changed', `Changed by ${byWord(row.changed.by)} · ${ago(row.changed.ts)}`))
     const no = refused.get(row.key)
     if (no) {                            // kept until its next change goes through (#1563)
-      box.append(el('p', 'small set-refused', no.line))
+      box.append(para('small set-refused', no.line))
       const a = askLink({ ...row, ask: true }, title, `${row.label}: ${no.said}`)
       if (a) box.append(a)
       return box
