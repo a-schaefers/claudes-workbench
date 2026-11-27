@@ -9,7 +9,9 @@ entry (runner.rules_env), so the layer's denies still come last (#1290).
 
 Frontmatter keys: `description`, `tools` (read, none or code; `readonly` is read), `schema` (a
 name in schema_path's places, or a file), `steps`, `skills`, `ask` (questions; 0 for reports),
-`role` (routes.ROLES), `est` ({in, out, min}: one item's tokens and minutes, the run's estimate).
+`role` (routes.ROLES), `est` ({in, out, min}: one item's tokens and minutes, the run's estimate),
+`mcp` (#1463 P8: the user's MCP servers this role may use, of those commands.json gives the repo;
+missing: all of them, `[]`: none; a card narrows that allow-list, never widens it: `narrow_mcp`).
 `permissions` and `model` are dropped and said: a card never lifts a deny nor picks a model.
 """
 import json
@@ -25,7 +27,7 @@ SHIPPED = PKG_ROOT / "agent" / "roles"
 SCHEMAS = PKG_ROOT / "agent" / "schemas"
 BODY_MAX = 3000  # bytes of a card's body: it is in every prompt of its role (prefill time)
 TOOLS = ("read", "none", "code")
-KEYS = ("description", "tools", "schema", "steps", "skills", "ask", "role", "est", "from")
+KEYS = ("description", "tools", "schema", "steps", "skills", "ask", "role", "est", "from", "mcp")
 DROPPED = ("permissions", "permission", "model")  # a card's own: never the task's
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")
 
@@ -42,6 +44,7 @@ class Card:
     ask: int | None = None
     role: str | None = None
     est: dict = field(default_factory=dict)
+    mcp: list | None = None  # None: every server commands.json gives the repo (#1463 P8)
     body: str = ""
     dropped: list = field(default_factory=list)  # the keys a card may not set, said at load
 
@@ -178,6 +181,13 @@ def load(name: str) -> Card:
     skills = front.get("skills") or []
     if isinstance(skills, str):
         skills = [s.strip() for s in skills.split(",") if s.strip()]
+    mcp = front.get("mcp")
+    if isinstance(mcp, str):
+        mcp = [s.strip() for s in mcp.split(",") if s.strip()]
+    if mcp == {}:  # a bare `mcp:` with no list under it
+        mcp = []
+    if mcp is not None and not (isinstance(mcp, list) and all(isinstance(n, str) and n for n in mcp)):
+        raise RuntimeError(f"{path}: mcp is a list of the MCP server names commands.json gives")
     sch = front.get("schema")
     if tools != "code" and not sch:
         raise RuntimeError(f"{path}: a report card (tools {tools}) names its schema")
@@ -185,8 +195,18 @@ def load(name: str) -> Card:
         raise RuntimeError(f"{path}: no schema {sch!r} ({schemas_dirs_said()})")
     return Card(name=stem, path=path, description=str(front.get("description") or ""), tools=tools,
                 schema=str(sch) if sch else None, steps=steps, skills=list(skills),
-                ask=ask, role=role, est=dict(est), body=body.strip() + "\n",
+                ask=ask, role=role, est=dict(est), mcp=list(mcp) if mcp is not None else None,
+                body=body.strip() + "\n",
                 dropped=[k for k in front if k in DROPPED])
+
+
+def narrow_mcp(card: "Card | None", allowed: list[str]) -> tuple[list[str], list[str]]:
+    """The servers a task of ``card`` gets of ``allowed`` (commands.json's for its repo,
+    context.mcp_names), and the card's names that list doesn't give, left out (#1463 P8): a card
+    narrows the user's allow-list, never widens it. No card, or one with no `mcp`: all of them."""
+    if card is None or card.mcp is None:
+        return list(allowed), []
+    return [n for n in allowed if n in card.mcp], [n for n in card.mcp if n not in allowed]
 
 
 def schema_dirs() -> list[Path]:

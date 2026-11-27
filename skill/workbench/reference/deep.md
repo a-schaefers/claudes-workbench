@@ -75,7 +75,8 @@ is refused: write that flow yourself.
 ## Role cards
 Markdown with a frontmatter: `description`, `tools` (read, none, code), `schema`, `steps`,
 `skills`, `ask` (0 for reports), `role`, `est` (`{in, out, min}`: one item's tokens and minutes,
-for the estimate; without one, a paid API stage reads `unpriced`). A card's text is at most 3,000 bytes. A user's own go in
+for the estimate; without one, a paid API stage reads `unpriced`), `mcp` (the user's MCP servers the role
+may use, of those their commands.json gives the repo; missing, all of them; `[]`, none). A card's text is at most 3,000 bytes. A user's own go in
 `~/.config/workbench/roles/` (`$WB_ROLES`), schemas in its `schemas/`; a card can't set a model or
 permissions (dropped, said). Shipped: find, verify, judge (no tools), review, choose, critic; build, fix.
 

@@ -3430,7 +3430,7 @@ agent's OpenCode, its `environment` with it, until #1202; a 2.x stub of its name
 line (#1202): commands.json `mcp` (every task) or `repos.<path>.mcp` (that repo's tasks, the
 nearest entry, `context.mcp_names`) names servers from their OpenCode config, letters, digits and
 hyphens (`MCP_NAME`; never `workbench`, nor a name `DENIED_TOOLS` would match, such as `opencode`:
-`mcp_list_refusal`). `wb start` records them in task.json `mcp` and refuses one that holds a
+`mcp_list_refusal`). A role card's `mcp` narrows them (*Deep workflows*, #1463 P8). `wb start` records them in task.json `mcp` and refuses one that holds a
 credential, exit 3, naming the server and the key, never its value (`context.mcp_refusal`: a local
 one's `environment` or a token flag in its `command`, `MCP_TOKEN_FLAG`; a remote one's `headers`,
 `oauth` other than `false`, or a key in its URL's query, `MCP_QUERY_KEY`; a password in any URL;
@@ -10189,7 +10189,11 @@ from the router, the slices and tuning.
 
 **Role cards** are OpenCode agent Markdown (`cards.parse`, a frontmatter subset): `cards.KEYS` `description`,
 `tools` (read, none, code; `readonly` is read), `schema`, `steps`, `skills`, `ask`, `role`, `est` `{in, out,
-min}`. `permissions` and `model` are dropped and said (`cards.said_dropped`). The text is at most
+min}`, `mcp` (#1463 P8: the user's MCP servers the role may use, a list; missing, every server commands.json
+`mcp` gives the repo; `[]`, none). A card narrows that allow-list, never widens it (`cards.narrow_mcp`, in
+`wb start` before the credential refusal, so a server it leaves out isn't given); a name the allow-list doesn't
+give the repo is left out, `note: card <name> names MCP server(s) <names> that commands.json "mcp" doesn't give
+this repo: left out`, and the start line says `MCP: docs (commands.json "mcp", card <name>)`. `permissions` and `model` are dropped and said (`cards.said_dropped`). The text is at most
 `cards.BODY_MAX` 3,000 bytes. A report card's text stands in HANDBOOK.md's place; a code card's goes after it
 under `## Your role` (`cards.handbook`). `steps` go on the task's own `wb-code` agent entry (`runner.rules_env`),
 so the layer's denies still come last. task.json `card` fixes the card at start, and `wb run start` a code
