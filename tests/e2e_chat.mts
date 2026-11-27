@@ -121,6 +121,9 @@ async function run(engine: string, device?: string) {
   await check('the empty state says what the chat is for, and no hint repeats it', async () => {
     if (!(await page.textContent('#intro p')).replace(/\s+/g, ' ').includes(PURPOSE)) throw new Error(await page.textContent('#intro p'))
     if (await page.locator('#hint').isVisible()) throw new Error('the hint shows over the empty state')
+    // #1339: the starter chips, the first tap on the simple path, are 44 px to tap
+    const chips = await page.$$eval('#intro .chip', (x: Element[]) => x.map(c => Math.round(c.getBoundingClientRect().height)))
+    if (!chips.length || chips.some(h => h < 44)) throw new Error('the chips: ' + chips)
   })
   await check('a sent message lands once, with its tick', async () => {
     await page.fill('#input', 'hello from the phone')
@@ -144,6 +147,8 @@ async function run(engine: string, device?: string) {
     const said = (await page.textContent('#hint-text')).replace(/\s+/g, ' ')
     for (const want of [PURPOSE, 'waits in its terminal', 'permissions granted', 'settings live here'])
       if (!said.includes(want)) throw new Error(said)
+    const x = await page.evaluate(() => document.getElementById('hint-x')!.getBoundingClientRect().toJSON())
+    if (x.width < 44 || x.height < 44) throw new Error('the hint\'s ✕: ' + JSON.stringify(x))  // #1339
     await page.click('#hint-x')
     await until(async () => await page.locator('#hint').isHidden())
     if (await page.evaluate(() => localStorage.getItem('wb-chat-hint')) !== 'true') throw new Error('the dismissal was not kept')
@@ -470,6 +475,10 @@ async function run(engine: string, device?: string) {
     if (!(await line.locator('.dstate-grant').textContent()).includes('claude --permission-mode auto')) throw new Error(await line.textContent())
     if ((await line.locator('button').count()) !== 1 || (await line.locator('button').textContent()) !== 'Copy') throw new Error('a button besides Copy')
     if ((await line.getAttribute('role')) !== 'status') throw new Error('not a status')
+    // #1339: Copy is 44 px to tap, though the line is no taller: a tap 5 px over or under it lands on it
+    const lands = await page.evaluate(() => { const b = document.querySelector('.dstate-copy')!, r = b.getBoundingClientRect()
+      return [r.top - 5, r.bottom + 5].map(y => b.contains(document.elementFromPoint(r.left + r.width / 2, y))) })
+    if (lands.join() !== 'true,true') throw new Error('Copy\'s hit area: ' + lands)
     if (!(await page.textContent('#presence-text')).includes('waiting for you in the terminal')) throw new Error(await page.textContent('#presence-text'))
     if (await page.locator('.row.notice').count()) throw new Error('a thread row for a wait')
     if (await page.locator('.row.ask, .card .choices').count()) throw new Error('an answer card on the page')

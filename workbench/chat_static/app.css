@@ -146,8 +146,10 @@ body.kb-open #tabbar, body.kb-open .purpose { display: none; }
 .dstate .dstate-what { flex-basis: 100%; max-width: 100%; overflow-wrap: anywhere; white-space: pre-wrap; font: 12.5px var(--mono); }
 .dstate .dstate-next, .dstate .dstate-grant { color: var(--dim); }
 .dstate code { font: 12.5px var(--mono); overflow-wrap: anywhere; }
-.dstate .dstate-copy { min-height: 32px; padding: 0 12px; font: inherit; color: var(--fg); background: var(--bg);
+.dstate .dstate-copy { position: relative; min-height: 32px; padding: 0 12px; font: inherit; color: var(--fg); background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+/* 44 px to tap, the line no taller (#1339): its hit area reaches past its border, as .meta's buttons' do */
+.dstate .dstate-copy::after { content: ""; position: absolute; inset: -7px -1px; }
 .presence.waiting .dot { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
 
 /* the open tasks and their models, over the thread (#1016): while away, all the user sees of them;
@@ -225,7 +227,7 @@ div.ts-file { cursor: default; color: var(--dim); }
   padding: 6px 8px 6px 16px; font-size: 13px; line-height: 1.4; color: var(--dim); }
 .purpose p { margin: 0; flex: 1; padding-top: 4px; }
 .purpose code { font: 12px var(--mono); }
-.purpose button { flex: none; min-width: 36px; min-height: 36px; font: inherit; color: var(--dim); background: none; border: 0; cursor: pointer; }
+.purpose button { flex: none; min-width: 44px; min-height: 44px; font: inherit; color: var(--dim); background: none; border: 0; cursor: pointer; }
 .purpose[hidden] { display: none; }
 
 /* thread */
@@ -287,7 +289,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 .working span:last-child { font-variant-numeric: tabular-nums; }
 .chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
 .chip { font: 14px var(--sans); color: var(--fg); background: var(--panel); border: 1px solid var(--line);
-  border-radius: 999px; padding: 7px 14px; cursor: pointer; box-shadow: var(--shadow); }
+  border-radius: 999px; padding: 7px 14px; min-height: 44px; cursor: pointer; box-shadow: var(--shadow); }  /* 44 px: the first tap on the simple path (#1339) */
 .chip:active { transform: scale(.96); }
 .working { display: flex; align-items: center; gap: 10px; margin-top: 10px; color: var(--dim); font-size: 13.5px; animation: rise .32s ease-out; }
 .working .dots { display: inline-flex; gap: 4px; padding: 12px 14px; background: var(--claude); border: 1px solid var(--claude-line);
@@ -302,6 +304,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
   width: 38px; height: 38px; padding: 9px; border-radius: 50%; border: 1px solid var(--line);
   background: var(--panel); color: var(--fg); box-shadow: var(--shadow); cursor: pointer; animation: rise .2s ease-out;
 }
+.jump::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; }  /* 44 px to tap, 38 seen (#1339) */
 .jump svg, .composer button svg { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* the savings badge (#101): the number and the sentence say it, the colour only underlines it */

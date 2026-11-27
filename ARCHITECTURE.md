@@ -7411,7 +7411,9 @@ whole (`say`, after the reveal), and "Claude is on it" (the driver's name) once;
 each row's time and `copy` out again, a reply in its reveal's fragments (#1408). A row's `.meta` is made anew only
 when its words change (`dataset.said`), so its buttons keep the focus (#1409), or once the copy a pressed
 *send again* sent (its `data-cid`) has left the outbox, landed or deleted, so the button is pressable again. The message box, focused, has a
-2 px ring, the accent toward `--fg` (3:1 on the page in light; the border's tint alone was 1.6:1, #1411). Claude's words are built as DOM, never HTML (`rich`): code fences,
+2 px ring, the accent toward `--fg` (3:1 on the page in light; the border's tint alone was 1.6:1, #1411). The common
+tap targets are 44 px (#1339): the starter and next-step chips (`.chip`), the hint's ✕, and `#jump` and the state
+line's Copy by a hit area past their edge (`::after`, as `.meta`'s buttons pad theirs), so neither grows. Claude's words are built as DOM, never HTML (`rich`): code fences,
 `code`, `**bold**`, links, and in each block every run of bullet lines a list, every run of other lines a paragraph
 (a lead-in line, then bullets with no blank line between, was one paragraph of '- ' lines, #1416). Use counts (`reportActive`, #959): on screen or a
 `pointerdown`/`keydown`, only while `!document.hidden` and `document.hasFocus()`, on the Chat view
@@ -11269,7 +11271,7 @@ the click still runs the real wb. What the chat is for (#1341): the empty state'
 thread the hint shows, hides while the state line shows and once a message is sent (#1339), dismisses, and stays
 dismissed after a reload, and where every storage call throws it still shows and dismisses with no page error; a
 phone's strip is one line of counts and names, and a 844×390 window has a short header and, with the keyboard up,
-no rail column (#1339). Sends land exactly once through
+no rail column (#1339). The starter chips and the hint's ✕ are 44 px, and a tap 5 px past the state line's Copy lands on it (#1339). Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
 `/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
 `computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
