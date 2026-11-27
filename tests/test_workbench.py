@@ -35657,6 +35657,55 @@ class Detector(unittest.TestCase):
         self.assertIsNone(d.feed(tool(same)))
         self.assertEqual(d.feed(tool(same)), "the same call 4 times in a row: write /w/src/eval.c")
 
+    def test_the_same_two_calls_over_and_over_stop_the_round_as_a_repeat(self):
+        # #1575 (2026-11-26): the same text written to answer.txt, then the same failing test,
+        # 800 calls a round: no one call 4 times in a row, so every round ran to its wall
+        tool = lambda name, inp, ok=True: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": name, "state": {"status": "completed" if ok else "error", "input": inp}}}, 1)
+        write = tool("write", {"filePath": "/w/answer.txt", "content": "41\n"})
+        test = tool("bash", {"command": "grep -qx 42 answer.txt"})
+        d = events.StuckDetector(worktree="/w")
+        whys = [d.feed(row) for row in [write, test] * 4]
+        self.assertEqual(whys[:-1], [None] * 7)
+        self.assertEqual(whys[-1], "the same 2 calls 4 times in a row: write /w/answer.txt; "
+                                   "bash grep -qx 42 answer.txt")
+        self.assertEqual(d.guard, "repeat")
+        # an edit flipping a line back and forth (A->B, B->A): each a real change, a block of 2
+        flip = lambda a, b: tool("edit", {"filePath": "/w/a.py", "oldString": a, "newString": b})  # noqa: E731
+        d = events.StuckDetector(worktree="/w")
+        whys = [d.feed(row) for row in [flip("x", "y"), flip("y", "x")] * 4]
+        self.assertEqual(whys[-1], "the same 2 calls 4 times in a row: edit /w/a.py; edit /w/a.py")
+        # three calls in a loop: a block of 3
+        d = events.StuckDetector(worktree="/w")
+        read = tool("read", {"filePath": "/w/a.py"})
+        whys = [d.feed(row) for row in [read, write, test] * 4]
+        self.assertEqual(whys[:-1], [None] * 11)
+        self.assertTrue(whys[-1].startswith("the same 3 calls 4 times in a row: read /w/a.py;"))
+        # the same two calls 3 times, then progress: no stop
+        d = events.StuckDetector(worktree="/w")
+        rows = [write, test] * 3 + [tool("write", {"filePath": "/w/answer.txt", "content": "42\n"}), test]
+        self.assertEqual([d.feed(row) for row in rows], [None] * 8)
+
+    def test_a_write_of_the_text_a_file_already_had_is_no_edit(self):
+        # #1575 (2026-11-26): every ok write reset the explore count, so rewriting one file with
+        # the same text kept a stuck agent "editing"; the same path written again with new text
+        # still is an edit, and so is writing the old text back after it
+        tool = lambda inp: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": "write", "state": {"status": "completed", "input": inp}}}, 1)
+        same = tool({"filePath": "/w/answer.txt", "content": "41\n"})
+        other = tool({"filePath": "/w/answer.txt", "content": "42\n"})
+        d = events.StuckDetector(no_edit=40, worktree="/w", workdir="/w")
+        d.feed(same)
+        self.assertEqual(d.since_edit, 0)
+        d.feed(same)
+        self.assertEqual(d.since_edit, 1)                        # the text it already had
+        d.feed(other)
+        self.assertEqual(d.since_edit, 0)                        # new text: an edit
+        d.feed(same)
+        self.assertEqual(d.since_edit, 0)                        # the old text back: a change too
+        d.feed(tool({"filePath": "/w/b.txt", "content": "41\n"}))
+        self.assertEqual(d.since_edit, 0)                        # another file
+
     def test_a_suspend_is_neither_silence_nor_the_rounds_time(self):
         # On the wall clock a laptop shut for 20 minutes woke to a round stopped for silence
         # (the 2026-11-16 audit). The monotonic clock skips a suspend; a frozen pass is cut out.
