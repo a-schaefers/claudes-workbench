@@ -3998,7 +3998,8 @@ plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*)
   they drop Claude Code's.
 
 ### The driver
-Which model has the final say on the OpenCode path (#1316, by the host-shape decision): whatever
+The README calls it the orchestrator, the word readers know from agent harnesses (the owner, 2026-11-27);
+`driver` stays the name in code, commands and files. Which model has the final say on the OpenCode path (#1316, by the host-shape decision): whatever
 the OpenCode session runs on, picked in OpenCode's own `/models` (variants included) or set by the
 `workbench` agent's `model`. wb doesn't own the choice; it records it and says what it means.
 Under Claude Code the driver is Claude Code, fixed (`driver.CLAUDE_CODE`, "Claude Code (fixed)"),
