@@ -1652,22 +1652,24 @@
     } catch {}
     drawShown()
   }
-  async function setPush(on: boolean) {
+  async function setPush(on: boolean) {  // a failure in the page's words is a Refused (uploads' too), shown as it is
     pushBusy = true; pushNote = ''; drawSettings()
     try {
       if (on) {
-        if (Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted') throw new Error('Notifications were not allowed.')
+        if (Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted') throw new Refused('Notifications were not allowed.')
         let sub = await swReg!.pushManager.getSubscription()
         if (!sub) sub = await swReg!.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(state.push.key!) })
         const r = await post('/api/push', { endpoint: sub.endpoint, on: true })
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'The computer refused it.')
+        if (!r.ok) throw new Refused((await r.json().catch(() => ({}))).error || 'The computer refused it.')
         pushOn = true; pushEndpoint = sub.endpoint
       } else {
         const sub = await swReg!.pushManager.getSubscription()
         if (sub) { await post('/api/push', { endpoint: sub.endpoint, on: false }).catch(() => {}); await sub.unsubscribe() }
         pushOn = false; pushEndpoint = ''
       }
-    } catch (e) { pushNote = String((e && (e as Error).message) || e) }
+    // our own words (`Refused`), else one next step: the browser's raw error ("Registration failed -
+    // push service error") said nothing a user could act on (the web app's review, 2026-11-26)
+    } catch (e) { pushNote = e instanceof Refused ? e.message : "Notifications couldn't be turned on here: reload the page and try again." }
     pushBusy = false; drawSettings()
   }
   const para = (box: HTMLElement, text: string, cls?: string) => { const p = document.createElement('p'); if (cls) p.className = cls; p.textContent = text; box.append(p); return p }
@@ -1678,15 +1680,19 @@
     text.split(/`([^`]+)`/).forEach((part, i) => p.append(i % 2 ? Object.assign(document.createElement('code'), { textContent: part }) : part))
     return p
   }
-  const HTTPS = "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
-    'on the computer, `tailscale serve --bg 1337` gives the chat an https address on your tailnet.'
+  // the port this chat runs on: both lines show only over plain http, where the page's own port is
+  // the server's; the cards said 1337 whatever it was, and `--bg 1337` served nothing, or another
+  // account's chat (#1562, 2026-11-26)
+  const servePort = () => location.port || '1337'
+  const HTTPS = () => "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
+    `on the computer, \`tailscale serve --bg ${servePort()}\` gives the chat an https address on your tailnet.`
   function drawApp() {
     const box = $('app'); box.replaceChildren()
     $('app-h').textContent = standalone() ? 'The app' : 'Install the app'
     if (standalone()) return para(box, "Installed ✓ — you're using the chat as an app.")
-    if (!window.isSecureContext) return paraCode(box, HTTPS, 'small')
+    if (!window.isSecureContext) return paraCode(box, HTTPS(), 'small')
     if (!https) return paraCode(box, 'The app installs from the https address, so the one app works on every device: ' +
-      'on the computer, `tailscale serve --bg 1337` gives the chat one on your tailnet.', 'small')
+      `on the computer, \`tailscale serve --bg ${servePort()}\` gives the chat one on your tailnet.`, 'small')
     if (installEvt) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'plain'; b.textContent = 'Install this app'
       b.onclick = async () => { installEvt!.prompt(); try { await installEvt!.userChoice } catch {} installEvt = null; drawSettings() }
@@ -1698,7 +1704,8 @@
   }
   function drawNotify() {
     const box = $('notify'); box.replaceChildren()
-    if (!window.isSecureContext) return para(box, 'They need the page over https too (see above).', 'small')
+    // the https line is Install the app's, below this card: "(see above)" pointed at nothing (2026-11-26)
+    if (!window.isSecureContext) return para(box, 'They need the page over https too: Install the app, below, says how.', 'small')
     if (ios && !standalone()) return para(box, 'On iPhone and iPad, notifications come only to the installed app: install it above in Safari, open it from its icon, and turn them on here.', 'small')
     if (!canPush) return para(box, "This browser can't take notifications from a page.", 'small')
     if (Notification.permission === 'denied') return para(box, "Notifications are blocked for this page: allow them in the browser's site settings, then come back here.", 'small')

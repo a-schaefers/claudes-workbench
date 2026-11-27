@@ -7514,7 +7514,12 @@ reaches Claude as `[web chat] (about task <task>) …`; steering stays Claude's 
 page never steers, edits or accepts.
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.ts` removes its link
 over http: localhost counts as secure and one computer got two apps); there the Settings card says how to get
-https, its `tailscale serve --bg 1337` drawn as code (`paraCode`: a line's backticked part as a `<code>`, #1323). The `badge` is
+https, its `tailscale serve --bg <port>` drawn as code (`paraCode`: a line's backticked part as a `<code>`, #1323), the port
+this chat runs on (`servePort`: the page's own, which over plain http is the server's; it said 1337 whatever the port,
+#1562). Over plain http the Notifications card points at it, below ("(see above)" pointed at nothing), and a subscribe
+that fails says one next step, "Notifications couldn't be turned on here: reload the page and try again.", in place of
+the browser's raw error, unless the failure is in the page's own words (`Refused`: not allowed, the computer's refusal)
+(the web app's review, 2026-11-26). The `badge` is
 `badge-96.png`, white on transparent (Android uses alpha only, #757). `sw.js` (`updateViaCache:
 'none'`) caches nothing and answers no fetch (an offline cache gave iOS white screens). Pushes carry
 no payload (RFC 8030), signed with VAPID (RFC 8292, ES256 in plain integers in `webpush.py`, checked

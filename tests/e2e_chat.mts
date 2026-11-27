@@ -524,9 +524,10 @@ async function run(engine: string, device?: string) {
     await until(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())))
     await until(() => page.evaluate(async () => (await (await caches.open('wb-chat')).match('/key')) !== undefined))
     if (!(await page.textContent('#app')).includes('installs from the https address')) throw new Error('install offered over http')
-    // its command as code, never its backticks as text (#1323)
+    // its command as code, never its backticks as text (#1323), on the port this chat runs on: this
+    // test's 13371, where the card said 1337 whatever the port (#1562)
     const cmd = await page.$$eval('#app code', (c: Element[]) => c.map(x => x.textContent))
-    if (JSON.stringify(cmd) !== '["tailscale serve --bg 1337"]' || (await page.textContent('#app')).includes('`'))
+    if (JSON.stringify(cmd) !== JSON.stringify([`tailscale serve --bg ${PORT}`]) || (await page.textContent('#app')).includes('`'))
       throw new Error('the install card: ' + await page.textContent('#app'))
     const notify = await page.textContent('#notify')
     if (engine === 'webkit' ? !notify.includes('installed app') : !(await page.locator('#push').count())) throw new Error('notifications: ' + notify)
