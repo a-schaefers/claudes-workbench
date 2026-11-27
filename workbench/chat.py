@@ -1146,7 +1146,8 @@ def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
     writes: the agent's summary (`agent_summary`), the files it changed (`changed`, the status
     lines' paths; None with no report) and the tests' line (`tests`, `tests: PASS (…)`), and for a
     failed or stuck task one plain line of what happened (`happened`: `The agent stopped before
-    writing anything (OpenCode exited).`). The sheet showed only `opencode exited 1 (see
+    writing anything (OpenCode exited).`; with no report, `The task stopped before the agent ran (…).`
+    only for a stop before the agent with a clean worktree). The sheet showed only `opencode exited 1 (see
     <path>/runner.log)`, a path the phone can't open, with Reply below the fold. Never
     runner.log's tail: OpenCode's raw stderr, which Claude reads when asked."""
     lines = report.split("\n")
@@ -1173,7 +1174,23 @@ def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
         cause = cause if len(cause) <= LEAD_CAUSE_CHARS else cause[:LEAD_CAUSE_CHARS - 1] + "…"
         why = f" ({cause})" if cause else ""
         if not has_report:
-            out["happened"] = f"The task stopped before the agent ran{why}."
+            # No report for this round is not "the agent never ran": a runner reaped mid-round
+            # (cli.reap's restart or dead runner) or a round failing after an earlier one's work
+            # leaves none either, and the sheet's 'Discard it' then threw away the agent's
+            # edits on the word of the phone (#1339's review, 2026-11-26). Only the machine's
+            # own stops before the agent (status infra setup, repo, model, which each runner
+            # start clears) with a clean worktree say it never ran.
+            from . import gitops
+            try:
+                edits = bool(gitops.changed(t.worktree))
+            except (OSError, gitops.GitError):
+                edits = False
+            if edits:
+                out["happened"] = f"The task stopped partway{why}: what the agent changed so far is in the worktree."
+            elif t.status.get("infra") in ("setup", "repo", "model"):
+                out["happened"] = f"The task stopped before the agent ran{why}."
+            else:
+                out["happened"] = f"The task stopped{why}."
         else:
             did = "partway: what it changed so far is in the worktree" if out["changed"] else "before writing anything"
             out["happened"] = f"The agent {'was stopped' if phase == 'stuck' else 'stopped'} {did}{why}."

@@ -7340,8 +7340,12 @@ address (#534).
   writes: `agent_summary`, `changed` (the files' paths, `[]` for `(none)`, null with no report),
   `tests` (its `tests: PASS|FAIL …` line) and, for a failed or stuck task, `happened`: one plain line
   (`The agent stopped before writing anything (OpenCode exited).`, `The agent was stopped partway:
-  what it changed so far is in the worktree (<the STOPPED reason>).`, `The task stopped before the
-  agent ran (<last>).`; the cause cut at `LEAD_CAUSE_CHARS` 160). Never runner.log's tail: OpenCode's
+  what it changed so far is in the worktree (<the STOPPED reason>).`, and with no report for the
+  round `The task stopped partway (<last>): what the agent changed so far is in the worktree.` when
+  `gitops.changed` lists any, else `The task stopped before the agent ran (<last>).` for status
+  `infra` setup, repo or model, else `The task stopped (<last>).`; the cause cut at `LEAD_CAUSE_CHARS`
+  160). A reaped runner (a restart, a dead runner) or a round failing after an earlier round's work
+  leaves no report either: the sheet said the agent never ran, under 'Discard it'. Never runner.log's tail: OpenCode's
   raw stderr, which Claude reads when asked.
   `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), with the
   ignored files `--include` commits (`force=runner.ignored_to_commit`, as `wb diff`: #1548), `stat`

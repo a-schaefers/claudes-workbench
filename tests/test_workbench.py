@@ -32817,10 +32817,28 @@ class WebChat(Base):
         t.set_status(phase="review")
         self.assertEqual(self.call(q, token=tok)[1]["happened"], "")      # nothing went wrong to say
         report.unlink()
-        t.set_status(phase="failed", last="setup: npm ci exited 1")
+        subprocess.run(["git", "-C", str(t.worktree), "checkout", "-q", "--", "README.md"], check=True)
+        (t.worktree / "new.py").unlink()          # a setup that failed before the agent: a clean tree
+        t.set_status(phase="failed", last="setup: npm ci exited 1", infra="setup", failed_before="setup")
         s = self.call(q, token=tok)[1]
         self.assertEqual((s["happened"], s["agent_summary"], s["changed"]),
                          ("The task stopped before the agent ran (setup: npm ci exited 1).", None, None))
+
+    def test_a_task_reaped_mid_round_with_the_agents_edits_never_reads_as_the_agent_never_ran(self):
+        # #1339's review (2026-11-26): a runner reaped mid-round (a restart, an OOM kill) leaves
+        # the round no summary.md, and the sheet said 'The task stopped before the agent ran'
+        # above 'Discard it', which removes the worktree and the agent's edits with it
+        t = self._sheet_task(phase="failed")     # its worktree: README.md changed, new.py added
+        t.round_dir(2).mkdir(parents=True)
+        t.set_status(last=cli.RESTARTED, infra="restart", pid=None)
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part=summary"
+        self.assertEqual(self.call(q, token=tok)[1]["happened"],
+                         f"The task stopped partway ({cli.RESTARTED}): what the agent changed so far is in the worktree.")
+        subprocess.run(["git", "-C", str(t.worktree), "checkout", "-q", "--", "README.md"], check=True)
+        (t.worktree / "new.py").unlink()
+        t.set_status(last=cli.RUNNER_DIED, infra="runner died")   # reaped with nothing changed yet
+        self.assertEqual(self.call(q, token=tok)[1]["happened"],
+                         "The task stopped (the runner died (see runner.log)).")
 
     def test_the_task_sheet_is_the_users_and_only_for_an_open_task(self):
         # the diff and report are the user's work: an agent's token reads none of it (AGENT_UNREAD)
