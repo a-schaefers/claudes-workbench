@@ -348,8 +348,12 @@ class StuckDetector:
         # The trees (gitops.mark) seen this round, its start's first: an edit row the runner gave
         # one (`mark`) is a change only when its tree is new. A line flipped A->B, B->A with a
         # read and a test run between (a block of 6, past CYCLE) reset the count at every edit
-        # and ran each round to its 40-minute wall (#1584, 2026-11-26)
+        # and ran each round to its 40-minute wall (#1584, 2026-11-26). `last` is the tree the
+        # last edit left: an edit leaving that same tree is one git can't see (a file it ignores,
+        # lib/ in GitHub's Python template: #1179, #1259), judged by its text as before, or
+        # every write to it, the first too, grew the count to a false stop (#1584's review)
         self.seen = {mark} if mark else set()
+        self.last = mark
         self.errors = 0
         self.since_edit = 0
         self.guard = None
@@ -365,7 +369,8 @@ class StuckDetector:
         if row["tool"] in EDIT_TOOLS and row["ok"]:
             self.wrote.update((self._key(p), row["sig"]) for p in written(row))
             if row.get("mark"):
-                changed = changed and row["mark"] not in self.seen
+                changed = changed and (row["mark"] == self.last or row["mark"] not in self.seen)
+                self.last = row["mark"]
                 self.seen.add(row["mark"])
         self.since_edit = 0 if changed else self.since_edit + 1
         # .guard names the one that fired, for the Stats tab's "what stops agents" (#404)

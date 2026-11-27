@@ -2322,6 +2322,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 # round (a flip done with sed) is none (#1584)
                 if detector.guard == "no_edit" and m not in detector.seen:
                     detector.seen.add(m)
+                    detector.last = m  # the next edit's tree is judged against this one
                     edit_mark, detector.since_edit, why = m, 0, None
             if why and detector.guard == "no_edit":
                 # The first trip in a session nudges (EXPLORE_NUDGE, sent below unless a

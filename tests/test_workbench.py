@@ -35778,6 +35778,31 @@ class Detector(unittest.TestCase):
         d.feed(flip("x", "z"))
         self.assertEqual(d.since_edit, 0)
 
+    def test_an_agent_writing_a_file_git_ignores_with_reads_and_test_runs_between_is_never_stopped(self):
+        # #1584's review (2026-11-26): a repo ignoring lib/ (GitHub's Python template; #1179,
+        # #1259), its agent writing lib/util.py a function more each time: gitops.mark leaves
+        # ignored files out, so every edit left the start's tree, already seen, and the round
+        # was stopped at 40 calls as stuck. An edit leaving the last edit's tree is judged by text
+        tool = lambda name, inp: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": name, "state": {"status": "completed", "input": inp}}}, 1)
+        d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-start")
+        whys = []
+        for i in range(60):
+            text = "".join(f"def f{j}(): return {j}\n" for j in range(i + 1))
+            whys += [d.feed(tool("read", {"filePath": "/w/lib/util.py"})),
+                     d.feed({**tool("write", {"filePath": "/w/lib/util.py", "content": text}),
+                             "mark": "tree-start"}),
+                     d.feed(tool("bash", {"command": f"python3 -m pytest -k f{i}"}))]
+            self.assertEqual(d.since_edit, 1)
+        self.assertEqual([w for w in whys if w], [])
+        # the same text again is still no change, and a tracked edit back to a seen tree none
+        d.feed({**tool("write", {"filePath": "/w/lib/util.py", "content": text}), "mark": "tree-start"})
+        self.assertEqual(d.since_edit, 2)
+        d.feed({**tool("edit", {"filePath": "/w/a.py", "oldString": "x", "newString": "y"}), "mark": "tree-y"})
+        self.assertEqual(d.since_edit, 0)
+        d.feed({**tool("edit", {"filePath": "/w/a.py", "oldString": "y", "newString": "x"}), "mark": "tree-start"})
+        self.assertEqual(d.since_edit, 1)
+
     def test_a_suspend_is_neither_silence_nor_the_rounds_time(self):
         # On the wall clock a laptop shut for 20 minutes woke to a round stopped for silence
         # (the 2026-11-16 audit). The monotonic clock skips a suspend; a frozen pass is cut out.
