@@ -40,6 +40,12 @@ FLOW_NAME_MAX = 14
 SAME_DAY = 99         # fires on one date, each its own batch
 TURNS = 300           # claude -p's --max-turns for one fire, unless `wb schedule add --max-turns`
 FIRE_HOURS = 12       # a fire's Claude is stopped past this, whatever its turns
+# headless Claude's Bash timeouts (ms), unless the user set theirs: driving.md's loop of
+# `wb wait --backlog <batch> --timeout 280` is one call, one turn, per 280 s idle, inside the prompt
+# cache's 5 minutes. Under Bash's 120 s default it polled every 100 s, a paid turn re-reading the
+# whole conversation each, and a long GPU night ran out of TURNS before its reviews and summary
+# (#1602, 2026-11-27)
+BASH_TIMEOUT_MS = {"BASH_DEFAULT_TIMEOUT_MS": "300000", "BASH_MAX_TIMEOUT_MS": "600000"}
 UNIT = "wb-schedule-"             # systemd: wb-schedule-<name>.timer / .service
 LABEL = "workbench.schedule."     # launchd: workbench.schedule.<name>
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -592,6 +598,8 @@ def run_now(name: str) -> str:
 def _fire_env(name: str) -> dict:
     env = {k: v for k, v in os.environ.items() if k not in CLAUDE_MARKS}
     env["WB_SCHEDULE"] = name  # wb accept --merge refuses under it
+    for k, v in BASH_TIMEOUT_MS.items():
+        env.setdefault(k, v)
     return env
 
 

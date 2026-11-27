@@ -484,6 +484,15 @@ class Flows(Base):
         self.assertIn("characters cut]", out)
         self.assertTrue(out.endswith(" {literal} P r/s"))
 
+    def test_a_stages_items_from_a_string_or_file_param_are_refused_by_the_params_name(self):
+        # #1601 (2026-11-27): items "{params.task}" over a string param passed, and list() made one
+        # task of each character of "Fix the login bug": 17 tasks, each a paid one on an API role
+        for t in ("string", "file", "int"):
+            self.assertIn(f"stage find: items {{params.areas}} is a {t} param: items need a list",
+                          self.errs(params={"areas": t, "focus": "string"}))
+        for t in runs.LIST_PARAMS:
+            self.assertEqual(self.errs(params={"areas": t, "focus": "string"}), "", t)
+
     def test_params_are_read_by_their_declared_type(self):
         self.assertEqual(runs.parse_params(AUDIT, ["areas=a, b"]), {"areas": ["a", "b"]})
         self.assertEqual(runs.parse_params(AUDIT, ['areas=["a"]']), {"areas": ["a"]})
@@ -580,6 +589,18 @@ class Customized(Base):
         self.assertEqual(store.all_tasks(), [])
         code, _, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run", "--param", "style=x")
         self.assertEqual((code, err.strip()), (1, "wb: --param style: one of unit, prop, not 'x'"))
+
+    def test_a_json_param_that_holds_no_list_is_refused_as_items_and_the_dry_run_starts_nothing(self):
+        # #1601 (2026-11-27): a value that is no list was split by list(), one task per character
+        plan = Path(self.tmp.name) / "one.json"
+        plan.write_text(json.dumps({"v": 1, "name": "one", "params": {"task": "json"}, "stages": [
+            {"id": "code", "kind": "code", "items": "{params.task}"}, {"id": "claude", "final": True, "from": "code"}]}))
+        for dry in (("--dry-run",), ()):
+            code, out, err = wb("run", "start", "one1", "--plan", str(plan), "--repo", str(self.repo), *dry,
+                                "--param", 'task="Fix the login bug"')
+            self.assertEqual((code, err.strip()), (1, "wb: stage code: items {params.task} holds a str, not a list"))
+            self.assertFalse(runs.run_dir("one1").exists())
+            self.assertEqual(store.all_tasks(), [])
 
     def test_a_run_started_in_a_subdirectory_reads_the_repo_from_its_top_and_starts_each_item_in_its_package(self):
         # #1494 (2026-11-26): from repo/src every flow command and deepcode was refused "is no git
@@ -974,6 +995,67 @@ class Runs(Base):
         for n in runs.run_tasks(runs.Run("fe")):
             if store.Task(n).exists:
                 run_wb("discard", n)
+
+    def test_a_fix_escalate_items_cheap_try_and_its_escalation_are_one_change_in_the_report_and_run_done(self):
+        # #1597 (bar loop #1030, 2026-11-27): #1592 grouped the tries in the hand-back only, so the
+        # report and run_done listed the cheap try and its escalation as two changes to accept,
+        # and Claude could accept both competing fixes
+        seq = Path(self.tmp.name) / "seq.json"
+        changes = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        seq.write_text(json.dumps([changes, changes, changes,
+                                   {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+        os.environ["FAKE_RESULT_SEQ"] = str(seq)
+        run_wb("run", "start", "fe", "--flow", "fix-escalate", "--param", 'findings=["answer.txt must hold 42"]',
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("fe", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        self.assertEqual(store.Task("fe-code-2").spec.get("item"), "1#e1")
+        done = self.run_notices("fe")[-1]["text"]
+        self.assertIn("1 change(s) at review", done)
+        rep = runs.report_of("fe")
+        self.assertEqual({c["task"]: c.get("keep") for c in rep["code"]}, {"fe-code-1": "fe-code-2",
+                                                                            "fe-code-2": "fe-code-2"})
+        out = run_wb("run", "report", "fe")
+        (alts,) = [ln for ln in out.splitlines() if ln.startswith("  code:1: ")]
+        self.assertTrue(alts.startswith("  code:1: fe-code-1 review, fe-code-2 review: alternatives for one change"), alts)
+        self.assertIn("the run escalated fe-code-1 to fe-code-2", alts)
+        self.assertIn("accept only fe-code-2, then wb discard fe-code-1", alts)
+        code, _, err = wb("run", "close", "fe")
+        self.assertEqual(code, 1)
+        self.assertIn("has code waiting on you: fe-code-1, fe-code-2 (one change: accept only fe-code-2", err)
+        for n in ("fe-code-1", "fe-code-2"):
+            run_wb("discard", n)
+
+    def test_an_escalation_still_running_or_held_is_never_named_for_wb_discard(self):
+        # #1597's second look (2026-11-27): kept_try skipped a try not at review, so a run paused
+        # at its budget or the day cap while its escalation ran, or held it at the cap, told Claude
+        # to accept the cheap try its reviewer still had asks on and wb discard the escalation,
+        # its paid rounds and kept work
+        seq = Path(self.tmp.name) / "seq.json"
+        changes = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        seq.write_text(json.dumps([changes, changes, changes,
+                                   {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+        os.environ["FAKE_RESULT_SEQ"] = str(seq)
+        run_wb("run", "start", "fe", "--flow", "fix-escalate", "--param", 'findings=["answer.txt must hold 42"]',
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("fe", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        esc = store.Task("fe-code-2")
+        for st, said in ((dict(phase="running"), "fe-code-2 is still running; decide once it ends"),
+                         (dict(phase="stuck", last="the day cap", infra=runner.SPEND, guard=runner.SPEND),
+                          "fe-code-2 is held: wb run resume fe goes on; decide once it ends")):
+            esc.set_status(**st)
+            self.assertIsNone(runs.report_of("fe")["code"][0].get("keep"), st)
+            out = run_wb("run", "report", "fe")
+            (alts,) = [ln for ln in out.splitlines() if ln.startswith("  code:1: ")]
+            self.assertIn(said, alts)
+            self.assertNotIn("wb discard", alts)
+            self.assertNotIn("accept only", alts)
+            code, _, err = wb("run", "close", "fe")
+            self.assertEqual(code, 1)
+            self.assertIn(f"(one change: {said})", err)
+            self.assertNotIn("wb discard fe-code-2", err)
+        esc.set_status(phase="review", last="", infra=None, guard=None)
+        for n in ("fe-code-1", "fe-code-2"):
+            run_wb("discard", n)
 
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
@@ -1594,6 +1676,94 @@ class Runs(Base):
             if store.Task(n).status.get("phase") not in store.CLOSED:
                 run_wb("discard", n)
 
+    def test_a_hand_back_keeps_the_cheap_try_claude_took_over_and_edited_when_the_escalation_is_at_review_too(self):
+        # #1595 (2026-11-27): the escalation at review too, the hand-back kept it, the latest try
+        # at review, and had Claude wb discard the cheap try it took over by name and wrote in
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))
+        self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
+        run_wb("takeover", "fxe-code-1")                                  # Claude chose the cheap try
+        (store.Task("fxe-code-1").worktree / "claude_fix.py").write_text("print('mine')\n")
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertIn("and you chose fxe-code-1 (wb takeover fxe-code-1)", alts)
+        self.assertIn("Finish fxe-code-1 in its worktree and wb accept only it", alts)
+        self.assertTrue(alts.endswith("then wb discard fxe-code-2"), alts)
+        self.assertNotIn("wb discard fxe-code-1", out)
+        self.assertTrue(store.Task("fxe-code-1").status.get("chosen_at"))  # kept across the hand-back
+        # both taken over by name: Claude's pick, neither named for wb discard
+        run_wb("takeover", "fxe-code-2")
+        again = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in again.splitlines() if "alternatives" in ln]
+        self.assertIn("your work is in fxe-code-1 (wb takeover fxe-code-1), fxe-code-2 (wb takeover "
+                      "fxe-code-2). Finish the one you chose", alts)
+        self.assertNotIn("wb discard fxe-code", again)
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
+    def test_a_hand_back_keeps_the_cheap_try_claude_edited_by_hand_at_review_without_a_takeover(self):
+        # #1595, case (b) (2026-11-27): Claude fixed the cheap try by hand at review, as SKILL.md
+        # asks of small things, with no takeover; the hand-back kept the escalation, the latest try
+        # at review, and named the cheap try for wb discard, Claude's edits deleted with it
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))
+        self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
+        (store.Task("fxe-code-1").worktree / "claude_fix.py").write_text("print('mine')\n")
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertIn("and you chose fxe-code-1 (your edits since its review)", alts)
+        self.assertIn("Finish fxe-code-1 in its worktree and wb accept only it", alts)
+        self.assertTrue(alts.endswith("then wb discard fxe-code-2"), alts)
+        self.assertNotIn("wb discard fxe-code-1", out)
+        # both edited by hand: Claude's pick, neither named for wb discard
+        (store.Task("fxe-code-2").worktree / "claude_fix.py").write_text("print('mine too')\n")
+        again = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in again.splitlines() if "alternatives" in ln]
+        self.assertIn("your work is in fxe-code-1 (your edits since its review), fxe-code-2 (your edits "
+                      "since its review). Finish the one you chose", alts)
+        self.assertNotIn("wb discard fxe-code", again)
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
+    def test_a_hand_back_keeps_the_escalation_when_claude_took_over_the_cheap_try_before_the_run_escalated(self):
+        # #1595's review (2026-11-27): Claude took over the slow cheap try by name and handed it
+        # back with wb feedback; the run refixed it twice and escalated to the paid role, and the
+        # hand-back still kept the cheap try Claude chose earlier and had it discard the escalation
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"fxe-code-1": "slow"})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.wait_item("fxe-code-1", lambda st: bool(st.get("session")) and runner.checked_out(store.Task("fxe-code-1")),
+                       timeout=60)
+        run_wb("takeover", "fxe-code-1")                                  # Claude chose it, then
+        msg = Path(self.tmp.name) / "m.txt"
+        msg.write_text("carry on\n")
+        run_wb("feedback", "fxe-code-1", "--message", str(msg))           # handed it back
+        self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"), timeout=180)
+        run = runs.Run("fxe")
+        self.assertEqual([r["task"] for r in run.journal() if r.get("kind") == "item"
+                          and r.get("stage") == "code"], ["fxe-code-1", "fxe-code-2"])  # escalated past it
+        self.assertTrue(store.Task("fxe-code-1").status.get("chosen_at"))
+        self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertNotIn("you chose", alts)
+        self.assertIn("Finish fxe-code-2 in its worktree and wb accept only it", alts)
+        self.assertTrue(alts.endswith("then wb discard fxe-code-1"), alts)
+        self.assertNotIn("wb discard fxe-code-2", out)
+        for n in runs.run_tasks(run):
+            if store.Task(n).exists and store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
     def test_an_items_role_follows_its_escalation_and_escalate_takes_distinct_roles(self):
         st = [{"id": "code", "kind": "code", "items": ["x"], "escalate": ["significant", "writing"]},
               {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 1},
@@ -1815,6 +1985,35 @@ class RunsApi(Base):
         self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
         run_wb("discard", "bgr-code-1")
 
+    def test_a_reviews_refix_past_the_runs_budget_is_held_even_after_its_role_moved_to_the_gpu(self):
+        # #1600 (bar loop #1030, 2026-11-27): the refix was priced by the role's model now, so once
+        # the role moved to the GPU (as the cap's notices advise) it ran on the task's API model,
+        # past --budget-usd, checked against the GPU minutes only
+        seq = Path(self.tmp.name) / "seq.json"
+        seq.write_text(json.dumps([
+            {"verdict": "changes", "must_fix": ["name the answer file in the README"], "nits": [], "summary": "close"},
+            {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_SEQ=str(seq))
+        with mock.patch.object(runs, "spawn", return_value=0):
+            code, _, err = wb("run", "start", "bgm", "--flow", "build", "--param", "request=Write answer.txt.",
+                              "--repo", str(self.repo), "--budget-usd", "1")
+        self.assertEqual(code, 0, err)
+        run = runs.Run("bgm")
+        runs.tick(run)
+        self.wait_item("bgm-code-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        runs.tick(run)
+        self.wait_item("bgm-review-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.spent(1.0, "bgm-code-1")                                    # the run's budget, all spent
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+            "significant": {"via": "gpu", "api": SPEND_FLASH}}})         # the role on the GPU, its api kept
+        runs.tick(run)
+        coder = store.Task("bgm-code-1")
+        self.assertEqual(coder.status["round"], 1)
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "refix"])
+        self.assertEqual(run.status["phase"], "paused")
+        self.assertIn("the run's budget: $", run.status["why"])
+        run_wb("discard", "bgm-code-1")
+
     def test_a_review_at_the_day_cap_holds_its_refix_until_midnight_or_a_higher_cap(self):
         # #1589 (bar loop #1030, 2026-11-27): wb feedback's day-cap refusal was logged as the
         # review's output, done, the review accepted, and the run said done (`run_done`) with the
@@ -2012,6 +2211,27 @@ class RunsApi(Base):
         self.assertNotIn("estimate $0 ·", out)
         self.assertRegex(out, r"\nestimate \$\d+\.\d*[1-9]\d* · budget")
 
+    def test_a_gpu_stages_escalation_to_a_paid_api_role_is_said_as_later_never_counted_as_0(self):
+        # #1597 (bar loop #1030, 2026-11-27): estimate and the dry run read the stage's own role
+        # only, so a fix-escalate run on a GPU trivial role said "estimate $0" with its
+        # escalations going to a paid API model, and its start line named no side for them
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+            "trivial": {"via": "gpu"}, "significant": {"via": "api", "api": SPEND_FLASH}}})
+        meter._CAP.clear()
+        argv = ("run", "start", "r1", "--flow", "fix-escalate", "--param", 'findings=["a is wrong", "b is wrong"]',
+                "--repo", str(self.repo))
+        code, out, err = wb(*argv, "--dry-run")
+        self.assertEqual(code, 0, err)
+        (line,) = [ln for ln in out.splitlines() if ln.startswith("  code: ")]
+        self.assertIn("fix on trivial (GPU) · then significant (API) · 2 item(s)", line)
+        (est,) = [ln for ln in out.splitlines() if ln.startswith("estimate ")]
+        self.assertIn("code's escalations to significant (API)", est)
+        with mock.patch.object(runs, "spawn", return_value=0):
+            code, out, err = wb(*argv)
+        self.assertEqual(code, 0, err)
+        self.assertIn("code trivial (GPU), then significant (API)", out)
+        self.assertIn("code's escalations to significant (API)", out)
+
     def test_a_code_item_refused_at_its_start_is_no_change_at_review_and_names_no_task(self):
         # #1531 (2026-11-26): _start logs the item's task before wb start runs, so a code item
         # refused there (a role with no key, here no price: the same exit 3) read "1 change(s)
@@ -2166,6 +2386,39 @@ class RunsApi(Base):
         self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
         self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
         self.assertEqual(runs.report_of("ovn")["null"], [])
+
+    def test_an_overnight_item_the_cap_stopped_after_its_run_spent_its_budget_is_held_at_the_budget_not_resumed(self):
+        # #1600 (bar loop #1030, 2026-11-27): the driver's resume of a held item checked the day
+        # cap (wb resume's) but never the run's budget, so under --overnight each midnight sent
+        # paid rounds past --budget-usd with the run still `running`
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_BY=json.dumps(
+            {"Audit area": {"findings": [], "covered": ["README.md"]}}))
+        run, _ = self.start("ovb", "--budget-usd", "1", "--overnight")
+        why = f"significant role: API spend today is $5.03 of the $5.00 day cap ({meter.RESETS})"
+        task = self.stopped_mid_round(run, "ovb-find-1", phase="stuck", last=why, infra=runner.SPEND,
+                                      guard=runner.SPEND)
+        self.spent(5.03, "ovb-find-1")                                   # the run's own: past its budget
+        runs.tick(run)
+        self.roles(SPEND_FLASH, 50)                                      # past midnight: room again
+        runs.tick(run)
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "resumed"])
+        self.assertEqual(run.status["phase"], "paused")
+        self.assertIn("the run's budget: $5.03 spent of $1.00", run.status["why"])
+        self.assertEqual(len(self.notices("ovb")), 1)
+        self.assertEqual(task.status["phase"], "stuck")                  # its work kept, held
+        with mock.patch.object(runs, "driver_alive", return_value=True):  # resumed under a live driver
+            self.assertEqual(wb("run", "resume", "ovb")[0], 0)           # no amend: still held
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "resumed"])
+        self.assertEqual(run.status["phase"], "paused")
+        runs.tick(run)
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "resumed"])
+        self.assertEqual(wb("run", "amend", "ovb", "--budget-usd", "10")[0], 0)
+        with mock.patch.object(runs, "spawn", return_value=0):
+            self.assertEqual(wb("run", "resume", "ovb")[0], 0)
+        runs.tick(run)
+        self.assertEqual([r["by"] for r in run.journal() if r.get("kind") == "resumed"], ["driver"])
+        self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
 
     OVERNIGHT_CODE = {"v": 1, "name": "ovc", "params": {"areas": "list"}, "stages": [
         {"id": "code", "card": "build", "escalate": ["significant"], "items": "{params.areas}",

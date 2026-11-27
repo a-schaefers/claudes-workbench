@@ -1189,13 +1189,13 @@ def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
     """What the task sheet leads with (#1339, 2026-11-26), read from the report runner.summary_text
     writes: the agent's summary (`agent_summary`), the files it changed (`changed`, the status
     lines' paths, then the ignored files --include commits, runner.ignored_to_commit, as task_diff
-    lists them; None with no report) and the tests' line (`tests`, `tests: PASS (…)`), and for a
+    lists them, never the run caches' note; None with no report) and the tests' line (`tests`, `tests: PASS (…)`), and for a
     failed or stuck task one plain line of what happened (`happened`: `The agent stopped before
     writing anything (OpenCode exited).`; with no report, `The task stopped before the agent ran (…).`
     only for a stop before the agent with a clean worktree). The sheet showed only `opencode exited 1 (see
     <path>/runner.log)`, a path the phone can't open, with Reply below the fold. Never
     runner.log's tail: OpenCode's raw stderr, which Claude reads when asked."""
-    from . import runner
+    from . import gitops, runner
     lines = report.split("\n")
     out: dict = {"happened": "", "agent_summary": None, "changed": None, "tests": ""}
     if has_report:
@@ -1205,7 +1205,8 @@ def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
             out["agent_summary"] = "\n".join(lines[at + 1:end]).strip()
             files = []
             for line in lines[end + 1:]:
-                if not line or line.startswith(("NOTE:", "not in the spec:")) or re.match(r"\d+ files? changed", line.strip()):
+                if (not line or line.startswith(("NOTE:", "not in the spec:", gitops.RUN_CACHES_NOTE))
+                        or re.match(r"\d+ files? changed", line.strip())):
                     break
                 if line != "(none)":
                     files.append(line[3:] if re.match(r"^[ MADRCU?!]{2} ", line) else line)
@@ -1230,9 +1231,8 @@ def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
             # edits on the word of the phone (#1339's review, 2026-11-26). Only the machine's
             # own stops before the agent (status infra setup, repo, model, which each runner
             # start clears) with a clean worktree say it never ran.
-            from . import gitops
-            try:  # an ignored file the commit takes is an edit too (#1591)
-                edits = bool(gitops.changed(t.worktree) or runner.ignored_to_commit(t))
+            try:  # an ignored file the commit takes is an edit too (#1591); a run's caches aren't (#1599)
+                edits = bool(gitops.changed(t.worktree, runner.run_caches(t)) or runner.ignored_to_commit(t))
             except (OSError, gitops.GitError):
                 edits = False
             if edits:
@@ -1275,15 +1275,18 @@ def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dic
     line cut at transcript.JSON_LINE_CHARS (`lines_cut`), or null with `cut` past
     TASK_DIFF_CHARS. None for a ``path`` that isn't in it. The ignored files --include commits
     are in it too (runner.ignored_to_commit), as in wb diff: without them the phone showed a
-    change importing a lib/util.py it never listed, under an ignored lib/ (#1548, 2026-11-26)."""
+    change importing a lib/util.py it never listed, under an ignored lib/ (#1548, 2026-11-26). The run caches
+    accept leaves out (runner.run_caches) aren't, as in wb diff (#1599)."""
     from . import gitops, runner, transcript
     base = gitops.diff_base(t)
     out = {"base": base if base == "HEAD" else base[:12], "stat": "", "files": []}
     if not t.worktree.is_dir():
         return {**out, "note": "no worktree yet" if t.status.get("phase") in store.ACTIVE else "its worktree is gone"}
-    force = runner.ignored_to_commit(t)
+    # the run caches accept leaves out, out of it too, as wb diff leaves them out: the sheet listed
+    # a test run's .pyc as the agent's change (#1599, 2026-11-27)
+    force, skip = runner.ignored_to_commit(t), runner.run_caches(t)
     try:
-        for line in (gitops.diff(t.worktree, base, numstat=True, force=force) or "").splitlines():
+        for line in (gitops.diff(t.worktree, base, numstat=True, force=force, skip=skip) or "").splitlines():
             added, deleted, name = (line.split("\t", 2) + ["", ""])[:3]
             out["files"].append({"path": name, "added": int(added) if added.isdigit() else None,
                                  "deleted": int(deleted) if deleted.isdigit() else None})
@@ -1291,9 +1294,9 @@ def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dic
             return None
         paths = [":(literal)" + path] if path is not None else ()
         if not full:  # the stat first; the diff when asked for
-            out["stat"] = gitops.diff(t.worktree, base, stat=True, paths=paths, force=force) or ""
+            out["stat"] = gitops.diff(t.worktree, base, stat=True, paths=paths, force=force, skip=skip) or ""
         else:
-            text = gitops.diff(t.worktree, base, paths=paths, limit=TASK_DIFF_CHARS, force=force)
+            text = gitops.diff(t.worktree, base, paths=paths, limit=TASK_DIFF_CHARS, force=force, skip=skip)
             if text is None:
                 out.update(diff=None, cut=True)
             else:

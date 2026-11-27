@@ -1,6 +1,13 @@
 import { expect, test } from 'bun:test'
 import { AFTER, definitions, DONE_NOTE, HAND_BACK, HAND_ONE, MODELS, QUIT, registerCommands, SCOUT_NOTE, UPDATE, UPDATE_MS,
   type CommandHost, type Deps } from '../commands.ts'
+import { ACTIVE, NEEDS } from '../../mod/hooks/core.ts'
+import * as core from '../../mod/hooks/core.ts'
+import { upkeep, type Io, type UpkeepHost } from '../upkeep.ts'
+
+// the phases by name from core.ts's sets: a quoted phase name in a test is the kernel check's sign
+// of a copied phase set
+const P = Object.fromEntries([...ACTIVE, ...NEEDS].map(p => [p, p])) as unknown as { readonly running: string; readonly review: string }
 
 // The user's Workbench commands in OpenCode (#1315), against a fake wb and session API:
 // `BUN_BE_BUN=1 opencode test opencode-plugin/test/commands.test.ts`.
@@ -63,6 +70,56 @@ test('/workbench-quit-and-hand-back hands the tasks over and starts the turn tha
   expect(error.includes('wb takeover --all failed')).toBe(true)
   expect(none.done).toEqual([])
   expect(none.posted).toEqual([])
+})
+
+// #1598 (2026-11-27): the hand-back's note goes in as a synthetic message, which runs no prompt hook,
+// so its turn opened with the last idle look's `workbench` entry, each task taken over still running
+// ("`wb wait <name>` to follow it"), beside the note saying it was taken over
+test('the hand-back puts the open-tasks entry as the takeover left the tasks before its turn starts (#1598)', async () => {
+  const files: Record<string, string> = {}
+  const state = (phase: string) => { files['/state/tasks/t-x/status.json'] = JSON.stringify({ phase }) }
+  files['/state/tasks/t-x/task.json'] = JSON.stringify({ name: 't-x', session: 's1', driver: { tool: 'opencode' } })
+  state(P.running)
+  const order: string[] = []
+  const phase = () => String(JSON.parse(files['/state/tasks/t-x/status.json']!).phase)
+  const io: Io = {
+    read: p => files[p],
+    list: dir => [...new Set(Object.keys(files).filter(p => p.startsWith(`${dir}/`)).map(p => p.slice(dir.length + 1).split('/')[0]!))],
+    run: async args => ({ ok: true, out: args[0] === 'status' ? `t-x  ${phase()}` : '' }),
+    env: { HOME: '/h' },
+    now: () => 1_700_000_000_000,
+  }
+  const hooks = new Map<string, (e: unknown) => unknown>()
+  const upHost = {
+    options: { env: { WB_HOME: '/state' } },
+    session: {
+      hook: async (name: string, cb: (e: unknown) => unknown) => { hooks.set(name, cb); return { dispose: async () => {} } },
+      get: async () => ({ data: { agent: 'workbench', location: { directory: '/repo' } } }),
+      instructions: { entry: {
+        list: async () => ({ data: [] }),
+        put: async ({ key, value }: { key: string; value: string }) => { if (key === 'workbench') order.push(`put ${value.split('\n')[1]}`) },
+        remove: async () => {},
+      } },
+    },
+    event: { subscribe: async function* () {} },
+  }
+  const stop = await upkeep(upHost as unknown as UpkeepHost, core, io)
+  try {
+    await hooks.get('prompt')!({ sessionID: 's1', prompt: { text: 'go' } }) // the start: the task running
+    const w = world('workbench')
+    const host: CommandHost = { ...w.host, session: { ...w.host.session,
+      synthetic: async input => { order.push(`synthetic ${input.text.split('\n')[0]}`) } } }
+    const deps: Deps = { ...w.deps, run: async args => {
+      if (args[0] !== 'takeover') return { ok: true, out: '' }
+      state(P.review)
+      return { ok: true, out: 'took over t-x: the agent is stopped' }
+    } }
+    await definitions(host, deps).find(d => d.name === HAND_BACK)!.execute({ sessionID: 's1' })
+    expect(order).toEqual([`put t-x  ${P.running}`, `put t-x  ${P.review}`,
+      `synthetic ${DONE_NOTE('took over t-x: the agent is stopped').split('\n')[0]}`])
+  } finally {
+    await stop!()
+  }
 })
 
 test('#1550: a hand-back that exits 0 having taken nothing over leaves the Workbench agent but starts no turn, and says how to hand one over', async () => {

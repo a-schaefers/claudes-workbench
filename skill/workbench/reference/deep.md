@@ -17,7 +17,8 @@ not on a repo's flow), `stages`. Each stage:
 - `card` (a role card) or `"kind": "code"`; `role` overrides the card's (significant, trivial,
   writing). A report stage returns one object to `schema` (the card's unless given) with `tools`
   read or none; a code stage changes code in its own worktree (`test`, `setup`, `ask`).
-- Its inputs: `items` (a list, or `"{params.<a list param>}"`), or `from` an earlier stage,
+- Its inputs: `items` (a list, or `"{params.<k>}"` of a list, files, runs or json param, never a
+  string or file one: refused), or `from` an earlier stage,
   `split` a key of each earlier output that holds a list (one item per entry).
 - `prompt`: the item's spec. Placeholders only substitute: `{item}`, `{item.<key>}`,
   `{params.<key>}`, `{context}`, `{diff}` (the code stage's change) and `{report}` (its coder's
@@ -35,7 +36,9 @@ not on a repo's flow), `stages`. Each stage:
   goes back to the coder as `wb feedback`, then the change is reviewed again.
 - `escalate: [roles]`: on a code stage: an item stuck or failed, or with its review's asks left
   past refix's max, is tried again from the base on the next role (`<key>#e1`, …); the attempt
-  before is kept. Shipped as `fix-escalate` (trivial, then significant).
+  before is kept. The tries are one change: `wb run report` names the one to accept (the latest
+  with a finished change), and you discard the rest. A paid API escalate role is in the estimate's
+  "as their items come", never its figure. Shipped as `fix-escalate` (trivial, then significant).
 - `on_failure`: `checkpoint` asks you when an item ends with no result; a code item stuck or
   failed always does (with `escalate`, only once its last role has). It holds only that item:
   the others still start and run, and the run ends after your `wb run resume`.

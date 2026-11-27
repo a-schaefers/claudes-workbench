@@ -195,9 +195,10 @@ is at the terminal and nothing wakes you: no mod, no pane, no dialog.
 - You may run `wb` commands and read files; nothing else (no Edit or Write, no git, no gh).
   Write a spec straight into `wb start <name> --spec - --backlog <batch> … <<'EOF'`
   (a heredoc), feedback with `wb feedback <name> --text "…"`.
-- Spec the whole backlog first, then drive with `wb wait --backlog <batch> --timeout 100` in a
-  loop (each call under Bash's two minutes; exit 2 is the timeout, or no open task left): review
-  each task it prints as by day. Only your batch's tasks are yours: leave every other one alone.
+- Spec the whole backlog first, then drive with `wb wait --backlog <batch> --timeout 280` in a
+  loop (the fire sets Bash's timeout to 5 minutes, so each call is one turn; exit 2 saying "timed
+  out" means wait again, "no open tasks" means the batch is done): review each task it prints as
+  by day. Only your batch's tasks are yours: leave every other one alone.
 - Accept without `--merge` (it is refused here): the user merges in the morning. A hard call, a
   task that needs the user, a question you can't answer from the backlog:
   `wb note <name> --text "…"`, and leave it in review rather than guess.

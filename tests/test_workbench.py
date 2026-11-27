@@ -4062,6 +4062,42 @@ class Lifecycle(Base):
         # a round with no report yet: the worktree's ignored file is an edit too
         self.assertIn("partway", chat.report_lead(t, "", False)["happened"])
 
+    def test_the_task_sheet_leaves_out_the_run_caches_wb_diff_and_accept_leave_out(self):
+        # #1599 (bar loop #1030 round 5, 2026-11-27): #1593 left a test run's caches out of wb
+        # diff and the review, but the web app's task sheet (chat.task_diff) and a run's {diff}
+        # listed the .pyc as the agent's change, and the sheet read #1593's note line as a
+        # changed file: an agent that wrote nothing "stopped partway"
+        from workbench import chat, runs
+        pyc = "mkdir -p __pycache__ && printf '\\0\\1' > __pycache__/f0.cpython-312.pyc"
+        self.start("t-rc", "ok", "--test", f"{pyc} && {TEST_CMD}", "--no-self-review")
+        wait_phase("t-rc", {"review"})
+        t = store.Task("t-rc")
+        self.assertEqual(runner.run_caches(t), ["__pycache__/f0.cpython-312.pyc"])
+        d = chat.task_diff(t)
+        self.assertEqual([f["path"] for f in d["files"]], ["answer.txt"])
+        self.assertEqual(d["stat"], run_wb("diff", "t-rc", "--stat").rstrip("\n"))
+        self.assertNotIn("__pycache__", chat.task_diff(t, full=True)["diff"])
+        self.assertNotIn("__pycache__", runs._task_diff(t))       # a run's {diff} too
+        self.assertIn(gitops.RUN_CACHES_NOTE, t.report(1))         # the report names them
+        self.assertEqual(chat.task_summary(t)["changed"], ["answer.txt"])
+        # an agent that wrote nothing and failed, then a test run in its worktree: the caches
+        # and the report's note on them are no edit
+        os.environ["FAKE_EXIT"] = "1"
+        self.start("t-rc0", "say")
+        self.assertEqual(wait_phase("t-rc0", {"review", "stuck", "failed"})["phase"], "failed")
+        t0 = store.Task("t-rc0")
+        subprocess.run(pyc, shell=True, cwd=t0.worktree, check=True)
+        caches = runner.run_caches(t0)
+        self.assertEqual(caches, ["__pycache__/f0.cpython-312.pyc"])
+        self.assertEqual(chat.task_diff(t0)["files"], [])
+        report = t0.report(1)
+        self.assertTrue(report.endswith("files changed:\n(none)"), report)
+        report += "\n" + gitops.run_caches_line(caches)      # as summary_text names them
+        lead = chat.report_lead(t0, report, True)
+        self.assertEqual(lead["changed"], [])
+        self.assertIn("before writing anything", lead["happened"])
+        self.assertNotIn("partway", chat.report_lead(t0, "", False)["happened"])
+
     def test_wb_verify_and_wb_shot_run_the_candidate_with_the_ignored_files_accept_commits(self):
         # #1275 (the 2.0 bar loop, 2026-11-24): #1259 put the agent's lib/util.py, under
         # Python.gitignore's lib/, in the review diff but not in verify's candidate: wb verify
@@ -8370,6 +8406,29 @@ class Context(Base):
         self.assertNotIn("set aside", run_wb("takeover", "t-srf"))  # no live round: its finish stands
         self.assertEqual(store.Task("t-srf").worktree.joinpath("answer.txt").read_text(), "43\n")
 
+    def test_a_self_review_that_leaves_its_mutation_in_a_file_the_repo_ignores_is_set_aside_as_a_tracked_one_is(self):
+        # #1596 (bar loop #1030 round 5, M2, 2026-11-27): the green fingerprint (gitops.mark) left
+        # ignored files out, so "43" in an ignored answer.txt read as the green tree: a guard's
+        # stop settled as its finish under tests: PASS, and its own finish with its tests failing
+        # took an auto-fix round (a paid one on an API role), no 2s kept
+        (self.repo / ".gitignore").write_text("answer.txt\n")
+        for a in (("add", ".gitignore"), ("commit", "-qm", "ignore")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True)
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="3", FAKE_SELF_DONE="1")
+        self.start("t-sri", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-sri", {"review", "stuck", "failed"}, timeout=60)
+        self.assert_set_aside("t-sri", st, "finished on its own")
+        self.assertFalse([e for e in store.read_jsonl(store.Task("t-sri").dir / "events.jsonl")[0]
+                          if e.get("kind") == "autofix"])
+        del os.environ["FAKE_SELF_DONE"]
+        os.environ.update(FAKE_SELF_RERUN="1", FAKE_READS="45")
+        self.start("t-srig", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srig", {"review", "stuck", "failed"}, timeout=60)
+        settled = [e["text"] for e in store.read_jsonl(store.Task("t-srig").dir / "events.jsonl")[0]
+                   if e.get("kind") == "settled"]
+        self.assertTrue(settled and all("on a tree it changed" in x for x in settled), settled)
+        self.assert_set_aside("t-srig", st, "stopped mid-check (the same call 4 times in a row")
+
     def mid_check(self, name):
         """A self-review stalled mid-check, "41" on disk (FAKE_SELF_STALL, no nudge)."""
         os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
@@ -8407,6 +8466,77 @@ class Context(Base):
         out = run_wb("stop", "t-sst")
         self.assertEqual(t.status["phase"], "stuck")
         self.assert_green_back(t, out, "wb stop")
+
+    def test_accept_force_mid_self_review_commits_the_green_tree_not_the_unfinished_one(self):
+        # #1596 (bar loop #1030 round 5, M2, 2026-11-27): wb accept --force (the way its own
+        # refusal names) stopped the runner with no set-aside, and committed "41", a check the
+        # self-review had broken, under the green round's tests:ok
+        t = self.mid_check("t-sacc")
+        out = run_wb("accept", "t-sacc", "-m", "Write answer", "--force")
+        self.assertIn("self-review stopped mid-check (wb accept --force); its edits set aside as 2s "
+                      "(the tests weren't run on them, git tree ", out)
+        self.assertIn("), not committed: the tree its tests passed on is what's committed", out)
+        self.assertLess(out.index("set aside as 2s"), out.index("accepted t-sacc"), out)
+        self.assertEqual(t.status["phase"], "accepted")
+        shown = subprocess.run(["git", "-C", str(self.repo), "show", f"{t.spec['branch']}:answer.txt"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, "42\n")
+
+    def test_accept_force_after_a_stop_and_a_rewind_commits_the_tree_claude_chose(self):
+        # #1596's review (2026-11-27): _stop_aside counted any phase but review as a live
+        # self-review, so after wb stop and wb rewind <t> 2s, the wb accept --force the rewind
+        # names set "41" aside again and committed "42", not the tree Claude chose, under a false
+        # "stopped mid-check" line
+        t = self.mid_check("t-rra")
+        self.assertIn("set aside", run_wb("stop", "t-rra"))
+        self.assertIn("next: wb accept t-rra --force", run_wb("rewind", "t-rra", "2s"))
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "41\n")
+        out = run_wb("accept", "t-rra", "-m", "Write answer", "--force")
+        self.assertNotIn("set aside", out)
+        self.assertEqual(t.status["phase"], "accepted")
+        shown = subprocess.run(["git", "-C", str(self.repo), "show", f"{t.spec['branch']}:answer.txt"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, "41\n")
+
+    def test_a_takeover_after_a_stop_keeps_the_users_own_edits_and_the_first_set_aside(self):
+        # #1596's review (2026-11-27): the same, a takeover after wb stop set the user's edits
+        # in an editor aside as 2s, over the self-review's own 2s
+        t = self.mid_check("t-rre")
+        self.assertIn("set aside", run_wb("stop", "t-rre"))
+        aside = t.status["review_trees"]["2s"]["tree"]
+        t.worktree.joinpath("answer.txt").write_text("40\n")
+        self.assertNotIn("set aside", run_wb("takeover", "t-rre"))
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "40\n")
+        self.assertEqual(t.status["review_trees"]["2s"]["tree"], aside)
+
+    def stopped_on_green(self, name):
+        """wb stop on a self-review whose tree is the green one ("42": it had only read so far),
+        then the user's edit in an editor, "40"."""
+        t = self.mid_check(name)
+        t.worktree.joinpath("answer.txt").write_text("42\n")
+        self.assertNotIn("set aside", run_wb("stop", name))
+        self.assertEqual(sorted(t.status["review_trees"]), ["1"])  # nothing kept: nothing to keep
+        t.worktree.joinpath("answer.txt").write_text("40\n")
+        return t
+
+    def test_accept_force_after_a_stop_on_the_green_tree_commits_the_users_edits(self):
+        # #1596's review, round 2 (2026-11-27): that stop kept nothing, so the round still
+        # counted as live and the wb accept --force wb's refusal names set the user's "40" aside
+        # as 2s, committed "42" under a false "its edits set aside" line and dropped the refs
+        t = self.stopped_on_green("t-rgf")
+        out = run_wb("accept", "t-rgf", "-m", "Write answer", "--force")
+        self.assertNotIn("set aside", out)
+        self.assertEqual(t.status["phase"], "accepted")
+        shown = subprocess.run(["git", "-C", str(self.repo), "show", f"{t.spec['branch']}:answer.txt"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, "40\n")
+
+    def test_a_takeover_after_a_stop_on_the_green_tree_keeps_the_users_edits(self):
+        # #1596's review, round 2: the takeover the same, "40" set aside and "42" put back
+        t = self.stopped_on_green("t-rgt")
+        self.assertNotIn("set aside", run_wb("takeover", "t-rgt"))
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "40\n")
+        self.assertNotIn("2s", t.status["review_trees"])
 
     def test_a_takeover_of_a_self_review_an_update_stopped_mid_check_puts_the_green_tree_back(self):
         # #1582 (2026-11-26): _stop_aside set aside only a live runner's round, so wb update
@@ -23538,6 +23668,23 @@ class ScheduledRuns(Base):
             time.sleep(POLL)
         self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
         self.assertTrue(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_a_fires_claude_waits_a_whole_turn_long_inside_bash_timeouts_the_fire_sets_and_the_users_own_stay(self):
+        # #1602 (2026-11-27): driving.md's 100 s polls under Bash's 120 s default spent a paid turn
+        # each, and a long GPU night ran out of --max-turns before its reviews and summary
+        from workbench import schedule
+        os.environ.pop("BASH_DEFAULT_TIMEOUT_MS", None)
+        os.environ.pop("BASH_MAX_TIMEOUT_MS", None)
+        env = schedule._fire_env("night")
+        default_ms = int(env["BASH_DEFAULT_TIMEOUT_MS"])
+        self.assertGreaterEqual(default_ms, 290_000)
+        self.assertGreaterEqual(int(env["BASH_MAX_TIMEOUT_MS"]), default_ms)
+        driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
+        wait = int(re.search(r"`wb wait --backlog <batch> --timeout (\d+)`", driving).group(1))
+        self.assertTrue(200 <= wait <= 290 and wait * 1000 < default_ms, wait)
+        self.assertIn("the fire sets Bash's timeout to 5 minutes", driving)
+        os.environ["BASH_DEFAULT_TIMEOUT_MS"] = "400000"  # the user's own stays
+        self.assertEqual(schedule._fire_env("night")["BASH_DEFAULT_TIMEOUT_MS"], "400000")
 
     def test_wait_on_a_backlog_takes_its_tasks_alone(self):
         # headless Claude in the repo would otherwise take the daytime session's tasks there by

@@ -3356,7 +3356,7 @@ def _stop_runner(task):
 LIVE = ("queued", "running", "testing", "asking")
 
 
-def _stop_aside(task, how: str) -> str:
+def _stop_aside(task, how: str, committed: bool = False) -> str:
     """_stop_runner, and for a runner stopped mid self-review off its green tree runner.set_aside's
     one rule: its files kept as review tree `<n>s`, the green tree put back (status `tests`
     stays the green round's: the tests aren't rerun, Claude's Bash stops at 2 minutes) and the
@@ -3367,13 +3367,37 @@ def _stop_aside(task, how: str) -> str:
     own set_aside, so a stuck or failed self-review is an outside stop. Gated on liveness, a
     runner already dead (wb update --stop, a logout's SIGTERM: stuck, the runner gone) left the
     unfinished tree to wb takeover and the hand-back under tests:ok, which wb accept committed
-    (#1582, 2026-11-26)."""
-    live = task.status.get("phase") != "review" or runner_alive(task)
+    (#1582, 2026-11-26). ``committed``: wb accept --force's, set_aside's line for a tree it
+    commits next (#1596).
+
+    A round whose tree this step already keeps (`<n>s`, an earlier stop's set-aside; `<n>`, a
+    review of it or a rewind's save) is over: what is on disk since is Claude's or the user's
+    (a wb rewind, an editor). Counted live by its phase alone, wb stop then wb rewind <t> 2s
+    then the wb accept --force the rewind names committed the green tree, not the one Claude
+    chose, under a false "stopped mid-check" line, and a second stop or a takeover set aside
+    the user's own edits over the first 2s (#1596's review, 2026-11-27).
+
+    A round an earlier stop already handled is over too, whatever set_aside made of it (status
+    `aside_done`, its step, round and `round_started_at`, so the next round, or the runner
+    starting this one again, is live once more): a wb stop on the green tree (the self-review had
+    only read) kept nothing, so the user's edits in an editor were set aside as 2s by the
+    wb accept --force wb's refusal names, the green tree committed under a false "its edits"
+    line, and the review refs dropped with them (#1596's review, round 2, 2026-11-27). A round
+    only wb update --stop or a signal ended never gets the mark: its takeover still puts the
+    green tree back (#1582)."""
+    st = task.status
+    n = int(st.get("round") or 1)
+    steps = st.get("steps", 1)
+    mark = {"step": steps, "round": n, "began": st.get("round_started_at")}
+    done = {k for k, v in (st.get("review_trees") or {}).items() if v.get("step") == steps}
+    live = ((st.get("phase") != "review" or runner_alive(task)) and not {str(n), f"{n}s"} & done
+            and st.get("aside_done") != mark)
     _stop_runner(task)
     if not live or not task.worktree.is_dir():
         return ""
-    return runner.set_aside(task, int(task.status.get("round") or 1), None,
-                            f"stopped mid-check ({how})", None) or ""
+    line = runner.set_aside(task, n, None, f"stopped mid-check ({how})", None, committed) or ""
+    task.set_status(aside_done=mark)  # handled, on the green tree or not (#1596's review)
+    return line
 
 
 def _open_tasks():
@@ -5040,8 +5064,14 @@ def _take_over(name: str, user: bool, hand_back: bool = False) -> tuple[store.Ta
     # (#1592's review, 2026-11-27); only --all's own takeover records the phase it found
     prior = (task.status.get("prior_phase") if task.status.get("taken_over") else None) \
         or (task.status.get("phase") if hand_back else "review")
+    # and marked Claude's choice, kept across later takeovers: with the escalation at review too,
+    # the hand-back kept the latest try at review and had Claude wb discard the one it took over
+    # and wrote in (#1595, 2026-11-27). When, not whether: a choice the run escalated past (taken
+    # over while slow, handed back with wb feedback, then refixed and escalated) still won, and
+    # the hand-back had Claude discard the paid escalation (#1595's review, 2026-11-27)
+    chosen = {} if hand_back else {"chosen_at": store.now()}
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
-                    parked=None, prior_phase=prior)  # Claude's now (#698)
+                    parked=None, prior_phase=prior, **chosen)  # Claude's now (#698)
     _ack_all(task)
     return task, aside
 
@@ -5065,13 +5095,35 @@ _PHASE_SAID = {"failed": "failed", "stuck": "got stuck", "queued": "never starte
                "running": "was still running", "testing": "was still testing", "asking": "was still asking"}
 
 
+def _edited_by_hand(task: store.Task) -> bool:
+    """Whether ``task``'s worktree holds edits made since its agent's last round: its files are
+    none of the trees its step's review notices kept (status `review_trees`, edits by hand that
+    wb rewind kept left out). False when it has no such tree, or the worktree can't be read: a
+    hand-back named the try Claude fixed by hand at review for wb discard (#1595, 2026-11-27)."""
+    st = task.status
+    steps = st.get("steps", 1)
+    trees = {v.get("tree") for v in (st.get("review_trees") or {}).values()
+             if v.get("step") == steps and not v.get("hand")}
+    trees.discard(None)
+    if not trees or not task.worktree.is_dir():
+        return False
+    try:  # as the review notice snapshots it: what accept would commit (#1259, #1593)
+        now = gitops.review_snapshot(task.worktree, force=runner.ignored_to_commit(task),
+                                     skip=runner.run_caches(task))[0]
+    except (gitops.GitError, OSError):
+        return False
+    return now not in trees
+
+
 def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
     """--all's one line for the tries it took over at one code item (runs.tries_of): a compare
     item's attempts (#1576), one kept, the rest discarded, which records them as not chosen
     (runs.not_chosen), never as rejected; or an escalation and the tries it escalated from
-    (#1592), the latest finished one kept (at review before Claude first took it over: status
-    ``prior_phase``, which _take_over keeps across another takeover), else the latest, the others
-    discarded, no pick to count them against."""
+    (#1592), the one holding Claude's work kept (taken over by name since the latest try began,
+    status ``chosen_at``, or edited by hand at review: _edited_by_hand, #1595), else the latest
+    finished one (at review before Claude first took it over: status ``prior_phase``, which
+    _take_over keeps across another takeover), else the latest, the others discarded, no pick to
+    count them against."""
     tries = runs.tries_of(store.Task(names[0]))[3]
     rest = [t.name for t in tries if t.name not in names]
     kept = [n for n in rest if store.Task(n).status.get("phase") == "accepted"]
@@ -5093,9 +5145,30 @@ def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
         # kept at review (asks left after its refixes) whose escalation crashed was named to
         # discard, and Claude dropped the reviewed change to redo it in the crashed try's worktree
         # (#1592, the bar loop's M5, 2026-11-27)
-        keep = next((n for n in reversed(live) if phase[n] == "review"), live[-1])
+        # Claude's own work first, whatever the others' phases: the latest at review was kept and
+        # the try Claude chose and wrote in named for wb discard, its edits deleted with its
+        # worktree (#1595, 2026-11-27). A try taken over by name since the latest try began
+        # (`chosen_at`; one taken earlier the run escalated past), or one at review whose files
+        # differ from every tree its agent left (Claude's edits by hand at review, SKILL.md's
+        # small fixes, with no takeover)
+        began = store.Task(live[-1]).spec.get("created_at") or 0
+        how = {}
+        for n in live:
+            if (store.Task(n).status.get("chosen_at") or 0) > began:
+                how[n] = f"wb takeover {n}"
+            elif phase[n] == "review" and _edited_by_hand(store.Task(n)):
+                how[n] = "your edits since its review"
+        chosen = [n for n in live if n in how]
+        if len(chosen) > 1:  # Claude's own pick to make: none of them named for wb discard
+            return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for "
+                    f"one change, {where}: the run escalated {', '.join(live[:-1])} to {live[-1]}, and "
+                    f"your work is in {', '.join(f'{n} ({how[n]})' for n in chosen)}. Finish the one "
+                    f"you chose in its worktree and wb accept only it -m \"…\" (it commits), then wb "
+                    f"discard the rest")
+        keep = chosen[0] if chosen else next((n for n in reversed(live) if phase[n] == "review"), live[-1])
         drop = [n for n in live if n != keep]
         why = ("" if keep == live[-1] else
+               f", and you chose {keep} ({how[keep]})" if chosen else
                f", which {_PHASE_SAID.get(phase[live[-1]], 'never finished')}: {keep} holds the latest "
                f"finished change")
         return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for one "
@@ -5203,7 +5276,15 @@ def cmd_accept(a):
     if (not close and was_live and st.get("steps", 1) == 1 and task.worktree.is_dir()
             and not gitops.changed(task.worktree, gitops.run_caches(task.worktree))):  # #1580
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
-    _stop_runner(task)  # under --force it may still be running, and would set its phase back
+    # under --force it may still be running, and would set its phase back; stopped mid self-review
+    # off its green tree, set_aside's one rule puts that tree back first, so the tree its tests
+    # passed on is what's committed: _stop_runner alone committed the unfinished one, a check
+    # still broken, without a word (#1596, bar loop #1030 round 5, M2, 2026-11-27). At review the
+    # runner ended the round itself (a self-review's own finish, its tests passing, stands)
+    if st.get("phase") == "review":
+        _stop_runner(task)
+    else:
+        _say(_stop_aside(task, "wb accept --force", committed=True))
     checked = None if close else verify.note(task)  # before the commit: what Claude accepts it on (#97)
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
