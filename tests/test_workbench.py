@@ -3986,6 +3986,27 @@ class Lifecycle(Base):
         self.assertIsNotNone(one)
         self.assertIn("+++ b/lib/util.py", one["diff"])
 
+    def test_a_failed_tasks_sheet_counts_the_ignored_files_its_agent_wrote(self):
+        # #1591 (the 2.2 bar loop, 2026-11-27): the agent wrote only answer.txt, which the repo
+        # ignores, and OpenCode exited 1; the sheet's lead said "The agent stopped before writing
+        # anything" and "No files changed." beside the Diff tab listing answer.txt, and offered
+        # "Discard it"
+        from workbench import chat
+        (self.repo / ".gitignore").write_text("answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore answer.txt"], check=True)
+        os.environ["FAKE_EXIT"] = "1"
+        self.start("t-lost", "ok")
+        self.assertEqual(wait_phase("t-lost", {"review", "stuck", "failed"})["phase"], "failed")
+        t = store.Task("t-lost")
+        s = chat.task_summary(t)
+        self.assertNotIn("before writing anything", s["happened"])
+        self.assertIn("partway", s["happened"])
+        self.assertEqual(s["changed"], [f["path"] for f in chat.task_diff(t)["files"]])
+        self.assertEqual(s["changed"], ["answer.txt"])
+        # a round with no report yet: the worktree's ignored file is an edit too
+        self.assertIn("partway", chat.report_lead(t, "", False)["happened"])
+
     def test_wb_verify_and_wb_shot_run_the_candidate_with_the_ignored_files_accept_commits(self):
         # #1275 (the 2.0 bar loop, 2026-11-24): #1259 put the agent's lib/util.py, under
         # Python.gitignore's lib/, in the review diff but not in verify's candidate: wb verify

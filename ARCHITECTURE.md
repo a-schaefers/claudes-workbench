@@ -7429,12 +7429,15 @@ address (#534).
   `created_at`/`updated_at`, model, label (`chat.model_label`), via, provider_name, the round's report (`store.Task.report`, as
   `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`),
   and what the sheet leads with (`chat.report_lead`, #1339), read from the report `runner.summary_text`
-  writes: `agent_summary`, `changed` (the files' paths, `[]` for `(none)`, null with no report),
+  writes: `agent_summary`, `changed` (the files' paths, `[]` for `(none)`, then the ignored files
+  `--include` commits, `runner.ignored_to_commit`, as the Diff tab lists them: a failed task whose agent
+  wrote only those said `before writing anything` and `No files changed.` above 'Discard it', #1591;
+  null with no report),
   `tests` (its `tests: PASS|FAIL …` line) and, for a failed or stuck task, `happened`: one plain line
   (`The agent stopped before writing anything (OpenCode exited).`, `The agent was stopped partway:
   what it changed so far is in the worktree (<the STOPPED reason>).`, and with no report for the
   round `The task stopped partway (<last>): what the agent changed so far is in the worktree.` when
-  `gitops.changed` lists any, else `The task stopped before the agent ran (<last>).` for status
+  `gitops.changed` or `runner.ignored_to_commit` lists any, else `The task stopped before the agent ran (<last>).` for status
   `infra` setup, repo or model, else `The task stopped (<last>).`; the cause cut at `LEAD_CAUSE_CHARS`
   160). A reaped runner (a restart, a dead runner) or a round failing after an earlier round's work
   leaves no report either: the sheet said the agent never ran, under 'Discard it'. Never runner.log's tail: OpenCode's
