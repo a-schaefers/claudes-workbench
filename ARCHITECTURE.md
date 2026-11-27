@@ -59,8 +59,7 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   `agent/schemas/`; *Deep workflows*): `wb run`, a flow's items as wb tasks on the user's roles,
   started by a detached driver that wakes Claude only at checkpoints and the end.
 - **The web chat** (`chat.py`, `chat_static/`, `webpush.py`): the same session from a phone;
-  `settings.py`, the admin table its Settings are drawn from (*The admin table (settings.py)*);
-  `qr.py`, the phone link's QR code (*Phone reach*).
+  `settings.py`, the admin table its Settings are drawn from (*The admin table (settings.py)*).
   Its scripts are TypeScript (`chat_static/src/`), built by `scripts/web.py` into the committed
   plain scripts the page loads (*The page's TypeScript*); users need no Node or compiler.
   `story.py` holds every sentence it and the docs tell of the driver, `scripts/gen_story.py`
@@ -4213,7 +4212,7 @@ in the task sheet's note, #1339): while away, the chat is all the user sees.
   however old while it is its key's newest row, anyone's (#1557: the page promises the driver's
   offer, and one made with no session up lapsed after the hour), and one older than `OLDEST_WAKE_MS`
   only while `wb settings help <key> --json` still gives a note (`helpStill`; none: retired, marked
-  seen; wb failing: left for the next read), since probe set up or `tailscale serve` run outside the
+  seen; wb failing: left for the next read), since probe set up outside the
   offer made it untrue (#1557's review); it toasts
   `workbench: <label> changed on the web app: Claude will offer to set it up` and queues a
   `[workbench]` turn (`mem.queued`): `The user changed <label> from <from> to <to> on the web app.
@@ -4423,7 +4422,7 @@ wb setup's and scout's line said `local: true` after the `wb model add` it has t
 
 #### A model on another machine
 Ollama there with `OLLAMA_HOST=0.0.0.0`, reachable only from the client (no login; plain `http://`
-carries the code: a firewall or Tailscale), then `wb remote <host>` (`--context N`, since that
+carries the code: a firewall, or a VPN that encrypts it), then `wb remote <host>` (`--context N`, since that
 Ollama says no window until a model loads; `--remove` undoes it). It adds
 a model, never splits one; its energy isn't measured. Another server there: models.json `"local":
 true` on its provider, then `wb model add … --url`.
@@ -6820,10 +6819,11 @@ one" sends `Keep take <n>: <name>` with `about: {audio, n}`, and Claude gets `[w
 
 ## The web chat
 
-`wb chat serve` (`workbench/chat.py`, `chat_static/`) serves a page on port 1337 that reaches the
+`wb chat serve` (`workbench/chat.py`, `chat_static/`) serves a page on port 8090 (`chat.PORT`; another the user keeps with `wb chat on <port>`, #1616) that reaches the
 Claude session in workbench mode while the user is away: messages both ways, Claude Code's
-dialogs, push notifications (installable and notifying over https only: `tailscale serve --bg
-1337`). On by default (the owner, 2026-11-24, #1281, reversing 2026-11-19's off until `wb chat
+dialogs, push notifications (installable and notifying over https only). It listens on
+`127.0.0.1` alone (#1616, 2026-11-27): to open it from another device, point any tunnel or proxy at
+`localhost:<port>` and add its name to chat.json's `hosts` (read again on a change, no restart); the link's token still applies. On by default (the owner, 2026-11-24, #1281, reversing 2026-11-19's off until `wb chat
 on`): `chat.ensure` brings it up, `wb setup` installs its service, `wb doctor` says whether it
 answers; `wb chat off` turns it off, and that choice is kept. The pane's modeline shows its link, or
 why it is down (*Seeing what the agent does*).
@@ -6862,8 +6862,7 @@ default after 2.0 turned it on.
   bytes, `chat.WAITING`, `WAITING_GRANT`), `receipt.blocked`, `lane` (with `rule.terminal` and `rule.settings`,
   Settings' *How the chat works*: three short lines where "prompts wait in the terminal" was said five times over
   three cards, `rule.chat` and `prompts` folded in, the web app's review, 2026-11-26);
-  `link.where` (wb setup's last line: where the web app's link is) and `link.reach` (`wb chat on`'s
-  and doctor's: `wb chat reach tailnet`), read by cli.py; `moved.deepmode` (`wb deepmode --moved`'s
+  `link.where` (wb setup's last line: where the web app's link is), read by cli.py; `moved.deepmode` (`wb deepmode --moved`'s
   line, both hosts' toast, #1507); `refusal.question`, `refusal.plan`,
   `refusal.consent` (the mod's `AWAY_QUESTION`, `AWAY_PLAN`, `CONSENT_WAITING`, the plugin's
   `AWAY_QUESTION` naming `workbench_chat_reply`); `skill.rule` (SKILL.md's terminal-primary
@@ -6935,11 +6934,8 @@ for macOS's system tools, #1305; it retries even
 exit 78; unchecked on a Mac, #449). Messages name the OS's service (`chat.service_name`,
 `service_hint`, #756). `wb setup` installs the service (*Up by default*, below); without one,
 `chat.ensure` starts a server of wb's own. `wb chat url` prints `http://localhost:<port>/#token=…` (the port from `chat/port.json`,
-else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server and drops its pid, else 1337; `--port`, #349; the fragment never leaves the browser),
-and once there is one a second line, `on your phone: <link>` (`chat.phone_url(port)`, the token in its fragment: `https://<name>`
-when `tailscale serve` serves this port, `served_site`, else with reach the tailnet `http://<tailnet name>:<port>`; localhost
-alone left the user to edit the host by hand, the web app's review, 2026-11-26), and at a terminal (stdout a tty: never the
-mod's read, a pipe or `--json`) its QR code under it (`cli.chat_phone`, *Phone reach*, #1552).
+else the user's, `chat/switch.json` `port` (`chat.chosen_port`), else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server and drops its pid, else `chat.PORT`, 8090; `--port`, #349; the fragment never leaves the browser),
+and nothing else (the phone link and its QR code went with #1616).
 
 - **The path of a message.** The page posts it to `chat/messages.jsonl`; the listening session's
   mod submits `[web chat] <the user's words>` and nothing more (plus `(about <task>, step <s>,
@@ -6977,14 +6973,14 @@ mod's read, a pipe or `--json`) its QR code under it (`cli.chat_phone`, *Phone r
   `audio.Down` (a url listener's server restarting). 404 `dictation is off: …` without a listener;
   502 `the listener failed: …` (also in serve.log), nothing kept, so the next try runs it again.
   The page keeps a clip (wb-chat-dictate, its bytes in IndexedDB) through a 409, a 503, a 5xx
-  that isn't the chat server's (a proxy's, no JSON `error`: `tailscale serve` while the server
+  that isn't the chat server's (a proxy's, no JSON `error`: a tunnel's while the server
   restarts), a 408/425/429 or a 200 without `text`, and asks again on `BACKOFF` (a state's flush
   only once the step is up, `hearAt`), its mic saying `Waiting for the GPU…` or `Waiting for the
   listener…`; only a 4xx or the listener's own 502 drops it, its reason on the banner. A 409 had
   dropped the clip, so the user said it all again once the task let the GPU go. An agent's token is 403 (outside `AGENT_MAY`; `AGENT_CANT`'s wording, a prefix entry). The clip's upload
   is a draft no message names, so `wb gc` drops it in time. Realtime voice isn't built: Claude
   Code's turns aren't a realtime loop, and its own voice covers the terminal.
-- **The switch.** `chat/switch.json` `{on, v}` (absent: on, `chat.is_on`; `{"on": false}` only after
+- **The switch.** `chat/switch.json` `{on, v, port?}` (`port`: the user's, `wb chat on <port>`, kept across on and off) (absent: on, `chat.is_on`; `{"on": false}` only after
   `wb chat off`, and the user's off stays off; `v`, `chat.SWITCH_V`, marks 2.0's writes: a bare
   `{"on": false}` with no `chat/port.json` is an older wb's failed `wb chat on`, read as never set
   and removed once, #1405). `on` turns it on and runs `chat.ensure`; when that
@@ -6994,9 +6990,8 @@ mod's read, a pipe or `--json`) its QR code under it (`cli.chat_phone`, *Phone r
   `chat/serve.pid` `{pid, port, start}`) in an environment without `chat.CLAUDE_VARS`
   (`CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`, and an OpenCode driver's `OPENCODE_SESSION_ID`, #1309):
   started from a Claude session (the mod's `wb chat url`) or an OpenCode driver's tool or shell, the server must never
-  run wb as the model (#1281). A wildcard is probed at its
-  family's loopback (`chat._probe`, #450); `chat.wait_up` waits `START_WAIT` 10 s (an exit fails
-  at once with serve.log's last line, #200). `chat.who_answers`: a response whose
+  run wb as the model (#1281). `chat.wait_up` waits `START_WAIT` 10 s (an exit fails
+  at once with serve.log's last line, #200). `chat.who_answers` asks `127.0.0.1` (`chat.BIND`): a response whose
   `X-Workbench-Chat` (`chat.MARK`, on every response) equals `chat.identity(token)` (HMAC-SHA256 of
   a fixed string keyed by the token) is ours; anything else is "other" (`chat.blocked_why`, #554).
   `chat.running` is `who_answers == "workbench"`. Off: nobody listens or relays, no link, away ends,
@@ -7013,8 +7008,7 @@ mod's read, a pipe or `--json`) its QR code under it (`cli.chat_phone`, *Phone r
   `failed` (`why`: serve.log's last line). A unit that doesn't answer is followed by `chat.start`
   once (#1343: one that exits 78, stopped for good, left the app down, as only the unit was ever
   started again): `started` with `why` naming the unit, or `failed`. One at a time
-  (`chat/ensure.lock`). `wb chat url` runs it and prints the link (and the phone's on a line of its own, its QR code
-  only at a terminal, #1552; the mod reads `--json`, and plain output only from a wb older than it, which prints the link alone);
+  (`chat/ensure.lock`). `wb chat url` runs it and prints the localhost link alone (the mod reads `--json`);
   `wb chat url --json` prints the dict, exit 0, for the mod. **`wb setup`** installs the service
   (`cli.install_service`; `--no-service` skips it): on Linux, where `systemctl --user
   show-environment` answers with this HOME, it links `systemd/wb-chat.service` into
@@ -7060,9 +7054,9 @@ mod's read, a pipe or `--json`) its QR code under it (`cli.chat_phone`, *Phone r
 - **Away is the device the user last used** (#959). Away once they use the chat after last typing
   in the terminal (a web message, or a page shown, focused and in use on its Chat view: `POST
   /api/active`; never a click in Stats or Settings, or a tap on the nav leaving the chat, and a
-  request whose Host is localhost, 127.* or ::1, the modeline's link on this machine, writes
+  request whose Host is localhost, 127.* or ::1 with no proxy's forwarding header (`Handler._desk`), the modeline's link on this machine, writes
   `page.json` alone: the web app is the desk's admin too, #1374; told by the Host, never the peer,
-  since `tailscale serve` proxies a phone from loopback under its tailnet name), until
+  since a tunnel proxies a phone from loopback under its own name), until
   they type or answer a dialog in the terminal (answering counts: a tapped notice made the user away
   and the answer submitted no prompt); at most 6 h after that use, longer while one of this
   session's tasks is open (#110; `--backlog` ones alone until #1402: one long task asked for from
@@ -7131,7 +7125,7 @@ client; the server needs no browser.
   `chat-agents.json` beside the token file (`chat.agents_path`, 0600, under `chat-agents.lock`);
   `list`, `revoke` (`chat.agent_revoke`). `Handler._authed` returns `"user"` or `"agent <name>"`
   (`chat.agent_for`, constant time, the file read per request so a revoke is at once) and sets
-  `Handler.agent`; an agent token from a peer that isn't this machine (`Handler._from_this_machine`: `127.*`, `::1`, or the very address it connected to, `Handler._local`: an agent here reaching a chat bound only to the tailnet or LAN IP comes from that IP, and was refused, #1274) is 403 `not_local` (``agent tokens work only from this machine, at the address `wb chat url` prints``) whatever the bind, as agents are this machine's own (owner, 2026-11-23), while the user's token still works from the tailnet or LAN; a held wait or open stream checks again at every wake (`Handler._revoked`:
+  `Handler.agent`; an agent token from a peer that isn't this machine (`Handler._from_this_machine`: a `127.*` or `::1` peer with none of `chat.FORWARDED`'s headers, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `Forwarded`, `X-Real-IP`, `Via`, `True-Client-IP`, `Cf-Connecting-Ip`, `Tailscale-User-Login`: behind a tunnel or proxy every peer is 127.0.0.1, #1616; an `ssh -L` forward adds none, so it still looks local) is 403 `not_local` (``agent tokens work only from this machine, at the address `wb chat url` prints``), as agents are this machine's own (owner, 2026-11-23), while the user's token still works through any tunnel; a held wait or open stream checks again at every wake (`Handler._revoked`:
   both went on reading its replies after a revoke, the #1042 review). An agent's token is on an
   allow-list, `AGENT_MAY` (`(method, path)` pairs, a trailing `/` matching by prefix: GET `/api/health`,
   `/api/wait`, `/api/state`, `/api/stream`, `/api/upload/`, `/api/file/`; PUT `/api/upload/`; POST
@@ -7270,10 +7264,8 @@ client; the server needs no browser.
     `N replies`, `received`, `queued` or `expired`, and which driver listens, if any.
 
   Local only, by design: `this_machine` takes `localhost`, `127.0.0.0/8` and `::1` (IPv4-mapped
-  too) over http or https, or an IP of this machine's own (`_own`: a socket binds to it;
-  `0.0.0.0`, `::` and multicast never), as a chat bound only to the tailnet or LAN IP serves no
-  localhost and an agent here reaches it there (#1274); anything else (another machine's address,
-  any other name: its address could be anywhere) makes every tool refuse, nothing sent, as the
+  too) over http or https, where the chat listens (#1616); anything else (an address of this
+  machine's own, another machine's, any other name: its address could be anywhere) makes every tool refuse, nothing sent, as the
   chat refuses an agent token from another machine anyway. `ask_workbench.py`'s opener follows no redirect (`_Stay`): urllib
   sends `Authorization` on to wherever a 3xx points. Its config line for OpenCode needs
   `codemode: false`, or OpenCode 2.3 offers MCP tools only behind `execute` (docs/chat-api.md,
@@ -7384,51 +7376,19 @@ client; the server needs no browser.
 **Settings.** The token: `$WB_CHAT_TOKEN`, else `~/.config/workbench/chat-token` (`O_EXCL`, 600,
 `token_urlsafe(32)`; under 16 characters refused), read once at start. `$WB_CHAT_CONFIG`, else
 `~/.config/workbench/chat.json`: `upload_mb`, `upload_message_mb` (read per request straight from
-the file, `chat.upload_limits`, so a broken `bind` can't fail requests); `bind`, replacing
-localhost: `localhost`, an address, `tailscale` (from `tailscale status --json`: the IPv4, else the
-first IPv6, #937; the CLI on PATH or `TAILSCALE_APP`, never Windows' under WSL, #920; skipped as
-`tailscale (not running)`, `(no Tailscale address)`, `(CLI not found: …)`, and `(its address isn't on
-this machine)` when `chat.listenable` can't bind it, Tailscale's userspace networking: bound, it
-failed and took localhost down with it, #1499), `0.0.0.0` or `::`;
-`hosts`, extra names (`*`: any). Each is a list of strings (a string is one item); anything else is
-`chat.ConfigError`, exit 78. A wildcard drops its family's specific binds, and `::` beside IPv4
-gets `IPV6_V6ONLY` (`plan()["v6only"]`): each further socket failed `EADDRINUSE` (#534). `--bind`
-replaces, `--host` adds, `--port`. Answered names (`chat.plan`, at startup): loopback, each bind's
-own names (a wildcard's: the host's names and addresses), `hosts`, and on any bind this machine's
-full MagicDNS name while Tailscale is up (only the full name, which no other site's DNS can answer for; `chat.tailnet_name`, at most every `REPLAN_EVERY` 30 s, for an unanswered
-Host: `tailscale serve` passes it, #448; under WSL without a Linux CLI, Windows' `tailscale.exe`,
-`tailscale(windows=True)`, `TAILSCALE_WINDOWS` via `hardware.windows_program`). An address it can't
-listen on ends `serve` with one line (`can't listen on <addr>:<port>: the port is taken: …; --port
-picks another`; `serve` prints its binds, the skipped ones, and warnings for a wildcard or `hosts: *`). With a bind skipped, or no `--bind` (its binds chat.json's), it rechecks every `REPLAN_EVERY` and
-re-execs in place when the address set differs (#200): so `wb chat reach` takes effect with nothing to restart (#1355; before it only a skipped or `tailscale` bind was rechecked).
-
-**Phone reach** (#1355): `wb chat reach local|tailnet` and the Settings row `reach` say who opens
-the web app. `chat.reach()` reads chat.json's `bind`: `tailnet` when it names `tailscale`, `local`
-for none or loopback only (`LOOPBACK`), `custom` for an address of the user's own.
-`chat.set_reach(to, port)` writes it, the file's other keys kept: `tailnet` is `TAILNET_BIND`
-(`["127.0.0.1", "tailscale"]`), refused (`ValueError`, nothing written) while `tailscale()` has no
-address (`no tailscale command here: …` or `Tailscale isn't up here: \`tailscale up\`, then this
-again`) or `chat.listenable` can't bind that address (`… is on none of its interfaces …: leave reach
-local and run \`tailscale serve --bg <port>\``, #1499), or under WSL with Tailscale on Windows alone
-(`Tailscale runs on Windows here, …: leave reach local and run \`tailscale.exe serve --bg <port>\``,
-never "install Tailscale", #1524); `local` drops `bind`, and only that: a
-`tailscale serve` in front of the port still serves the tailnet, so `wb chat reach local` then ends
-`…, but \`tailscale serve\` still serves it to your tailnet at https://<name>/: \`tailscale serve
---https=443 off\` stops that` (`cli.still_served`, from `chat.served_site`) and a bare `wb chat reach`
-reads `local, but tailnet https via tailscale serve (…)`, never "this machine only" (#1512). No LAN option (a wildcard is the user's own edit) and the token stays
-the key. https, which push and the home-screen app need, is `tailscale serve`'s:
-`chat.https_served(port)` reads `tailscale serve status --json` (`chat.served_site`: the `Web` site,
-`<name>:<https port>`, with a handler proxying to the port: True when there is one; None when it can't tell;
-`chat.tailscale_cli(windows=True)`, so Windows' serve under WSL counts, #1524), and with none wb prints the `tailscale serve --bg <port>`
-line, which the row's `REACH_HELP` has the driver offer, run only on a yes.
-**The phone link** (#1552): `chat.phone_url(port)`, the token in its fragment, is
-`https://<serve's name>[:<its port>]/#token=…` while `served_site` names a site for the port, else, with reach
-`tailnet`, `http://<the tailnet name, else its IP>:<port>/#token=…`, else "" (reach local or custom, Tailscale down). A phone's camera
-opens it from a QR code (`qr.py`, standard library only: ISO/IEC 18004 byte mode, level M, versions 1 to 40, the mask
-of the lowest penalty; `qr.encode`, `qr.svg`, `qr.half_blocks`), so no 40-character token is typed by hand: `wb chat url` prints
-`on your phone: <link>` (when it isn't the link above), and at a terminal the code in half blocks, black on bright white
-whatever the terminal's theme (`cli.chat_phone`); `chat.phone_base(port)` is the same address without the token while reach
-is `tailnet` (Settings' `reach` row, whose page adds its own token; a `tailscale serve` with reach local isn't offered there); `GET /api/phone-qr.svg` serves it as an SVG (*The admin endpoints*). Every `RELOAD_EVERY` 10 s it stamps its
+the file, `chat.upload_limits`, so a broken `hosts` can't fail requests); `hosts`, extra names to
+answer to (`*`: any), a list of strings (a string is one item; anything else is
+`chat.ConfigError`, exit 78, #534). An old `bind` is ignored, never migrated (#1616). It listens on
+`127.0.0.1` alone (`chat.BIND`; the owner, 2026-11-27, #1616: a tunnel or proxy, `ssh -L`, or
+whatever the user runs points at localhost, and listening on another address gave plain http,
+so push and the home-screen app never worked there; `wb chat reach`, the Settings row, the phone link
+and its QR code went with it). `--port` picks the port; there is no `--bind` or `--host`. Answered names
+(`chat.plan`): `chat.LOCAL_NAMES` (localhost, 127.0.0.1, ::1) and `hosts`, where a tunnel's
+name goes (it passes its own as the Host, #448); read at startup and again by `Handler._hosts_now`
+whenever chat.json's stamp (`chat.config_stamp`: mtime, size, inode) changes, so a name added while
+it runs needs no restart, and a broken file keeps the last good list (#1616, 2026-11-27). An address it can't listen on ends `serve` with one line
+(`can't listen on 127.0.0.1:<port>: the port is taken: …; --port picks another`; `serve` prints its
+address and a warning for `hosts: *`). Every `RELOAD_EVERY` 10 s it stamps its
 `*.py` (`code_stamp`, `watch_code`); changed and then still for a look, it re-execs
 `sys.orig_argv` in the same process (an old server served the new page for a day and a half,
 2026-11-18). That holds for an update in place (a clone, Claude Code's marketplace clone); on
@@ -7437,13 +7397,11 @@ run from the cache (`ocplugin.runs_from_cache`) also looks each time for a newer
 key (`chat.newer_generation`: the highest `<key>/<n>/node_modules/opencode-workbench` not
 `<n>.rejected`, with its `bin/wb`), and once one is the same, files and all, for a look, it
 re-execs that one's `bin/wb` (`serve_argv`) in the same process from its directory: it served the
-old generation's page and Settings until OpenCode removed it, then exited (#1525). A `bind` with neither loopback nor a wildcard makes `wb chat url` name its first
-address (#534).
+old generation's page and Settings until OpenCode removed it, then exited (#1525).
 
 **The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS; `TIMEOUT` 30 s stall closes):
-- Every request: `Host` (port, brackets stripped, lowercased) must be an answered name or the
-  connection's own address (`Handler._local`, #533), else 403 `unknown host <host>: add it to
-  chat.json's hosts`: this stops other pages and DNS rebinding, which needs a name, never an address. Headers: `Cache-Control: no-store`
+- Every request: `Host` (port, brackets stripped, lowercased) must be an answered name, else 403
+  `unknown host <host>: add it to chat.json's hosts`: this stops other pages and DNS rebinding. Headers: `Cache-Control: no-store`
   (not `/api/file`), `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, a CSP (`default-src 'self'`,
   inline styles only, images also and media only from `blob:`, no framing, no forms).
 - `GET /`, `/<name>` with a known suffix (`TYPES`: html, js, css, svg, png, webmanifest) from
@@ -7766,8 +7724,8 @@ reaches Claude as `[web chat] (about task <task>) …`; under it the next steps 
 Steering stays Claude's (`wb steer`), and the page never steers, edits or accepts.
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.ts` removes its link
 over http: localhost counts as secure and one computer got two apps); there the Settings card says how to get
-https, its `tailscale serve --bg <port>` drawn as code (`paraCode`: a line's backticked part as a `<code>`, #1323), the port
-this chat runs on (`servePort`: the page's own, which over plain http is the server's; it said 1337 whatever the port,
+https: an https tunnel or proxy the user trusts pointed at `localhost:<port>`, drawn as code (`paraCode`: a line's backticked part as a `<code>`, #1323; no product named, #1616), the port
+this chat runs on (`servePort`: the page's own, which over plain http is the server's; it said the default whatever the port,
 #1562). Over plain http the Notifications card points at it, below ("(see above)" pointed at nothing), and a subscribe
 that fails says one next step, "Notifications couldn't be turned on here: reload the page and try again.", in place of
 the browser's raw error, unless the failure is in the page's own words (`Refused`: not allowed, the computer's refusal)
@@ -7859,7 +7817,7 @@ still helps with one when the user asks (the owner, 2026-11-24). Every row the p
 entry in `workbench/settings.py`, under the pane's old key and making its old `wb` call, so a new
 setting touches only Python. The chat server draws from it (#1280); nothing in it serves HTTP.
 
-- `GROUPS` (`significant`, `trivial`, `writing`: a card per role, #1553; then `shared`, `web`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental`: display order; `web`, the web app's own rows, #1355), `KINDS`.
+- `GROUPS` (`significant`, `trivial`, `writing`: a card per role, #1553; then `shared`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental`: display order), `KINDS`.
 - `rows(fresh=False) -> list[dict]`: every row, kept `ROWS_CACHE_S` 10 s (`fresh` reads again);
   `reads(fresh=False)`, the same cache's `{routes, models}` (`wb route --json`, `wb models --json`,
   or None); `drop()` forgets it.
@@ -7892,7 +7850,7 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   `cli._SettingWrite`, whoever runs it (the web app's child, `wb settings set`'s child, an OpenCode
   driver's shell, the user's terminal): `key_for(argv) -> (key, value) | None`, `_argv`'s inverse
   (a read, a dry run, a flag no row's command takes, or a combined line such as `wb route
-  significant api --api x` is None; `--api=x` reads as `--api x`; `wb chat reach <v> --port N` too;
+  significant api --api x` is None; `--api=x` reads as `--api x`;
   an audio engine's row by the engine's kind, `_audio_kind`); `current(key)`, the row's value read
   in-process from the files its command writes (routes.json, coding.json, …, chat.json; never the
   rows' `wb route --json` children), before and after; wb's last stdout line while it runs
@@ -7915,8 +7873,7 @@ problem or a request: true, or a string, the request itself; the page gives it a
 run, `api-connected` with a provider that has no key it can run on, `flows`), `brief` (what a folded card's
 one-line summary says of it, `""` nothing: `api-connected` its providers and `today ≈$0.07 of $5`,
 `api-none`, `gpu-none`, `optimize` `N models, <state>`, a run, `flows`, `setup-size`; the `size-<id>` rows
-`""`; without it, a choice's `<label>: <its choice>`), `phone` (the `reach` row's: `chat.phone_base`, the web
-app's address on the tailnet with no token, `""` while reach isn't the tailnet) and by kind: `choice` (`value`, `choices`
+`""`; without it, a choice's `<label>: <its choice>`) and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd`; `off`, `""` and null clear it); `info` (`text`); `action`
 (`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
@@ -7965,13 +7922,8 @@ ask before an offer over an hour old (#1557's review): a key added to `HELP` nee
   only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`, its note today's spend once a role is
   on API or any is spent (`_spent_today`: `API tasks stop for the day at $5 of spend: ≈$0.12 so far today.`, #1339;
   no `api-spend` row of its own since);
-  `progress` → `wb progress on|off` (On names an `--after` threshold). *web* (the web app's own, "Web
-  app" on the page and in `wb settings`, #1355): `reach` ("Web app reach", phone reach) → `wb chat reach local|tailnet` (`REACH`; a bind of the user's own reads
-  `custom`, `REACH_CUSTOM`, a choice only then; chat.json that can't be read is a `reach-why`
-  note), with `HELP`'s `REACH_HELP` when the tailnet has no https in front of it (wb's line says
-  `not served`): the driver offers to run the `tailscale serve` command wb printed, on a yes; and
-  `REACH_LOCAL_HELP` when `local` leaves a `tailscale serve` in front of it (`still serves`, #1512):
-  the driver says so and offers its `tailscale serve --https=<port> off`, on a yes. No `record`, `live`,
+  `progress` → `wb progress on|off` (On names an `--after` threshold). No *web* group: its one row,
+  the web app's reach, went with #1616 (the web app listens on localhost alone). No `record`, `live`,
   `every` or `price` row: #1322 took Stats recording, Live view, Live refresh and the electricity
   price from the pane's Settings (recording is always on; `wb stats set` and `wb savings --price`
   keep the rest).
@@ -8056,11 +8008,6 @@ The chat server's side of the web app's Stats and Settings views, the user's tok
 - `GET /api/stats`: `{feed: stats.feed() (wb stats --json, in-process), routes, models}`, the last two
   `settings.reads()` (the rows' cache of the two `--json` reads, or null), so the page names models
   as the pane's `namesNow` did.
-- `GET /api/phone-qr.svg`: the phone link (`chat.phone_url` of the server's port, *Phone reach*) as a QR code,
-  `image/svg+xml` (`qr.svg`: a 4-module quiet zone, black on white), `no-store` as every answer; 404 `no phone link: …
-  (wb chat reach tailnet)` while there is none. It carries the user's token, so an agent's token gets 403 (`AGENT_CANT`:
-  `read the user's phone link`); the page fetches it with the bearer header and shows it as a blob, since an `<img>`
-  sends none (#1552).
 - `GET /api/top`, server-sent events (`Handler._top`): `event: top` with one `wb top --json` line
   verbatim (the newest at once on connect), `event: down` `{why, retry}` (the child's last stderr
   line or `wb top ended (exit N)`, and the seconds until it is tried again), the 50 ms blank line
@@ -8096,7 +8043,7 @@ alone, and a generic renderer: a new setting touches only Python.
   (`.set-changed`; who from its `by`: the web app, Claude, OpenCode, the terminal, an agent), and a
   *Recent changes* card (`.set-changes`, no group's `.set-card`) lists GET's `changes`, `label: from → to, by <who>`,
   each value by its row's choice label (" (default)" dropped; `$N/day` for the cap), the raw value for a row
-  not drawn: the rows said "My tailnet" where the list said `tailnet` (the web app's review, 2026-11-26). A
+  not drawn: the list said a raw value where the rows said its label (the web app's review, 2026-11-26). A
   change made anywhere moves the chat state's `settings` (chat/settings-rev.json, *The driver's
   state line*): the view shown reads its rows again with no reload (a draft being typed kept, as any
   redraw keeps it), and any view toasts `<label> set to <value> by <who>` (the value by its choice label),
@@ -8109,7 +8056,7 @@ alone, and a generic renderer: a new setting touches only Python.
   order with their names: a card per role first (#1553), `significant` "Complex coding", `trivial` "Trivial
   coding", `writing` "English writing" (`routes.LABELS`' words), its `role-<role>` row on top with no label of
   its own (a row whose label is its card's name is drawn without it) and its `more` rows under a closed
-  `details.set-more` "More"; then `shared` "Agents and roles", `web` "Web app" (#1355), `gpu` "GPU", `api` "API", `setup` "What your agents get",
+  `details.set-more` "More"; then `shared` "Agents and roles", `gpu` "GPU", `api` "API", `setup` "What your agents get",
   `workflows` "Deep workflows", `terminal` "Terminal", `experimental` "Experimental"; a group the table adds later follows, under
   its key. **Folded** (the web app's review, 2026-11-26: Settings ran 6 to 8 phone screens, Notifications and
   Spend today 4,000 to 5,000 px down): `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental` and
@@ -8155,13 +8102,6 @@ alone, and a generic renderer: a new setting touches only Python.
   - `info`: its `text` as a muted line.
   - A row's `says`, `text` and note, and a kept refusal, draw a `` `…` `` span as `<code>` (text nodes and
     `<code>`, never markup: literal backticks showed, the web app's review, 2026-11-26).
-  - **Open on your phone** (the `reach` row's `phone`, on a desktop page with the key, `(hover: hover) and
-    (pointer: fine)`; the web app's review, 2026-11-26: the phone needed a terminal trip, a host edited by
-    hand and a 40-character token carried over): the full link, `<phone>/#token=<this page's token>`
-    (`.set-phone-link`), Copy (the clipboard, else the link selected for the keys), Share where
-    `navigator.share` is, and its QR code from `GET /api/phone-qr.svg` (fetched with the token, shown as
-    a blob, asked once per link, hidden when the server answers none). With reach `local`, one line: "To
-    open the web app on your phone, pick My tailnet."
   - **Ask <driver>** (`.set-ask`, the web app's review, 2026-11-26: Settings' only fixes were terminal
     commands a phone can't run): on a `note`, a row with `help` or one with `ask`, a link (a 44 px button,
     named as the state's `driver.who` names it) that calls `WB.ask`: the Chat view, `ask` when a string,
@@ -10500,7 +10440,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (opens with `runner.STEP_NOTE`: a `smaller` intervention after a progress check, else a `hint`; delivered, status `step_note`: no auto-fix or self-review until Claude's next wb feedback or wb next, #1300) | Queued/running/testing/asking with a live runner only. steer.jsonl, delivered when the run ends, before the tests; `--now` at once. |
 | `wb note <task> --text "…"` | | A `captain` event. |
 | `wb splash [on\|off]` | | `$WB_HOME/splash.json`: the pane's opening (#963). |
-| `wb settings [set KEY VALUE \| offers \| help KEY]` | `--json`; `set`: `--dry-run`, `--json`; `offers`: `--if-due`, `--json`; `help`: `--json` | The web app's Settings rows (*The admin table (settings.py)*, *Claude's writes*, #1287): every row by group with its choices (`cli.settings_lines`); `set` runs `settings.apply(by="claude")` (a role's row gated as `wb route` is, the mod's dialog reading `--dry-run --json`), prints wb's line and the row's `help`, appends to settings-changes.jsonl; exit 2 no such key or value, 3 wb refused. `offers` (#1334, the OpenCode plugin's, *Background jobs on OpenCode*): `settings.offers`, the settings-changes.jsonl rows `by: "web"` newer than settings-offered.json's mark, a note under `OFFER_MAX_AGE_S` (an hour) old, an offer however old while it is its key's newest row (#1557) and, past the hour, while `settings.help_now` still gives its key a note (else retired, the mark past it), `{"offers": [{ts, key, label, text, toast}], "notes": [{ts, key, text}]}` (a row with `help` an offer, `change_said` and its help; the rest notes, but `SAID_ELSEWHERE`'s keys), plain the texts; `--if-due` records the newest as said under its lock. `help KEY` (#1557's review, the mod's `helpStill`): `settings.help_now`, the note `HELP` gives the key as it stands now (probe's row's `help`, from `wb experiment`'s line; reach's from chat.json and `tailscale serve`, as `wb chat reach` words it: `cli.not_served_line`, `cli.still_serves_line`), or nothing; `--json` `{"key", "help": note or null}`. |
+| `wb settings [set KEY VALUE \| offers \| help KEY]` | `--json`; `set`: `--dry-run`, `--json`; `offers`: `--if-due`, `--json`; `help`: `--json` | The web app's Settings rows (*The admin table (settings.py)*, *Claude's writes*, #1287): every row by group with its choices (`cli.settings_lines`); `set` runs `settings.apply(by="claude")` (a role's row gated as `wb route` is, the mod's dialog reading `--dry-run --json`), prints wb's line and the row's `help`, appends to settings-changes.jsonl; exit 2 no such key or value, 3 wb refused. `offers` (#1334, the OpenCode plugin's, *Background jobs on OpenCode*): `settings.offers`, the settings-changes.jsonl rows `by: "web"` newer than settings-offered.json's mark, a note under `OFFER_MAX_AGE_S` (an hour) old, an offer however old while it is its key's newest row (#1557) and, past the hour, while `settings.help_now` still gives its key a note (else retired, the mark past it), `{"offers": [{ts, key, label, text, toast}], "notes": [{ts, key, text}]}` (a row with `help` an offer, `change_said` and its help; the rest notes, but `SAID_ELSEWHERE`'s keys), plain the texts; `--if-due` records the newest as said under its lock. `help KEY` (#1557's review, the mod's `helpStill`): `settings.help_now`, the note `HELP` gives the key as it stands now (probe's row's `help`, from `wb experiment`'s line), or nothing; `--json` `{"key", "help": note or null}`. |
 | `wb experiment [<name> [on\|off]]` | | *Experiments* (`cli.experiment_lines`, `context.EXPERIMENTS`, use over `USE_RECENT` 5 rows, `cli.use_recent`); sets `experiments.json` for later tasks; old probe levels `context.OLD_LEVELS` mean on; `; on is recommended` while `context.PROBE_RECOMMENDED`. |
 | `wb deepmode [on\|off]`, `wb workflows [on\|off]` | `--rule` (prints `runs.DEEPCODE_RULE`, the rule a host adds when the user types `deepcode`); `--moved` (once: a 2.1 `mode: on` written as deepmode off and the story's `moved.deepmode` printed, else nothing; the hosts' once a load, #1507) | *Dynamic workflows (deepmode)* (#1041, #1278): `$WB_HOME/workflows.json`; off by default. One command under two names. |
 | `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--args TEXT` (a flow's slash command's line as typed: `runs.parse_args`, its one param whole, else `k=v` words), `--dry-run`, `--repo DIR` (.: any directory in the repo, read from its top, and each item's `wb start --repo` is DIR, so its package is found, run.json `package_dir`, #1494), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE` (kept whole in run.json; past `runs.CUTS` 4,000 characters a line says each spec's `{context}` carries the first 4,000, and the spec says the cut, #1519), `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param (a `choices` one not among them; a `files` one matching nothing committed at the base, or over `runs.FILES_MAX` 1,000), a stage on an API role with no day cap (`meter.no_cap`), and with exit 3 `stage <id>: ` and wb start's own line for a stage (or escalate) role on API whose model can't be found (`runs.role_cant_run`: no API model, or one the catalog doesn't list, a missing key named, `models.unlisted_why`; read fresh, so a cold hosted.json never says a working API role is the GPU's, #1532), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `note: the repo has uncommitted changes; every item starts from <base> without them` when tracked files are changed (`--untracked-files=no`, wb start's own note, which the driver drops, #1570), `stop: wb run stop <run>` and that its notices wake the session as a task's (without the mod or the plugin, `wb wait <run>` in the background). `--dry-run` (#1295) stops after the cap check and the budget, before any file: a line per stage (its card or code, role and side, where its items come from, those `unless_exists` skips), each items stage's first spec cut at `runs.DRY_SPEC_CUT` 1,500 characters, and the estimate (`runs.dry_run`), then the uncommitted-changes note too (#1570); exit 0, or 1 on a refusal (3 for a role that can't run). |
@@ -10582,7 +10522,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--default NAME`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. `--default NAME` (no prompt) sets images.json's `"default"` (*The default engines*). |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back\|reach]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `url` adds `on your phone: <link>` under the link when there is a phone link and it isn't the link printed, and at a terminal its QR code under that (`cli.chat_phone`, `chat.phone_url`, #1552; nothing without a phone link, the code never in `--json` or a pipe); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy] [--waiting <json>]` (`chat.hold`, `waiting` the dialog up in its terminal, `{kind, tool, since, what?}`, #1355, exit 1 for another shape: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands, or exit 1 `the web chat is off: …` while it is, nothing written, #1480), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (the story's `note.waiting`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and ends with the page's state line word for word (`chat.driver_state`'s `line`: `Claude is listening in ~/p.`, `OpenCode is waiting for you in the terminal: a permission for bash.`, `No session is listening: messages wait.`, #1355); `reach [local\|tailnet]` (*Phone reach*: none prints `web app reach: local\|tailnet\|custom (…)`; `tailnet` refused, exit 1, nothing written, while Tailscale isn't up here or its address is on none of this machine's interfaces (`tailscale serve --bg <port>` named, #1499), else `web app reach: tailnet: http://<name>:<port>/ with the link's #token=… (`wb chat url`), within 30 s` and `https: served at https://<name>/ …` or `https: not served: … `tailscale serve --bg <port>` serves it on your tailnet only`; `local` drops the bind, its line naming a `tailscale serve` that still serves the tailnet and the command that stops it, #1512) | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690), and ends `--  ` + the story's `link.reach` while it opens on this machine alone and this OS has its own tailscale CLI (`cli.reach_hint`, #1355; never under WSL with Tailscale on Windows alone, which `reach tailnet` refuses, #1524); `off` stops only a server `on` started. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back]` | `listen <clip>… [--text]`, `on <port>` or `--port` (kept as the user's in `chat/switch.json` `port`, `chat.set_port`: a server wb started moves there, the service restarts onto it, `chat.move`, and a port something else answers changes nothing; else `chat/port.json`, else the kept one, else 8090, never 8080, llama.cpp's and three other model servers'; `serve` with no `--port` takes the kept one, as the service runs it; it listens on 127.0.0.1 alone, #1616), `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `url` prints the localhost link alone; `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy] [--waiting <json>]` (`chat.hold`, `waiting` the dialog up in its terminal, `{kind, tool, since, what?}`, #1355, exit 1 for another shape: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands, or exit 1 `the web chat is off: …` while it is, nothing written, #1480), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (the story's `note.waiting`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and ends with the page's state line word for word (`chat.driver_state`'s `line`: `Claude is listening in ~/p.`, `OpenCode is waiting for you in the terminal: a permission for bash.`, `No session is listening: messages wait.`, #1355) | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. `reach` went with #1616. |
 | `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one), `--queue` (accepted, a no-op: the sample queues behind the GPU's holders as any start does, #1251, #1322), `--force` (passed to wb start: the sample waits for a model whose server isn't up yet, else exit 3 with wb start's can't-run refusal, whose `--force` advice wb try once rejected as an unknown argument, #1297) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016) and `--no-sign`, set up by `wb init --no-sign` (a locked key failed it or hung it on a prompt, #1226), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) says so in wb start's model line (#1322: its own line went). |
 | `wb chat reply --turn-answer` | `--text`, `--to <id>` (again for more), `--if-owed` (the OpenCode plugin's: only the `--to` messages its session still owes, `chat.owed`; none: `not owed: the session replied`, exit 0; a post says `sent to the web chat: <ids>`; without `--turn-answer` and `--to`, exit 1) | The mod's: a turn's own answer for a web message it didn't reply to (*The web chat listener*, #1352): an `auto` row, cut to `chat.TURN_ANSWER_MAX` 4,000 characters (`chat.turn_answer`). The OpenCode plugin's the same, with `--if-owed` (*The web chat on OpenCode*). |
 | `wb init <dir>` | `--no-sign` (its commits unsigned, whatever `commit.gpgsign` says; else signed as accept's, `UNLOCK` at once for a locked key, #1226) | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`), no hooks run (#1254). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
@@ -10596,7 +10536,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb patch check <commit>` | | *Local patches*. A clone; the commit one of `local@{u}..local` (else `isn't one of local's patches`, exit 1; `no such commit`, exit 1). Its test files (`is_test`) alone, as a diff, `git apply --3way` onto the upstream `wb update` last fetched, in a scratch worktree under `patches/` (removed afterwards, a failure too); then only what the patch added: each `def test_…` its diff adds, as `python -m unittest <module>.<Class>.<method>` (the class read from the file there with `ast`), run by `patches.RUN_TESTS` (a `-c` script, `python -m unittest`'s loader and cwd, telling apart exit 1 a failure or an error, 3 a skip, an expected failure, an unexpected success or no test run, 0 a pass), and each other test file by its directory's runner (`patches._own_runs`, #1328: every `*.test.ts(x)` once ran as the mod's suite): under `mod/` `claude plugin test mod`, under `opencode-plugin/` `opencode test opencode-plugin/test` with `BUN_BE_BUN=1` (else `bun test opencode-plugin/test`), under `kernel/` (`kernel/test/` counts as tests, `is_test`) `python3 scripts/kernel.py props` (its exit 0 a pass; only with `bun` or `opencode` on PATH), with `WB_HOME` inside the scratch directory and `CHECK_SECS` 900 each (the process group killed past it, a failure). One verdict, exit 0, the first that holds: `upstream fails this patch's tests (<subject>): keep it` (any failure); `<subject>'s tests didn't all run here (<why>), so wb patch check can't tell: run them where they can (a skip is not a pass)` (`a test was skipped`, `no test class holds <names>`: an added `def test_…` `_test_ids` placed in no class, `claude isn't on PATH for the mod's tests`, `neither opencode nor bun is on PATH for the OpenCode plugin's tests`, `neither bun nor opencode is on PATH for the kernel's props` (`kernel.py props` refuses without one, which read as a failure), `no runner for <paths> (only mod/, opencode-plugin/ and kernel/ have one)`; joined by `; `), never a pass: a test skipped without Landlock or claude was called `already passes`, inviting a drop (#1005, 2026-11-22); `<subject> has no test of its own, so wb patch check can't tell: write one (upstream asks for one in a pull request too)` (no test file, or nothing it found to run); `upstream already passes this patch's tests (<subject>): it likely fixed the same thing. Drop it with the user's yes: wb patch drop <sha>`. Before any, `<subject>'s tests don't apply to upstream any more: compare by hand`. It drops nothing. No abbreviated flags. |
 | `wb patch zip [<commit>…]` | `--name SLUG` (the zip's slug, `patches.SLUG`; default the newest commit's short sha) | *Sending a patch without GitHub*. A clone with branch `local` tracking an upstream (one tracking nothing is given one first, `track_upstream`, #1327; else refused, exit 1); the commits named (each one of `local@{u}..local`, else `<c> isn't one of local's patches (wb patch list)` or `<c>: no such commit`, exit 1; kept in local's order, as `git am` applies them), else every one there (none: `no patches on local: it is upstream's`, exit 1). No fetch, no gh, no network: the upstream `wb update` last fetched. Writes `workbench-patch-<slug or short sha>-<UTC %Y%m%d>[-n].zip` (`-2`, `-3`… beside one already there) in `~/Downloads` when that directory exists, else `$WB_HOME/patches/out/` (`patches.zip_out`), through a `.part` file renamed into place: a folder of that name holding one `git format-patch --no-signature` file per commit (`DIFF_PLAIN`, `0001-…`) and `README.txt` (`ZIP_README`: the commits' subjects, the base, `merge-base local local@{u}`, `git switch -c` and `git am <this folder>/*.patch`, `UPSTREAM_CONTACT`, and that the From: lines name the authors). Prints `wrote <path>: N patch(es) on upstream's <base>`, `email it to adam.schaefers@icloud.com, or send it any way you like; nothing was sent`, and `the patch files name the commit author (<name> <email>[, …]); edit them before sending if you'd rather not`. Not an outward command: the mod's gate doesn't ask (the kernel's `gateOf` gives it no gate, neither `outward` nor `send`). No abbreviated flags. |
 | `wb driver [beat]` | `--session ID` (that session's, the plugin's RPC; else the caller's `OPENCODE_SESSION_ID`, else every live one), `--model REF` (the model the session runs on next, `provider/id#variant`, over its beat's: the TUI's selection, `driver.selected`; a session's only, exit 1 without one or for a ref that isn't one), `--once` (each note said once, `drivers/said.json`), `--json` | *The driver*: `driver: <id> (GPU\|API) · session <id>` and a `note:` line each; from a terminal every session that drove in `DRIVER_HOLD` and the `pin:` line; under Claude Code `driver: Claude Code (fixed)`. `beat` (no flag): the plugin's heartbeat on stdin, written by `driver.write_beat` (exit 1 `no heartbeat written: …`) |
-| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014; then each role on API, `ok  <role> role: <id> ready` or `BAD` with wb start's own refusal, `routes.resolve` and `routes.cant_run`: no key, a key wb can't hold, gone from the catalog, out of credit, no price, the day cap, `cli._api_role_lines`, #1067; with a role on API, the keys, `cli.api_key_lines`); with every role on API, no local model and no OpenCode config read `--` (`--  0 local model(s): every role runs on API`), not `BAD`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`context.interop_gap`, `context.home_gap`: doctor's alone, #1322; `lane.gaps`, what the lane breaks for the agent's tools; from ABI 4 `_tcp_refused`'s `local daemons' TCP ports are out of the lane (N ports)`, *What TCP reaches*), commands.json, each MCP server it names (`ok  MCP server <name> (commands.json): the agents of every task|<repos>`, else `BAD` with wb start's refusal, `cli._mcp_named`, #1202; `--  MCP server '<name>' names <path>, in the repo …` for one whose command names a path in a repo its tasks run in, `context.mcp_checkout_notes`, with a lane on), what the agents get (`cli.setup_lines` over `context.agent_setup` and `setup_said`, *What reaches the agent, listed*, #1295: `--  agents get <each source that reaches, its size; a plugin's tools>: about NK tokens with OpenCode's own, before a task's project files and spec (wb start counts those)` and `--  kept from agents: N skills kept out by name (Claude's, ~/.agents and workbench's own), <each dropped or denied source>`), `context.TOOLCHAINS`, `wb` on PATH (the plugin's launcher, `cli.plugin_launcher`, said as such and never as another copy; not on PATH with the mod installed, a `--` line for the user's own terminal, not BAD, #1190; nor on the OpenCode path alone, the mod not listed and the OpenCode plugin installed or wb run from OpenCode's install, `--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below says which); for your own terminal, …` (a clone's and `bin/wb setup --opencode` from OpenCode's install, else `wb setup --opencode`'s link), #1321's finding 26) and which wb the mod runs (`the mod runs WB_BIN=…`, `it by name` with `, else ~/.local/bin/wb where its PATH has no wb` when that link is there, or off PATH `~/.local/bin/wb (wb setup's link)`: `cli.mod_wb`, #1200), `cli.logout_stops`, the web app (`cli.chat_line`: `ok`, `--` off, or `BAD web app down: …`, *The web chat*; after its `ok`, with this OS's own tailscale CLI (`chat.tailscale_cli`) and the web app on this machine alone, `--  ` + the story's `link.reach`, `cli.reach_hint`, #1355), each schedule (`schedule.doctor_lines`: `ok  schedule <name> (<when>): last <its last run>`, `BAD` with claude (a backlog's: a flow's needs none, `schedule.needs`, #1295) or opencode not on the unit's PATH, the wb its unit runs gone (`schedule.newest_wb`: `its wb is gone (<path>): wb schedule rm <name>, then add`, the unit's and not this wb's, #1497) or its unit gone, #1204, or on macOS a repo, backlog or wb in a protected folder until a fire has run, `schedule.privacy_note`, #1539; on WSL with a schedule or the web app on, `--  ` + `schedule.WSL_IDLE`, #1511), `cli.awake_line`, `webpush.has_cas` (with push subscriptions or any API role: the keyhole's context is `webpush.tls()`, #1080), the mod (`cli._mod_behind`; #1061's note on Claude's own files went, #1322: the release notes carry it), each install of the OpenCode plugin and the wb it runs (`ocplugin.doctor_lines`, *The OpenCode plugin*; with the plugin, or wb run from OpenCode's install, and no Claude Code mod, a missing `skills/workbench` is a `--` line, not BAD), then `patches.doctor_lines` (from OpenCode's install instead `ok  install: OpenCode's, at P: OpenCode updates it (…)`, `ocplugin.updated_by`): `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; on `local` tracking nothing, `--  local patches: branch local tracks no upstream: git -C P branch -u origin/main local (wb update sets it)`, #1327; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
+| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014; then each role on API, `ok  <role> role: <id> ready` or `BAD` with wb start's own refusal, `routes.resolve` and `routes.cant_run`: no key, a key wb can't hold, gone from the catalog, out of credit, no price, the day cap, `cli._api_role_lines`, #1067; with a role on API, the keys, `cli.api_key_lines`); with every role on API, no local model and no OpenCode config read `--` (`--  0 local model(s): every role runs on API`), not `BAD`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`context.interop_gap`, `context.home_gap`: doctor's alone, #1322; `lane.gaps`, what the lane breaks for the agent's tools; from ABI 4 `_tcp_refused`'s `local daemons' TCP ports are out of the lane (N ports)`, *What TCP reaches*), commands.json, each MCP server it names (`ok  MCP server <name> (commands.json): the agents of every task|<repos>`, else `BAD` with wb start's refusal, `cli._mcp_named`, #1202; `--  MCP server '<name>' names <path>, in the repo …` for one whose command names a path in a repo its tasks run in, `context.mcp_checkout_notes`, with a lane on), what the agents get (`cli.setup_lines` over `context.agent_setup` and `setup_said`, *What reaches the agent, listed*, #1295: `--  agents get <each source that reaches, its size; a plugin's tools>: about NK tokens with OpenCode's own, before a task's project files and spec (wb start counts those)` and `--  kept from agents: N skills kept out by name (Claude's, ~/.agents and workbench's own), <each dropped or denied source>`), `context.TOOLCHAINS`, `wb` on PATH (the plugin's launcher, `cli.plugin_launcher`, said as such and never as another copy; not on PATH with the mod installed, a `--` line for the user's own terminal, not BAD, #1190; nor on the OpenCode path alone, the mod not listed and the OpenCode plugin installed or wb run from OpenCode's install, `--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below says which); for your own terminal, …` (a clone's and `bin/wb setup --opencode` from OpenCode's install, else `wb setup --opencode`'s link), #1321's finding 26) and which wb the mod runs (`the mod runs WB_BIN=…`, `it by name` with `, else ~/.local/bin/wb where its PATH has no wb` when that link is there, or off PATH `~/.local/bin/wb (wb setup's link)`: `cli.mod_wb`, #1200), `cli.logout_stops`, the web app (`cli.chat_line`: `ok`, `--` off, or `BAD web app down: …`, *The web chat*), each schedule (`schedule.doctor_lines`: `ok  schedule <name> (<when>): last <its last run>`, `BAD` with claude (a backlog's: a flow's needs none, `schedule.needs`, #1295) or opencode not on the unit's PATH, the wb its unit runs gone (`schedule.newest_wb`: `its wb is gone (<path>): wb schedule rm <name>, then add`, the unit's and not this wb's, #1497) or its unit gone, #1204, or on macOS a repo, backlog or wb in a protected folder until a fire has run, `schedule.privacy_note`, #1539; on WSL with a schedule or the web app on, `--  ` + `schedule.WSL_IDLE`, #1511), `cli.awake_line`, `webpush.has_cas` (with push subscriptions or any API role: the keyhole's context is `webpush.tls()`, #1080), the mod (`cli._mod_behind`; #1061's note on Claude's own files went, #1322: the release notes carry it), each install of the OpenCode plugin and the wb it runs (`ocplugin.doctor_lines`, *The OpenCode plugin*; with the plugin, or wb run from OpenCode's install, and no Claude Code mod, a missing `skills/workbench` is a `--` line, not BAD), then `patches.doctor_lines` (from OpenCode's install instead `ok  install: OpenCode's, at P: OpenCode updates it (…)`, `ocplugin.updated_by`): `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; on `local` tracking nothing, `--  local patches: branch local tracks no upstream: git -C P branch -u origin/main local (wb update sets it)`, #1327; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
 
 ## Files and formats
 
@@ -10794,7 +10734,7 @@ $WB_HOME (~/.local/state/workbench)
                                  runs none; a non-empty string or refused, #1295),
                                  "skills": [library skill names] (handed to every task there, after --skill; one not in the library a
                                  note at wb start, left out; names [a-z0-9-] or refused, #1295)}}
-  chat.json ($WB_CHAT_CONFIG)    {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}; `wb chat reach` writes `bind` (*Phone reach*)
+  chat.json ($WB_CHAT_CONFIG)    {"hosts": [...], "upload_mb": 25, "upload_message_mb": 50}; an old `bind` is ignored (#1616)
   chat-token ($WB_CHAT_TOKEN)    mode 600
   chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}, "revoked"?: {"<sha256>": ts}}
                                  (wb chat token; *Other agents*, #1042; revoked: the newest 200, so a revoked token is told so, #1138)
@@ -11406,20 +11346,6 @@ round-tripping a `coding` change and its settings-changes.jsonl row, probe turne
 `AGENT_MAY`, /api/top's `top` event and its child gone within `TOP_LINGER_S`+5 s of the viewer hanging up; a refusal's
 409 with `settings.apply` stood in for, and a change's `help` passed to the page with no row of the POST's own: its
 child logs it, #1355);
-`test_chat_reach.py` (*Phone reach*, a fake `tailscale` on PATH: `tailnet` binding the tailnet too with the other keys
-kept, the name to open, the bind the server replans to, `https: not served` and the row's `REACH_HELP`, a served https
-said with no help; refused with nothing written while Tailscale is stopped or missing, or its address can't be bound
-(#1499: `tailscale serve --bg` named, and a bind written by hand serves localhost with the tailnet skipped); `local` dropping the bind, a bind
-of the user's own `custom`; `local` with `tailscale serve` still in front naming its https and the
-command that stops it, with `REACH_LOCAL_HELP` (#1512); under WSL with only a `tailscale.exe`, `tailnet` refused naming
-`tailscale.exe serve --bg`, Windows' serve seen and no `reach_hint` (#1524); the `reach` row and its call; `cli.reach_hint`
-only while it opens here alone, with a tailscale CLI; the phone link, serve's https before the tailnet name and none while
-local or down, `wb chat url`'s QR code at a terminal only, and `GET /api/phone-qr.svg` that link's SVG, 404 without one,
-401 and an agent's 403, #1552);
-`test_qr.py` (`qr.py`, #1552: Reed-Solomon, format and version bits from the standard's examples, every version's blocks
-filling its codewords, byte capacities, alignment positions, a version 1 symbol under each mask and a version 7 module for module as
-qrencode 4.1.1 made them, `tests/fixtures/qr-qrencode.json`; the smallest version, 2,332 bytes refused, the SVG's and the
-half blocks' modules and colours);
 `test_story.py` (*The story*: `gen_story.py --check` clean, a one-byte edit to either `story.ts` or a
 skill block failing it, the hosts' refusals byte for byte as each said them and imported from `mod/hooks/story.ts`, the
 skill blocks Claude Code's with OpenCode's in the module,
@@ -11695,8 +11621,7 @@ no model opening its API model list under the row, a pick sending the model, the
 list of 16 in four groups, its filter box narrowing it by name and by provider and id, the chosen one kept, through a
 redraw, cleared by Escape and by a pick (#1617), and none over one model; "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
-group; a row's `` `…` `` drawn as `<code>`; on a desktop with reach the tailnet, Open on your phone's link with the page's
-token and Copy, no QR where the server has none, and with reach local its one line (none of it on a phone); a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
+group; a row's `` `…` `` drawn as `<code>`; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
 (two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side
 `fetch` wrapper to a binding (`__wbSettings`), never `page.route`: the page is its service worker's client, and
 WebKit sends such a page's fetches past Playwright's routes. While the server answers that path 404, a stand-in
@@ -11730,7 +11655,10 @@ requests once the service worker was registered), and a click on a pair or a tak
 `.bubble.flowing` grows above it. `no script errors` leaves out WebKit's "Fetch API cannot load … due to access
 control checks", its words for a same-origin fetch a reload cut off, which Playwright hands over as a page error.
 `WebChat` checks `/api/task` against `wb report`, `wb diff` and `wb log -v` on one task, its cuts, the agents' 403
-and `about: {task}` (#1201). `WebChat` runs the agents' client, `skill/agents/ask-workbench/scripts/ask_workbench.py`, against its server with a
+and `about: {task}` (#1201); that it listens on 127.0.0.1 alone, an old `bind` ignored and `hosts` adding a tunnel's
+name (`--bind` and `--host` gone), and that an agent token carrying any proxy's forwarding header is 403 `not_local`
+while the user's token still works through it (#1616,
+`test_an_agent_token_through_a_tunnel_is_refused_while_the_users_token_still_works_1616`). `WebChat` runs the agents' client, `skill/agents/ask-workbench/scripts/ask_workbench.py`, against its server with a
 listener played in the test (#1042), a Claude Code one and an OpenCode one (a heartbeat listing its session) each
 taking a request, its follow-up and a later report and named as the one that answered, and with both open a plain
 report threading to the agent only from the one that listens (#1366), and against a stub that cuts a send (one Idempotency-Key every try; cut for good,
@@ -11878,7 +11806,7 @@ start (task.json put back) leave the provider's stop. Each guard was deleted in 
 
 **Conventions for a new test.** Names read as sentences; one class per feature, a one-line docstring; end to end through
 `self.start`/`wait_phase`/`run_wb`, asserting the phrases Claude reads and the state files; real processes and servers
-on port 0 (only `chat.tailscale` and Hardware's probes are mocked); a regression test cites the incident and date; task
+on port 0 (only Hardware's probes are mocked); a regression test cites the incident and date; task
 names `t-<slug>`; OpenCode-dependent tests through `run_calls`; kernel ones `@unittest.skipUnless(lane.abi(), …)`
 (Seatbelt's `lane.kind() == "seatbelt"`); a test meaning "no lane" mocks `lane.kind` to None, never `lane.abi` to 0 (a Mac has Seatbelt);
 a test of `writable()`'s split around NOT_WRITABLE's places pins `lane.kind` to `landlock` and checks Seatbelt's

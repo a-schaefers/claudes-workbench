@@ -31104,13 +31104,13 @@ class WebChat(Base):
         os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
         from workbench import chat
         self.chat = chat
-        # a wildcard bind's names (chat.this_machine) ask socket.getfqdn, a reverse lookup that sat
-        # past WB_TEST_HANG_SECS' 600 s on GitHub's macOS runner (2026-11-22). No test here is
-        # about the lookup; #236's, that the server makes none, patch it again
+        # socket.getfqdn, a reverse lookup, sat past WB_TEST_HANG_SECS' 600 s on GitHub's macOS
+        # runner (2026-11-22). No test here is about the lookup; #236's, that the server makes
+        # none, patch it again
         fqdn = mock.patch("socket.getfqdn", lambda name="": name or socket.gethostname())
         fqdn.start()
         self.addCleanup(fqdn.stop)
-        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        servers, _ = chat.make_servers(0)
         self.srv = servers[0]
         self.port = self.srv.server_address[1]
         import threading
@@ -31191,17 +31191,8 @@ class WebChat(Base):
         # the user's off is remembered across /workbench runs. On starts a server when none
         # answers; off stops only one wb started, and nobody listens.
         self.assertTrue(self.chat.is_on())                             # no switch.json: on
-        # the phone's way in while it opens here alone (#1355), only with this OS's own tailscale
-        # CLI (#1524, 2026-11-26): the runner's PATH decides neither, so both are put here
-        from workbench import story
-        with mock.patch.object(self.chat, "tailscale_cli", lambda windows=False: "/opt/ts/tailscale"):
-            out = run_wb("chat", "on", "--port", str(self.port))       # one runs already: kept
+        out = run_wb("chat", "on", "--port", str(self.port))           # one runs already: kept
         self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
-        self.assertTrue(out.endswith(f"--  {story.text('link.reach')}\n"), out)
-        with mock.patch.object(self.chat, "tailscale_cli", lambda windows=False: None):
-            out = run_wb("chat", "on", "--port", str(self.port))
-        self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
-        self.assertNotIn(story.text("link.reach"), out)                # no tailscale here: no hint
         self.assertTrue(self.chat.is_on())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())
         store.write_json(self.chat.chat_dir() / "listener.json", {"session": "s", "pid": os.getpid()})
@@ -31289,10 +31280,10 @@ class WebChat(Base):
         time.sleep(1.5)  # past the restart's pause, had it gone on
         self.assertFalse(nxt.exists())
 
-    def call(self, path, body=None, token=None, host="localhost"):
+    def call(self, path, body=None, token=None, host="localhost", headers=None):
         import http.client
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        headers = {"Host": f"{host}:{self.port}"}
+        headers = {"Host": f"{host}:{self.port}", **(headers or {})}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         if body is not None:
@@ -31402,133 +31393,38 @@ class WebChat(Base):
         self.assertEqual(self.call(f"/api/audio?batch={self.chat.thread()[-1]['audio']['batch']}&n=1",
                                    token=tok)[0], 200)
 
-    def test_it_serves_localhost_unless_the_user_chose_more(self):
+    def test_it_listens_on_localhost_alone_and_chat_jsons_hosts_adds_a_tunnels_name_1616(self):
+        # #1616 (the owner, 2026-11-27): localhost only; a tunnel or proxy of the user's own points
+        # at it, and an old `bind` (tailscale, 0.0.0.0) is ignored, never migrated
         chat, conf = self.chat, Path(os.environ["WB_CHAT_CONFIG"])
-        self.assertEqual(chat.plan()["binds"], ["127.0.0.1"])         # no Tailscale assumed
-        conf.write_text(json.dumps({"bind": ["localhost", "0.0.0.0"]}))
-        p = chat.plan()
-        self.assertEqual(p["binds"], ["0.0.0.0"])                     # the wildcard covers it (#534)
-        self.assertIn(socket.gethostname().lower(), p["hosts"])      # its names, on any interface
-        self.assertNotIn("evil.example", p["hosts"])
-        conf.write_text(json.dumps({"bind": ["0.0.0.0"], "hosts": ["chat.example.org"]}))
+        self.assertEqual(chat.plan(), {"binds": ["127.0.0.1"], "hosts": {"localhost", "127.0.0.1", "::1"}})
+        conf.write_text(json.dumps({"bind": ["tailscale", "0.0.0.0"], "hosts": ["Chat.Example.org"]}))
+        self.assertEqual(chat.plan()["binds"], ["127.0.0.1"])
         self.assertIn("chat.example.org", chat.plan()["hosts"])      # a tunnel's name
+        self.assertNotIn("evil.example", chat.plan()["hosts"])
+        self.assertTrue(chat.url(1337).startswith("http://localhost:1337/#token="))  # the old bind: no say
         conf.write_text(json.dumps({"hosts": ["*"]}))
         self.assertIsNone(chat.plan()["hosts"])                      # any name: the token alone
-        self.assertEqual(chat.plan(["10.0.0.5"])["binds"], ["10.0.0.5"])  # --bind wins
-        conf.write_text("{}")
-        with mock.patch.object(chat, "tailscale", return_value={}):
-            p = chat.plan(["localhost", "tailscale"])
-        self.assertEqual((p["binds"], p["skipped"]), (["127.0.0.1"], ["tailscale (not running)"]))
-        with mock.patch.object(chat, "tailscale",
-                               return_value={"ip": "100.64.0.9", "names": {"box", "box.ts.net"}}), \
-                mock.patch.object(chat, "listenable", return_value=True):  # on no interface here (#1499)
-            p = chat.plan(["localhost", "tailscale"])
-        self.assertEqual(p["binds"], ["127.0.0.1", "100.64.0.9"])
-        self.assertTrue({"box", "box.ts.net", "100.64.0.9"} <= p["hosts"])
-
-    def test_a_missing_tailscale_cli_is_said_apart_from_tailscale_not_running(self):
-        # macOS's App Store app keeps its CLI in the bundle, off PATH (the 2026-11-16 audit)
-        chat = self.chat
-        with mock.patch.object(chat.shutil, "which", return_value=None), \
-                mock.patch.object(chat.sys, "platform", "linux"):
-            self.assertEqual(chat.plan(["localhost", "tailscale"])["skipped"],
-                             ["tailscale (CLI not found: put `tailscale` on PATH)"])
-        me = {"Self": {"TailscaleIPs": ["100.64.0.9"], "DNSName": "box.ts.net.", "HostName": "box"}}
-        ran = mock.Mock(return_value=types.SimpleNamespace(stdout=json.dumps(me)))
-        with mock.patch.object(chat.shutil, "which", return_value=None), \
-                mock.patch.object(chat.sys, "platform", "darwin"), \
-                mock.patch.object(chat.os.path, "isfile", return_value=True), \
-                mock.patch.object(chat.subprocess, "run", ran):
-            self.assertEqual(chat.tailscale()["ip"], "100.64.0.9")
-        self.assertEqual(ran.call_args[0][0][0], chat.TAILSCALE_APP)
-
-    def test_a_tailnet_node_with_only_an_ipv6_address_binds_it_and_a_stopped_one_is_not_running(self):
-        # #937 (the review of 1.90.24): only IPs with a "." were kept, so a node with IPv4 turned
-        # off was reported "tailscale (not running)" and the chat listened on localhost alone
-        chat, conf = self.chat, Path(os.environ["WB_CHAT_CONFIG"])
-
-        def status(ips, state="Running"):
-            me = {"BackendState": state, "Self": {"TailscaleIPs": ips, "DNSName": "box.ts.net.",
-                                                  "HostName": "box"}}
-            return mock.patch.object(chat.subprocess, "run", return_value=types.SimpleNamespace(
-                stdout=json.dumps(me)))
-        with mock.patch.object(chat.shutil, "which", return_value="/usr/bin/tailscale"), \
-                mock.patch.object(chat, "listenable", return_value=True):  # on no interface here (#1499)
-            with status(["fd7a:115c:a1e0::9"]):
-                p = chat.plan(["localhost", "tailscale"])
-                self.assertEqual((p["binds"], p["skipped"]), (["127.0.0.1", "fd7a:115c:a1e0::9"], []))
-                self.assertTrue({"box", "box.ts.net", "fd7a:115c:a1e0::9"} <= p["hosts"])
-                conf.write_text(json.dumps({"bind": ["tailscale"]}))
-                self.assertTrue(chat.url(1337).startswith("http://[fd7a:115c:a1e0::9]:1337/#token="))
-                conf.write_text("{}")
-            with status(["fd7a:115c:a1e0::9", "100.64.0.9"]):          # dual stack: the IPv4
-                self.assertEqual(chat.plan(["tailscale"])["binds"], ["100.64.0.9"])
-            with status(["100.64.0.9"], state="Stopped"):
-                self.assertEqual(chat.plan(["localhost", "tailscale"])["skipped"], ["tailscale (not running)"])
-            with status([]):
-                self.assertEqual(chat.plan(["localhost", "tailscale"])["skipped"],
-                                 ["tailscale (no Tailscale address)"])
-
-    def test_a_taken_port_is_one_line_not_a_traceback(self):
-        with self.assertRaisesRegex(RuntimeError, f"can't listen on 127.0.0.1:{self.port}: the port is taken"):
-            self.chat.make_servers(self.port, ["127.0.0.1"])
-
-    def test_a_bind_mixing_a_wildcard_with_another_address_starts_and_answers_on_each(self):
-        # #534 (the 2026-11-20 audit): each further socket on the port failed EADDRINUSE on Linux,
-        # so these never started, blamed on "another wb chat serve", and wb-chat.service retried forever
-        import http.client
-        chat, conf = self.chat, Path(os.environ["WB_CHAT_CONFIG"])
-        try:
-            with socket.socket(socket.AF_INET6) as sk:
-                sk.bind(("::1", 0))
-            v6 = True
-        except OSError:
-            v6 = False
-        lists = [["localhost", "0.0.0.0"], ["0.0.0.0", "localhost"]]
-        if v6:
-            lists += [["0.0.0.0", "::"], ["::", "0.0.0.0"], ["127.0.0.1", "::"], ["::", "127.0.0.1"]]
-        for binds in lists:
-            with socket.socket() as sk:
-                sk.bind(("0.0.0.0", 0))
-                port = sk.getsockname()[1]
-            servers, p = chat.make_servers(port, binds)
-            try:
-                for srv in servers:
-                    threading.Thread(target=srv.serve_forever, daemon=True).start()
-                for at in ["127.0.0.1"] + (["::1"] if "::" in binds else []):
-                    c = http.client.HTTPConnection(at, port, timeout=5)
-                    c.request("GET", "/manifest.webmanifest", headers={"Host": "localhost"})
-                    self.assertEqual(c.getresponse().status, 200, (binds, at))
-                    c.close()
-            finally:
-                for srv in servers:
-                    srv.shutdown()
-                    srv.server_close()
-                servers[0].RequestHandlerClass.hub.close()
-        # a string is one address or name, not its characters
-        conf.write_text(json.dumps({"bind": "0.0.0.0", "hosts": "box.ts.net"}))
-        p = chat.plan()
-        self.assertEqual(p["binds"], ["0.0.0.0"])
-        self.assertIn("box.ts.net", p["hosts"])
-        self.assertNotIn("b", p["hosts"])
-        conf.write_text(json.dumps({"bind": 5}))                        # anything else: chat.json named
-        with self.assertRaisesRegex(chat.ConfigError, "chat.json: bind is a list of strings"):
+        conf.write_text(json.dumps({"hosts": "box.example.org"}))    # a string is one name (#534)
+        self.assertIn("box.example.org", chat.plan()["hosts"])
+        self.assertNotIn("b", chat.plan()["hosts"])
+        conf.write_text(json.dumps({"hosts": 5}))                    # anything else: chat.json named
+        with self.assertRaisesRegex(chat.ConfigError, "chat.json: hosts is a list of strings"):
             chat.plan()
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit) as ex:
             run_wb("chat", "serve", "--port", "0")
         self.assertEqual(ex.exception.code, 78)                        # the unit stops: no retry fixes it
-        # no loopback in the list: the link names the address it listens on
-        conf.write_text(json.dumps({"bind": ["10.0.0.5"]}))
-        self.assertTrue(chat.url(1337).startswith("http://10.0.0.5:1337/#token="))
-        conf.write_text("{}")
-        if v6:  # a later address taken: not blamed on another wb chat serve
-            with socket.socket(socket.AF_INET6) as held:
-                held.bind(("::1", 0))
-                held.listen()
-                port = held.getsockname()[1]
-                with self.assertRaisesRegex(RuntimeError, "another address in the bind list"):
-                    chat.make_servers(port, ["127.0.0.1", "::1"])
+        conf.write_text(json.dumps({"bind": 5}))                     # an old key, even a bad one: ignored
+        self.assertEqual(chat.plan()["binds"], ["127.0.0.1"])
+        for flag in ("--bind", "--host"):                            # gone with it
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ex:
+                run_wb("chat", "serve", flag, "0.0.0.0")
+            self.assertEqual(ex.exception.code, 2, flag)
+
+    def test_a_taken_port_is_one_line_not_a_traceback(self):
+        with self.assertRaisesRegex(RuntimeError, f"can't listen on 127.0.0.1:{self.port}: the port is taken"):
+            self.chat.make_servers(self.port)
 
     def test_a_bad_length_or_a_stalled_connection_is_turned_away(self):
         import http.client
@@ -31574,106 +31470,27 @@ class WebChat(Base):
         self.assertEqual(c.getresponse().status, 401)                # no "Bearer ": no entry
         c.close()
 
-    def test_a_chat_on_localhost_answers_behind_tailscale_serve_under_the_machines_tailnet_name(self):
-        # #448 (the 2026-11-20 audit): `tailscale serve --bg 1337`, the https Settings advises, passes
-        # the tailnet name through as the Host, and the default localhost chat answered it 403
-        chat, tok = self.chat, self.chat.token()
-        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
-        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
-                mock.patch.object(chat, "tailscale", return_value=me) as asked:
-            self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 200)
-            self.assertEqual(self.call("/", host="BOX.tail1234.ts.net")[0], 200)
-            self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 403)
-            self.assertEqual(self.call("/api/state", token=tok, host="box")[0], 403)  # the full name only
-            self.assertEqual(asked.call_count, 1)                 # looked up once, not per request
-        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
-                mock.patch.object(chat, "tailscale", return_value={}):       # Tailscale down
-            self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 403)
-
-    def test_on_wsl_the_tailnet_name_comes_from_windows_tailscale_exe_but_the_bind_does_not(self):
-        # #920: with Tailscale on Windows, `which("tailscale")` never tries tailscale.exe, so the
-        # chat behind `tailscale serve` answered every request 403 "unknown host"
-        chat, tok = self.chat, self.chat.token()
-        me = {"Self": {"TailscaleIPs": ["100.64.0.9"], "DNSName": "box.tail1234.ts.net.",
-                       "HostName": "box"}}
-        ran = mock.Mock(return_value=types.SimpleNamespace(stdout=json.dumps(me) + "\r\n"))
-        exe = "/mnt/c/Program Files/Tailscale/tailscale.exe"
-        from workbench import hardware
-        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
-                mock.patch.object(chat.shutil, "which",
-                                  side_effect=lambda n: exe if n == "tailscale.exe" else None), \
-                mock.patch.object(chat.sys, "platform", "linux"), \
-                mock.patch.object(hardware, "system", return_value="wsl"), \
-                mock.patch.object(chat.subprocess, "run", ran):
-            self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 200)
-            self.assertEqual(ran.call_args[0][0][0], exe)
-            self.assertEqual(chat.plan(["localhost", "tailscale"])["skipped"],   # NAT: not WSL's IP
-                             ["tailscale (CLI not found: put `tailscale` on PATH)"])
-        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
-                mock.patch.object(chat.shutil, "which",
-                                  side_effect=lambda n: exe if n == "tailscale.exe" else None), \
-                mock.patch.object(chat.sys, "platform", "linux"), \
-                mock.patch.object(hardware, "system", return_value="linux"):   # not WSL
-            self.assertEqual(chat.tailnet_name(), "")
-
-    def test_on_wsl_a_chat_without_windows_path_finds_tailscale_exe_under_the_automount_root(self):
-        # the review of #920: wb-chat.service runs with the user manager's PATH, and
-        # appendWindowsPath=false leaves Windows' off too, so `which("tailscale.exe")` found
-        # nothing and the chat behind `tailscale serve` still answered 403 "unknown host"
-        chat, tok = self.chat, self.chat.token()
-        me = {"Self": {"TailscaleIPs": ["100.64.0.9"], "DNSName": "box.tail1234.ts.net.",
-                       "HostName": "box"}}
-        ran = mock.Mock(return_value=types.SimpleNamespace(stdout=json.dumps(me)))
-        from workbench import hardware
-        with tempfile.TemporaryDirectory() as root:
-            exe = Path(root, chat.TAILSCALE_WINDOWS)
-            exe.parent.mkdir(parents=True)
-            exe.write_text("")
-            with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
-                    mock.patch.object(chat.shutil, "which", lambda n: None), \
-                    mock.patch.object(hardware.shutil, "which", lambda n: None), \
-                    mock.patch.object(hardware, "_read", lambda path: f"[automount]\nroot = {root}\n"
-                                      if path == hardware.WSL_CONF else ""), \
-                    mock.patch.object(chat.sys, "platform", "linux"), \
-                    mock.patch.object(hardware, "system", return_value="wsl"), \
-                    mock.patch.object(chat.subprocess, "run", ran):
-                self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 200)
-                self.assertEqual(ran.call_args[0][0][0], str(exe))
-
-    def test_a_wildcard_chat_answers_to_the_address_it_was_reached_on_where_the_host_name_says_127_0_1_1(self):
-        # #533 (the 2026-11-20 audit): with bind 0.0.0.0 the names came from the host name, which
-        # Debian's /etc/hosts maps to 127.0.1.1, so a phone on the LAN IP got a bare 403
-        import http.client
-        real = socket.getaddrinfo
-        debian = lambda host, *a, **k: ([(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.1.1", 0))]
-                                        if host == socket.gethostname() else real(host, *a, **k))
-        with mock.patch("socket.getaddrinfo", side_effect=debian):
-            servers, p = self.chat.make_servers(0, ["0.0.0.0"])
-        srv = servers[0]
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        self.addCleanup(srv.RequestHandlerClass.hub.close)
-        self.addCleanup(srv.server_close)
-        self.addCleanup(srv.shutdown)
-        self.assertNotIn("127.0.0.2", p["hosts"])                 # not among the names worked out
-        tok, port = self.chat.token(), srv.server_address[1]
-
-        def get(at, host):
-            c = http.client.HTTPConnection(at, port, timeout=5)
-            try:
-                c.request("GET", "/api/state", headers={"Host": f"{host}:{port}", "Authorization": f"Bearer {tok}"})
-                r = c.getresponse()
-                return r.status, json.loads(r.read())
-            finally:
-                c.close()
-        try:
-            got = get("127.0.0.2", "127.0.0.2")                   # the LAN IP, as the phone typed it
-        except OSError:
-            self.skipTest("no 127.0.0.2 here (macOS configures only 127.0.0.1)")
-        self.assertEqual(got[0], 200)
-        code, body = get("127.0.0.2", "127.0.0.3")                # an address, but not this socket's
+    def test_a_tunnels_host_name_is_answered_once_chat_json_names_it_without_a_restart_1616(self):
+        # #448 (the 2026-11-20 audit): a tunnel to localhost passes its own name through as the
+        # Host, and the chat answered it 403; chat.json's `hosts` names it. #1616 (2026-11-27): no
+        # product's name is looked up any more, so that is every tunnel's way in, and a name added
+        # while the server ran stayed 403 until a restart nothing named: read again on a change
+        conf, tok = Path(os.environ["WB_CHAT_CONFIG"]), self.chat.token()
+        code, body = self.call("/api/state", token=tok, host="chat.example.org")
         self.assertEqual(code, 403)
         self.assertIn("add it to chat.json's hosts", body["error"])  # says what to do
-        self.assertEqual(get("127.0.0.2", "evil.example")[0], 403)
+        conf.write_text(json.dumps({"hosts": ["chat.example.org"]}))  # the server already running
+        self.assertEqual(self.call("/api/state", token=tok, host="chat.example.org")[0], 200)
+        self.assertEqual(self.call("/", host="CHAT.example.org")[0], 200)
+        self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 403)
+        for broken in ('{"hosts": ', json.dumps({"hosts": 5}), "[1]"):  # mid-edit or wrong: the last good
+            conf.write_text(broken)
+            self.assertEqual(self.call("/api/state", token=tok, host="chat.example.org")[0], 200, broken)
+        conf.write_text(json.dumps({"hosts": ["*"]}))
+        self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 200)  # any name
+        conf.unlink()                                                 # gone: localhost alone again
+        self.assertEqual(self.call("/api/state", token=tok, host="chat.example.org")[0], 403)
+        self.assertEqual(self.call("/api/state", token=tok)[0], 200)
 
     def test_an_empty_token_file_lets_nobody_in(self):
         Path(os.environ["WB_CHAT_TOKEN"]).write_text("\n")
@@ -31702,10 +31519,9 @@ class WebChat(Base):
         # the terminal, neither shown on the phone nor allowed
         chat, tok = self.chat, self.chat.token()
         d = chat.chat_dir()
-        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
-        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
-                mock.patch.object(chat, "tailscale", return_value=me):
-            phone = "box.tail1234.ts.net"  # a phone through `tailscale serve`: from loopback, not localhost (#1374)
+        handler = self.srv.RequestHandlerClass
+        with mock.patch.object(handler, "hosts", {*handler.hosts, "chat.example.org"}):  # chat.json's
+            phone = "chat.example.org"  # a phone through a tunnel: from loopback, not localhost (#1374)
             self.assertEqual(self.call("/api/active", {}, host=phone)[0], 401)
             self.assertEqual(self.call("/api/active", {"x": 1}, token=tok, host=phone)[0], 400)
             self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
@@ -31727,7 +31543,7 @@ class WebChat(Base):
         # #1374: the web app is the desk's admin too (Settings, Stats, from the modeline's
         # localhost link), and using it there made the user at the terminal away, their next plan
         # or question refused into the chat. Every request here comes from loopback, as a phone's
-        # through `tailscale serve` does: the Host tells them apart, never the peer
+        # through a tunnel does: the Host tells them apart, never the peer
         chat, tok = self.chat, self.chat.token()
         d = chat.chat_dir()
         store.write_json(d / "away.json", {"at": 0})            # the user typed in the terminal
@@ -31736,11 +31552,14 @@ class WebChat(Base):
             self.assertEqual(self.call("/api/active", {}, token=tok, host=host), (200, {}), host)
             self.assertGreaterEqual(store.read_json(d / "page.json")["at"], before, host)  # a chat user still
             self.assertEqual(store.read_json(d / "away.json"), {"at": 0}, host)             # not away
-        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
-        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
-                mock.patch.object(chat, "tailscale", return_value=me):
-            self.assertEqual(self.call("/api/active", {}, token=tok, host="box.tail1234.ts.net")[0], 200)
+        handler = self.srv.RequestHandlerClass
+        with mock.patch.object(handler, "hosts", {*handler.hosts, "chat.example.org"}):  # chat.json's
+            self.assertEqual(self.call("/api/active", {}, token=tok, host="chat.example.org")[0], 200)
         self.assertEqual(store.read_json(d / "away.json")["by"], "page")  # the phone's, from loopback too: away
+        store.write_json(d / "away.json", {"at": 0})
+        # a localhost Host a proxy forwarded (a tunnel set to pass localhost) is no desk either (#1616)
+        self.assertEqual(self.call("/api/active", {}, token=tok, headers={"X-Forwarded-For": "100.64.0.7"})[0], 200)
+        self.assertEqual(store.read_json(d / "away.json")["by"], "page")
 
     def test_a_dialog_at_the_terminal_is_one_waiting_line_on_the_phone_only_for_a_user_of_the_chat_959_1350(self):
         # #959: at the terminal the prompt stays there, and the phone is told one waits, as a
@@ -32395,32 +32214,13 @@ class WebChat(Base):
             free = sk.getsockname()[1]
         self.assertFalse(self.chat.wait_up(free, dead.pid, limit=5))
 
-    def test_an_ipv6_only_chat_is_seen_running_by_wbs_own_check(self):
-        # #450 (the 2026-11-20 audit): `::` was probed at 127.0.0.1, which an IPv6-only socket
-        # (bindv6only=1) never answers, so wb chat on took a healthy chat for none
-        try:
-            with socket.socket(socket.AF_INET6) as sk:
-                sk.bind(("::1", 0))
-        except OSError:
-            self.skipTest("no IPv6 here")
-        Path(os.environ["WB_CHAT_CONFIG"]).write_text(json.dumps({"bind": ["::"]}))
-        handler = self.srv.RequestHandlerClass
-        only6 = type("Only6", (self.chat._Server6,), {"v6only": True})(("::", 0), handler)  # bindv6only=1
-        threading.Thread(target=only6.serve_forever, daemon=True).start()
-        self.addCleanup(only6.server_close)
-        self.addCleanup(only6.shutdown)
-        port = only6.server_address[1]
-        self.assertFalse(self.chat._connects("0.0.0.0", port))           # nothing on IPv4
-        self.assertEqual(self.chat.who_answers(port), "workbench")
-        self.assertTrue(self.chat.running(port))
-
     def test_wb_chat_on_never_takes_another_accounts_chat_for_its_own(self):
         # #554 (the 2026-11-20 audit): the mark said only "a wb chat", so on a shared machine B's
         # wb chat on printed a link to A's server that B's token got 401 on, and off named A's unit
         mine = os.environ["WB_CHAT_TOKEN"]
         os.environ["WB_CHAT_TOKEN"] = str(Path(self.tmp.name) / "a-chat-token")     # account A
         try:
-            servers, _ = self.chat.make_servers(0, ["127.0.0.1"])
+            servers, _ = self.chat.make_servers(0)
         finally:
             os.environ["WB_CHAT_TOKEN"] = mine                                     # back to B
         theirs = servers[0]
@@ -32485,7 +32285,7 @@ class WebChat(Base):
             self.assertNotIn("systemctl", off)
             with self.assertRaisesRegex(RuntimeError, r"another wb chat serve \(launchctl print "
                                         r"gui/\$\(id -u\)/workbench.chat\)"):
-                chat.make_servers(self.port, ["127.0.0.1"])
+                chat.make_servers(self.port)
         with mock.patch.object(chat, "_macos", return_value=False):
             self.assertIn("systemd's wb-chat: systemctl --user disable --now wb-chat stops it",
                           run_wb("chat", "off", "--port", str(self.port)))
@@ -32560,33 +32360,6 @@ class WebChat(Base):
                 mock.patch.dict(os.environ, {"PATH": "/opt/homebrew/bin:/usr/bin:/bin"}):
             self.assertEqual(store.machine(), "5A1B-UUID")       # never the host name
             self.assertEqual(store.boot_id(), "1732000000")
-
-    def test_a_chat_on_an_address_that_comes_and_goes_rebinds_in_place_when_it_changes(self):
-        # #200 (the 2026-11-19 audit): with bind ["tailscale"] the plan was loopback while the
-        # tailnet was down and its address once up, but only a longer list restarted, and the
-        # restart was an exit 75 that ended a chat with no service manager
-        chat = self.chat
-        ts = {"value": {}}
-        execs = []
-        with mock.patch.object(chat, "tailscale", side_effect=lambda: ts["value"]), \
-                mock.patch.object(chat, "listenable", return_value=True), \
-                mock.patch.object(chat, "REPLAN_EVERY", 0.05), \
-                mock.patch.object(chat.os, "execv", side_effect=lambda *a: (execs.append(a), sys.exit())), \
-                mock.patch.object(chat, "make_servers", return_value=(
-                    [types.SimpleNamespace(server_address=("127.0.0.1", 1),
-                                           serve_forever=lambda: time.sleep(1),
-                                           RequestHandlerClass=types.SimpleNamespace(hub=None))],
-                    chat.plan(["tailscale"]))), \
-                mock.patch.object(chat, "Pusher"), mock.patch.object(chat, "watch_code"):
-            threading.Thread(target=chat.serve, args=(0, ["tailscale"]), kwargs={"say": lambda m: None},
-                             daemon=True).start()
-            time.sleep(0.3)
-            self.assertEqual(execs, [])                                  # the same set: kept
-            ts["value"] = {"ip": "100.64.0.9", "names": {"box"}}        # same length, other address
-            deadline = time.time() + 5
-            while not execs and time.time() < deadline:
-                time.sleep(0.05)
-        self.assertTrue(execs)                                           # re-exec'd, not exit 75
 
     def test_the_stream_sends_a_tasks_new_phase_at_once_and_wakes_for_nothing_on_its_steps(self):
         # #1559 (2026-11-26): the hub watched chat/ alone, so a task gone from running to review
@@ -32738,7 +32511,7 @@ class WebChat(Base):
         from workbench import watch
         saved, watch._libc = watch._libc, False
         try:
-            servers, _ = self.chat.make_servers(0, ["127.0.0.1"])
+            servers, _ = self.chat.make_servers(0)
         finally:
             watch._libc = saved
         srv = servers[0]
@@ -32873,32 +32646,26 @@ class WebChat(Base):
             self.assertEqual(self.call(path, body, token=self.chat.token())[0], 404, path)
         self.assertIn("my-agent  since ", run_wb("chat", "token", "list"))
 
-    def test_an_agent_token_from_another_machine_is_refused_while_the_users_token_still_works(self):
-        # agents are this machine's own (owner, 2026-11-23): a chat bound to the tailnet for the
-        # user's phone answered an agent token from any peer on it
-        tok = self._agent()
-        self.assertEqual(self.call("/api/state", token=tok)[0], 200)
-        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"):   # the tailnet peer
-            code, r = self.call("/api/state", token=tok)
-            self.assertEqual((code, r["error"]),
-                             (403, "agent tokens work only from this machine, at the address `wb chat url` prints"))
-            self.assertEqual(self.call("/api/send", {"text": "hi"}, token=tok)[0], 403)
-            self.assertEqual(self.call("/api/state", token=self.chat.token())[0], 200)  # the user's phone
-
-    def test_an_agent_token_from_this_machine_works_on_a_chat_bound_only_to_its_tailnet_or_lan_address(self):
-        # #1274 (2026-11-24): with `bind: ["tailscale"]` (no localhost served) an agent on this
-        # machine reaches the chat from the tailnet IP itself, not 127.*, and every agent token
-        # was refused with a 403 that sent it to localhost, which wasn't served
-        tok = self._agent()
-        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.1"), \
-                mock.patch.object(self.chat.Handler, "_local", lambda self: "100.64.0.1"):
-            self.assertEqual(self.call("/api/health", token=tok), (200, {"api": 1, "listening": False}))
-        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"), \
-                mock.patch.object(self.chat.Handler, "_local", lambda self: "100.64.0.1"):
-            self.assertEqual(self.call("/api/health", token=tok)[0], 403)        # another machine on it
-        with mock.patch.object(self.chat.Handler, "_peer", lambda self: ""), \
-                mock.patch.object(self.chat.Handler, "_local", lambda self: ""):
-            self.assertEqual(self.call("/api/health", token=tok)[0], 403)        # neither known: not here
+    def test_an_agent_token_through_a_tunnel_is_refused_while_the_users_token_still_works_1616(self):
+        # agents are this machine's own (owner, 2026-11-23). #1616 (2026-11-27): the chat listens on
+        # localhost alone, so behind a tunnel or proxy every peer is 127.0.0.1, another device's
+        # too: a request carrying a proxy's forwarding header is not this machine's for an agent
+        tok, mine = self._agent(), self.chat.token()
+        self.assertEqual(self.call("/api/state", token=tok)[0], 200)            # this machine's own
+        refused = (403, "agent tokens work only from this machine, at the address `wb chat url` prints")
+        for name, value in (("X-Forwarded-For", "100.64.0.7"), ("Forwarded", "for=100.64.0.7"),
+                            ("X-Real-IP", "100.64.0.7"), ("Tailscale-User-Login", "someone@example.org"),
+                            ("Cf-Connecting-Ip", "203.0.113.9"), ("x-forwarded-host", "chat.example.org"),
+                            ("Via", "1.1 caddy")):
+            with self.subTest(header=name):
+                code, r = self.call("/api/state", token=tok, headers={name: value})
+                self.assertEqual((code, r["error"]), refused)
+                self.assertEqual(self.call("/api/send", {"text": "hi"}, token=tok, headers={name: value})[0], 403)
+                self.assertEqual(self.call("/api/state", token=mine, headers={name: value})[0], 200)  # the user's phone
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"):   # another machine's peer
+            self.assertEqual(self.call("/api/state", token=tok)[0], 403)
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: ""):             # none known: not here
+            self.assertEqual(self.call("/api/health", token=tok)[0], 403)
 
     def test_a_revoked_agent_token_gets_401_and_names_are_checked(self):
         tok = self._agent()
@@ -33230,7 +32997,7 @@ class WebChat(Base):
 
     def test_ask_workbench_gives_up_on_a_chat_that_stays_unreachable_long_before_its_deadline(self):
         # the #1107 review: retrying a cut wait to the deadline (an hour by default) also covered a
-        # chat gone for good (`wb chat off`, the machine asleep, the tailnet down): the agent sat an
+        # chat gone for good (`wb chat off`, the machine asleep, a tunnel down): the agent sat an
         # hour where it got exit 1 at once before; past OUTAGE_MOST in a row it is exit 2 and --after
         import importlib.util
         script = Path(__file__).resolve().parent.parent / "skill/agents/ask-workbench/scripts/ask_workbench.py"
@@ -33799,8 +33566,8 @@ class WebChat(Base):
         refused(self.call("/api/push", {"test": True}, token=tok), 403, "agent_forbidden")
         refused(self.call("/api/nope", token=tok), 403, "agent_forbidden")      # outside its allow-list
         refused(self.call("/api/wait?after=x&timeout=9999", token=tok), 400, "bad_request")
-        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"):  # a tailnet peer
-            refused(self.call("/api/health", token=tok), 403, "not_local")
+        refused(self.call("/api/health", token=tok, headers={"X-Forwarded-For": "100.64.0.7"}), 403,
+                "not_local")                                                 # through a tunnel (#1616)
         with mock.patch.object(self.srv.RequestHandlerClass.sends, "per_min", 1):
             code, r = self.call("/api/send", {"text": "the first"}, token=tok)
             self.assertEqual(code, 200)
@@ -33996,7 +33763,7 @@ class AgentMcp(Base):
         fqdn = mock.patch("socket.getfqdn", lambda name="": name or socket.gethostname())  # WebChat's why
         fqdn.start()
         self.addCleanup(fqdn.stop)
-        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        servers, _ = chat.make_servers(0)
         self.srv = servers[0]
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -34360,11 +34127,8 @@ class AgentMcp(Base):
                     "http://100.64.0.1:1337", "http://0.0.0.0:1337", "http://[::]:1337", "http://224.0.0.1",
                     "ftp://localhost", "localhost:1337", "http://localhost:99999", "http://my-host.tailnet.ts.net"):
             self.assertFalse(m.this_machine(url), url)
-        # a chat bound only to this machine's tailnet or LAN IP serves no localhost, and an agent
-        # here reaches it there (the chat's #1274): that IP is this machine's, so it is taken
-        with mock.patch.object(m, "_own", lambda ip: str(ip) == "100.64.0.1"):
-            self.assertTrue(m.this_machine("http://100.64.0.1:1337"))
-            self.assertFalse(m.this_machine("http://100.64.0.2:1337"))
+        # the chat listens on localhost alone (#1616, 2026-11-27): an address of this machine's own
+        # (its LAN or tailnet IP) serves no chat, so it is refused as any other
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
             try:
                 sk.connect(("192.0.2.1", 9))                             # a route's source: sends nothing
@@ -34372,7 +34136,7 @@ class AgentMcp(Base):
             except OSError:
                 mine = ""
         if mine and not mine.startswith("127."):
-            self.assertTrue(m.this_machine(f"http://{mine}:1337"), mine)   # the real check, a real own IP
+            self.assertFalse(m.this_machine(f"http://{mine}:1337"), mine)
         rpc = self._server(url="http://192.0.2.1:1337")                  # TEST-NET-1: never reached
         for name, args in (("ask_workbench", {"text": "x"}), ("get_reply", {"id": "m1"}), ("list_requests", {})):
             r = rpc.tool(name, **args)
@@ -34428,13 +34192,13 @@ class ChatUploads(Base):
         os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
         from workbench import chat
         self.chat = chat
-        # a wildcard bind's names (chat.this_machine) ask socket.getfqdn, a reverse lookup that sat
-        # past WB_TEST_HANG_SECS' 600 s on GitHub's macOS runner (2026-11-22). No test here is
-        # about the lookup; #236's, that the server makes none, patch it again
+        # socket.getfqdn, a reverse lookup, sat past WB_TEST_HANG_SECS' 600 s on GitHub's macOS
+        # runner (2026-11-22). No test here is about the lookup; #236's, that the server makes
+        # none, patch it again
         fqdn = mock.patch("socket.getfqdn", lambda name="": name or socket.gethostname())
         fqdn.start()
         self.addCleanup(fqdn.stop)
-        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        servers, _ = chat.make_servers(0)
         self.srv = servers[0]
         self.port = self.srv.server_address[1]
         self.tok = chat.token()
@@ -34553,8 +34317,8 @@ class ChatUploads(Base):
 
     def test_a_chat_json_broken_while_serving_still_gives_the_page_its_state_and_limits(self):
         # #534 keeps the server up when chat.json breaks while it runs; the upload limits are read
-        # on every snapshot, so through settings() a bad `bind` would fail every request
-        Path(os.environ["WB_CHAT_CONFIG"]).write_text(json.dumps({"bind": 5, "upload_mb": 2}))
+        # on every snapshot, so through settings() a bad `hosts` would fail every request
+        Path(os.environ["WB_CHAT_CONFIG"]).write_text(json.dumps({"hosts": 5, "upload_mb": 2}))
         snap = self.chat.snapshot()
         self.assertEqual(snap["uploads"]["file"], 2 * self.chat.MB)
         Path(os.environ["WB_CHAT_CONFIG"]).write_text("[]")

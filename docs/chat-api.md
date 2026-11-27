@@ -56,19 +56,18 @@ runs the new scripts.
 
 ## Base URL and auth
 
-- **Base URL:** `http://localhost:1337` by default (the port is `wb chat serve --port`; `wb chat
+- **Base URL:** `http://localhost:8090` by default (another is `wb chat on <port>`'s; `wb chat
   url` prints the page's link, whose host and port are the base). The server listens on
-  localhost unless `~/.config/workbench/chat.json` says otherwise (`bind`: an address,
-  `tailscale`, or `0.0.0.0`; `hosts`: more names to answer to). `wb chat reach tailnet` (the
-  Settings row `reach`) binds the tailnet too, by this machine's tailnet name; https there is
-  `tailscale serve --bg 1337`. Reaching it any other way is the user's own setup.
+  `127.0.0.1` only. To reach it from another device, point a tunnel or proxy of your own at
+  `localhost:8090` and add the name it passes as the Host to `~/.config/workbench/chat.json`'s
+  `hosts` (`*` for any; read again when the file changes, no restart); the token still applies.
 - **Paths:** every `/api/<x>` below is also served at `/api/v1/<x>`, by the same handler with the
   same rules (an agent's denials too). New clients use `/api/v1/` (workbench 2.1 and later);
   `/api/` stays for the page and older clients, and `ask_workbench.py` keeps it, so it works with
   any server.
 - **Host check:** a request whose `Host` header is a name the server doesn't answer to gets
-  `403 {"error": "unknown host <host>: add it to chat.json's hosts", "code": "unknown_host"}`. An
-  address it listens on always passes.
+  `403 {"error": "unknown host <host>: add it to chat.json's hosts", "code": "unknown_host"}`.
+  `localhost`, `127.0.0.1` and `::1` always pass.
 - **Auth:** every `/api/` path wants `Authorization: Bearer <token>`. A missing or wrong token
   is `401 {"error": "bad or missing token: open the link from `wb chat url`", "code":
   "bad_token"}`; a revoked agent token is `401` with `"code": "token_revoked"`.
@@ -88,11 +87,12 @@ runs the new scripts.
       `read tasks` for `/api/task`, `transcribe the user's voice clips` for
       `/api/transcribe/<id>`). An endpoint added later is the user's alone unless this list
       names it.
-    - It works only from this machine: a request with an agent token from any other machine
-      (a tailnet or LAN peer, when the chat is bound there for the user's phone) is ``403
-      {"error": "agent tokens work only from this machine, at the address `wb chat url`
-      prints", "code": "not_local"}``. On a chat bound only to the tailnet or a LAN IP, an agent
-      here uses that address (localhost isn't served). The user's token is unaffected.
+    - It works only from this machine: a loopback peer with no proxy's forwarding header. A
+      request with an agent token that comes through a tunnel or proxy (it carries
+      `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `Forwarded`, `X-Real-IP`, `Via`,
+      `True-Client-IP`, `Cf-Connecting-Ip` or `Tailscale-User-Login`), or from any other peer, is
+      ``403 {"error": "agent tokens work only from this machine, at the address `wb chat url`
+      prints", "code": "not_local"}``. The user's token is unaffected.
     - Its sends are limited to `AGENT_SENDS_PER_MIN` (30) a minute, then `429 {"error", "code":
       "rate_limited", "retry_after": <seconds>}`.
     - `wb chat token list` names the agents; `wb chat token revoke <name>` ends one at once
@@ -172,7 +172,7 @@ landed. Send it again with the same key and the driver is never asked twice:
 ## The agent flow, end to end
 
 ```sh
-export WORKBENCH_URL=http://localhost:1337 WORKBENCH_TOKEN=wba-…   # from wb chat token add my-agent
+export WORKBENCH_URL=http://localhost:8090 WORKBENCH_TOKEN=wba-…   # from wb chat token add my-agent
 auth=(-H "Authorization: Bearer $WORKBENCH_TOKEN")
 
 # 1. Is a driver (Claude Code or OpenCode in workbench mode) listening? If not: do it yourself, or try later.
@@ -229,7 +229,7 @@ An agent's token reads only its own conversation:
   someone else stored is `409 {"error": "that upload id is another sender's"}`, and a send can
   attach only its own uploads.
 - **403:** every path outside the allow-list (*Base URL and auth*): `/api/latest`, `/api/shot`, `/api/audio`, `/api/task`, the admin endpoints (`/api/settings`, `/api/stats`,
-  `/api/top`), `/api/phone-qr.svg` (the user's token is in it), and the user's `POST`s (`/api/transcribe/<id>` among them).
+  `/api/top`), and the user's `POST`s (`/api/transcribe/<id>` among them).
 - **`/api/health`** and the `listener` are as for the user.
 
 The user's own token reads everything, as below.
@@ -246,8 +246,7 @@ library only, started by the agent's MCP client. It reads the same `WORKBENCH_UR
 It is for the user's own agents on this machine, talking to the user's own driver.
 It calls only the `/api/v1/` paths, so it needs a chat from workbench 2.1 or later (an older one
 is said so, nothing sent). It listens on nothing but stdio. It refuses a `WORKBENCH_URL` whose host isn't this machine's
-(`localhost`, `127.*`, `::1`, or an IP address of its own, such as the tailnet or LAN address a
-chat bound only there is reached at): every tool says so, and nothing is sent. It follows no redirect.
+(`localhost`, `127.*` or `::1`): every tool says so, and nothing is sent. It follows no redirect.
 
 - **`ask_workbench {text, key?}`**: checks `/api/v1/health` (not listening: refused, nothing
   sent), sends the request and returns its id at once, naming the driver that listens. `key` (optional, 1 to 64 of `A-Z a-z 0-9 . _ :
@@ -272,13 +271,13 @@ The config, one line. For OpenCode (`opencode.json`; `codemode: false` offers th
 themselves, not behind `execute`):
 
 ```json
-"mcp": {"servers": {"ask-workbench": {"type": "local", "command": ["python3", "/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "environment": {"WORKBENCH_URL": "http://localhost:1337", "WORKBENCH_TOKEN": "wba-…"}, "codemode": false}}}
+"mcp": {"servers": {"ask-workbench": {"type": "local", "command": ["python3", "/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "environment": {"WORKBENCH_URL": "http://localhost:8090", "WORKBENCH_TOKEN": "wba-…"}, "codemode": false}}}
 ```
 
 For clients that read an `mcpServers` map (Cursor's `mcp.json`, Gemini CLI's `settings.json`):
 
 ```json
-"mcpServers": {"ask-workbench": {"command": "python3", "args": ["/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "env": {"WORKBENCH_URL": "http://localhost:1337", "WORKBENCH_TOKEN": "wba-…"}}}
+"mcpServers": {"ask-workbench": {"command": "python3", "args": ["/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "env": {"WORKBENCH_URL": "http://localhost:8090", "WORKBENCH_TOKEN": "wba-…"}}}
 ```
 
 The token is the agent's own (`wb chat token add <name>`), with an agent's view and limits.
@@ -480,12 +479,11 @@ sent for it (to every device, or with `endpoint` to that one) → `{}`.
 
 ### `GET /api/settings` (user only)
 The web app's Settings: `{"rows": [...], "changes": [...], "ts": <seconds>}`. Each row is `{key, group, label, kind,
-…}`: `group` one of `significant`, `trivial`, `writing` (a card per role, #1553), `shared`, `web`, `gpu`, `api`, `setup`,
+…}`: `group` one of `significant`, `trivial`, `writing` (a card per role, #1553), `shared`, `gpu`, `api`, `setup`,
 `workflows`, `terminal`, `experimental` (in that order); `more: true`, a row shown under its card's More (a role's GPU
 and API model and thinking); `hidden: true`, a row the page doesn't show while it can do nothing; `fixed: true`, a
 choice shown as its `says` alone; `ask`, a row with a problem or a request the page offers to hand to the driver
-(true, or a string: the request); `brief`, what a folded card's summary says of it; `phone` (the `reach` row's),
-the web app's address on the tailnet, with no token, `""` while reach isn't the tailnet; `kind` one
+(true, or a string: the request); `brief`, what a folded card's summary says of it; `kind` one
 of `choice` (`value`, `choices: [{value, label, says, needs?, group?}]` (`needs`: the row whose value that choice needs
 first, a role's API its `api-<role>`; `group`: an API model's provider, or `In use` for the role's own and the
 others' in use, the page's `<optgroup>`s: an API row lists every catalog model, #1617), `says`, `other`: any id is taken),
@@ -542,14 +540,6 @@ not `EventSource`):
 
 One `wb top` runs per server, whoever watches; it stops 15 s after the last viewer leaves. At most
 4 streams are open: a 5th is `503 {"error": "too many live views open"}`.
-
-### `GET /api/phone-qr.svg` (user only)
-The phone link as a QR code, `image/svg+xml`: the link `wb chat url` draws at a terminal, the
-web app's address on the user's tailnet with the token in its fragment (`https://<name>/#token=…`
-while `tailscale serve` serves the port, else `http://<tailnet name>:<port>/#token=…` with reach
-`tailnet`). `404 {"error": "no phone link: the web app opens on this machine only (wb chat reach
-tailnet)"}` while there is none. It carries the user's token: never cached (`no-store`), and an
-agent token gets 403. An `<img src>` sends no bearer header, so fetch it and show the blob.
 
 ### The page itself (no token)
 `GET /` (or `/index.html`) and the page's files (`/app.js`, `/app.css`, `/sw.js`, icons,
@@ -614,5 +604,5 @@ bumps it; adding a field or an endpoint doesn't (the admin endpoints, `/api/sett
   endpoints left it (#1350): the driver's dialogs are answered in the terminal. Added since, in
   the same version (workbench 2.1): the `/api/v1/` paths, `code` on every error (`error` kept as
   the text), a revoked token's own code, `410 expired` from `/api/wait`, and `Idempotency-Key`;
-  (workbench 2.2) `driver` on `/api/health`, the listener and each reply (*The driver*), and
-  `/api/phone-qr.svg`.
+  (workbench 2.2) `driver` on `/api/health`, the listener and each reply (*The driver*);
+  `/api/phone-qr.svg` came in 2.2 and went with #1616 (the web app listens on localhost only).

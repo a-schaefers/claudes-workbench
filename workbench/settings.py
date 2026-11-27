@@ -17,9 +17,7 @@ list under it instead of sending); `ask`, a row
 that carries a problem or a request, which the page gives an "Ask <driver>" link filling the chat's box
 (true: "Help me with Settings › <its card>: <its line>"; a string: that request); a note, or a row with
 `help`, gets the link without it. `brief`, what a folded card's one-line summary says of the row ("" for
-nothing; without it, a choice's `<label>: <its choice>`); `phone` (the reach row), the web app's address on
-the tailnet, "" while it isn't there. A row may
-carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
+nothing; without it, a choice's `<label>: <its choice>`). A row may carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,
 2026-11-24: "the terminal still offers to help").
@@ -54,10 +52,10 @@ from pathlib import Path
 
 from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savings, store
 
-# display order (`web`: the web app's own, #1355). A card per role first (#1553, 2026-11-26): its
+# display order. A card per role first (#1553, 2026-11-26): its
 # GPU or API, then its GPU model, API model and thinking under More (`more`), where one role's
 # settings were spread over three cards, its API model 2,000 px below its GPU|API choice
-GROUPS = (*routes.ROLES, "shared", "web", "gpu", "api", "setup", "workflows", "terminal", "experimental")
+GROUPS = (*routes.ROLES, "shared", "gpu", "api", "setup", "workflows", "terminal", "experimental")
 KINDS = ("choice", "number", "info", "action", "note")
 ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_apply)
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
@@ -128,14 +126,6 @@ SPLASH = [("on", "Enabled (default)", "The first /workbench of a session opens w
 PROBE = [("off", "Off (default)", "The agent reads whole files, as without the experiment."),
          ("on", "On (large files only)", f"The agent may extract one function of a file over "
           f"{context.PROBE_FILE_LINES:,} lines with probe, instead of reading it whole (github.com/probelabs/probe).")]
-# Who opens the web app (#1355's phone reach, `wb chat reach`): this machine, or the user's tailnet
-# too; never a LAN option, and the token stays the key either way
-REACH = [("local", "This machine (default)", "Only this machine opens the web app (from elsewhere, an `ssh -L` "
-          "forward of its port)."),
-         ("tailnet", "My tailnet", "Your devices on Tailscale open it at this machine's tailnet name, the link's token "
-          "still the key. Notifications and the home-screen app need https: `tailscale serve` gives it.")]
-REACH_CUSTOM = ("custom", "Addresses of your own (chat.json's bind)", "chat.json names addresses of its own; "
-                "picking one here replaces them.")
 MEDIA = [("image", "Image engine", "image"), ("speech", "Speech engine", "audio"),
          ("sfx", "Sound effects engine", "audio"), ("music", "Music engine", "audio")]
 LOWEST_SAID = "thinking at its lowest effort"  # runner.THINKING_LOWEST's opening (the mod's thinkStops: Couplings)
@@ -158,52 +148,19 @@ def _probe_help(value, said: str) -> str | None:
     return PROBE_HELP.format(said=said) if value == "on" and "not set up" in said else None
 
 
-# The note for the driver when the web app is just opened to the tailnet with no https in front of
-# it (`wb chat reach tailnet` says `https: not served`): the phone opens it, but notifications and
-# the home-screen app need https, which `tailscale serve` gives on the user's yes
-REACH_HELP = (
-    "The web app is now open to the user's tailnet, but nothing serves it over https there, so their "
-    "phone can open it while notifications and the home-screen app can't work yet. wb says: {said}\n"
-    "Offer to run the `tailscale serve` command wb printed, which puts Tailscale's https in front of "
-    "it on their tailnet only, and run it only on their yes.")
-
-
-# The note for the driver when the web app is set to this machine only while `tailscale serve`
-# still serves it to the tailnet (`wb chat reach local` says `still serves`, #1512): the phone
-# keeps opening it until that stops, which only the user's yes runs
-REACH_LOCAL_HELP = (
-    "The web app is now set to this machine only, but `tailscale serve` still serves it to the user's "
-    "tailnet over https, so their phone and their other tailnet devices can still open it (the link's "
-    "token still the key). wb says: {said}\n"
-    "Tell them, offer to run the command wb printed that stops it, and run it only on their yes.")
-
-
-def _reach_help(value, said: str) -> str | None:
-    if value == "local" and "still serves" in said:
-        return REACH_LOCAL_HELP.format(said=said)
-    return REACH_HELP.format(said=said) if value == "tailnet" and "not served" in said else None
-
-
 # key -> (value, wb's line) -> the note for Claude, or None: a setting whose chosen value can need
 # Claude's help to work names it here
-HELP = {"probe": _probe_help, "reach": _reach_help}
+HELP = {"probe": _probe_help}
 
 
 def help_now(key: str) -> str | None:
     """The note HELP gives ``key`` as it stands now (its value and wb's line for it now), else None:
     an offer older than OFFER_MAX_AGE_S is made only while this still says one (#1557's review,
-    2026-11-26: a help row days old was offered after probe was set up, or `tailscale serve` run,
-    outside the offer, an untrue offer that started a paid turn). `wb settings help` prints it for
+    2026-11-26: a help row days old was offered after probe was set up outside the offer, an untrue offer that started a paid turn). `wb settings help` prints it for
     the mod. A key added to HELP needs its own case here, or its old offers are never made."""
     try:
         if key == "probe":
             return _probe_row().get("help")
-        if key == "reach":
-            value, port = chat.reach(), chat.port()
-            if value == "tailnet" and not chat.https_served(port):  # as `wb chat reach tailnet` says it
-                return _reach_help(value, cli.not_served_line(port))
-            if value == "local" and (still := cli.still_served(port)):
-                return _reach_help(value, cli.still_serves_line(still))
     except (chat.ConfigError, OSError, ValueError):
         return None
     return None
@@ -215,7 +172,7 @@ BY = ("web", "claude")  # apply()'s writers: the web app's click, Claude's `wb s
 # here, a role's from routes.LABELS (label_of), a model's tasks row from its id
 LABELS = {"agents": "Agents", "busy": "When the GPU is busy", "driver": "Driver", "coding": "Claude coding",
           "workflows": "Dynamic workflows", "cap": "API day cap", "progress": "Progress checks",
-          "reach": "Web app reach", "splash": "Opening animation", "probe": "Agent code navigation",
+          "splash": "Opening animation", "probe": "Agent code navigation",
           "optimize": "Optimize"}
 ROLE_LABELS = {"role": "{}", "gpu": "{} GPU model", "api": "{} API model", "think": "{} thinking",
                "review": "{} self-review thinking"}
@@ -614,15 +571,6 @@ def _build() -> dict:
     after = progress.user_after(prog) or 0
     out.append(_choice("progress", "shared", LABELS["progress"], _progress_stops(after),
                        "on" if prog.get("on") is True else "off"))
-    try:
-        reach = chat.reach()
-    except chat.ConfigError as e:
-        out.append(_note("reach-why", "web", str(e)))
-    else:
-        # `phone`: its address on the tailnet (chat.phone_base, no token: the page adds its own), ""
-        # while it isn't there; the page's Open on your phone line
-        out.append(_choice("reach", "web", LABELS["reach"], [*REACH, *([REACH_CUSTOM] if reach == "custom" else [])],
-                           reach, phone=chat.phone_base(chat.port()) if reach == "tailnet" else ""))
 
     # gpu
     if r is None:
@@ -792,8 +740,6 @@ def _argv(row: dict, value) -> list[str]:
         return ["experiment", "probe", value]
     if key == "optimize":
         return ["optimize", "start"]
-    if key == "reach":
-        return ["chat", "reach", value]
     if key == "driver":
         return ["route", "driver", value]
     if head == "run":
@@ -967,8 +913,6 @@ def key_for(argv: list[str]) -> tuple[str, str] | None:
         return "probe", rest[1]
     if a == ["optimize", "start"]:
         return "optimize", "start"
-    if cmd == "chat" and rest[:1] == ["reach"] and (len(rest) == 2 or (len(rest) == 4 and rest[2] == "--port")):
-        return "reach", rest[1]
     if cmd == "model" and len(rest) >= 2 and rest[0] == "sizes" and not any(x.startswith("-") for x in rest):
         sizes = sorted(set(rest[2:]))
         return f"size-{rest[1]}", sizes[0] if len(sizes) == 1 else "all"
@@ -1017,8 +961,6 @@ def current(key: str):
             return "on" if cli.splash_on() else "off"
         if key == "probe":
             return context.experiments().get("probe", "off")
-        if key == "reach":
-            return chat.reach()
         if head == "size":
             from . import models
             sizes = (models._overrides().get(rest) or {}).get("sizes") or []

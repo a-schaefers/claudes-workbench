@@ -107,9 +107,49 @@ class ChatDefault(Base):
         self.assertEqual(cli.chat_line(), (True, f"web app answers on localhost:{port} (started by wb)"))
         self.assertIn("stopped the server it started", run_wb("chat", "off", "--port", str(port)))
         self.assertEqual(self.url_json(), {"url": chat.url(port), "state": "off"})
-        # the port is kept without the pid: once the server had exited, off's link named 1337
+        # the port is kept without the pid: once the server had exited, off's link named the default
         # (the macOS nightly, 2026-11-25; Linux passed only while the server was a zombie)
         self.assertEqual(store.read_json(chat.chat_dir() / "serve.pid"), {"port": port})
+
+    def test_wb_chat_on_a_port_keeps_it_and_moves_the_running_server_there_1616(self):
+        # #1616 (the owner, 2026-11-27): the port is the user's to choose, `wb chat on <port>`,
+        # kept for the server, the service and the link; 8090 by default, never 8080 (llama.cpp's)
+        from workbench import models
+        self.assertEqual(chat.PORT, 8090)
+        self.assertNotIn(chat.PORT, [p for p, _ in models.SERVER_PORTS])
+        self.assertEqual((chat.chosen_port(), chat.port()), (8090, 8090))
+        first, second = free_port(), free_port()
+        out = run_wb("chat", "on", str(first))
+        self.addCleanup(lambda: self.stop(pid) if (pid := (store.read_json(chat.chat_dir() / "serve.pid", None)
+                                                            or {}).get("pid")) else None)
+        self.assertIn(chat.url(first), out)
+        old = store.read_json(chat.chat_dir() / "serve.pid")["pid"]
+        self.assertEqual((chat.chosen_port(), chat.port()), (first, first))
+        self.assertTrue(chat.running(first))
+        out = run_wb("chat", "on", str(second))                    # moved: the old server stops
+        self.assertIn(chat.url(second), out)
+        self.addCleanup(self.stop, old)
+        deadline = time.time() + 10                                 # the move stopped it, not the test
+        while chat.running(first) and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(chat.running(first))
+        self.assertTrue(chat.running(second))
+        self.assertEqual((chat.chosen_port(), chat.port()), (second, second))
+        self.assertEqual(self.url_json(), {"url": chat.url(second), "state": "up"})
+        run_wb("chat", "off")
+        self.assertEqual(store.read_json(chat.chat_dir() / "switch.json"), {"on": False, "v": 2, "port": second})
+        self.assertEqual(chat.port(), second)                           # kept across off
+        for bad, said in (("eighty", "a port number"), ("70000", "from 1 to 65535")):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb("chat", "on", bad)
+            self.assertIn(said, err.getvalue())
+        # the service serves the kept port: a move restarts it onto the new one
+        with mock.patch.object(chat, "_unit_keeps_it", return_value=True), \
+                mock.patch.object(chat, "_start_unit") as unit:
+            chat.move(first)
+        unit.assert_called_once_with(restart=True)
+        self.assertEqual(chat.chosen_port(), first)
 
     def test_a_foreign_listener_blocks_the_web_app_and_doctor_says_why(self):
         class Other(BaseHTTPRequestHandler):
@@ -127,21 +167,23 @@ class ChatDefault(Base):
         got = chat.ensure(port)
         self.assertEqual((got["state"], got["why"]), ("blocked", chat.blocked_why(port)))
         self.assertIn(f"another account's chat (or another program, or a server still on a replaced "
-                      f"token) answers on port {port}: wb chat on --port <free port>", got["why"])
+                      f"token) answers on port {port}: wb chat on <free port> moves the web app there", got["why"])
         self.assertFalse((chat.chat_dir() / "serve.pid").exists())        # nothing started
         store.write_json(chat.chat_dir() / "serve.pid", {"pid": 1, "port": port})  # chat.port()'s
         self.assertEqual(cli.chat_line(), (False, f"web app down: {chat.blocked_why(port)} (wb chat on)"))
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
             run_wb("chat", "on", "--port", str(port))
+        # a port something else answers isn't kept, and the switch is put back (#1616, #690)
         self.assertIn("web chat not up: another account's chat", err.getvalue())
-        self.assertTrue(chat.is_on())                                       # put back as it was
+        self.assertEqual(chat.chosen_port(), chat.PORT)
+        self.assertTrue(chat.is_on())
 
     def test_ensure_starts_the_unit_that_keeps_the_chat_and_says_when_it_doesnt_answer(self):
         port, servers = free_port(), []
 
         def unit():  # systemd starting wb-chat.service: a server on the unit's port
-            srv = chat.make_servers(port, ["127.0.0.1"])[0][0]
+            srv = chat.make_servers(port)[0][0]
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             servers.append(srv)
         self.addCleanup(lambda: [(s.shutdown(), s.server_close(), s.RequestHandlerClass.hub.close())

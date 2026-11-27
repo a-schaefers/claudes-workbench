@@ -192,8 +192,6 @@ export type SettingRow = {
   ask?: boolean | string; help?: string
   /** what a folded card's one-line summary says of it ("" nothing; without it a choice's `label: choice`) */
   brief?: string
-  /** the reach row's: the web app's address on the tailnet (no token), "" while it isn't there */
-  phone?: string
   /** its newest change within a week (settings.changed, #1355): when, and who (web, claude, opencode, terminal, agent) */
   changed?: { ts: number; by: string }
 }

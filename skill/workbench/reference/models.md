@@ -59,7 +59,7 @@ ollama/<model>` writes it itself. `wb doctor` names each provider it skipped and
 another host that is the user's own server (WSL2's Windows host, a LAN box) needs their yes for
 `local: true`, set in models.json before `wb model add --url` (which refuses an address off this
 machine without it). Its server must listen on the LAN, firewalled to this machine (model servers
-have no login); plain HTTP carries the code unencrypted (Tailscale encrypts; its address still
+have no login); plain HTTP carries the code unencrypted (a VPN encrypts it; its address still
 needs the flag). An Ollama there: `wb remote <host> [--context N]` does all of it, with the
 user's yes (`--remove` undoes it). Another machine adds a model beside this GPU's, never speed to one model. Ollama cloud models (`:cloud`) run off this machine: they are API models,
 never GPU candidates, run only through a role the user sets; never register one without

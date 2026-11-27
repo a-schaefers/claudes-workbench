@@ -14,8 +14,8 @@ info:
     own, `wb chat token add <name>`). It is for the user's own agents on this machine talking to the
     user's own driver, the Claude Code or OpenCode session in workbench mode that listens (the same
     API for both; `driver` on the listener and on each reply says which): it listens on localhost
-    by default, an agent token from any other
-    address is refused (`not_local`), and it is no model endpoint. Every path is served under
+    only, an agent token from any other address or through a proxy's forwarding header is refused
+    (`not_local`), and it is no model endpoint. Every path is served under
     `/api/v1/` and, for the page and clients older than workbench 2.1, under `/api/` too, by the
     same handler. `info.version` is the API's version, `api` in /health and /state. Nobody listening
     is not an error: `/health` says `listening: false` and a sent message waits (unread past 6 hours,
@@ -25,7 +25,7 @@ info:
   license:
     name: MIT
 servers:
-  - url: http://localhost:1337
+  - url: http://localhost:8090
     description: the default (`wb chat serve --port`; `wb chat url` prints the page's link)
 security:
   - bearer: []
@@ -576,30 +576,6 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "503":
           $ref: "#/components/responses/Busy"
-  /api/v1/phone-qr.svg:
-    get:
-      operationId: phoneQr
-      tags: [user]
-      x-user-only: true
-      summary: The phone link as a QR code (the tailnet link with the user's token).
-      description: >-
-        The link `wb chat url` draws at a terminal: https at `tailscale serve`'s name while it
-        serves the port, else this machine's tailnet name with reach tailnet. It carries the
-        user's token, so it is never cached; an img sends no bearer header, so fetch it.
-      responses:
-        "200":
-          description: the QR code, black on white with a 4-module quiet zone
-          content:
-            image/svg+xml:
-              schema:
-                type: string
-                contentMediaType: image/svg+xml
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
   /api/v1/transcribe/{id}:
     parameters:
       - $ref: "#/components/parameters/UploadId"
@@ -1038,7 +1014,7 @@ components:
           type: string
         group:
           type: string
-          enum: [significant, trivial, writing, shared, web, gpu, api, setup, workflows, terminal, experimental]
+          enum: [significant, trivial, writing, shared, gpu, api, setup, workflows, terminal, experimental]
         label:
           type: string
         kind:
@@ -1047,9 +1023,6 @@ components:
         more:
           type: boolean
           description: drawn under its card's More (a role's GPU and API model and thinking, #1553)
-        phone:
-          type: string
-          description: the reach row's, the web app's address on the tailnet (no token); empty while reach isn't the tailnet
         help:
           type: string
       additionalProperties: true

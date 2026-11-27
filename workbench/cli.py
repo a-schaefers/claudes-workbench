@@ -36,7 +36,6 @@ from . import runner
 from . import keyhole
 from . import meter
 from . import privacy
-from . import qr
 from . import schedule
 from .runner import PKG_ROOT
 
@@ -7856,11 +7855,19 @@ def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.more and a.action not in ("listen", "ended"):
         die(f"wb chat {a.action}: too many arguments")
-    if a.port is None:  # named: that port; else the running server's, else the default (#349)
-        a.port = chat.PORT if a.action == "serve" else chat.port()
+    asked = a.port
+    if a.action == "on" and a.id is not None:  # wb chat on <port>: the user's from now on (#1616)
+        try:
+            asked = int(a.id)
+        except ValueError:
+            die(f"wb chat on {a.id}: a port number, as `wb chat on 8090`")
+    if a.action == "on" and asked is not None and not 1 <= asked <= 65535:  # serve's 0: any free one
+        die(f"port {asked}: a number from 1 to 65535")
+    if a.port is None:  # named: that port; else the running server's, else the user's (#349, #1616)
+        a.port = chat.chosen_port() if a.action == "serve" else chat.port()
     if a.action == "serve":
         try:
-            chat.serve(a.port, a.bind or None, a.host or None, say=lambda m: print(m, flush=True))
+            chat.serve(a.port, say=lambda m: print(m, flush=True))
         except chat.ConfigError as e:  # 78 (EX_CONFIG): wb-chat.service stops, no retry fixes it
             die(str(e), 78)
     elif a.action == "url":  # silent but for the link: the mod reads it whole
@@ -7871,15 +7878,15 @@ def cmd_chat(a):
             die(f"wb chat url: {got['why']}")
         else:
             print(got["url"])  # the token is the key: keep it private
-            # and the phone's, once there is one: localhost alone left the user to edit the host by
-            # hand (the web app's review, 2026-11-26); at a person's terminal its QR code under it,
-            # never in the mod's read or a script's (#1552)
-            if got["url"]:
-                chat_phone(a.port, got["url"], sys.stdout.isatty())
     elif a.action == "on":  # the switch, kept: the link shows and a session listens
         # a failure puts the switch back as it was: turned on and left on when this died, the
         # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an
         # on-by-default chat (#1281) stayed off after a port taken once
+        if asked is not None and (asked != chat.port() or asked != chat.chosen_port()):
+            # a port something else answers isn't kept: ensure refuses it below, as ever (#690)
+            if chat.who_answers(asked) != "other":
+                chat.move(asked)
+            a.port = asked
         was = chat.is_on()
         chat.set_on(True)
         got = chat.ensure(a.port)
@@ -7893,8 +7900,6 @@ def cmd_chat(a):
               f"web chat on: started its server ({_chat_started()}): {got['url']}")
         for why in logout_stops():  # its unit is a user service: a logout stops it (#351)
             print(f"--  {why}")
-        if (said := reach_hint()):  # the phone's way in (#1355)
-            print(f"--  {said}")
     elif a.action == "off":
         chat.set_on(False)
         if chat.stop_started():
@@ -7959,8 +7964,6 @@ def cmd_chat(a):
         if not ok:
             die(f"standing by: {(claim or {}).get('tool') or 'claude'} listens in {(claim or {}).get('cwd', '?')}")
         print("listening")
-    elif a.action == "reach":  # who opens the web app: this machine, or the tailnet too (#1355)
-        chat_reach(a.id, a.port)
     elif a.action == "away":  # the OpenCode plugin's: is the user away from the terminal (#1319)
         print("away" if chat.away(store.opencode_session() or a.by or "") else "here")
     elif a.action == "back":  # and back at it: they typed, or answered a dialog there
@@ -7996,100 +7999,6 @@ def cmd_chat(a):
             files = "".join(f" [attached: {f.get('path')}]" for f in r.get("files") or [] if isinstance(f, dict))
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}{files}")
         print(chat.driver_state()["line"])  # the page's state line, word for word (#1355)
-
-
-def reach_hint() -> str:
-    """The story's `link.reach` while the web app opens on this machine alone and `wb chat reach
-    tailnet` can work here (this OS's own tailscale CLI: under WSL with Tailscale on Windows it is
-    refused, and `wb chat on` advised it anyway, #1524), else ""."""
-    if not chat.tailscale_cli():
-        return ""
-    try:
-        return story.text("link.reach") if chat.reach() == "local" else ""
-    except chat.ConfigError:
-        return ""
-
-
-def still_served(port: int) -> tuple[str, str] | None:
-    """`tailscale serve`'s https in front of the web app on ``port``, as (its URL, the command that
-    stops it), else None: reach `local` drops only the bind, and wb said "this machine only" while
-    every tailnet device still opened the app (#1512, 2026-11-26)."""
-    site = chat.served_site(port)
-    if not site:
-        return None
-    name, _, https = site.rpartition(":")
-    if not name or not https.isdigit():
-        name, https = site, "443"
-    exe = "tailscale.exe" if (chat.tailscale_cli(windows=True) or "").lower().endswith(".exe") else "tailscale"
-    return (f"https://{name}/" if https == "443" else f"https://{name}:{https}/",
-            f"{exe} serve --https={https} off")
-
-
-def still_serves_line(still: tuple[str, str], drops: str = "") -> str:
-    """`wb chat reach local`'s line while `tailscale serve` still serves the tailnet (``still``,
-    still_served's), with REACH_LOCAL_HELP's cue `still serves`: settings.help_now says it too."""
-    return (f"web app reach: local{drops}, but `tailscale serve` still serves it to your tailnet at {still[0]}: "
-            f"`{still[1]}` stops that")
-
-
-def not_served_line(port: int) -> str:
-    """`wb chat reach tailnet`'s line with no https there, REACH_HELP's cue `not served`:
-    settings.help_now says it too."""
-    return (f"https: not served: notifications and the home-screen app need it; `tailscale serve --bg {port}` "
-            "serves it on your tailnet only")
-
-
-def chat_reach(to: str | None, port: int) -> None:
-    """`wb chat reach [local|tailnet]` (#1355): who opens the web app. No value: which it is. A
-    change writes chat.json's `bind` (chat.set_reach), which the running server rebinds to within
-    chat.REPLAN_EVERY; for the tailnet, the name to open and whether https is served there (push
-    and the home-screen app need it: `tailscale serve`, the driver's to offer, run on a yes)."""
-    if to is None:
-        try:
-            now = chat.reach()
-        except chat.ConfigError as e:
-            die(str(e))
-        still = still_served(port) if now == "local" else None
-        print(f"web app reach: {now}" + (f", but tailnet https via tailscale serve ({still[0]})" if still else
-                                          {"local": " (this machine only)", "tailnet": " (this machine and your tailnet)",
-                                           "custom": " (chat.json's own bind)"}[now]))
-        return
-    try:
-        got = chat.set_reach(to, port)
-    except ValueError as e:
-        die(f"wb chat reach {to}: {e}")
-    except chat.ConfigError as e:
-        die(str(e))
-    if to == "local":
-        drops = "" if got["from"] == "local" else f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"
-        if (still := still_served(port)):  # settings.REACH_LOCAL_HELP's cue: `still serves`
-            print(still_serves_line(still, drops))
-        else:
-            print(f"web app reach: local (this machine only){drops}")
-        return
-    ts = got["ts"]
-    name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts["ip"]
-    print(f"web app reach: tailnet: http://{name}:{port}/ with the link's #token=… (`wb chat url`), within "
-          f"{chat.REPLAN_EVERY} s")
-    served = chat.https_served(port)
-    if served:
-        print(f"https: served at https://{ts.get('dns') or name}/ (notifications and the home-screen app work there)")
-    else:  # settings.REACH_HELP's cue: `not served`
-        print(not_served_line(port))
-
-
-def chat_phone(port: int, shown: str, qr_code: bool) -> None:
-    """`wb chat url`'s phone link (chat.phone_url), `on your phone: <link>` under the link when it
-    isn't the one already printed, and with ``qr_code`` (a terminal) its QR code, so a phone's
-    camera opens it instead of a 40-character token typed by hand (#1552, 2026-11-26). Nothing
-    while there is none."""
-    link = chat.phone_url(port)
-    if not link:
-        return
-    if link != shown:
-        print(f"on your phone: {link}")
-    if qr_code:
-        print(qr.half_blocks(link))
 
 
 def chat_token(what: str | None, name: str | None) -> None:
@@ -8304,7 +8213,7 @@ def _came_up(stop: list[str]) -> str | None:
     service stopped with ``stop`` and wb's own server started (chat.ensure): enable --now and
     bootstrap succeed when the server exits at once (exit 78: a Python 3.11+ not on the unit's
     PATH), and setup said `ok  kept up` over a web app left down for good (#1343)."""
-    if chat.wait_up(chat.PORT, None):
+    if chat.wait_up(chat.chosen_port(), None):
         return None
     _service_run(stop)
     got = chat.ensure(chat.port())
@@ -9406,8 +9315,6 @@ def cmd_doctor(a):
         print(f"--  {said}")
     else:
         line(good, said)
-        if good and (hint := reach_hint()):  # the phone's way in (#1355)
-            print(f"--  {hint}")
     for good, said in schedule.doctor_lines():  # wb schedule (#1204)
         line(good, said)
     # #516: a warning, not BAD: a server or a desktop that never sleeps is fine. Its own name: once
@@ -10302,7 +10209,7 @@ def parser() -> argparse.ArgumentParser:
                    "(settings-offered.json)")
     x.add_argument("--json", action="store_true", help='{"offers": [...], "notes": [...]}')
     x = sp.add_parser("help", help="the note a setting needs its driver's help with now (probe on "
-                      "but not set up, the tailnet without https), or nothing (the mod's check of an old offer)")
+                      "but not set up), or nothing (the mod's check of an old offer)")
     x.add_argument("key", metavar="KEY", help="a row's key, as wb settings lists it")
     x.add_argument("--json", action="store_true", help='{"key": KEY, "help": the note or null}')
     x = sp.add_parser("set", help="change one row, on the user's clear ask and yes")
@@ -10441,15 +10348,14 @@ def parser() -> argparse.ArgumentParser:
                        "the thread (log), receipts (ack, claim), what waits (pending), the line "
                        "that a dialog waits in the terminal (notice: the mod's), other agents' tokens "
                        "(token add|list|revoke), a turn's end (ended: the mod's), and the "
-                       "OpenCode plugin's claim on it (listener), away and back, and who opens it "
-                       "(reach local|tailnet)")
+                       "OpenCode plugin's claim on it (listener), and away and back")
     s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
                                       "claim", "pending", "notice", "token", "ended", "listener",
-                                      "away", "back", "reach"], nargs="?",
+                                      "away", "back"], nargs="?",
                    default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; listen: the clips (wb "
                    "audio's takes, up to 8); token: add, list or revoke; ended: the messages the "
-                   "turn took; reach: local or tailnet (none: which it is)")
+                   f"turn took; on: the port to keep (default {chat.PORT})")
     s.add_argument("verdict", nargs="?", help="token: the agent's name")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
     s.add_argument("--tool", help="notice: the tool asking")
@@ -10461,11 +10367,8 @@ def parser() -> argparse.ArgumentParser:
                    "terminal (no push for it; the page's line clears)")
     s.add_argument("--json", action="store_true", help="url: {url, state: "
                    "up|started|off|blocked|failed, why} (the mod's)")
-    s.add_argument("--port", type=int, help=f"default: the running server's (chat/port.json), "
-                   f"else {chat.PORT}")
-    s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
-                   "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
-    s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
+    s.add_argument("--port", type=int, help=f"on: the port to keep, as `wb chat on <port>`; default: "
+                   f"the running server's (chat/port.json), else the one kept, else {chat.PORT}")
     s.add_argument("--text", help="reply, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--to", action="append", metavar="ID", help="reply: the message it answers (again "
                    "for more; `user`: the user's thread; default: those this turn took, the user's alone if any)")

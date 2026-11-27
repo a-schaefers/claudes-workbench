@@ -528,7 +528,7 @@ class DocsForTheWebApp(unittest.TestCase):
         # its phone chat one line, the detail in *The web chat*
         readme = " ".join((ROOT / "README.md").read_text().split())
         using = readme[readme.index("## Using it"):readme.index("## Models and cost")]
-        self.assertIn("`http://localhost:1337/#token=…`", using)
+        self.assertIn("`http://localhost:8090/#token=…`", using)
         for fact in ("stats", "settings"):
             self.assertIn(fact, using)
         self.assertIn("(ARCHITECTURE.md#the-web-chat)", readme)

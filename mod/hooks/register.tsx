@@ -2423,8 +2423,7 @@ export function settingSaid(r: Row): string {
 export const SETTING_HELP = (r: Row) => `[workbench] ${settingSaid(r)}\n${String(r.help).trim().slice(0, 4000)}\n` +
   'Offer to help with it, and install or change nothing without their yes.'
 // Whether a setting still needs the help an old web row asked for (#1557's review, 2026-11-26: a
-// row days old was offered after probe was set up, or `tailscale serve` run, outside the offer, an
-// untrue offer that started a paid turn): `wb settings help <key> --json`'s note, as it stands now.
+// row days old was offered after probe was set up outside the offer, an untrue offer that started a paid turn): `wb settings help <key> --json`'s note, as it stands now.
 // undefined when wb couldn't say (an older wb, a failure).
 async function helpStill($: any, key: string): Promise<boolean | undefined> {
   const r = await runWb($, ['settings', 'help', key, '--json'], 15_000)

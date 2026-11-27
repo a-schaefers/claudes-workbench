@@ -23,8 +23,7 @@ def expected(key: str, value) -> list[str]:
              "workflows": ["workflows", value],
              "progress": ["progress", value], "splash": ["splash", value],
              "probe": ["experiment", "probe", value], "optimize": ["optimize", "start"],
-             "cap": ["route", "cap", value], "driver": ["route", "driver", value],
-             "reach": ["chat", "reach", value]}
+             "cap": ["route", "cap", value], "driver": ["route", "driver", value]}
     if key in fixed:
         return fixed[key]
     return {"role": ["route", rest, value], "gpu": ["route", rest, "--gpu", value],
@@ -80,8 +79,9 @@ class Settings(Rows):
         json.dumps(rows)  # JSON-safe
         for want in ("agents", "busy", "role-significant", "coding", "workflows", "cap",
                      "progress", "gpu-trivial", "optimize", "api-connected", "api-writing",
-                     "think-trivial", "review-trivial", "splash", "probe", "reach"):
+                     "think-trivial", "review-trivial", "splash", "probe"):
             self.assertIn(want, keys)
+        self.assertNotIn("reach", keys)  # the web app listens on localhost only (#1616, 2026-11-27)
         self.assertNotIn("api-spend", keys)  # today's spend is the cap row's note now (#1339)
         self.assertNotIn("review-writing", keys)  # only a role with an API model (#1059)
         self.assertNotIn("chat", keys)   # the web app is always on now
@@ -698,7 +698,7 @@ class OneWriter(Rows):
         for argv in (["route"], ["route", "--json"], ["route", "--dry-run", "cap", "5"], ["route", "trivial"],
                      ["route", "significant", "api", "--api", "x"], ["route", "trivial", "fallback", "gpu"],
                      ["coding"], ["settings", "set", "coding", "ask"], ["optimize", "start", "--if-due"],
-                     ["chat", "log"], ["chat", "reach"], ["experiment"], ["model", "sizes", "m", "--x"],
+                     ["chat", "log"], ["chat", "url"], ["experiment"], ["model", "sizes", "m", "--x"],
                      ["experiment", "probe", "--json"], ["image", "--default", "--list"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(settings.key_for(argv))
@@ -783,8 +783,8 @@ class SettingsOffers(tw.Base):
         now = store.now()
         context.set_experiment("probe", "on")            # and still not set up: no probe on PATH
         self.change("probe", now - 3700, help="Offer to set probe up.", label="Agent code navigation")
-        self.change("reach", now - 9000, help="Offer to run tailscale serve.")
-        self.change("reach", now - 8000, by="terminal")  # changed again since: that offer is retired
+        self.change("coding", now - 9000, help="Offer to help with it.")
+        self.change("coding", now - 8000, by="terminal")  # changed again since: that offer is retired
         self.change("splash", now - 3700)                # a note that old is still no news
         empty = Path(self.tmp.name) / "no-probe"
         empty.mkdir()

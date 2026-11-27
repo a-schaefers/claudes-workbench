@@ -5,7 +5,7 @@ on the web chat) through the chat's API, and print the driver's replies.
     ask_workbench.py "<request>" [--file F]... [--timeout S] [--key K]
     ask_workbench.py --after <message or reply id> [--timeout S]     # wait for a later report
 
-Environment: WORKBENCH_URL (the chat's address, e.g. http://localhost:1337) and WORKBENCH_TOKEN
+Environment: WORKBENCH_URL (the chat's address, e.g. http://localhost:8090) and WORKBENCH_TOKEN
 (this agent's token, from `wb chat token add <name>`); CLAUDE_WB_URL and CLAUDE_WB_TOKEN, their
 names before 2.2, still work. Standard library only.
 
@@ -36,10 +36,10 @@ from urllib.parse import quote, urlencode
 
 WAIT_EACH = 300  # seconds one GET /api/wait may hold (the server's default)
 # A wait cut by the server going away for a moment (it re-execs itself on a code change, `wb
-# update`, a rebind or a restart of its unit; a proxy in front answers 502 to 504 meanwhile) is
+# update` or a restart of its unit; a proxy in front answers 502 to 504 meanwhile) is
 # asked again after a pause growing from RETRY_FIRST to RETRY_MOST seconds: it ended the client at
 # once with a bare error and no `--after` id (#1107, 2026-11-23). A chat cut longer than any
-# restart takes (OUTAGE_MOST seconds in a row: `wb chat off`, the machine asleep, the tailnet down)
+# restart takes (OUTAGE_MOST seconds in a row: `wb chat off`, the machine asleep, a tunnel down)
 # ends it with exit 2 and the `--after` id, never a wait to the deadline (an hour by default:
 # the #1107 review, 2026-11-23)
 TRANSIENT = (502, 503, 504)
