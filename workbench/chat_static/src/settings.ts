@@ -57,7 +57,23 @@
   const refused = new Map<string, { line: string; said: string }>()
   let focusGroup = ''                   // a group to bring into view at the next draw (the runs strip's tap)
   let picking = ''                      // the row whose choice opened its needed row's list under it (#1558)
-  const opened = new Set<string>()      // the role cards whose More is open: a redraw keeps it so
+  // Folded cards (the web app's review, 2026-11-26: Settings ran 6 to 8 phone screens, Notifications
+  // and Spend today 4,000 px down): the power groups and Recent changes are <details> cards with a
+  // one-line summary of their state, closed on a phone and open on a wider screen until the user
+  // folds one; a role's More starts closed everywhere. Each one's state is this device's
+  // (localStorage, a convenience: a page with none still works)
+  const FOLD = new Set(['gpu', 'api', 'setup', 'workflows', 'terminal', 'experimental', 'changes'])
+  const OPEN_KEY = 'wb-settings-open'
+  let openState: Record<string, boolean> = {}
+  const readOpen = () => {                 // at each show: another tab of this device may have folded one
+    try { const v = JSON.parse(localStorage.getItem(OPEN_KEY) || '{}'); openState = v && typeof v === 'object' ? v : {} } catch { openState = {} }
+  }
+  const wide = () => matchMedia('(min-width: 601px)').matches
+  const isOpen = (k: string, fallback: boolean) => typeof openState[k] === 'boolean' ? openState[k] : fallback
+  const setOpen = (k: string, on: boolean) => {
+    openState[k] = on
+    try { localStorage.setItem(OPEN_KEY, JSON.stringify(openState)) } catch {}
+  }
   // who made a change, as settings-changes.jsonl's `by` says (store.caller_kind, or the web's click)
   const BY: Record<string, string> = { web: 'the web app', claude: 'Claude', opencode: 'OpenCode', terminal: 'the terminal', agent: 'an agent' }
   const byWord = (by: string) => BY[by] || by || 'someone'
@@ -211,7 +227,7 @@
     if (!want) return false                              // no such row here: sent, and the server says why
     if (want.value != null && want.value !== '') return false
     if (!Array.isArray(want.choices) || (!want.choices.length && !want.other)) {
-      opened.add(want.group); draw()
+      setOpen(`more:${want.group}`, true); draw()
       const at = root && root.querySelector<HTMLElement>(`.set-row[data-key="${CSS.escape(want.key)}"]`)
       if (at) { at.scrollIntoView({ block: 'center' }); const f = at.querySelector<HTMLElement>('select, input, button'); if (f) f.focus() }
       return true
@@ -340,6 +356,30 @@
     return ask(`${row.label}: ${row.says || row.text || ''}`)
   }
 
+  // a folded card: <details> whose <summary> holds its name and a line of its state
+  function foldCard(k: string, title: string, sum: string) {
+    const card = el('details', 'card set-fold')
+    card.open = isOpen(k, wide())
+    const head = el('summary', 'set-fold-head')
+    head.append(el('h3', '', title))
+    if (sum) head.append(el('span', 'small set-sum', sum))
+    card.append(head)
+    // only the user's: the toggle a drawn-open card fires matches its state, and storing it would
+    // pin the wide screen's default on this device
+    card.addEventListener('toggle', () => { if (card.open !== isOpen(k, wide())) setOpen(k, card.open) })
+    return card
+  }
+  // a folded card's line: each row's `brief` ("" for none), else a choice's `<label>: <its choice>`
+  function brief(mine: SettingRow[]) {
+    const parts: string[] = []
+    for (const r of mine) {
+      if (typeof r.brief === 'string') { if (r.brief) parts.push(r.brief); continue }
+      if (r.kind !== 'choice' || r.more) continue
+      const c = Array.isArray(r.choices) && r.choices.find(x => x.value === shown(r))
+      if (c) parts.push(`${r.label}: ${plainLabel(c.label)}`)
+    }
+    return parts.slice(0, 3).join(' · ')
+  }
   let refocus: { key?: string; tag: string; value?: string } | null = null  // a control the last redraw couldn't focus (disabled while it waits)
   function draw() {
     if (!root) return
@@ -370,24 +410,26 @@
         // `hidden`: a row that can do nothing yet (an API control with no provider), kept for `wb settings`
         const mine = rows.filter(r => r && r.group === g && !r.hidden)
         if (!mine.length) continue
-        const card = el('section', 'card set-card')
+        const card = FOLD.has(g) ? foldCard(g, title, brief(mine)) : el('section', 'card set-card')
+        card.classList.add('set-card')
         card.dataset.group = g
-        card.append(el('h3', '', title))
+        if (!FOLD.has(g)) card.append(el('h3', '', title))
         for (const r of mine) if (!r.more) card.append(drawRow(r, title))
         const more = mine.filter(r => r.more)
         if (more.length) {
-          const fold = el('details', 'set-more')
-          fold.open = opened.has(g)
+          const k = `more:${g}`, fold = el('details', 'set-more')
+          fold.open = isOpen(k, false)
           fold.append(el('summary', '', 'More'))
-          fold.addEventListener('toggle', () => { if (fold.open) opened.add(g); else opened.delete(g) })
+          fold.addEventListener('toggle', () => { if (fold.open !== isOpen(k, false)) setOpen(k, fold.open) })
           for (const r of more) fold.append(drawRow(r, title))
           card.append(fold)
         }
         out.append(card)
       }
       if (changes.length) {
-        const card = el('section', 'card set-changes')
-        card.append(el('h3', '', 'Recent changes'))
+        const c0 = changes[0]
+        const card = foldCard('changes', 'Recent changes', `${changes.length} · newest ${c0.label || c0.key}, ${ago(c0.ts)}`)
+        card.classList.add('set-changes')
         const list = el('ul', 'set-change-list')
         for (const c of changes) list.append(el('li', 'small', `${changeWords(c)}, by ${byWord(c.by)} · ${ago(c.ts)}`))
         card.append(list)
@@ -404,9 +446,12 @@
       }
       if (input) { input.value = typing.value; input.focus(); try { input.setSelectionRange(typing.at, typing.at) } catch {} }
     }
-    if (focusGroup) {
-      const card = root.querySelector(`.set-card[data-group="${CSS.escape(focusGroup)}"]`)
-      if (card) { focusGroup = ''; card.scrollIntoView({ block: 'start' }) }
+    if (focusGroup) {                    // opened too, when it is folded (the runs strip's tap)
+      const card = root.querySelector<HTMLElement>(`.set-card[data-group="${CSS.escape(focusGroup)}"]`)
+      if (card) {
+        if (card instanceof HTMLDetailsElement && !card.open) { card.open = true; setOpen(focusGroup, true) }
+        focusGroup = ''; card.scrollIntoView({ block: 'start' })
+      }
     }
     if (held) {
       const box = root.querySelector(`.set-row[data-key="${CSS.escape(held.key!)}"]`)
@@ -444,7 +489,7 @@
   document.addEventListener('wb-settings-group', e => { focusGroup = String((e as CustomEvent).detail || ''); if (showing) draw() })
   WB.view('settings', {
     mount(r: HTMLElement) { root = r },
-    show() { showing = true; load() },
+    show() { showing = true; readOpen(); load() },
     hide() { showing = false },
   })
 })()

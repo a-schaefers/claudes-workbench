@@ -138,6 +138,12 @@ export async function check(page: any, ctx: E2eCtx) {
     if (got.width !== width || got.out.length || got.scroll > 0 || got.page > 0) throw new Error(JSON.stringify(got))
     return got
   }
+  // the folded cards open, so a check reaches their rows on a phone too (their own check is below)
+  const FOLDED = ['gpu', 'api', 'setup', 'workflows', 'terminal', 'experimental', 'changes']
+  const openAll = () => page.evaluate((keys: string[]) => {
+    try { localStorage.setItem('wb-settings-open', JSON.stringify(Object.fromEntries(keys.map(k => [k, true])))) } catch {}
+  }, FOLDED)
+  await openAll()
   try {
     await ctx.check('Settings lists the admin rows above the device cards, a card per role first, its GPU model under More, then "Agents and roles" (#1553)', async () => {
       await reshow()
@@ -499,6 +505,28 @@ export async function check(page: any, ctx: E2eCtx) {
         return { long, gone, held, after: t.classList.contains('on') }
       })
       if (JSON.stringify(got) !== JSON.stringify({ long: true, gone: true, held: true, after: false })) throw new Error(JSON.stringify(got))
+    })
+
+    await ctx.check('the power groups are folded cards with a line of their state, closed on a phone and open wider, each one\'s state kept on this device', async () => {
+      // the web app's review (2026-11-26): Settings ran 6 to 8 phone screens, Notifications 5,000 px down
+      unmock()
+      mock(async (method: string) => method === 'POST' ? null : answer(200, { rows: MOCK_ROWS.map(r => r.key === 'api-connected' ? { ...r, brief: 'Provider' } : r), ts: 1 }))
+      await page.evaluate(() => { try { localStorage.removeItem('wb-settings-open') } catch {} })
+      try {
+        await reshow()
+        await until(async () => (await page.locator('#settings-rows details.set-card[data-group="terminal"]').count()) === 1)
+        const got = () => page.evaluate(() => Object.fromEntries([...document.querySelectorAll<HTMLDetailsElement>('#settings-rows details.set-card')]
+          .map(d => [d.dataset.group, `${d.open}|${d.querySelector('.set-sum') ? d.querySelector('.set-sum')!.textContent : ''}`])))
+        const first = await got()
+        const wide = await page.evaluate(() => innerWidth > 600)
+        if (first.terminal !== `${wide}|Opening animation: Enabled` || first.api !== `${wide}|Provider` || 'shared' in first)
+          throw new Error(JSON.stringify(first))
+        await page.locator('#settings-rows details.set-card[data-group="terminal"] > summary').click()
+        await reshow()
+        await until(async () => (await got()).terminal === `${!wide}|Opening animation: Enabled`)
+          .catch(async () => { throw new Error(JSON.stringify(await got())) })
+        if ((await got()).api !== `${wide}|Provider`) throw new Error('another card moved: ' + JSON.stringify(await got()))
+      } finally { await openAll() }
     })
 
     await ctx.check(desktop ? 'the view lays out at 1280 px, two columns of cards, and at 390 px, one, nothing past its edge'

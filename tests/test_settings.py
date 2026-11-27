@@ -191,6 +191,15 @@ class Settings(Rows):
             self.assertTrue(line.startswith(f"{settings.label_of(key)} wasn't changed"), line)
             self.assertNotRegex(line, r"wb |`|\btrivial\b")
 
+    def test_a_folded_cards_line_comes_from_its_rows_briefs(self):
+        # the web app's review (2026-11-26): the power groups fold, each with one line of its state
+        by = {r["key"]: r for r in settings.rows()}
+        self.assertEqual(by["api-spend"]["brief"], "today $0 of $5")
+        self.assertRegex(by["optimize"]["brief"], r"^\d+ models?, (not run yet|measured .+|measuring now)$")
+        self.assertRegex(by["setup-size"]["brief"], r"^about \d+\.\dK tokens$")
+        self.assertTrue(all(r["brief"] == "" for k, r in by.items() if k.startswith("size-")))
+        self.assertTrue(by["api-connected"]["brief"])
+
     def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
         # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
         home = Path(self.tmp.name) / "home"

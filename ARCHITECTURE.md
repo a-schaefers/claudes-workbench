@@ -7357,7 +7357,8 @@ address (#534).
 
 **The page** (`chat_static/`; no inline script, for the CSP). The token comes from the fragment (or
 `?token=`) into `localStorage` `wb-chat-token` and leaves the address bar before anything else reads the hash (other keys: `wb-chat-thread`, the
-  last 50 for a reload; `wb-chat-seen`, 500 ids not replayed; `wb-chat-draft`, `wb-chat-about`, `wb-chat-hint`, `wb-chat-dictate`); over https the manifest
+  last 50 for a reload; `wb-chat-seen`, 500 ids not replayed; `wb-chat-draft`, `wb-chat-about`, `wb-chat-hint`, `wb-chat-dictate`;
+  Settings' `wb-settings-open`, its folded cards' state); over https the manifest
 link carries `?k=<token>`, since an iPhone app has its own storage. The stream is a `fetch` with the
 bearer header (EventSource can't send one): each connection starts with a whole state, patches
 merge by id (`merge`), and a POST reply or `/api/state` older than the newest state's `now`
@@ -7651,7 +7652,10 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 GPU and API model and thinking, #1553), `hidden` (true: the page doesn't draw it while it can do nothing; `wb
 settings` lists it still), `fixed` (true: a choice the page draws as its `says` alone), `ask` (a row with a
 problem or a request: true, or a string, the request itself; the page gives it an Ask link: a role that can't
-run, `api-connected` with a provider that has no key it can run on, `flows`) and by kind: `choice` (`value`, `choices`
+run, `api-connected` with a provider that has no key it can run on, `flows`), `brief` (what a folded card's
+one-line summary says of it, `""` nothing: `api-connected` its providers, `api-spend` `today ≈$0.07 of $5`,
+`api-none`, `gpu-none`, `optimize` `N models, <state>`, a run, `flows`, `setup-size`; the `size-<id>` rows
+`""`; without it, a choice's `<label>: <its choice>`) and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd`; `off`, `""` and null clear it); `info` (`text`); `action`
 (`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
@@ -7827,9 +7831,18 @@ alone, and a generic renderer: a new setting touches only Python.
   order with their names: a card per role first (#1553), `significant` "Complex coding", `trivial` "Trivial
   coding", `writing` "English writing" (`routes.LABELS`' words), its `role-<role>` row on top with no label of
   its own (a row whose label is its card's name is drawn without it) and its `more` rows under a closed
-  `details.set-more` "More" (kept open across redraws once opened); then `shared` "Agents and roles", `web` "Web app" (#1355), `gpu` "GPU", `api` "API", `setup` "What your agents get",
+  `details.set-more` "More"; then `shared` "Agents and roles", `web` "Web app" (#1355), `gpu` "GPU", `api` "API", `setup` "What your agents get",
   `workflows` "Deep workflows", `terminal` "Terminal", `experimental` "Experimental"; a group the table adds later follows, under
-  its key. The runs strip's tap (app.ts, a `wb-settings-group` event) brings the `workflows` card into view. A
+  its key. **Folded** (the web app's review, 2026-11-26: Settings ran 6 to 8 phone screens, Notifications and
+  Spend today 4,000 to 5,000 px down): `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental` and
+  Recent changes (`FOLD`) are `details.set-fold` cards, their `<summary>` the name and, closed, one line of
+  their state (`.set-sum`: up to three of the rows' `brief`s, else a choice's `<label>: <its choice>`;
+  Recent changes, how many and the newest); closed on a phone (600 px and narrower) and open wider, until
+  the user folds one. The role cards, Agents and roles (with the day cap and Progress checks), Web app and
+  the device cards stay open. Each card's state, and each role's More (closed at first everywhere), is this
+  device's: localStorage `wb-settings-open` (`{<group>|changes|more:<role>: bool}`, read at each show, inside
+  try/catch, a page without it still working; only the user's toggle is stored, never a default). The runs
+  strip's tap (app.ts, a `wb-settings-group` event) brings the `workflows` card into view, opened. A
   `hidden` row isn't drawn, a `fixed` one is its `says` alone (a role's, with no API provider). A
   `note` row is a muted line in its place, and the group's other rows are drawn beside it (with the
   routes unreadable, the shared group's note sits over Claude coding and the rest); a group with no
@@ -11294,7 +11307,9 @@ the window's `focus`, and a click on the value shown still sent (#1392); a POST 
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the
 computer out of reach, Try again shown and the rows drawn once the stream gets through, with no tab switch (#1412); a choice
 made with Space keeping the focus on its radio, and a number sent with Enter on its box (#1409); the focus ring
-on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); a radio group one Tab
+on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); the power groups
+folded with a line of their state, closed on a phone and open wider, each one's state kept (the checks before
+open them all through `wb-settings-open`); a radio group one Tab
 stop, its arrows moving the focus and picking nothing; a role's API choice with
 no model opening its API model list under the row, a pick sending the model, then the role's API (#1558); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its

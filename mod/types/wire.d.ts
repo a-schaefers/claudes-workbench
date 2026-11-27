@@ -186,6 +186,8 @@ export type SettingRow = {
   key: string; group: string; kind: string; label: string; value?: string | number | null; text?: string
   says?: string; choices?: SettingChoice[]; other?: boolean; unit?: string; more?: boolean; hidden?: boolean; fixed?: boolean
   ask?: boolean | string; help?: string
+  /** what a folded card's one-line summary says of it ("" nothing; without it a choice's `label: choice`) */
+  brief?: string
   /** its newest change within a week (settings.changed, #1355): when, and who (web, claude, opencode, terminal, agent) */
   changed?: { ts: number; by: string }
 }

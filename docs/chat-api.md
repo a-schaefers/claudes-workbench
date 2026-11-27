@@ -472,7 +472,7 @@ The web app's Settings: `{"rows": [...], "changes": [...], "ts": <seconds>}`. Ea
 `workflows`, `terminal`, `experimental` (in that order); `more: true`, a row shown under its card's More (a role's GPU
 and API model and thinking); `hidden: true`, a row the page doesn't show while it can do nothing; `fixed: true`, a
 choice shown as its `says` alone; `ask`, a row with a problem or a request the page offers to hand to the driver
-(true, or a string: the request); `kind` one
+(true, or a string: the request); `brief`, what a folded card's summary says of it; `kind` one
 of `choice` (`value`, `choices: [{value, label, says, needs?}]` (`needs`: the row whose value that choice needs
 first, a role's API its `api-<role>`), `says`, `other`: any id is taken),
 `number` (`value`: a number or null for off, `unit`: `usd`, `says`), `info`

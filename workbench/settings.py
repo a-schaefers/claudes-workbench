@@ -15,7 +15,8 @@ true`, a choice the page draws as its `says` alone (a role's GPU|API with no API
 list under it instead of sending); `ask`, a row
 that carries a problem or a request, which the page gives an "Ask <driver>" link filling the chat's box
 (true: "Help me with Settings › <its card>: <its line>"; a string: that request); a note, or a row with
-`help`, gets the link without it. A row may
+`help`, gets the link without it. `brief`, what a folded card's one-line summary says of the row ("" for
+nothing; without it, a choice's `<label>: <its choice>`). A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,
@@ -343,6 +344,14 @@ def _think_stops(row: dict) -> list:
              "after this.") if on.startswith("thinking off") else THINK[1]]
 
 
+def _spend_brief(r: dict) -> str:
+    """Today's API spend for the API card's summary: `today ≈$0.07 of $5`."""
+    s = r.get("spend_today") or {}
+    cap = r.get("day_usd")
+    return f"today {savings.money(s.get('usd') or 0, s.get('prices') or 'catalog')}" + \
+        (f" of {routes.money(cap)}" if cap is not None else "")
+
+
 def _spend_line(r: dict) -> str:
     s = r.get("spend_today") or {}
     total = s.get("usd") or 0
@@ -458,8 +467,9 @@ def _optimize_row(m: dict) -> dict:
         state = f"measured {n} model{'' if n == 1 else 's'}{when}"
     else:
         state = "not run yet"
+    n = len(m.get("gpu") or [])
     return {"key": "optimize", "group": "gpu", "label": LABELS["optimize"], "kind": "action",
-            "text": f"Optimize: {state}",
+            "text": f"Optimize: {state}", "brief": f"{n} model{'' if n == 1 else 's'}, {state}",
             "choices": [{"value": "start", "label": "Measure now",
                          "says": "Measures this machine for its models (wb optimize start)."}]}
 
@@ -491,13 +501,14 @@ def _run_rows() -> list[dict]:
     for r in snap:
         stops = ([RUN_STOP] if r.get("phase") in runs.OPEN else []) + [RUN_SUMMARY]
         out.append({"key": f"run-{r['run']}", "group": "workflows", "label": f"Run {r['run']}", "kind": "action",
-                    "text": run_text(r), "choices": [{"value": v, "label": lab, "says": says} for v, lab, says in stops]})
+                    "text": run_text(r), "brief": f"run {r['run']} {r.get('phase') or '?'}", "choices": [{"value": v, "label": lab, "says": says} for v, lab, says in stops]})
     try:
         names = [f["name"] for f in runs.flow_rows() if f.get("where") != "repo"]
     except (OSError, ValueError):
         names = []
     if names:
-        out.append({**_info("flows", "workflows", "Flows", f"Flows: {', '.join(names)}. {FLOWS_SAY}"), "ask": True})
+        out.append({**_info("flows", "workflows", "Flows", f"Flows: {', '.join(names)}. {FLOWS_SAY}"), "ask": True,
+                    "brief": f"{len(names)} flow{'' if len(names) == 1 else 's'}"})
     return out
 
 
@@ -582,7 +593,7 @@ def _build() -> dict:
     elif m is None:
         out.append(_note("gpu-why", "gpu", mwhy or OLDER_WB))
     elif not m["gpu"]:
-        out.append({**_note("gpu-none", "gpu", NO_GPU.format(who=who)), "ask": NO_GPU_ASK})
+        out.append({**_note("gpu-none", "gpu", NO_GPU.format(who=who)), "ask": NO_GPU_ASK, "brief": "no model yet"})
     else:
         for name, label, row in roles:
             gpu = row.get("gpu") or routes.AUTO
@@ -591,7 +602,7 @@ def _build() -> dict:
         for g in m["gpu"]:  # every discovered model: the pane's six-row cap went with the pane
             sizes = g.get("sizes") or []
             out.append(_choice(f"size-{g['id']}", "gpu", f"{g.get('label') or g['id']} tasks", SIZES,
-                               sizes[0] if len(sizes) == 1 else "all"))
+                               sizes[0] if len(sizes) == 1 else "all", brief=""))
         out.append(_optimize_row(m))
     out.extend(_media_rows(m))
 
@@ -601,10 +612,12 @@ def _build() -> dict:
     else:
         if not stored and not any_api:
             err = r.get("catalog_error")
-            out.append(_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER))
+            out.append({**_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER),
+                        "brief": "catalog not read" if err else "no provider connected"})
         else:
             if provs:
-                c = _info("api-connected", "api", "Connected", _connected_line(r))
+                c = {**_info("api-connected", "api", "Connected", _connected_line(r)),
+                     "brief": ", ".join(str(p.get("name")) for p in provs.values() if isinstance(p, dict) and p.get("name"))}
                 if any(isinstance(p, dict) and p.get("key") not in ("stored", "ollama", "copilot") and p.get("runs") is not True
                        for p in provs.values()):
                     c["ask"] = True  # a provider with no key it can run on
@@ -628,7 +641,7 @@ def _build() -> dict:
                 if row.get("api"):
                     out.append(_choice(f"review-{name}", name, label_of(f"review-{name}"), REVIEW,
                                        row.get("thinking_review") or "off", more=True))
-            out.append(_info("api-spend", "api", "Spend today", _spend_line(r)))
+            out.append({**_info("api-spend", "api", "Spend today", _spend_line(r)), "brief": _spend_brief(r)})
 
     out += setup_rows()
     out.append(_choice("splash", "terminal", LABELS["splash"], SPLASH, "on" if cli.splash_on() else "off"))
@@ -656,8 +669,9 @@ def setup_rows() -> list[dict]:
     out = [_info(key, "setup", label, f"{label}: {', '.join(got)}" + (f"; {tail}." if tail else ".")
                  if got else f"{label}: {tail.removeprefix('and ')}.")
            for key, label, got, tail in lines if got or key in ("setup-instructions", "setup-skills")]
-    out.append(_info("setup-size", "setup", "Size", f"About {said['tokens'] / 1000:.1f}K tokens, with "
-                     "OpenCode's own prompt and tools, before a task's project files and spec."))
+    out.append({**_info("setup-size", "setup", "Size", f"About {said['tokens'] / 1000:.1f}K tokens, with "
+                        "OpenCode's own prompt and tools, before a task's project files and spec."),
+                "brief": f"about {said['tokens'] / 1000:.1f}K tokens"})
     return out
 
 
