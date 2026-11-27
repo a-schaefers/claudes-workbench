@@ -7861,7 +7861,7 @@ def cmd_chat(a):
             asked = int(a.id)
         except ValueError:
             die(f"wb chat on {a.id}: a port number, as `wb chat on 8090`")
-    if asked is not None and not 1 <= asked <= 65535:
+    if a.action == "on" and asked is not None and not 1 <= asked <= 65535:  # serve's 0: any free one
         die(f"port {asked}: a number from 1 to 65535")
     if a.port is None:  # named: that port; else the running server's, else the user's (#349, #1616)
         a.port = chat.chosen_port() if a.action == "serve" else chat.port()
@@ -7883,10 +7883,9 @@ def cmd_chat(a):
         # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an
         # on-by-default chat (#1281) stayed off after a port taken once
         if asked is not None and (asked != chat.port() or asked != chat.chosen_port()):
-            # a port taken by something else changes nothing: the web app stays where it answers
-            if chat.who_answers(asked) == "other":
-                die(f"web chat not moved to port {asked}: {chat.blocked_why(asked)}")
-            chat.move(asked)
+            # a port something else answers isn't kept: ensure refuses it below, as ever (#690)
+            if chat.who_answers(asked) != "other":
+                chat.move(asked)
             a.port = asked
         was = chat.is_on()
         chat.set_on(True)

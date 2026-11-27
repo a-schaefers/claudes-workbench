@@ -174,8 +174,8 @@ class ChatDefault(Base):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
             run_wb("chat", "on", "--port", str(port))
-        # a port something else answers changes nothing: neither the kept port nor the switch (#1616)
-        self.assertIn(f"web chat not moved to port {port}: another account's chat", err.getvalue())
+        # a port something else answers isn't kept, and the switch is put back (#1616, #690)
+        self.assertIn("web chat not up: another account's chat", err.getvalue())
         self.assertEqual(chat.chosen_port(), chat.PORT)
         self.assertTrue(chat.is_on())
 
