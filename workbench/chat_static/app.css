@@ -242,7 +242,7 @@ div.ts-file { cursor: default; color: var(--dim); }
 .ts-body .ts-said { white-space: pre-wrap; }
 .ts-body .ts-fail { color: var(--bad); }
 .ts-full { margin-top: 10px; }
-.ts-full > summary { min-height: 44px; display: flex; align-items: center; color: var(--accent); cursor: pointer; font-size: 14px; }
+.ts-full > summary { min-height: 44px; display: flex; align-items: center; color: var(--accent-text); cursor: pointer; font-size: 14px; }
 .ts-foot { position: sticky; bottom: -12px; margin: 10px 0 -12px; padding: 8px 0 12px; background: var(--panel); }
 .ts-next { margin-top: 8px; }
 

@@ -1777,7 +1777,8 @@ async function run(engine: string, device?: string) {
           document.querySelector(where)!.append(box)
         }
         put('#ts-body', '<button class="ts-link" data-e2e-text="ts-link">Show the whole diff</button>'
-          + '<pre><span class="add" data-e2e-text="diff add">+world</span></pre>')
+          + '<pre><span class="add" data-e2e-text="diff add">+world</span></pre>'
+          + '<details class="ts-full"><summary data-e2e-text="ts-full">The whole diff</summary></details>')
         put('#thread', '<div class="day" data-e2e-text="day">Today</div>'
           + '<div class="row"><span class="about-tag" data-e2e-text="about-tag">About fix</span><div class="meta"><span class="tick" data-e2e-text="tick">✓</span></div></div>'
           + '<div class="shots"><figure><div class="missing" data-e2e-text="shots missing">Expired</div></figure></div>'
@@ -1793,7 +1794,7 @@ async function run(engine: string, device?: string) {
       try {
         const names: [string, string][] = [['#ts-back', 'chat'], ['#ts-refresh', 'chat'], ...await page.$$eval('[data-e2e-text]',
           (x: HTMLElement[]) => x.map(e => [`[data-e2e-text="${e.dataset.e2eText}"]`, e.closest<HTMLElement>('[data-e2e-probe]')!.dataset.e2eProbe]))]
-        if (names.length !== 17) throw new Error('probes: ' + JSON.stringify(names))
+        if (names.length !== 18) throw new Error('probes: ' + JSON.stringify(names))
         const low: string[] = []
         for (const scheme of ['light', 'dark']) {
           await page.emulateMedia({ colorScheme: scheme })
