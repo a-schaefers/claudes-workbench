@@ -57,10 +57,10 @@ the user's sign that it is on. The user then works with you as usual, in plain w
 request is handled the way this skill says, until they run `/workbench-quit` or
 `/workbench-quit-and-hand-back-claude`. Running `/workbench` again while it is on only brings
 the pane back (the mod answers it; with a task, the task is yours to take as usual).
-- **First task:** `$ARGUMENTS`. With a `workbench-firstrun` note after this skill (sent on a
-  fresh install: setup was never completed and no task ever ran), run *First run* below now, then
-  that task, if one was given. Empty and no note? Reply in one line that workbench mode is on and
-  wait for their first request; don't scan the repo or check models until there is work.
+- **First task:** `$ARGUMENTS`. Empty? With no `workbench-firstrun` note after this skill, reply
+  in one line that workbench mode is on and wait for their first request; don't scan the repo or
+  check models until there is work. With that note, empty or not (sent on a fresh install: setup
+  was never completed and no task ever ran), run *First run* below now, then the task, if any.
 - **What goes to the agents:** the coding: features, fixes, refactors, tests, boilerplate.
   Answer questions, read code, plan, and do what is yours (git, CLAUDE.md, `.claude/`, anything
   outward) yourself, as always. An edit that costs less to make than to spec (a typo, one line)

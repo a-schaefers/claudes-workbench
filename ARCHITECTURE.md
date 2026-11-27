@@ -8334,7 +8334,7 @@ task's sessions the first to deliver wins (the `acked` write is not locked).
 
 **Workbench mode** (`workbenchMode(on)`, `chat.delegating`). On: the `workbench` skill's prompt
 (`skill.prompt`, which opens the pane via `showPane`; again while on with no task, read by
-`firstTask` from the skill's "**First task:** \`…\`" line, it returns AGAIN_NOTE instead; with no
+`firstTask` from the skill's "**First task:** \`…\`. Empty?" line, it returns AGAIN_NOTE instead; with no
 task, and on a fresh install with a task or without, core.ts's `freshInstall`: no `setup.json`
 (`wb setup --done`'s), nothing under `tasks/`, `results.jsonl` empty or missing, read from the
 files so the mod keeps no state (a role on API no longer counts as set up, and a task given with
@@ -12354,7 +12354,9 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   ↔ `gateConf`'s directories ↔ `cli.plugins_dir`, `cli._install_kind`; a `wb patch init` clone is found as
   `known_marketplaces.json`'s `installLocation`. **`FIRSTRUN_NOTE`** (`[workbench-firstrun]`, the story's
   `firstrun.note`: the mod's and `opencode-plugin/pane.ts`'s, #1574) ↔ SKILL.md's *First
-  task* and *First run* (its last step, `wb setup --done`); core.ts's `freshInstall` ↔ the mod's
+  task* and *First run* (its last step, `wb setup --done`); SKILL.md's "**First task:**
+  \`$ARGUMENTS\`. Empty?" ↔ the mod's `firstTask`, which reads the task from it (a reword that
+  dropped "Empty?" lost every task of a second `/workbench`, #1606's review; `test_docs` pins it); core.ts's `freshInstall` ↔ the mod's
   reads (`setup.json`, `tasks/`, `results.jsonl`) and the plugin's (`freshAt`: the same files) ↔
   `cli.setup_done`, `SETUP_DONE` (#1606).
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), `routes.thinking_of` (the dialog's thinking clause, `cli.start_line`, `routes.model_line` and `routed_line`, #1237), *Thinking off by default*.

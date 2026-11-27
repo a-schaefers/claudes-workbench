@@ -118,8 +118,8 @@ export const HOST_LINES: readonly Rule[] = [
     'Workbench mode is the Workbench agent: `/workbench` switches this session to it;'),
   line('`/workbench-quit-and-hand-back-claude`. Running `/workbench` again',
     '`/workbench-quit-and-hand-back`, or switch to another agent. Running `/workbench` again'),
-  line('`$ARGUMENTS`. With a `workbench-firstrun` note after this skill',
-    'what the user typed after `/workbench`, if anything. With a `workbench-firstrun` note'),
+  line('`$ARGUMENTS`. Empty? With no `workbench-firstrun` note after this skill, reply',
+    'what the user typed after `/workbench`, if anything. Empty? With no `workbench-firstrun` note, reply'),
   // `wb coding`'s rows say Claude, the driver on Claude Code's path: `decide` is the key either way
   line('**Claude coding**', '**Your coding**'),
   line('"Let Claude decide" (the default) is this skill as written.', '`decide` (the default) is these instructions as written.'),

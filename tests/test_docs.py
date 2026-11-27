@@ -178,6 +178,23 @@ class DocsMatchTheCode(unittest.TestCase):
         for copy in ("const PROBE_STOPS", "const CODING_STOPS", "const SETTING_ROWS", "const TABS"):
             self.assertNotIn(copy, pane)
 
+    def test_the_mods_first_task_parse_reads_the_task_from_the_real_skill_text(self):
+        # #1606, 2026-11-27 (its review): SKILL.md's *First task* was reworded without the
+        # "`. Empty?" the mod's firstTask anchors on, so every task read as none and a second
+        # /workbench with a request on a set-up install got AGAIN_NOTE, the request lost. The
+        # mod's tests feed a made-up line, so this one reads the real skill and the real regex.
+        reg = (ROOT / "mod/hooks/register.tsx").read_text()
+        found = re.search(r"const firstTask = \(text: string\) => /(.+?)/\.exec\(text\)", reg)
+        self.assertIsNotNone(found, "register.tsx's firstTask is no longer a regex literal")
+        parse = re.compile(found.group(1))
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        self.assertIn("- **First task:** `$ARGUMENTS`. Empty?", skill)  # the mod tests' made-up line
+        for task in ("add a dark mode switch to the settings page", "fix `x`. Then y", ""):
+            with self.subTest(task=task):
+                got = parse.search(skill.replace("$ARGUMENTS", task))
+                self.assertIsNotNone(got, "the mod no longer finds SKILL.md's First task line")
+                self.assertEqual(got.group(1).strip(), task)
+
     def test_wb_start_role_and_the_agents_switch_are_in_the_command_reference(self):
         # #1016: the role Claude picks per task, and the user's Agents switch
         ref = section(ARCH, "## Every `wb` command")
