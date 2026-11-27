@@ -10216,7 +10216,10 @@ item fails, so `runs.estimate` leaves it out of the figure and, for a paid API e
 read `estimate $0`, #1597). An item's tries are one change in `wb run report`, `run_done` and `wb run close`
 (`runs.change_groups`, by the key without `#e<k>`, as the hand-back's `tries_of`): the report's `code` entries
 of such an item carry `item`, `tries` and `keep` (`runs.kept_try`, the hand-back's rule: one accepted, else the
-latest still open at `review` or, after a takeover, `prior_phase` `review`), and print as one line, `<stage>:<key>:
+latest still open at `review` or, after a takeover, `prior_phase` `review`; none while a later try is still
+running or held for `wb run resume`, `runs.try_pending`, which the line names instead: `B is still running` or `B is
+held: wb run resume <run> goes on`, `; decide once it ends`, never a discard of it: a run paused at its budget or the
+cap mid-escalation had Claude discard the escalation's paid work), and print as one line, `<stage>:<key>:
 … alternatives for one change, the run escalated A to B: accept only B, then wb discard A`; `run_done`'s
 `N change(s) at review` counts the item once (`runs.open_changes`): two changes for one finding had Claude
 accept both competing fixes (#1597). Shipped: `fix-escalate` (fix on trivial, then

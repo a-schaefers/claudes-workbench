@@ -1004,6 +1004,38 @@ class Runs(Base):
         for n in ("fe-code-1", "fe-code-2"):
             run_wb("discard", n)
 
+    def test_an_escalation_still_running_or_held_is_never_named_for_wb_discard(self):
+        # #1597's second look (2026-11-27): kept_try skipped a try not at review, so a run paused
+        # at its budget or the day cap while its escalation ran, or held it at the cap, told Claude
+        # to accept the cheap try its reviewer still had asks on and wb discard the escalation,
+        # its paid rounds and kept work
+        seq = Path(self.tmp.name) / "seq.json"
+        changes = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        seq.write_text(json.dumps([changes, changes, changes,
+                                   {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+        os.environ["FAKE_RESULT_SEQ"] = str(seq)
+        run_wb("run", "start", "fe", "--flow", "fix-escalate", "--param", 'findings=["answer.txt must hold 42"]',
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("fe", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        esc = store.Task("fe-code-2")
+        for st, said in ((dict(phase="running"), "fe-code-2 is still running; decide once it ends"),
+                         (dict(phase="stuck", last="the day cap", infra=runner.SPEND, guard=runner.SPEND),
+                          "fe-code-2 is held: wb run resume fe goes on; decide once it ends")):
+            esc.set_status(**st)
+            self.assertIsNone(runs.report_of("fe")["code"][0].get("keep"), st)
+            out = run_wb("run", "report", "fe")
+            (alts,) = [ln for ln in out.splitlines() if ln.startswith("  code:1: ")]
+            self.assertIn(said, alts)
+            self.assertNotIn("wb discard", alts)
+            self.assertNotIn("accept only", alts)
+            code, _, err = wb("run", "close", "fe")
+            self.assertEqual(code, 1)
+            self.assertIn(f"(one change: {said})", err)
+            self.assertNotIn("wb discard fe-code-2", err)
+        esc.set_status(phase="review", last="", infra=None, guard=None)
+        for n in ("fe-code-1", "fe-code-2"):
+            run_wb("discard", n)
+
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
         seq.write_text(json.dumps([

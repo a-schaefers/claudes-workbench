@@ -1298,24 +1298,49 @@ def change_groups(run: Run, names) -> list[tuple[str, list[str]]]:
     return [(f"{sid}:{key}", g) for (sid, key), g in out.items()]
 
 
-def kept_try(names: list[str]) -> str | None:
+def kept_try(names: list[str], run: Run | None = None) -> str | None:
     """Which of an item's escalation tries ``names`` (start order) is the change to keep, the
     hand-back's rule (cli._attempts_line): one accepted already; else the latest still open with a
     finished change (at review, or at review before a takeover, `prior_phase`), so a failed
-    escalation keeps the cheap try its reviewer saw; None while none has one (#1597)."""
+    escalation keeps the cheap try its reviewer saw; None while none has one (#1597), or while a
+    later try is still in flight or held (try_pending): its outcome isn't in yet (#1597's second
+    look, 2026-11-27)."""
     sts = {n: store.Task(n).status for n in names}
     if acc := [n for n in names if sts[n].get("phase") == "accepted"]:
         return acc[-1]
     done = [n for n in names if sts[n].get("phase") not in store.CLOSED
             and (sts[n].get("prior_phase") or sts[n].get("phase")) == "review"]
+    if (p := try_pending(names, run)) and (not done or names.index(p[0]) > names.index(done[-1])):
+        return None
     return done[-1] if done else None
 
 
-def tries_said(names: list[str], keep: str | None) -> str:
+def try_pending(names: list[str], run: Run | None = None) -> tuple[str, bool] | None:
+    """The latest of an item's tries ``names`` whose outcome isn't in: (task, held), a try still
+    running (cli.LIVE), or one held where it stopped, which wb run resume takes up (_resumable:
+    the day cap's, a provider's, a restart's, wb run stop's; _outside's without ``run``). Without
+    it a run paused at its budget, the cap or another item's checkpoint while its escalation ran
+    or was held named the cheap try to accept and the escalation, its paid rounds and kept work,
+    to wb discard (#1597's second look, 2026-11-27)."""
+    from . import cli
+    for n in reversed(names):
+        st = store.Task(n).status
+        if st.get("phase") in cli.LIVE:
+            return n, False
+        if _resumable(run, n, st) if run is not None else _outside(st):
+            return n, True
+    return None
+
+
+def tries_said(names: list[str], keep: str | None, run: Run | None = None) -> str:
     """What Claude does with one item's escalation tries (change_groups, kept_try's ``keep``)."""
     rest = [n for n in names if n != keep and store.Task(n).status.get("phase") not in store.CLOSED]
     then = f", then wb discard {', '.join(rest)}" if rest else ""
     if keep is None:
+        if p := try_pending(names, run):  # never a discard of a try still under way (#1597's second look)
+            how = (f"held: wb run resume {run.name if run is not None else '<run>'} goes on" if p[1]
+                   else "still running")
+            return f"{p[0]} is {how}; decide once it ends"
         return "none holds a finished change: keep at most one"
     if store.Task(keep).status.get("phase") == "accepted":
         return f"{keep} is accepted" + (f": wb discard {', '.join(rest)}" if rest else "")
@@ -2199,7 +2224,7 @@ def report_of(name: str) -> dict:
                 rep["not_run"].append({"key": f"{s['id']}:{mk}", "why": f"unjudged: {k} returned nothing for it"})
     for item, g in change_groups(run, [c["task"] for c in rep["code"]]):
         if len(g) > 1:  # one change, its tries the alternatives (#1597)
-            keep = kept_try(g)
+            keep = kept_try(g, run)
             for c in rep["code"]:
                 if c["task"] in g:
                     c.update(item=item, tries=g, keep=keep)
@@ -2249,7 +2274,7 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
             tries = g[0]["tries"]
             out.append(f"  {item}: " + ", ".join(f"{c['task']} {c['phase']}" for c in g)
                        + f": alternatives for one change, the run escalated {', '.join(tries[:-1])} to {tries[-1]}: "
-                       + tries_said(tries, g[0]["keep"]))
+                       + tries_said(tries, g[0]["keep"], Run(rep["run"])))
     return out
 
 
@@ -2813,7 +2838,7 @@ def cmd_close(a) -> None:
         for _, g in change_groups(run, code):
             if not (left := [n for n in g if n in open_code]):
                 continue
-            said.append(", ".join(left) + (f" (one change: {tries_said(g, kept_try(g))})" if len(g) > 1 else ""))
+            said.append(", ".join(left) + (f" (one change: {tries_said(g, kept_try(g, run), run)})" if len(g) > 1 else ""))
         _die(f"run {run.name} has code waiting on you: {', '.join(said)} (wb accept or wb discard each)")
     if run.status.get("phase") in OPEN:
         stop(run, "closed")
