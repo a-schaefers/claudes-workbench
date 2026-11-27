@@ -8446,6 +8446,33 @@ class Context(Base):
                                capture_output=True, text=True, check=True).stdout
         self.assertEqual(shown, "42\n")
 
+    def test_accept_force_after_a_stop_and_a_rewind_commits_the_tree_claude_chose(self):
+        # #1596's review (2026-11-27): _stop_aside counted any phase but review as a live
+        # self-review, so after wb stop and wb rewind <t> 2s, the wb accept --force the rewind
+        # names set "41" aside again and committed "42", not the tree Claude chose, under a false
+        # "stopped mid-check" line
+        t = self.mid_check("t-rra")
+        self.assertIn("set aside", run_wb("stop", "t-rra"))
+        self.assertIn("next: wb accept t-rra --force", run_wb("rewind", "t-rra", "2s"))
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "41\n")
+        out = run_wb("accept", "t-rra", "-m", "Write answer", "--force")
+        self.assertNotIn("set aside", out)
+        self.assertEqual(t.status["phase"], "accepted")
+        shown = subprocess.run(["git", "-C", str(self.repo), "show", f"{t.spec['branch']}:answer.txt"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, "41\n")
+
+    def test_a_takeover_after_a_stop_keeps_the_users_own_edits_and_the_first_set_aside(self):
+        # #1596's review (2026-11-27): the same, a takeover after wb stop set the user's edits
+        # in an editor aside as 2s, over the self-review's own 2s
+        t = self.mid_check("t-rre")
+        self.assertIn("set aside", run_wb("stop", "t-rre"))
+        aside = t.status["review_trees"]["2s"]["tree"]
+        t.worktree.joinpath("answer.txt").write_text("40\n")
+        self.assertNotIn("set aside", run_wb("takeover", "t-rre"))
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "40\n")
+        self.assertEqual(t.status["review_trees"]["2s"]["tree"], aside)
+
     def test_a_takeover_of_a_self_review_an_update_stopped_mid_check_puts_the_green_tree_back(self):
         # #1582 (2026-11-26): _stop_aside set aside only a live runner's round, so wb update
         # --stop mid-check left a dead runner, stuck, and the takeover (or the hand-back) left

@@ -3368,13 +3368,22 @@ def _stop_aside(task, how: str, committed: bool = False) -> str:
     runner already dead (wb update --stop, a logout's SIGTERM: stuck, the runner gone) left the
     unfinished tree to wb takeover and the hand-back under tests:ok, which wb accept committed
     (#1582, 2026-11-26). ``committed``: wb accept --force's, set_aside's line for a tree it
-    commits next (#1596)."""
-    live = task.status.get("phase") != "review" or runner_alive(task)
+    commits next (#1596).
+
+    A round whose tree this step already keeps (`<n>s`, an earlier stop's set-aside; `<n>`, a
+    review of it or a rewind's save) is over: what is on disk since is Claude's or the user's
+    (a wb rewind, an editor). Counted live by its phase alone, wb stop then wb rewind <t> 2s
+    then the wb accept --force the rewind names committed the green tree, not the one Claude
+    chose, under a false "stopped mid-check" line, and a second stop or a takeover set aside
+    the user's own edits over the first 2s (#1596's review, 2026-11-27)."""
+    n = int(task.status.get("round") or 1)
+    steps = task.status.get("steps", 1)
+    done = {k for k, v in (task.status.get("review_trees") or {}).items() if v.get("step") == steps}
+    live = (task.status.get("phase") != "review" or runner_alive(task)) and not {str(n), f"{n}s"} & done
     _stop_runner(task)
     if not live or not task.worktree.is_dir():
         return ""
-    return runner.set_aside(task, int(task.status.get("round") or 1), None,
-                            f"stopped mid-check ({how})", None, committed) or ""
+    return runner.set_aside(task, n, None, f"stopped mid-check ({how})", None, committed) or ""
 
 
 def _open_tasks():
