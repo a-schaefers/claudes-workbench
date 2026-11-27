@@ -14769,6 +14769,43 @@ class Lane(Base):
                              f"{home}/.nimble/pkgs2")        # never its bin/
 
     @home_outside_the_lane
+    def test_a_pnpm_projects_agent_is_given_the_users_store_in_the_lane_unless_they_set_one(self):
+        # #1583 (bar round 3 of 2.2, 2026-11-26): pnpm couldn't link in its data dir, so it put
+        # its store in <worktree>/.pnpm-store, and a setup's `pnpm install --frozen-lockfile`
+        # failed as unclean before round 1; on macOS ~/Library/pnpm/store wasn't in the lane
+        self.start("t-1583", "ok")
+        wait_phase("t-1583", {"review"})
+        task = store.Task("t-1583")
+        home = self.fake_home()
+        self.assertNotIn("npm_config_store_dir", runner.agent_env(task))   # not pnpm's: npm warns
+        (task.worktree / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+
+        def given():
+            env = runner.agent_env(task)
+            return env.get("npm_config_store_dir"), context.writable(task)
+        for env, where in (({}, ".local/share/pnpm/store"), ({"XDG_DATA_HOME": str(home / "data")},
+                                                              "data/pnpm/store"),
+                           ({"PNPM_HOME": str(home / "pnpmhome"), "XDG_DATA_HOME": str(home / "data")},
+                            "pnpmhome/store")):
+            with mock.patch.dict(os.environ, env):
+                named, w = given()
+            self.assertEqual(named, str(home / where), env)            # made first, then named
+            self.assertIn(str(home / where), w, env)
+        self.assertNotIn(str(home / "pnpmhome"), w)                    # its global bin stays out
+        with mock.patch.object(sys, "platform", "darwin"):
+            self.assertEqual(context.pnpm_store(task), home / "Library/pnpm/store")
+        (home / "Library/pnpm/store").mkdir(parents=True)
+        self.assertIn(str(home / "Library/pnpm/store"), context.writable(task))
+        # a store-dir the user set stands: their environment, their .npmrc, the repo's
+        with mock.patch.dict(os.environ, {"npm_config_store_dir": "/srv/pnpm-store"}):
+            self.assertEqual(given()[0], "/srv/pnpm-store")
+        for rc in (home / ".npmrc", task.worktree / ".npmrc"):
+            rc.write_text("registry=https://r.example/\nstore-dir = /srv/store\n")
+            self.assertIsNone(given()[0], rc)
+            rc.unlink()
+        self.assertEqual(given()[0], str(home / ".local/share/pnpm/store"))
+
+    @home_outside_the_lane
     def test_the_homes_of_the_tools_the_wider_allowlist_added_are_in_the_lane_not_their_settings(self):
         # #994 (2026-11-22): the wider allowlist let godot, lualatex, dub, xmake, zef, carton's
         # cpanm, forge, tflint and bicep run, but their caches were out of the lane, so each

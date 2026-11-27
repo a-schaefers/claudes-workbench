@@ -845,6 +845,12 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # be made, so a setup's `poetry install` was refused (#825); the venv ignores itself
         env.setdefault("POETRY_VIRTUALENVS_IN_PROJECT", "true")
         env.setdefault("PIPENV_VENV_IN_PROJECT", "1")
+        # pnpm's store, the user's, granted (context.pnpm_store): without it pnpm put its store
+        # in the worktree, and a setup's `pnpm install` failed as unclean (#1583, 2026-11-26)
+        pnpm = context.pnpm_store(task)
+        if pnpm and any(os.path.realpath(pnpm) == os.path.realpath(p)
+                        or context._under(os.path.realpath(pnpm), os.path.realpath(p)) for p in places):
+            env.setdefault("npm_config_store_dir", str(pnpm))
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)

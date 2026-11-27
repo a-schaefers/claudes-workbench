@@ -2353,15 +2353,16 @@ deliberately hostile process.
   `/proc`; the build caches and toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.m2`,
   `.android` (split around `adbkey`), `.texlive*/texmf-var` (each match; not `texmf-config`, which
   every later run reads), caches, never a tool's keystores or settings…; of `go`, `.bun`, `.deno`
-  and pnpm's home only their caches; the `.local/share|state` ones under
+  and pnpm's home only their caches, pnpm's store `.local/share/pnpm/store` or macOS's
+  `Library/pnpm/store`; the `.local/share|state` ones under
   `$XDG_DATA_HOME`/`$XDG_STATE_HOME` when set, `tool_homes`), Flutter's `bin/cache`
   (`flutter_caches`: every flutter command locks it), wherever `TOOL_HOME_VARS` moved them
   (`CARGO_HOME`, `GOPATH`'s first entry, `GOMODCACHE`, `CARGO_TARGET_DIR`, `JULIA_DEPOT_PATH`'s
-  every entry (`ALL_ENTRIES`), `HF_HOME`…, absolute only; of `GOPATH` and `BUN_INSTALL` only
-  `VAR_CACHES`), `$XDG_CACHE_HOME`, and the extra paths
+  every entry (`ALL_ENTRIES`), `HF_HOME`…, absolute only; of `GOPATH`, `BUN_INSTALL` and
+  `PNPM_HOME` only `VAR_CACHES`), `$XDG_CACHE_HOME`, and the extra paths
   (`commands.json` `paths`, grants `paths`), each with its real path, only those that exist.
   OpenCode's cache and config directories are made first (a fresh profile couldn't open its log,
-  #340). The user's OpenCode data and state homes are not in it, made or not: OpenCode V2 keeps
+  #340), and in a pnpm project pnpm's store (`context.pnpm_store`, below, #1583). The user's OpenCode data and state homes are not in it, made or not: OpenCode V2 keeps
   every `/connect` credential in `~/.local/share/opencode/opencode.db`, beside every project's
   sessions and snapshots, and the lane wrote that directory (#1010, 2026-11-22). The agent's
   OpenCode keeps its own in the task's home, `tasks/<task>/opencode/` (`context.opencode_home`,
@@ -2815,7 +2816,14 @@ default);
 `NX_NO_CLOUD` stops only Nx Cloud while a self-hosted cache was still written, and no flag undoes
 it; `PANTS_REMOTE_CACHE_WRITE=false`, `PANTS_REMOTE_EXECUTION=false`, which beat `pants.toml`: reads
 stay, and a repo whose toolchain lives only on remote workers fails in the lane);
-`POETRY_VIRTUALENVS_IN_PROJECT=true`, `PIPENV_VENV_IN_PROJECT=1` unless set (lane on, #825); build
+`POETRY_VIRTUALENVS_IN_PROJECT=true`, `PIPENV_VENV_IN_PROJECT=1` unless set (lane on, #825);
+`npm_config_store_dir`, pnpm's store in the lane (`context.pnpm_store`: `<data dir>/store`, the
+data dir as pnpm finds it, `PNPM_HOME`, `$XDG_DATA_HOME/pnpm`, `~/Library/pnpm` on macOS,
+`~/.local/share/pnpm`, from the user's environment), lane on, in a pnpm project only
+(`PNPM_MARKS`, `packageManager`: npm 12 warns on every call of an env config it doesn't know),
+never over a store-dir the user set (`STORE_DIR_VARS`, an `.npmrc`'s, pnpm's `rc`,
+`pnpm-workspace.yaml`'s `storeDir`): pnpm couldn't link in its data dir, so it put its store in
+the worktree, and a setup's `pnpm install` failed as unclean before round 1 (#1583); build
 daemons of its own (`daemon_env`, lane on: Gradle's registry under the runtime dir in
 `GRADLE_OPTS`, `SCCACHE_SERVER_PORT` from `free_port` in `SCCACHE_PORTS`, `DAEMONS_OFF` for MSBuild
 and Roslyn): shared daemons ran the user's builds under the lane and the agent's outside it (#669,
