@@ -80,12 +80,20 @@ export class Upstream {
   // Upstream's maintainer or a collaborator (they can push to it): their own driver's writes there
   // are their own work, never a send upstream, so never asked. The gate is for a user's driver
   // reaching the maintainer's repository; it held the owner's own issue comments until he answered
-  // (2026-11-26: "it never should halt our work"). The mod's canPush.
-  private async maintainer(slug: string): Promise<boolean> {
+  // (2026-11-26: "it never should halt our work"). The mod's canPushAll: every name upstream answers
+  // to (gatedWhere's slugs), in order, stopping at the first no. patches.json's upstream alone is a
+  // contributor's own fork when their clone tracks it, and they can push to that: their driver's
+  // writes to the maintainer's repository went out unasked (#1549, 2026-11-26).
+  private async maintainer(slugs: string[]): Promise<boolean> {
     if (!this.d.canPush) return false
+    for (const slug of slugs) if (!await this.pushes(slug)) return false
+    return slugs.length > 0
+  }
+
+  private async pushes(slug: string): Promise<boolean> {
     const now = this.now(), had = this.pushable.get(slug)
     if (had && (had.ok || now - had.at < PUSH_RECHECK_MS)) return had.ok
-    const ok = await this.d.canPush(slug).catch(() => false)
+    const ok = await this.d.canPush!(slug).catch(() => false)
     this.pushable.set(slug, { ok, at: now })
     return ok
   }
@@ -146,7 +154,7 @@ export class Upstream {
     if (aim.why === 'send') return SEND_VIA_TOOL
     if (aim.why === 'plugin' && !aim.named && !originIs(await this.d.origin(aim.at), g.slugs)) return ''
     if (aim.why === 'slug' && await this.developer(aim.at, g)) return ''
-    if (await this.maintainer(g.slug)) return ''
+    if (await this.maintainer(g.slugs)) return ''
     return this.ask(session, `The driver wants to send this to GitHub (${g.slug}), publicly: ${shownCommand(command, aim)}`)
   }
 
@@ -156,7 +164,7 @@ export class Upstream {
     const g = this.where(env, cwd)
     if (!githubAimsUpstream(name, input, g.slugs)) return ''
     if (await this.developer(cwd, g)) return ''
-    if (await this.maintainer(g.slug)) return ''
+    if (await this.maintainer(g.slugs)) return ''
     return this.ask(session, `The driver wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shownInput(input)}`)
   }
 

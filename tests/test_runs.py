@@ -753,12 +753,28 @@ class ScheduledFlows(Base):
         row = schedule.runs("nightly")[-1]
         self.assertEqual(row["outcome"], "skipped")
         self.assertEqual(row["why"], f"run nightly-{day} waits for Claude at a checkpoint (nightly-code-1 (code 1) is failed: "
-                                     f"opencode exited 1): wb run resume nightly-{day}, and the next fire starts")
+                                     f"opencode exited 1): then wb run resume nightly-{day}")
         self.assertIn("waits for Claude at a checkpoint", out.getvalue())
-        r.set_status(phase="paused", why="the budget")
-        self.assertIn("is paused (the budget): wb run resume", schedule.held_why(r))
+        r.set_status(phase="paused", why="the day cap: $5.00 spent today")
+        self.assertEqual(schedule.held_why(r), f"run nightly-{day} is paused (the day cap: $5.00 spent today): once that "
+                                               f"allows, wb run resume nightly-{day}; or wb run stop nightly-{day}")
         r.set_status(phase="running", why="")
         self.assertEqual(schedule.held_why(r), f"run nightly-{day} is still going")
+
+    def test_a_flow_fire_held_by_its_last_runs_budget_names_the_amend_that_lets_it_go_on(self):
+        # #1546 (2026-11-26): the row said `wb run resume <run>, and the next fire starts`, and the
+        # resume paused again at once at the same budget
+        from workbench import schedule
+        r = runs.Run("nightly-1")
+        r.dir.mkdir(parents=True)
+        store.write_json(r.dir / "spec.json", {"flow": self.NIGHT})
+        r.set_status(phase="paused", why="the run's budget: $2.00 spent of $2.00, and the next request can cost up to $0.01")
+        self.assertEqual(schedule.held_why(r), "run nightly-1 is paused (the run's budget: $2.00 spent of $2.00, and the next "
+                         "request can cost up to $0.01): wb run amend nightly-1 --budget-usd N, then wb run resume "
+                         "nightly-1; or wb run stop nightly-1")
+        r.set_status(phase="paused", why="the run's GPU budget: 30 of 30 minutes used")
+        self.assertIn("wb run amend nightly-1 --budget-min N, then wb run resume nightly-1", schedule.held_why(r))
+        self.assertNotIn("next fire starts", schedule.held_why(r))
 
     def wait_ended(self, name):
         deadline = time.time() + 60
@@ -1017,6 +1033,28 @@ class Runs(Base):
         self.assertEqual(self.wait_run("chk", ("review", "failed"))["phase"], "review")
         self.assertEqual([f["result"]["verdict"] for f in runs.report_of("chk")["final"]], ["unsure"])
 
+    def test_a_resume_at_a_claude_checkpoint_is_refused_with_its_feed_and_a_held_fire_names_it_too(self):
+        # #1546 (2026-11-26): a resume there set the run running and acked the checkpoint, which
+        # tick raises once, so it sat with nothing due and every scheduled fire after it skipped
+        from workbench import schedule
+        flow = {"v": 1, "name": "chk", "params": {"areas": "list"}, "stages": [
+            AUDIT["stages"][0],
+            {"id": "merge", "claude": True, "from": "find"},
+            {"id": "verify", "card": "verify", "from": "merge", "prompt": "Check this finding:\n{item}"},
+            {"id": "end", "final": True, "from": "verify"}]}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Audit area": {"findings": [finding("A1", "claim-one")], "covered": ["README.md"]}})
+        run_wb("run", "start", "chk", "--plan", self.plan(flow), "--param", "areas=a", "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("chk", ("checkpoint", "review", "failed"))["phase"], "checkpoint")
+        feed = "wb run report chk --stage find, then wb run feed chk merge --file <list.json>"
+        self.assertEqual(schedule.held_why(runs.Run("chk")),
+                         f"run chk waits for Claude at a checkpoint (stage merge is Claude's): {feed}")
+        code, _, err = wb("run", "resume", "chk")
+        self.assertEqual(code, 1)
+        self.assertIn(feed, err)
+        self.assertEqual(runs.Run("chk").status["phase"], "checkpoint")
+        self.assertIsNotNone(runs.awaiting_feed(runs.Run("chk")))
+
     def test_a_dead_driver_stops_its_run_once_and_resume_goes_on_from_the_journal(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
         run_wb("run", "start", "dead", "--plan", self.plan({**AUDIT, "name": "dead"}), "--param", "areas=a",
@@ -1206,6 +1244,34 @@ class Runs(Base):
         for n in (1, 2, 3):
             run_wb("discard", f"bo-code-{n}")
 
+    def ignore_lib(self):
+        (self.repo / ".gitignore").write_text("lib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore lib"], check=True)
+
+    def test_a_reviewer_and_a_chooser_read_the_gitignored_files_the_coder_wrote_which_accept_commits(self):
+        # #1547 (2026-11-26): {diff} and {diffs} were git's own view, so a coder's lib/util.py under
+        # a .gitignore's lib/ was in neither while wb accept --include commits it: the reviewer and
+        # the chooser judged part of the change
+        self.ignore_lib()
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({f"{r}-code-{n}": "shellwrite"
+                                                          for r, n in (("bxi", 1), ("boi", 1), ("boi", 2), ("boi", 3))})
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Review this": {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"},
+            "Pick the best attempt": {"best": "a1", "ranking": ["a1", "a2", "a3"], "why": "a1"}})
+        for name, flow in (("bxi", "build"), ("boi", "best-of")):
+            run_wb("run", "start", name, "--flow", flow, "--param", "request=Write 42 to answer.txt via main.py",
+                   "--repo", str(self.repo))
+        for name in ("bxi", "boi"):
+            self.assertEqual(self.wait_run(name, ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        review = store.Task("bxi-review-1").round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn("+++ b/lib/util.py", review.split("The change:")[1])
+        (pick,) = [n for n in runs.run_tasks(runs.Run("boi")) if n.startswith("boi-choose-")]
+        chooser = store.Task(pick).round_dir(1).joinpath("prompt.md").read_text()
+        self.assertEqual(chooser.count("+++ b/lib/util.py"), 3, chooser)
+        for n in ("bxi-code-1", "boi-code-1", "boi-code-2", "boi-code-3"):
+            run_wb("discard", n)
+
     def test_a_best_of_attempt_discarded_as_another_was_accepted_is_not_scored_as_the_models_rejected_work(self):
         # #1473 (the #1373 audit, 2026-11-26): wb run close wants every attempt accepted or
         # discarded, and each losing attempt's row was a judged discard with credit 0, so every
@@ -1318,6 +1384,9 @@ class Runs(Base):
         st = runs.Run("pq").status
         self.assertEqual((st["phase"], st.get("cause")), ("checkpoint", "item"), st)
         self.assertIn("pq-code-1 (code 1) is failed", st["why"])
+        # #1546's review (2026-11-26): its refusal at an unfed claude stage took this resume too,
+        # exit 1, though the merge's checkpoint isn't raised yet: only one tick raised is waited on
+        self.assertIsNone(runs.awaiting_feed(runs.Run("pq")))
         self.assertIn("resumed pq", run_wb("run", "resume", "pq"))
         st = self.wait_run("pq", ("checkpoint", "review", "failed", "stopped"), timeout=60)
         self.assertEqual((st["phase"], st["why"]), ("checkpoint", "stage merge is Claude's"), st)

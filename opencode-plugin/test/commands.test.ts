@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { AFTER, definitions, DONE_NOTE, HAND_BACK, MODELS, QUIT, registerCommands, SCOUT_NOTE, UPDATE, UPDATE_MS,
+import { AFTER, definitions, DONE_NOTE, HAND_BACK, HAND_ONE, MODELS, QUIT, registerCommands, SCOUT_NOTE, UPDATE, UPDATE_MS,
   type CommandHost, type Deps } from '../commands.ts'
 
 // The user's Workbench commands in OpenCode (#1315), against a fake wb and session API:
@@ -63,6 +63,16 @@ test('/workbench-quit-and-hand-back hands the tasks over and starts the turn tha
   expect(error.includes('wb takeover --all failed')).toBe(true)
   expect(none.done).toEqual([])
   expect(none.posted).toEqual([])
+})
+
+test('#1550: a hand-back that exits 0 having taken nothing over leaves the Workbench agent but starts no turn, and says how to hand one over', async () => {
+  const out = 'left parked by an earlier quit (leave them unless the user asks): t1'
+  const w = world('workbench', { takeover: { ok: true, out } })
+  await w.run(HAND_BACK)
+  expect(w.done).toEqual([`switch ${AFTER}`])
+  expect(w.posted).toEqual([{ sessionID: 's1', text: `${out}\n${HAND_ONE}`, description: `Workbench: nothing handed over. ${out}`,
+    metadata: { source: 'workbench.command' }, resume: false } as never])
+  expect(HAND_ONE.includes('`wb takeover <name>`')).toBe(true)
 })
 
 test("/workbench-models marks the weekly check raised and starts the driver's model check", async () => {

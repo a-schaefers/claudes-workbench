@@ -511,6 +511,29 @@ export async function within(p: Promise<unknown>, ms: number): Promise<void> {
   clearTimeout(timer as never)
 }
 
+// The upkeeps set up in this process, on globalThis (notices.ts's lane is per process, an Upkeep
+// per instance): a wake's turn reads the blocks as they stand at its first step, and OpenCode runs
+// no `prompt` hook for a synthetic message (`Session.synthetic` admits it without `prepare`), so
+// notices.ts refreshes them first (`beforeWake`). Without it the wake for a review came with the
+// `workbench` entry of the last idle look, the task still running, and the driver said so and
+// ended its turn (#1545, 2026-11-26).
+const UPKEEPS = '__workbenchUpkeeps'
+const upkeeps = (): Set<Upkeep> => {
+  const g = globalThis as Record<string, unknown>
+  return (g[UPKEEPS] ??= new Set<Upkeep>()) as Set<Upkeep>
+}
+
+// The session's blocks read again before a wake goes into it, as the `prompt` hook does before a
+// typed prompt: by each upkeep that knows the session, else by the first (it learns it), waited
+// for at most `ms`
+export async function beforeWake(sessionID: string, ms = REFRESH_WAIT_MS): Promise<void> {
+  const all = [...upkeeps()]
+  if (!sessionID || !all.length) return
+  const knowing = all.filter(u => u.sessions.has(sessionID))
+  await within(Promise.all((knowing.length ? knowing : all.slice(0, 1))
+    .map(u => u.learn(sessionID).then(() => u.refresh(sessionID)))), ms)
+}
+
 // The server part's setup calls this: the hooks and the event feed; nothing without the kernel,
 // the session hooks or the event stream
 export async function upkeep(host: UpkeepHost, k?: Kernel, io?: Io): Promise<(() => Promise<void>) | undefined> {
@@ -534,6 +557,7 @@ export async function upkeep(host: UpkeepHost, k?: Kernel, io?: Io): Promise<(()
     await host.session.hook('context', (input) => u.context(input)),
     await host.session.hook('compaction', (input) => u.compaction(input)),
   ]
+  upkeeps().add(u)
   const stop = new AbortController()
   void (async () => {
     while (!stop.signal.aborted) {
@@ -545,6 +569,7 @@ export async function upkeep(host: UpkeepHost, k?: Kernel, io?: Io): Promise<(()
   })()
   return async () => {
     stop.abort()
+    upkeeps().delete(u)
     for (const r of regs) await r.dispose().catch(() => {})
   }
 }

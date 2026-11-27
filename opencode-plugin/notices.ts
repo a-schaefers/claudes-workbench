@@ -25,6 +25,7 @@ import { ACTIVE, NEEDS, NO_ANSWER, WAKE_OPENING, noticePlan, noticesDue, owns, r
 import type { NoticeRow, StatusFile, TaskFile } from '../mod/types/wire.d.ts'
 import { Jobs } from './jobs.ts'
 import { shownHere, whenShownHere } from './chat.ts'
+import { beforeWake } from './upkeep.ts'
 
 export const SCAN_MS = 15_000          // the timer's look: held notices, the rewake net, the jobs
 export const EARS_RETRY_MS = 2_000     // wb events respawned this long after it ends, doubling to a minute
@@ -316,6 +317,9 @@ export class NoticeLane {
     if (!this.sessions) return false
     let said = text
     if (resume && (await this.deps.run(['chat', 'away'], sid)).out.trim() === 'away') said = `${text}\n\n${AWAY_TAIL}`
+    // its turn reads the session's blocks at its first step, and no prompt hook runs for a synthetic
+    // one: upkeep's read again first, or a review's wake said the task was still running (#1545)
+    if (resume) await beforeWake(sid)
     try {
       await this.sessions.synthetic({ sessionID: sid, id, text: said, description: `Workbench: ${String(meta.title ?? '')}`.trim(),
         metadata: { source: SOURCE, ...meta }, delivery, ...(resume ? {} : { resume: false }) })

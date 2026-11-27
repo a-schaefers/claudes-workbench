@@ -3935,6 +3935,23 @@ class Lifecycle(Base):
         self.assertIn("+# changed in round 2", run_wb("diff", "t-fb"))  # wb diff's "all of it" too
         self.assertIn("since your last review: (no changes)", runner.review_diff(t))
 
+    def test_the_web_apps_task_sheet_shows_the_ignored_files_wb_diff_and_accept_include_count(self):
+        # #1548 (the 2.2 bar seal, 2026-11-26): the agent shell-wrote lib/util.py under an ignored
+        # lib/; wb diff and the review notice listed it, but the phone's task sheet (chat.task_diff)
+        # passed no force, so it showed main.py importing a module it never listed
+        from workbench import chat
+        self.ignore_lib()
+        self.start("t-sheet", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-sheet", {"review"})
+        t = store.Task("t-sheet")
+        self.assertEqual(runner.ignored_to_commit(t), ["lib/util.py"])
+        d = chat.task_diff(t)
+        self.assertIn("lib/util.py", [f["path"] for f in d["files"]])
+        self.assertEqual(d["stat"], run_wb("diff", "t-sheet", "--stat").rstrip("\n"))
+        one = chat.task_diff(t, full=True, path="lib/util.py")
+        self.assertIsNotNone(one)
+        self.assertIn("+++ b/lib/util.py", one["diff"])
+
     def test_wb_verify_and_wb_shot_run_the_candidate_with_the_ignored_files_accept_commits(self):
         # #1275 (the 2.0 bar loop, 2026-11-24): #1259 put the agent's lib/util.py, under
         # Python.gitignore's lib/, in the review diff but not in verify's candidate: wb verify
@@ -9571,6 +9588,52 @@ class Steering(Base):
         self.assertFalse(st.get("taken_over"))
         self.assertTrue(store.Task("t-new").status["taken_over"])
 
+    def test_a_hand_back_straight_after_the_quit_takes_over_what_that_quit_parked(self):
+        # #1550 (the 2.2 bar's seal, 2026-11-26): /workbench-quit, then the hand-back straight
+        # after, took over nothing (#1540 left every parked task) and exited 0, and the mod and
+        # the plugin still told Claude the tasks were its own to finish
+        here = os.getcwd()
+        self.start("t-old", "ok", "--test", TEST_CMD)
+        wait_phase("t-old", {"review"})
+        run_wb("stop", "--all", "--park-waiting", "--repo", here)        # an earlier quit
+        old = store.Task("t-old")
+        old.set_status(parked=old.status["parked"] - 60)
+        self.start("t-rev", "ok", "--test", TEST_CMD)
+        wait_phase("t-rev", {"review"})
+        self.start("t-run", "slow")
+        self.wait_session("t-run")
+        run_wb("stop", "--all", "--park-waiting", "--repo", here)        # the latest quit
+        self.assertEqual(store.Task("t-rev").status["parked"], store.Task("t-run").status["parked"])
+        out = run_wb("takeover", "--all", "--user", "--repo", here)
+        self.assertRegex(out, r"(?m)^took over t-rev")
+        self.assertRegex(out, r"(?m)^took over t-run")
+        self.assertIn("left parked by an earlier quit (leave them unless the user asks): t-old", out)
+        for name in ("t-rev", "t-run"):
+            st = store.Task(name).status
+            self.assertTrue(st["taken_over"])
+            self.assertFalse(store.parked(st))
+        self.assertTrue(store.parked(store.Task("t-old").status))
+        self.assertFalse(store.Task("t-old").status.get("taken_over"))
+
+    def test_a_hand_back_a_day_after_the_quit_leaves_what_that_quit_parked(self):
+        # #1550's review (2026-11-26): a quit, then a day later /workbench and the hand-back with
+        # nothing delegated between, took over yesterday's parked task, and Claude was told to
+        # finish and accept it (#1540 back): the latest quit counted however old it was
+        here = os.getcwd()
+        self.start("t-old", "ok", "--test", TEST_CMD)
+        wait_phase("t-old", {"review"})
+        run_wb("stop", "--all", "--park-waiting", "--repo", here)
+        old = store.Task("t-old")
+        st = old.status
+        store.write_json(old.dir / "status.json", {**st, "parked": st["parked"] - 86400,
+                                                   "updated_at": st["updated_at"] - 86400})
+        out = run_wb("takeover", "--all", "--user", "--repo", here)
+        self.assertNotRegex(out, r"(?m)^took over ")
+        self.assertIn("left parked by an earlier quit (leave them unless the user asks): t-old", out)
+        st = store.Task("t-old").status
+        self.assertTrue(store.parked(st))
+        self.assertFalse(st.get("taken_over"))
+
     def test_wb_doctor_names_the_tasks_left_waiting_on_claude_for_days(self):
         # #541: a task left stuck, failed or in review for weeks was named nowhere
         self.start("t-idle", "ok")
@@ -9634,9 +9697,9 @@ class Steering(Base):
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         self.assertEqual(store.Task("t-mine").status["phase"], "stuck")
         out = run_wb("takeover", "--all", "--repo", here)
-        # the quit parked it: the hand-back leaves it so (#1540)
-        self.assertIn("left parked by an earlier quit (leave them unless the user asks): "
-                      "t-mine", out)
+        # the quit just parked it: the hand-back straight after takes it (#1550; an earlier
+        # quit's stays parked, #1540)
+        self.assertIn("took over t-mine", out)
         self.assertIn("left alone (other sessions'): t-theirs", out)
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         with self.assertRaises(SystemExit):

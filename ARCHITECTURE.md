@@ -1187,8 +1187,11 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   the notice aged out past the hour, a run having no rewake), and both hosts' context names the run with no
   task open (#1491: the run's `wb status` lines, after `no open tasks`, were dropped). A fire while the last
   fire's run still has a live driver is a `skipped` row, whose why (`schedule.held_why`) names a run held at a
-  checkpoint or paused, with its why and `wb run resume <run>` (#1510: one held past the next night said only
-  `still going`, every night); a run waiting on its final stage is in `review`, not open, so the next fire starts. Its row names the run, and `wb schedule list` shows it
+  checkpoint or paused, with its why and the step that answers it (#1510: one held past the next night said only
+  `still going`, every night): at a `claude` stage `wb run report <run> --stage <from>`, then `wb run feed`; at the
+  run's budget `wb run amend <run> --budget-usd N` (`--budget-min` for the GPU one), then `wb run resume`, or `wb run
+  stop`; at an item's checkpoint or another pause `wb run resume` (#1546: a resume for every hold wedged a run at
+  a `claude` stage and re-paused one at its budget); a run waiting on its final stage is in `review`, not open, so the next fire starts. Its row names the run, and `wb schedule list` shows it
   as it stands (`runs.status_line`); `wb doctor` asks its unit's PATH for opencode alone (`schedule.needs`).
   wb's own timers still, not OpenCode's automations, for the reason above. A repo's flow is never scheduled.
 
@@ -1314,8 +1317,8 @@ new files out, named ("left out of the review snapshot, too big to store each ro
 top-level directories with most new files while over `NEW_FILES_MAX`, then the biggest while the
 rest pass `SNAPSHOT_MAX` 32 MiB; the next review shows them again), built with `add -u` plus kept files by name: `add -A` filled the user's
 object store each round (#431). `wb
-verify` takes the tree accept would land (`landing=True`, #642). The snapshot and both diffs, and
-`wb diff`, hold the ignored files `--include` commits too (`runner.ignored_to_commit`: of
+verify` takes the tree accept would land (`landing=True`, #642). The snapshot and both diffs,
+`wb diff` and the web app's task sheet (`chat.task_diff`, #1548), hold the ignored files `--include` commits too (`runner.ignored_to_commit`: of
 `runner.accept_writes`, the agent's edit tools', its shell's and Claude's, what git ignores; added
 `add -f` in the scratch index, `force=` on `gitops.diff`, `snapshot_left` and `with_new_files`):
 without them an agent's feedback-round change to its `lib/util.py` read "the diff since your last
@@ -7314,7 +7317,8 @@ address (#534).
   --json`, which can start OpenCode. `summary` (`chat.task_summary`): phase, round, step, last,
   `created_at`/`updated_at`, model, via, provider_name, the round's report (`store.Task.report`, as
   `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`).
-  `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), `stat`
+  `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), with the
+  ignored files `--include` commits (`force=runner.ignored_to_commit`, as `wb diff`: #1548), `stat`
   and `files` (numstat); `full=1` the diff instead (`path=` one of `files`, `:(literal)`, else 404 "no
   such file in the diff"), each line cut at `transcript.JSON_LINE_CHARS` (`lines_cut`), `diff: null`
   and `cut` past `TASK_DIFF_CHARS` 256 KB (`gitops.diff`'s `limit`: never held whole); no worktree or
@@ -7839,13 +7843,17 @@ Only the user's two slash commands stop the delegation, never words in a message
   count, rewake, the boundary, the jobs' gate and `wb status` without `--all`, until `spawn_runner`
   or a named `wb takeover <task>` clears it (#541).
 - **`/workbench-quit-and-hand-back-claude`**: `wb takeover --all --user` with the same scope (each open run's driver in it
-  stopped first, as the quit's, `stopped: wb run <run>`, #1471; a task an earlier quit parked is
-  left so, `left parked by an earlier quit (leave them unless the user asks): …`, never a
-  `took over` line, #1540), then
+  stopped first, as the quit's, `stopped: wb run <run>`, #1471; the tasks the latest quit just
+  parked are taken over, `cli._just_parked`: its one `parked` stamp and those within
+  `PARK_GROUP_SECS` (5 s) of it, while that quit is under `PARK_FRESH_SECS` (10 minutes) old and
+  no task of the scope, closed ones too, was made or changed since, #1550 (a day-old quit's stay
+  parked, its review); a task an earlier quit parked is left so, `left parked by an earlier quit (leave
+  them unless the user asks): …`, never a `took over` line, #1540), then
   DONE_NOTE as a turn (leave the mode; per task taken over `wb diff`, finish it, run the acceptance
   command, `wb accept`, `--merge` only if asked; carry on without delegating) whenever the output
   has a `took over` line, even on a non-zero exit over a refused task (a toast says some weren't
-  taken, the note carries the refusals, #918); none taken over, no turn.
+  taken, the note carries the refusals, #918); none taken over, no turn, whatever the exit (exit 0
+  with every task parked earlier: the output and `HAND_ONE`, ask for one by name, #1550).
 
 The scope keeps them to this session's tasks (`mine`, *Waking Claude, exactly once*): another
 session's agents keep running, listed as left alone (the 2026-11-16 audit). If `wb` fails, the
@@ -8265,10 +8273,13 @@ checkout whose origin is upstream (a marketplace renamed), or when the line anyw
 (`export GH_REPO=<slug> && gh issue create` named it outside the outward command), unless that runs in a developer's own
 clone of upstream (`developerClone`: `git -C <dir> remote get-url origin`, 5 s, `originIs`; never a gated directory or
 inside the plugins directory), which is no user's Claude, nor (but `wb patch send`, which checks its own yes) when
-the signed-in GitHub user can push to the upstream, its maintainer or a collaborator (`canPush`: `gh api
-repos/<slug> --jq .permissions.push`, gh's word only, 8 s; a yes kept for the session, a no or no answer
-`PUSH_RECHECK_MS` 10 minutes): the owner's own Claude's issue comments from his clone, patches.json's `source`, each
-waited on his click (2026-11-26: "it never should halt our work"). The gated directories (`gateConf`): the patch clone,
+the signed-in GitHub user can push to every name the upstream answers to, its maintainer or a collaborator
+(`canPushAll`: `canPush` of each of the gate's slugs, patches.json's `upstream`, `UPSTREAM` and `FORMER_UPSTREAM`, in
+order, stopping at the first no; `canPush`: `gh api repos/<slug> --jq .permissions.push`, gh's word only, 8 s; a yes
+kept for the session, a no or no answer `PUSH_RECHECK_MS` 10 minutes): the owner's own Claude's issue comments from
+his clone, patches.json's `source`, each waited on his click (2026-11-26: "it never should halt our work"). Every
+name, not patches.json's alone: a contributor's clone of their own fork records the fork there, and push rights on it
+let their writes to the maintainer's repository out unasked (#1549). The gated directories (`gateConf`): the patch clone,
 `patches.json`'s `source`, else `WB_SOURCE`, else `~/.local/share/workbench/source`; `$WB_HOME/upstream/`; and Claude
 Code's own `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/` (and `CLAUDE_CODE_PLUGIN_CACHE_DIR`) `marketplaces/workbench` and
 `cache/workbench`: the marketplace install's clone has upstream as its origin, and was once exempted as a developer's
@@ -8806,9 +8817,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     refused with `SEND_VIA_TOOL`. An MCP tool whose namespace (its server's name) holds `github`
     (`githubTool`; no info: `<server>_<name>`), not `get_`/`list_`/`search_`, whose input names
     the upstream or a repository of its name (`githubAimsUpstream`), asks the same, unless the
-    session's directory is a developer's clone. Neither asks a user who can push to the upstream
-    (`UpstreamDeps.canPush`, consent.ts's `gh api repos/<slug> --jq .permissions.push`; `PUSH_RECHECK_MS`
-    after a no), the mod's `canPush`. The form (`Asker`, `consent.ts`'s): `The driver
+    session's directory is a developer's clone. Neither asks a user who can push to every name the
+    upstream answers to (`Upstream.maintainer`, each of `gatedWhere`'s slugs through
+    `UpstreamDeps.canPush`, consent.ts's `gh api repos/<slug> --jq .permissions.push`, stopping at
+    the first no; `PUSH_RECHECK_MS` after a no), the mod's `canPushAll`: a fork owner is asked (#1549). The form (`Asker`, `consent.ts`'s): `The driver
     wants to send this to GitHub (<slug>), publicly: <the command>` (`shownCommand`: the whole
     line up to 600 characters, else the outward command then the line's start; an MCP call's
     input up to 4000, `shownInput`), `Send it` / `Don't send`; the yes lets that one call through,
@@ -9163,7 +9175,11 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       notices.ts wakes it for them, #1493; no bench replay; `notes.md`, `coding.json`, `workflows.json`) at a
       prompt (waited for at most `REFRESH_WAIT_MS` 3 s, `within`), a switch of agent (the event, which
       names a session switched to the Workbench agent before any hook has, or
-      the `context` hook seeing a new one) and each idle look; `sync` lists the session's entries
+      the `context` hook seeing a new one), each idle look, and before each wake notices.ts sends
+      (`beforeWake`, at most `REFRESH_WAIT_MS`, by each upkeep of the process that knows the
+      session, else the first: they are on `globalThis`, as the notices' lane is): OpenCode runs no
+      `prompt` hook for a synthetic message, so a review's wake once came with the last idle look's
+      `workbench` entry, the task still running, and the driver said so and ended its turn (#1545); `sync` lists the session's entries
       once, then puts each block whose text differs and removes each of `OURS` it shouldn't have
       (another plugin's keys are never touched), one refresh at a time per session. Unlike the
       mod's once-per-conversation `web-chat` block, the entry follows away: a prompt the user typed
@@ -9201,8 +9217,9 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     switched from the Workbench agent to `build` (`AFTER`; only when it is on it), `QUIT_NOTE` with
     `resume: false` (no turn). `/workbench-quit-and-hand-back` (`HAND_BACK`, the mod's
     `…-hand-back-claude`): `wb takeover --all --user`; nothing taken over (`took over` nowhere in
-    its output) is the command's error and the mode stays; else the switch to `build` and
-    `DONE_NOTE`, which starts the turn that finishes them. `/workbench-models` (`MODELS`): scout.json's
+    its output) on a failure is the command's error and the mode stays; on exit 0 the switch to
+    `build` and the output with `HAND_ONE` (ask for a parked task by name), no turn (#1550); else
+    the switch and `DONE_NOTE`, which starts the turn that finishes them. `/workbench-models` (`MODELS`): scout.json's
     `offered_at` written, as the mod's `scoutOffered`, and `SCOUT_NOTE` (the mod's, its reference
     named as the `workbench-models` skill) as a turn. `/workbench-update` (`UPDATE`): `wb update`
     (`UPDATE_MS` 600 s; the rest `RUN_MS` 120 s), its output posted without a turn (OpenCode reloads
@@ -9537,7 +9554,8 @@ record: the plugin reads `notify.jsonl` (its last `NOTIFY_TAIL` 1 MiB), each tas
   one host. A session new here (its first execution, a new typed one) has notify.jsonl read again.
 - **Delivery** (each due notice's `noticePlan`, `busy` the session's execution under way): `wake`:
   `wb ack <task> <ts>` (exit 3: another server or `wb wait` took it; any other failure: tried again
-  at the next look), then `session.synthetic` `{sessionID, id: noticeId(task, kind, ts), text,
+  at the next look), then (the session's upkeep entries read again first, `beforeWake`: its turn
+  gets no `prompt` hook, #1545) `session.synthetic` `{sessionID, id: noticeId(task, kind, ts), text,
   description: "Workbench: <task> <headline>", metadata: {source: "workbench.notice", task, kind,
   ts, title}, delivery: "queue"}`, which opens a turn on an idle session; refused, `wb ack <task>
   <prev> --if <ts>` puts the mark back and the net tries again after a minute (`dropped`). `steer`
@@ -9838,7 +9856,9 @@ an object of `runs.PARAM_KEYS` `{type, description, default, choices, optional}`
 `max_items` (`MAX_ITEMS` 200 distinct items, the rest `not_run`, named; a refix's reviews of one change, `1`,
 `1~r1`, …, count once, and an item started is never cut: #1484), `claude`, `final`, and `prompt` (the item's spec, by
 default `{item}`; `runs.render` only substitutes, an object as fenced JSON, each place cut at `runs.CUTS`, said).
-Over a code stage (`runs.CODE_PLACES`) a report's prompt may carry `{diff}` and `{report}`: the reviewed round's
+Over a code stage (`runs.CODE_PLACES`) a report's prompt may carry `{diff}` and `{report}`: the change since the
+task's base with the ignored files `--include` commits (`runs._task_diff`, `runner.ignored_to_commit`; `{diffs}`'s
+too: both left a coder's `lib/util.py` out, #1547), and the reviewed round's
 report (`store.Task.report`: the coder's summary and test line, `runs._code_report`), so a review after a refix
 reads the coder's "done, or declined with why" (the shipped build, fix and best-of reviews carry it; #1134's
 study found reasoned declines asked again until `max` ran out). **A batch** (`batch` N): each member is
@@ -10043,7 +10063,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--args TEXT` (a flow's slash command's line as typed: `runs.parse_args`, its one param whole, else `k=v` words), `--dry-run`, `--repo DIR` (.: any directory in the repo, read from its top, and each item's `wb start --repo` is DIR, so its package is found, run.json `package_dir`, #1494), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE` (kept whole in run.json; past `runs.CUTS` 4,000 characters a line says each spec's `{context}` carries the first 4,000, and the spec says the cut, #1519), `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param (a `choices` one not among them; a `files` one matching nothing committed at the base, or over `runs.FILES_MAX` 1,000), a stage on an API role with no day cap (`meter.no_cap`), and with exit 3 `stage <id>: ` and wb start's own line for a stage (or escalate) role on API whose model can't be found (`runs.role_cant_run`: no API model, or one the catalog doesn't list, a missing key named, `models.unlisted_why`; read fresh, so a cold hosted.json never says a working API role is the GPU's, #1532), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `stop: wb run stop <run>` and that its notices wake the session as a task's (without the mod or the plugin, `wb wait <run>` in the background). `--dry-run` (#1295) stops after the cap check and the budget, before any file: a line per stage (its card or code, role and side, where its items come from, those `unless_exists` skips), each items stage's first spec cut at `runs.DRY_SPEC_CUT` 1,500 characters, and the estimate (`runs.dry_run`); exit 0, or 1 on a refusal (3 for a role that can't run). |
 | `wb run status [<run>]` | `--all`, `--json`, `--all-sessions` (and, suppressed, `--repo DIR`, `--session ID`) | Reaps a dead driver (`runs.reap`: `stopped`, one `run_stopped`); a line per run in the caller's scope (`runs.status_line`). |
 | `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, results (each done item of a stage no later one reads, with its trail: best-of's reviews, #1504), filtered, superseded, null, not_run, pending, code (each code item's task that exists: one refused at its start is `not_run` alone, and the `run_done` notice's `change(s) at review` counts none, #1531), spend; every item accounted for. |
-| `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`); from the web app (`WB_ACTOR=web`, no model's variables) its why is `runs.WEB_STOP` and a `run_stopped` notice tells the run's session. Resume (refused closed or at `review`, `runs._ended`): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
+| `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`); from the web app (`WB_ACTOR=web`, no model's variables) its why is `runs.WEB_STOP` and a `run_stopped` notice tells the run's session. Resume (refused closed or at `review`, `runs._ended`; refused, naming `wb run feed`, while a `claude` stage's inputs are in, its checkpoint raised (its journalled `notice` row) and it isn't fed, `runs.awaiting_feed`: the resume acked the checkpoint tick raises once and left the run running with nothing due, #1546; one not yet raised, under an item's checkpoint, is resumed, so tick raises it, #1510): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
 | `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items are `not_run`. |
 | `wb run feed <run> <stage> --file <json\|->` | | A `claude` checkpoint's merge: a JSON list, `inbox/<stage>-feed`; the run goes on. Refused on a closed run or one at `review`, before the inbox is written. |
 | `wb run close <run>` | | Refused while a code item (a task not started as a report) is open (accept or discard it); stops the driver, discards report items never taken, writes `result.json`, phase `closed`. |
@@ -10056,9 +10076,9 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb flow import <file.md>` | `--name NAME` (the file's), `--card NAME` (a code stage without), `--out FILE` (`$WB_FLOWS/<name>.json`), `--force` | *Deep workflows*: a slash command's Markdown as a flow of yours (`runs.import_command`): one stage over `--param items`, `$ARGUMENTS` as `{item}`. Refuses a positional `$1`, a file there already without `--force`, a flow `runs.validate` refuses. |
 | `wb coding [only\|ask\|decide]` | `allow <task> [--edit "…"] [--said "…"] [--when "…"]`, `used <task> --did "…"` | *Claude coding*: the mode and allowances; `allow` records the user's yes for one task until it goes back to the agent; `used` what Claude changed (exit 1 with none). |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat`, `--setup` | *Screenshots of the base and the candidate*. |
-| `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--user` (the user's ask, recorded) | Stops the runner: phase `review`, status `taken_over`, `hands_off_at` unless set (a file Claude then writes under an ignored path is refused at accept until `--include`, #1179). Refuses (exit 1) an unfinished checkout (the hand-back remade it and lost Claude's edits, #655). Outside "Let Claude decide" needs the user's yes, else exit 3. `--all` stops each open run's driver in the scope first (`runs.stop`, `items=False`, `stopped: wb run <run>`, #1471), then takes the rest past a refusal (#601), skipping unready checkouts (#918) and parked tasks (`store.parked`, an earlier quit's: `left parked by an earlier quit (leave them unless the user asks): …`, #1540; a named takeover clears the mark). Scope (`_scope`, for stop, resume, wait, status too): from Claude Code's Bash without `--repo`/`--session`, the caller's (`cli._caller`: every id in `claude-sessions/<CLAUDE_PID>`, and its directory, #693; from an OpenCode driver its `OPENCODE_SESSION_ID`'s root and the subagents' sessions under it, `store.opencode_family`, and directory, #1309, #1477), else `--all-sessions` or a terminal: every session's; by `session` id wherever it ran, or by directory (`repo`, package, `cwd`; real paths, case-folded where the file system is; never home or `/`, but for a gone session's task started exactly there, #1403) when no `session`, no `--session` given, or its `claude_pid` is gone (#695; an OpenCode task's session `gone` by its heartbeat, claimed only by an OpenCode session, #1309); a task with neither key is everyone's. Others: `left alone (other sessions'): …`. |
+| `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--user` (the user's ask, recorded) | Stops the runner: phase `review`, status `taken_over`, `hands_off_at` unless set (a file Claude then writes under an ignored path is refused at accept until `--include`, #1179). Refuses (exit 1) an unfinished checkout (the hand-back remade it and lost Claude's edits, #655). Outside "Let Claude decide" needs the user's yes, else exit 3. `--all` stops each open run's driver in the scope first (`runs.stop`, `items=False`, `stopped: wb run <run>`, #1471), then takes the rest past a refusal (#601), skipping unready checkouts (#918) and parked tasks (`store.parked`, an earlier quit's: `left parked by an earlier quit (leave them unless the user asks): …`, #1540; a named takeover clears the mark), but for those the latest quit just parked, under `PARK_FRESH_SECS` (600 s) ago with nothing in the scope made or changed since (`_just_parked`, `PARK_GROUP_SECS`, #1550). Scope (`_scope`, for stop, resume, wait, status too): from Claude Code's Bash without `--repo`/`--session`, the caller's (`cli._caller`: every id in `claude-sessions/<CLAUDE_PID>`, and its directory, #693; from an OpenCode driver its `OPENCODE_SESSION_ID`'s root and the subagents' sessions under it, `store.opencode_family`, and directory, #1309, #1477), else `--all-sessions` or a terminal: every session's; by `session` id wherever it ran, or by directory (`repo`, package, `cwd`; real paths, case-folded where the file system is; never home or `/`, but for a gone session's task started exactly there, #1403) when no `session`, no `--session` given, or its `claude_pid` is gone (#695; an OpenCode task's session `gone` by its heartbeat, claimed only by an OpenCode session, #1309); a task with neither key is everyone's. Others: `left alone (other sessions'): …`. |
 | `wb verify <task>` | `--test CMD`, `--files PATH…`, `--expect TEXT`, `--timeout N` (300), `--setup` | *Verifying a fix against the base*; refused while the agent runs. SIGTERM/SIGHUP end it cleanly (`cli._ends_cleanly`, #372), like `wb image`, `wb audio`, `wb bench add`, `wb bench self` (`media.run_group`: the child's whole process group killed, since killing only a wrapper left its worker holding the GPU, #589). |
-| `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--park-waiting` | Status `stopping`, SIGTERM (15 s, `wait_exit`, then SIGKILL to its session and the agent's), `runner.sweep`, phase `stuck`, acked; worktree kept. `--all` (`stop_everything`): a `stopped` event, `last` `cli.BAIL_OUT`, status `infra` `stopped` (not the step's: `cli.stopped_outside`, #1260), status `parked` (`store.parked`: out of `wb status` and the mod's counts until `spawn_runner` or a named takeover clears it, #541); `--park-waiting` (with `--all`, the mod's quit) parks review/stuck/failed too, acking their news (`_park_waiting`, #698); unscoped (`_caller`'s scope: a terminal or `--all-sessions`, never an OpenCode or Claude Code session's bare call, #1500), `bench.stop_driver` first (another host's left, #876). Others: `left running (other sessions'): …`. `--all` stops each run's driver in the scope first (`runs.stop`, `items=False`: its items stop with the rest), named `wb run <run>`. |
+| `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--park-waiting` | Status `stopping`, SIGTERM (15 s, `wait_exit`, then SIGKILL to its session and the agent's), `runner.sweep`, phase `stuck`, acked; worktree kept. `--all` (`stop_everything`): a `stopped` event, `last` `cli.BAIL_OUT`, status `infra` `stopped` (not the step's: `cli.stopped_outside`, #1260), status `parked`, one stamp for the whole quit (#1550) (`store.parked`: out of `wb status` and the mod's counts until `spawn_runner` or a named takeover clears it, #541); `--park-waiting` (with `--all`, the mod's quit) parks review/stuck/failed too, acking their news (`_park_waiting`, #698); unscoped (`_caller`'s scope: a terminal or `--all-sessions`, never an OpenCode or Claude Code session's bare call, #1500), `bench.stop_driver` first (another host's left, #876). Others: `left running (other sessions'): …`. `--all` stops each run's driver in the scope first (`runs.stop`, `items=False`: its items stop with the rest), named `wb run <run>`. |
 | `wb resume <task> [<task>…]` | several names (start order, failures said, exit 1, #692), `--all` (`last` in `cli.INTERRUPTED` or starting `runner.UPDATED`: `cli._interrupted`, #788; never a guard's stop or a crash; in `store.all_tasks` order, each under its command lock, #544; a worktree problem or an API task whose repo became local-only is said and skipped, the rest go on), `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` | Reaps first. Stuck/failed, no live runner; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Round n+1 on a fresh session (`runner.RESUME`), undelivered notes as `NOTE_HEAD`; a self-review's green tree carried on (`self_review_tree`, `runner.carried_tree`, #1228); after a provider's stop (`infra: provider`) its provider's `no_credit` mark becomes its turn to ask (`cli._credit_turn`, #1178). Never ran a round: round 1 again (`_early_notes`); checkout cut short, or a `--after` task stopped by the reviewer before its checkout (held again until its time, #1204): remade (`_rechecks_out`). |
 | `wb accept <task> -m "…"` (a report task: no `-m`, *Deep workflows*) | `--include`, `--no-sign`, `--merge`, `--merge-as merge\|ff\|squash` (implies `--merge`; commands.json `repos` `merge` sets the default, without implying it), `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` | Reaps; a moved repo refused first (#498). Review only; a closed one only when status `unrecorded` (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner stops; past the base, nothing changed since the last commit (`cli._to_commit`: git's changes, ignored files written, edits in a filled submodule, #1307) accepts that commit, its `accepted` line ending `(-m unused: nothing changed since <commit>)` unless a squash took the message (`closing`'s `message`, #1393); a failed commit leaves it `stuck`, not live with no runner. Commits `<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:` (no AI co-author line); the step is measured from where it began (`gitops.step_base`: a retry past accept's commit, #879, or past an interrupted wb next's, #1302), and a retry puts `delegate/<task>` on that commit (`gitops.put_on_branch`, refused when the branch holds commits it lacks, #417). Ignored files changed since the agent stopped, or by its shell (#1210), that the commit leaves out are copied to `left-out/` first and named (`cli._keep_left`, #1179's review). Removes the worktree and runtime dir, records `tip`, keeps base..tip in `steps.bundle` (`gitops.bundle_steps`; `refs/workbench/accepted/<task>`, `gitops.keep_accepted`, only if it fails, #799, deleted once a merge lands the tip, else by gc). `--merge`: *Git, commits and projects* (`gitops.merge_lock`; failure: the accept stands, exit 5 `NOT_MERGED`, #247). A retry resumes from status `closing` (#246) while the worktree is gone or clean (`cli._gained_work`); meanwhile (`cli._accepting`) discard, feedback, next, resume and takeover refuse it (#878: discard recorded committed work as discarded); a merge already made is found by ancestry (`gitops.contains`), a squash by `closing`'s `merge_from` (#432); what a SIGKILLed merge left in the checkout is quit or backed out first (`gitops.clear_killed_merge`, #1231), once that try's signing git, if still waiting, is ended (`closing`'s `merge_git`, #1246). Writes the row, drops the rules and the review trees' refs (`_closed`); prints `the repo has no CLAUDE.md: write one (wb init)` when it has none (nor a committed AGENTS.md, #1513) and, for an API task, what it paid at the end of its `accepted` line (`savings.paid`: `· paid ≈$0.12`; a GPU fallback's API rounds, `· paid ≈$0.12 (before the GPU fallback)`, #1523), nothing else (#1322). Under `WB_SCHEDULE` (a scheduled run's headless Claude) `--merge` and `--merge-as` are refused before anything (*Scheduled runs*, #1204). |
 | `wb relocate <task> --repo <dir>` | | Refuses a repo without the base or a linked worktree; refuses a `.git` naming another git dir; repairs the link (`git worktree repair`), rewrites `gitdir.json`, task.json `repo`, `git_common`, `cwd`, `submodules.json` (`gitops.relocate`, #498, #682). |
@@ -10456,7 +10476,7 @@ off), not `wb start`'s.
 | Key | Meaning; set by |
 |---|---|
 | `phase`, `last`, `pid` | the phase; the last action; the runner's pid (cleared on exit) |
-| `parked` | `wb stop --all` or `--park-waiting`; counts only in review, stuck, failed (`store.parked`, `PARKS`); cleared by `spawn_runner`, a named `wb takeover <task>` (`--all` leaves it, #1540) |
+| `parked` | `wb stop --all` or `--park-waiting`; counts only in review, stuck, failed (`store.parked`, `PARKS`); cleared by `spawn_runner`, a named `wb takeover <task>` (`--all` leaves it, #1540, but for the latest quit's straight after it, `_just_parked`, #1550) |
 | `signalled` | a SIGTERM not from wb stopped it (`SIGNAL_STOP`); a shutdown's tasks batch by it (`runner._signal_notice`) |
 | `boot` | `store.boot_id` at start; `reap` reads another as a restart |
 | `machine`, `host` | `store.machine()`, `store.host()`: another machine's runner is never reaped, stopped or signalled here while its lock beats (`store.elsewhere`) |
@@ -11452,7 +11472,7 @@ doc needs its own `!/` line).
   `claude-coding`, `user-notes`, `dynamic-workflows`, `web-chat`, `workbench-wake`, `workbench-routes`, `workbench`) → `upkeep.ts`'s
   `KEYS` and `TASKS_KEY` (the entries' keys) and SKILL.md, which names them; **the mod's
   `KEEP_ON_COMPACT`** → `upkeep.ts`'s, word for word; **its `SCOUT_NOTE`, `QUIT_NOTE`,
-  `DONE_NOTE`, `CODING_RULES`, `WORKFLOWS_RULE`, `MODE_NOTE`, `NOTES_NOTE`, `AWAY_NOTE`, `WAKE_OFF_NOTE`** → `commands.ts`'s and
+  `DONE_NOTE`, `CODING_RULES`, `WORKFLOWS_RULE`, `MODE_NOTE`, `NOTES_NOTE`, `AWAY_NOTE`, `WAKE_OFF_NOTE`, `HAND_ONE`** → `commands.ts`'s and
   `upkeep.ts`'s, the same meaning in OpenCode's words (#1315); **the `wb` commands the quit commands
   run** (`stop --all --park-waiting`, `takeover --all --user`, `update`) → `commands.ts` too.
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught (`schema.py`, the ask server's import since #1278).
@@ -11572,7 +11592,7 @@ doc needs its own `!/` line).
   `upstream.ts` `Upstream`, over the same `mod/hooks/shell.ts`): one rule, two hosts, each a test of its own (the mod's,
   `consent.test.ts`, `upstream.test.ts`). **The gated directories** (`shell.ts` `gatedWhere`) ↔ `patches.source_dir`
   and Claude Code's plugin layout, read by `register.tsx`'s `gateConf` and `upstream.ts` alike. **The maintainer's
-  exemption** (`canPush` ↔ `Upstream.maintainer`, `PUSH_RECHECK_MS` in both).
+  exemption** (`canPushAll`/`canPush` ↔ `Upstream.maintainer`/`pushes`: every slug, `PUSH_RECHECK_MS` in both).
 - **A prompt's opening words** → `transcript` labels, `round_asks`, `lessons`, the fake OpenCode, the tests quoting them.
 - **Where a round's own prompt is** (`instructions.md` once `_start_fresh` makes prompt.md the handoff) → `store.round_prompt` (`current_task_prompt`, `round_asks`, `lessons`,
   `bench._step_prompt`).
@@ -11751,7 +11771,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/src/app.ts`'s strip; **`wb status`, `report`, `diff` and
   `log`'s words** → the web chat's task sheet (`chat.task_summary`, `task_diff`, `task_log`; app.ts's `drawSummary`,
   `drawDiff`, `drawLog`), through the helpers both read: `store.Task.report`, `verify.report_lines`,
-  `gitops.diff_base`/`diff_tip`, `transcript.log_body`/`LOG_KINDS` (#1201); **the `routed` watch kind** → the mod's
+  `gitops.diff_base`/`diff_tip`, `runner.ignored_to_commit` (#1548), `transcript.log_body`/`LOG_KINDS` (#1201); **the `routed` watch kind** → the mod's
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126); a role's

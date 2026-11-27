@@ -6,6 +6,8 @@ import { QUIET_MS } from '../jobs.ts'
 import { shown } from '../notices-tui.ts'
 import { ChatLane, lane as chatLane } from '../chat.ts'
 import { ACTIVE, CLOSED, NEEDS } from '../../mod/hooks/core.ts'
+import * as core from '../../mod/hooks/core.ts'
+import { upkeep, type Io, type UpkeepHost } from '../upkeep.ts'
 
 // Each phase, and the notice kinds that share its word, by name from core.ts's sets: a quoted phase
 // name in opencode-plugin, its tests too, is the kernel check's sign of a copied phase set
@@ -99,6 +101,49 @@ test('a review notice wakes its idle session once, as a queued synthetic bound t
   await w.lane.scan()
   expect(w.admitted.length).toBe(1)
   expect(w.acks().length).toBe(1)
+})
+
+// #1545 (2026-11-26): OpenCode runs no prompt hook for a synthetic message, so a wake's turn got the
+// `workbench` entry of the last idle look, the task still running, beside "is ready for review",
+// and the driver said it was running and ended its turn
+test('a wake puts the session\'s open-tasks entry as the tasks stand now before the synthetic goes in (#1545)', async () => {
+  const w = world()
+  const order: string[] = []
+  const phase = () => String(JSON.parse(w.files[`${HOME}/tasks/t1/status.json`]!).phase)
+  const io: Io = {
+    read: p => w.files[p],
+    list: dir => [...new Set(Object.keys(w.files).filter(p => p.startsWith(`${dir}/`)).map(p => p.slice(dir.length + 1).split('/')[0]!))],
+    run: async args => ({ ok: true, out: args[0] === 'status' ? `t1  ${phase()}` : '' }),
+    env: { HOME: '/h' },
+    now: () => w.now,
+  }
+  const hooks = new Map<string, (e: unknown) => unknown>()
+  const host = {
+    options: { env: { WB_HOME: HOME } },
+    session: {
+      hook: async (name: string, cb: (e: unknown) => unknown) => { hooks.set(name, cb); return { dispose: async () => {} } },
+      get: async () => ({ data: { agent: 'workbench', location: { directory: '/r' } } }),
+      instructions: { entry: {
+        list: async () => ({ data: [] }),
+        put: async ({ key, value }: { key: string; value: string }) => { if (key === 'workbench') order.push(`put ${value.split('\n')[1]}`) },
+        remove: async () => {},
+      } },
+    },
+    event: { subscribe: async function* () {} },
+  }
+  const stop = await upkeep(host as unknown as UpkeepHost, core, io)
+  try {
+    w.task('t1', P.running)
+    await hooks.get('prompt')!({ sessionID: 'ses_drv', prompt: { text: 'go' } }) // the start: the task running
+    const synthetic = w.lane.sessions!.synthetic
+    w.lane.sessions!.synthetic = async input => { order.push(`synthetic ${input.text.split('\n')[0]}`); return synthetic(input) }
+    w.task('t1', P.review)
+    w.notify({ task: 't1', kind: P.review, ts: w.now / 1000, text: 'diff here' })
+    await w.lane.scan()
+    expect(order).toEqual([`put t1  ${P.running}`, `put t1  ${P.review}`, 'synthetic [workbench] Task `t1` is ready for review.'])
+  } finally {
+    await stop!()
+  }
 })
 
 test('a resent notice under its fixed id admits nothing new: the inbox keeps the first', async () => {
