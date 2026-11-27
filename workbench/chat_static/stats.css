@@ -6,10 +6,10 @@
 .view-in .st-retry { margin: 0 0 8px; }
 .st-now-box[hidden] + .st-hist-box .st-h { margin-top: 4px; }
 .st-dim, .view-in .dim { color: var(--dim); }
-.view-in .ok { color: var(--ok); }
-.view-in .warn { color: var(--warn); }
+.view-in .ok { color: var(--ok-text); }
+.view-in .warn { color: var(--warn-text); }
 .view-in .bad { color: var(--bad); }
-.view-in .claude { color: var(--accent); }
+.view-in .claude { color: var(--accent-text); }
 
 /* Now: a card per GPU (and RAM), Running, Models, Queue */
 .st-gpu-h { overflow-wrap: anywhere; }
@@ -43,7 +43,7 @@
 .st-rows dt { font: 600 13px/1.35 var(--sans); }
 .st-rows dd { margin: 2px 0 0; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 .st-rows dd .st-spark { height: 22px; max-width: 160px; margin: 4px 0 0; }
-.view-in .card p.st-note { margin-bottom: 10px; color: var(--warn); }
+.view-in .card p.st-note { margin-bottom: 10px; color: var(--warn-text); }
 @media (min-width: 601px) {
   .st-row { display: grid; grid-template-columns: minmax(9em, 13em) minmax(0, 1fr); gap: 14px; align-items: start; }
   .st-rows dd { margin: 0; }

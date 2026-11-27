@@ -2,6 +2,9 @@
   --bg: #f5f3ec; --panel: #fbfaf6; --fg: #23211e; --dim: #6c6962; --faint: #a3a097;
   --line: #e4e0d4; --accent: #d97757; --accent-fg: #23211e; --on-bad: #fff; --accent-soft: #f3dfd4;
   --claude: #fffefb; --claude-line: #e9e5da; --ok: #4c8a59; --warn: #b07f22; --bad: #b3462f;
+  /* text in the green, amber and accent: the fills read 2.8 to 4:1 on the page in light, under
+     the 4.5:1 text needs (#1556, 2026-11-26); fills, meters and marks keep --ok, --warn, --accent */
+  --ok-text: #3b7448; --warn-text: #86600f; --accent-text: #a94f2c;
   --shadow: 0 1px 2px rgb(40 30 20 / .06), 0 4px 16px rgb(40 30 20 / .05);
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Source Serif Pro", Georgia, ui-serif, serif;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -13,6 +16,7 @@
     --bg: #1c1b19; --panel: #23221f; --fg: #ece9e1; --dim: #a29e94; --faint: #6f6c65;
     --line: #34322e; --accent: #d97757; --accent-fg: #1c1b19; --on-bad: #1c1b19; --accent-soft: #4a3026;
     --claude: #262522; --claude-line: #34322e; --ok: #7dbb88; --warn: #d8ae5c; --bad: #e07a63;
+    --ok-text: var(--ok); --warn-text: var(--warn); --accent-text: var(--accent);  /* past 4.9:1 already */
     --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 6px 20px rgb(0 0 0 / .25);
     color-scheme: dark;
   }
@@ -177,7 +181,7 @@ body.kb-open #tabbar { display: none; }
 .ts-row small { display: block; color: var(--dim); font-size: 13px; }
 .ts-head { display: flex; align-items: center; gap: 8px; }
 .ts-head b { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 15px; text-align: center; }
-.ts-head button, .ts-link { min-height: 44px; padding: 0 4px; border: 0; background: none; color: var(--accent);
+.ts-head button, .ts-link { min-height: 44px; padding: 0 4px; border: 0; background: none; color: var(--accent-text);
   font: inherit; font-size: 14px; cursor: pointer; }
 .ts-tabs { grid-template-columns: repeat(3, 1fr); }
 .ts-tabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-fg); }
@@ -187,7 +191,7 @@ body.kb-open #tabbar { display: none; }
 .ts-body h4 { margin: 12px 0 4px; font: 600 13.5px/1.3 var(--sans); }
 .ts-body pre { margin: 6px 0; padding: 8px 10px; max-height: 50vh; overflow-y: auto; background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.ts-body .add { color: var(--ok); }
+.ts-body .add { color: var(--ok-text); }
 .ts-body .del { color: var(--bad); }
 .ts-body .hunk, .ts-body .meta { color: var(--dim); }
 .ts-note { display: block; margin: 6px 0; color: var(--dim); font-size: 13px; }
@@ -258,7 +262,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 .bubble strong { font-weight: 650; }
 .meta { font-size: 12.5px; color: var(--dim); margin: 4px 6px 0; display: flex; flex-wrap: wrap; gap: 0 5px; align-items: center; }
 .meta span { white-space: nowrap; }
-.meta .tick { color: var(--ok); }
+.meta .tick { color: var(--ok-text); }
 .meta button { font: inherit; color: var(--fg); background: none; border: 0; padding: 10px 8px; margin: -10px -4px; cursor: pointer; text-decoration: underline; }
 
 /* Claude at work */

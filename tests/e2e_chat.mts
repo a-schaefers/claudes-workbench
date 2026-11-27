@@ -1597,6 +1597,46 @@ async function run(engine: string, device?: string) {
       })
       if (got.p !== got.card || got.margins !== `${got.p} ${got.p}` || got.code !== got.p || got.introCode !== got.intro) throw new Error(JSON.stringify(got))
     })
+    await check('text drawn green, amber or in the accent stands 4.5:1 or more on what is under it, light and dark (#1556)', async () => {
+      // #1556 (2026-11-26): in light the task sheet's links (the accent, 2.81:1), the diff's added
+      // lines (--ok, 3.72:1) and Stats' state words were drawn in the fills' colours.
+      // Each as the page draws it, in its own place, so what is under it is the page's, read with
+      // its view shown: WebKit kept a hidden view's light colours after the switch to dark
+      await page.evaluate(() => {
+        const put = (where: string, html: string) => {
+          const box = document.createElement('div'); box.innerHTML = html
+          box.dataset.e2eProbe = where.startsWith('#view-') ? where.slice(6, where.indexOf(' ')) : 'chat'
+          document.querySelector(where)!.append(box)
+        }
+        put('#ts-body', '<button class="ts-link" data-e2e-text="ts-link">Show the whole diff</button>'
+          + '<pre><span class="add" data-e2e-text="diff add">+world</span></pre>')
+        put('#thread', '<div class="row"><div class="meta"><span class="tick" data-e2e-text="tick">✓</span></div></div>')
+        put('#view-stats .view-in', '<div class="card"><span class="ok" data-e2e-text="stats ok">resident</span>'
+          + '<span class="warn" data-e2e-text="stats warn">split</span><span class="claude" data-e2e-text="stats claude">fix-nav</span>'
+          + '<p class="st-note" data-e2e-text="st-note">Not updated</p></div>')
+      })
+      try {
+        const names: [string, string][] = [['#ts-back', 'chat'], ['#ts-refresh', 'chat'], ...await page.$$eval('[data-e2e-text]',
+          (x: HTMLElement[]) => x.map(e => [`[data-e2e-text="${e.dataset.e2eText}"]`, e.closest<HTMLElement>('[data-e2e-probe]')!.dataset.e2eProbe]))]
+        if (names.length !== 9) throw new Error('probes: ' + JSON.stringify(names))
+        const low: string[] = []
+        for (const scheme of ['light', 'dark']) {
+          await page.emulateMedia({ colorScheme: scheme })
+          for (const view of ['chat', 'stats']) {
+            await goTo(view)
+            for (const [sel] of names.filter(([, v]) => v === view)) {
+              const got = await page.locator(sel).evaluate(settingsView.textContrast)
+              if (got.ratio < 4.5) low.push(`${scheme} ${sel}: ${JSON.stringify(got)}`)
+            }
+          }
+        }
+        if (low.length) throw new Error(low.join('; '))
+      } finally {
+        await page.emulateMedia({ colorScheme: 'light' })  // Playwright's default, as the checks after expect
+        await page.evaluate(() => document.querySelectorAll('[data-e2e-probe]').forEach(e => e.remove()))
+        await goTo('chat')
+      }
+    })
     if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px', async () => {
       await goTo('settings')
       const got = await page.evaluate(() => ({ w: document.querySelector('#view-settings .view-in')!.getBoundingClientRect().width,
