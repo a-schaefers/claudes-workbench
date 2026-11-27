@@ -150,7 +150,8 @@ AGENT_CANT = {"/api/push": "change notifications", "/api/active": "mark the user
               "/api/seen": "mark what the user has seen", "/api/latest": "read the user's notifications",
               "/api/shot": "read screenshots", "/api/audio": "read audio takes",
               "/api/transcribe/": "transcribe the user's voice clips",  # #1203
-              "/api/task": "read tasks"}  # a task's diff and report are the user's work (#1201)
+              "/api/task": "read tasks",  # a task's diff and report are the user's work (#1201)
+              "/api/phone-qr.svg": "read the user's phone link"}  # it carries the user's token (#1552)
 
 
 def _covers(rule: str, path: str) -> bool:
@@ -436,6 +437,27 @@ def tailnet_name() -> str:
         if time.monotonic() - _tailnet["at"] >= REPLAN_EVERY:
             _tailnet.update(at=time.monotonic(), name=tailscale(windows=True).get("dns") or "")
         return _tailnet["name"]
+
+
+def phone_url(port: int) -> str:
+    """The link a phone on the tailnet opens, the token in its fragment (#1552, 2026-11-26): at
+    `tailscale serve`'s https name when it serves ``port`` (served_site), else while reach is
+    `tailnet` at this machine's tailnet name over http; "" for neither (reach local, a bind of the
+    user's own, Tailscale down). The QR code `wb chat url` draws and GET /api/phone-qr.svg serves."""
+    site = served_site(port)
+    if site:
+        name, _, https = site.rpartition(":") if ":" in site else (site, "", "443")
+        return f"https://{name}{'' if https == '443' else ':' + https}/#token={token()}"
+    try:
+        if reach() != "tailnet":
+            return ""
+    except ConfigError:
+        return ""
+    ts = tailscale()
+    host = ts.get("dns") or ts.get("ip") or ""
+    if not host:
+        return ""
+    return f"http://{f'[{host}]' if ':' in host else host}:{port}/#token={token()}"
 
 
 # ---- the thread ----
@@ -2613,7 +2635,7 @@ API_V1 = "/api/v1/"  # every /api/<x> is also /api/v1/<x>, the same handler (#11
 # it (an agent's token on any path outside AGENT_MAY is 403, as it was)
 ROUTES = {"GET": ("/api/health", "/api/state", "/api/stream", "/api/wait", "/api/upload/", "/api/file/",
                   "/api/latest", "/api/shot", "/api/audio", "/api/task", "/api/settings", "/api/stats",
-                  "/api/top"),
+                  "/api/top", "/api/phone-qr.svg"),
           "PUT": ("/api/upload/",),
           "POST": ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings", "/api/transcribe/")}
 
@@ -3104,6 +3126,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"feed": stats.feed(), **admin.reads()})
         if path == "/api/top":  # the Stats view's live part: wb top --json's ticks (TopFeed)
             return self._top()
+        if path == "/api/phone-qr.svg":  # the phone link as a QR code, for Settings' phone line (#1552)
+            from . import qr
+            link = phone_url(self.server.server_address[1])
+            if not link:
+                return self._json(404, {"error": "no phone link: the web app opens on this machine only "
+                                                 "(wb chat reach tailnet)"})
+            # the token is in it: _security_headers' no-store keeps it out of every cache
+            return self._send(200, qr.svg(link).encode(), "image/svg+xml")
         name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
         f = STATIC / name
         if "/" in name or f.suffix not in TYPES or not f.is_file():

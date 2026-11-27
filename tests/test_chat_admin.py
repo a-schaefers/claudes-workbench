@@ -153,7 +153,7 @@ class ChatAdmin(Base):
                          (403, {"error": "agent tokens can't use /api/settings", "code": "agent_forbidden"}))
         self.assertEqual(cli.coding_mode(), "decide")
         # every path the handler answers, by every method it takes: outside AGENT_MAY is 403
-        paths = set(re.findall(r'"(/api/[a-z]+/?)', (ROOT / "workbench" / "chat.py").read_text()))
+        paths = set(re.findall(r'"(/api/[a-z][a-z.-]*/?)', (ROOT / "workbench" / "chat.py").read_text()))
         self.assertTrue({"/api/settings", "/api/stats", "/api/top", "/api/push", "/api/upload/"} <= paths)
         self.assertFalse({"/api/answer", "/api/ask/", "/api/prefs"} & paths)  # no dialog answered from the chat (#1350)
         refused = 0

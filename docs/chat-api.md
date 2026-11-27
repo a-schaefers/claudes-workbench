@@ -229,7 +229,7 @@ An agent's token reads only its own conversation:
   someone else stored is `409 {"error": "that upload id is another sender's"}`, and a send can
   attach only its own uploads.
 - **403:** every path outside the allow-list (*Base URL and auth*): `/api/latest`, `/api/shot`, `/api/audio`, `/api/task`, the admin endpoints (`/api/settings`, `/api/stats`,
-  `/api/top`), and the user's `POST`s (`/api/transcribe/<id>` among them).
+  `/api/top`), `/api/phone-qr.svg` (the user's token is in it), and the user's `POST`s (`/api/transcribe/<id>` among them).
 - **`/api/health`** and the `listener` are as for the user.
 
 The user's own token reads everything, as below.
@@ -520,6 +520,14 @@ not `EventSource`):
 One `wb top` runs per server, whoever watches; it stops 15 s after the last viewer leaves. At most
 4 streams are open: a 5th is `503 {"error": "too many live views open"}`.
 
+### `GET /api/phone-qr.svg` (user only)
+The phone link as a QR code, `image/svg+xml`: the link `wb chat url` draws at a terminal, the
+web app's address on the user's tailnet with the token in its fragment (`https://<name>/#token=…`
+while `tailscale serve` serves the port, else `http://<tailnet name>:<port>/#token=…` with reach
+`tailnet`). `404 {"error": "no phone link: the web app opens on this machine only (wb chat reach
+tailnet)"}` while there is none. It carries the user's token: never cached (`no-store`), and an
+agent token gets 403. An `<img src>` sends no bearer header, so fetch it and show the blob.
+
 ### The page itself (no token)
 `GET /` (or `/index.html`) and the page's files (`/app.js`, `/app.css`, `/sw.js`, icons,
 `/manifest.webmanifest`); anything else is 404.
@@ -580,4 +588,5 @@ bumps it; adding a field or an endpoint doesn't (the admin endpoints, `/api/sett
   endpoints left it (#1350): the driver's dialogs are answered in the terminal. Added since, in
   the same version (workbench 2.1): the `/api/v1/` paths, `code` on every error (`error` kept as
   the text), a revoked token's own code, `410 expired` from `/api/wait`, and `Idempotency-Key`;
-  (workbench 2.2) `driver` on `/api/health`, the listener and each reply (*The driver*).
+  (workbench 2.2) `driver` on `/api/health`, the listener and each reply (*The driver*), and
+  `/api/phone-qr.svg`.

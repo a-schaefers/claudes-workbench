@@ -279,7 +279,7 @@ class DocsMatchTheCode(unittest.TestCase):
         # #1042: docs/chat-api.md is the page another agent is handed; a path the server answers
         # that it doesn't name is one nobody can find
         doc = (ROOT / "docs/chat-api.md").read_text()
-        paths = set(re.findall(r'"(/api/[a-z]+/?)', (ROOT / "workbench/chat.py").read_text()))
+        paths = set(re.findall(r'"(/api/[a-z][a-z.-]*/?)', (ROOT / "workbench/chat.py").read_text()))
         self.assertGreater(len(paths), 10)
         missing = sorted(p for p in paths if p not in doc)
         self.assertEqual(missing, [], "add these to docs/chat-api.md")
@@ -301,7 +301,7 @@ class DocsMatchTheCode(unittest.TestCase):
                        if isinstance(n, ast.ClassDef) and n.name == "Handler")
         for fn in (n for n in handler.body if isinstance(n, ast.FunctionDef) and n.name.startswith("do_")):
             branches = {n.value for n in ast.walk(fn) if isinstance(n, ast.Constant)
-                        and isinstance(n.value, str) and re.fullmatch(r"/api/[a-z]+/?", n.value)}
+                        and isinstance(n.value, str) and re.fullmatch(r"/api/[a-z][a-z.-]*/?", n.value)}
             self.assertEqual(sorted(branches), sorted(chat.ROUTES[fn.name[3:]]), fn.name)
 
     def test_the_openapi_file_is_whole_with_one_error_shape_bearer_auth_and_the_idempotency_key(self):
