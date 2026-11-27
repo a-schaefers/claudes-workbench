@@ -18,13 +18,61 @@ work, and OpenCode subagents via API or GPU write the code.
 <a href="https://github.com/a-schaefers/workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/workbench"></a>
 </p>
 
+```text
+                                   ┌──────────┐
+                                   │   YOU    │
+                                   └────┬─────┘
+                                        │ /workbench
+                         ┌──────────────┴──────────────┐
+                         │          pick one           │
+                ┌────────▼─────────┐          ┌────────▼─────────┐
+                │  Claude Code CLI │    OR    │   OpenCode CLI   │
+                │   + the mod      │          │   + its plugin   │
+                └────────┬─────────┘          └────────┬─────────┘
+                         └──────────────┬──────────────┘
+                                        ▼
+ ┌──────────────────────────────────────────────────────────┐        ┌────────────────────┐
+ │                     ORCHESTRATOR                         │◄──────►│   WEB APP  :1337   │
+ │  first time? ─► setup questions                          │        │  tasks · stats ·   │
+ │  plans · splits into steps · writes a test for each      │        │  settings · chat   │
+ │  reviews each result · merges on your word               │        │  from any device   │
+ └──────┬──────────────────────────────────────────▲────────┘        └────────────────────┘
+        │ one step + its test                      │ report: review / stuck / failed
+        ▼                                          │
+ ┌──────────────┐   roles                          │
+ │   router     │   significant ─► API, $5/day cap │
+ │ size → model │   trivial ────► GPU              │
+ └──────┬───────┘   writing ────► GPU              │
+        ▼                                          │
+ ┌─────────────────────────────────────────────────┴──────────────────────────┐
+ │  runner (detached, one per task)                                           │
+ │   GPU: lease + load model          API: provider slot + KEYHOLE (key here) │
+ │  ┌──────────────── SANDBOX (Landlock / Seatbelt) ─────────────────────┐    │
+ │  │  SUBAGENT (OpenCode) ─ writes code in its own worktree + branch    │    │
+ │  │     git read-only · shell allowlist · no keys · ask_reviewer ──────┼────┼─► orchestrator
+ │  │          │                                                         │    │
+ │  │          ▼                                                         │    │
+ │  │      run the test ── FAIL ──► error fed back, try again ──┐        │    │
+ │  │          │              ▲                                 │        │    │
+ │  │          │              └─────────────────────────────────┘        │    │
+ │  │          ▼ PASS ─► self-review ─► green tree kept                  │    │
+ │  └────────────────────────────────────────────────────────────────────┘    │
+ │  guards: stuck detector · day cap · rate-limit pause · fresh session       │
+ └────────────────────────────────────────────────────────────────────────────┘
+        │ after your OK
+        ▼
+   commit on your branch (your name + a trailer naming the model)
+        │
+        ▼
+   results ─► router · tuning · skill library ─► the next task's subagent does better
+```
+
 You describe a change to the orchestrator agent, which splits it into steps, writes a test for each
-one, and hands each step to a subagent running a cheaper model on your GPU or an API. Each subagent
-works on its own branch in a separate copy of the project. After each attempt the step's test runs;
-if it fails, the subagent sees the error and tries again without involving the orchestrator agent.
-When the test passes, the orchestrator agent reviews the change and reports to you. Small models do
-well on short, tested steps, so each step is sized to the model that writes it
-([why](ARCHITECTURE.md#why-its-built-this-way)).
+one, and hands each step to a subagent running the model you chose for it, on your GPU or an API.
+Each subagent works on its own branch in a separate copy of the project. After each attempt the
+step's test runs; if it fails, the subagent sees the error and tries again without involving the
+orchestrator agent. When the test passes, the orchestrator agent reviews the change and reports to
+you. Each step is sized to the model that writes it ([why](ARCHITECTURE.md#why-its-built-this-way)).
 
 ## What you need
 
@@ -36,14 +84,11 @@ well on short, tested steps, so each step is sized to the model that writes it
   orchestrator agent suggests a model for your GPU and can install Ollama and pull it for you.
 - To use it in [Claude Code](https://claude.com/claude-code), a Claude subscription or an API key.
 
-Workbench runs in the OpenCode CLI and the Claude Code CLI. Desktop apps and IDE extensions are not
-supported.
-
 ## Install
 
-Install the plugin in whichever one you use.
+Install the plugin in one of:
 
-### OpenCode
+### OpenCode Workbench: (CLI only)
 
 ```sh
 opencode plugin add 'github:a-schaefers/workbench#main'
@@ -52,7 +97,7 @@ opencode plugin add 'github:a-schaefers/workbench#main'
 Open OpenCode in your project, pick the strongest model you have, local or API, for the orchestrator
 agent in `/models`, and type `/workbench`. OpenCode keeps the plugin up to date.
 
-### Claude Code
+### Claude Code Workbench: (CLI only)
 
 ```sh
 claude plugin marketplace add a-schaefers/workbench
@@ -64,10 +109,10 @@ Open Claude Code in your project, choose the strongest Claude model for the orch
 
 ## Using it
 
-After `/workbench`, work with the orchestrator agent as you normally would. The first time, it asks
-a few questions to set things up. Workbench shows a link to its web app,
-`http://localhost:1337/#token=…`, where you can follow the subagents' tasks, see your stats and
-change settings.
+After `/workbench`, you get work done in two places. Talk to the orchestrator agent as you normally
+would; the first time, it asks a few questions to set things up. Or open the web app at
+`http://localhost:1337/#token=…`, linked from the Workbench panel, to chat with the orchestrator
+agent, follow the subagents' tasks, see your stats and change settings.
 
 ## Models and cost
 
@@ -87,22 +132,19 @@ too](ARCHITECTURE.md#running-your-own-server), even one on another machine.
 
 Any provider you have connected in OpenCode with an API key works for the subagents, as does a
 GitHub Copilot sign-in. Their paid API usage counts against one daily [spending
-cap](ARCHITECTURE.md#spend-what-an-api-task-costs) in dollars, across all providers; a plan such as
-Copilot uses its own quota instead. At the cap, running API tasks stop and queued ones wait.
+cap](ARCHITECTURE.md#spend-what-an-api-task-costs) in dollars, across all providers.
 
 ## Safety and privacy
 
 The subagents never touch your checkout, and their work is merged only after you accept it. Each
 subagent runs in a [sandbox](ARCHITECTURE.md#what-the-agent-knows) that confines its writes to its
 copy of the project and never lets it see your API key. It can run only listed commands, and git
-only to read. The sandbox uses Landlock on Linux and Seatbelt on macOS; on a kernel without
-Landlock, only OpenCode's permission rules apply. Workbench's code enforces these limits and the
-spending cap.
+only to read. The sandbox uses Landlock on Linux and Seatbelt on macOS. Workbench's code enforces
+these limits and the spending cap.
 
 Subagents on your own GPU don't send your code to any provider. A subagent on an API model sends
 what it reads to that model's provider. The orchestrator agent sends what it reads to its own
-model's provider, unless that model is local. To keep a repository's subagents off every API, [mark
-it](ARCHITECTURE.md#privacy-for-api-roles) `local_only` in `~/.config/workbench/commands.json`.
+model's provider, unless that model is local.
 
 ## What else it does
 
@@ -117,8 +159,8 @@ it](ARCHITECTURE.md#privacy-for-api-roles) `local_only` in `~/.config/workbench/
   them.
 - Accepted commits carry your name as author and a
   [trailer](ARCHITECTURE.md#git-commits-and-projects) naming the model that wrote the code.
-- The web app has a [chat](ARCHITECTURE.md#the-web-chat) for talking to the orchestrator agent and
-  following tasks. To use it from your phone over Tailscale, ask the orchestrator agent.
+- To reach the web app and its [chat](ARCHITECTURE.md#the-web-chat) from your phone or another
+  computer, over Tailscale or any network you choose, ask the orchestrator agent.
 - When a review turns up a lesson, the orchestrator agent records it as a
   [skill](ARCHITECTURE.md#the-skill-library) and gives it to later subagents.
 - The orchestrator agent can also direct local [image](ARCHITECTURE.md#images) and
