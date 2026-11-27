@@ -144,6 +144,15 @@ class Settings(Rows):
         self.assertTrue(any(ln.startswith("  add-role: Add a role: wb route add <name> --label TEXT")
                             for ln in cli.settings_lines(settings.rows(fresh=True))))
 
+    def test_deep_workflows_side_is_a_row_of_the_workflows_card_and_its_command_is_logged_1627(self):
+        by = {r["key"]: r for r in settings.rows(fresh=True)}
+        row = by["deep-side"]
+        self.assertEqual((row["group"], row["value"]), ("workflows", "roles"))
+        self.assertEqual([c["value"] for c in row["choices"]], list(routes.RUN_SIDES))
+        self.assertEqual(settings._argv(row, "gpu"), ["workflows", "side", "gpu"])
+        for cmd in ("workflows", "deepmode"):
+            self.assertEqual(settings.key_for([cmd, "side", "api"]), ("deep-side", "api"))
+
     def test_each_role_has_a_card_its_own_sides_model_on_it_the_other_and_thinking_under_more_1553_1626(self):
         # #1553 (2026-11-26): a role's GPU|API, GPU model, API model and thinking were in three
         # cards, the API model 2,000 px below the choice that needed it; #1626 (2026-11-27): its GPU

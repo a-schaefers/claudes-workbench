@@ -110,6 +110,12 @@ RUN_DETAIL_CHARS = 16_000  # the Summary's text past this is cut: wb run report 
 # review, 2026-11-26)
 NOT_RECORDED = ("run-",)
 FLOWS_SAY = "Ask for one by name, or put deepcode in a message with your request."
+# which side a deep workflow's items run on (#1627): `wb workflows side <value>`, routes.run_side
+DEEP_SIDES = [("roles", "As each role says (default)", "Each item runs on its role's own side, GPU or API."),
+              ("gpu", "GPU only", "Every item runs on the GPU, on its role's GPU model or the router's pick: "
+               "nothing is paid."),
+              ("api", "API only", "Every item runs on its role's API model, within the day cap; a role "
+               "without one can't take part.")]
 PROGRESS_OFF = ("off", "Off (default)", "No progress checks: each one wakes Claude, which spends its tokens.")
 THINK = [("off", "Off (default)", "Faster and cheaper; for tasks started after this."),
          ("on", "On", "Better on hard steps, slower and costs more; for tasks started after this.")]
@@ -172,7 +178,7 @@ BY = ("web", "claude")  # apply()'s writers: the web app's click, Claude's `wb s
 # here, a role's from routes.LABELS (label_of), a model's tasks row from its id
 LABELS = {"agents": "Agents", "busy": "When the GPU is busy", "driver": "Driver", "coding": "Claude coding",
           "add-role": "Add a role",
-          "workflows": "Dynamic workflows", "cap": "API day cap", "progress": "Progress checks",
+          "workflows": "Dynamic workflows", "deep-side": "Deep workflows run on", "cap": "API day cap", "progress": "Progress checks",
           "splash": "Opening animation", "probe": "Agent code navigation",
           "optimize": "Optimize"}
 ROLE_LABELS = {"role": "{}", "gpu": "{} GPU model", "api": "{} API model", "think": "{} thinking",
@@ -612,6 +618,7 @@ def _build() -> dict:
         out.append(_driver_row(r, m))
     out.append(_choice("coding", "shared", LABELS["coding"], CODING, cli.coding_mode()))
     out.append(_choice("workflows", "workflows", LABELS["workflows"], WORKFLOWS, cli.workflows_mode()))
+    out.append(_choice("deep-side", "workflows", LABELS["deep-side"], DEEP_SIDES, routes.run_side()))
     out.extend(_run_rows())
     # Stats recording, Live view, Live refresh and the electricity price had rows here, as the
     # pane's Settings tab did until #1322 dropped them (recording always on; wb stats set and wb
@@ -806,6 +813,8 @@ def _argv(row: dict, value) -> list[str]:
         return ["route", "all" if key == "agents" else "busy", value]
     if key in ("coding", "workflows", "progress", "splash"):
         return [key, value]
+    if key == "deep-side":
+        return ["workflows", "side", value]
     if key == "probe":
         return ["experiment", "probe", value]
     if key == "optimize":
@@ -950,8 +959,8 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
 # typed at a terminal changed the row with no stamp and no open page heard of it. Only the rows'
 # own command lines count: a combined one (`wb route significant api --api x`) logs nothing.
 ROUTE_FLAGS = {"--gpu": "gpu", "--api": "api", "--thinking": "think", "--thinking-review": "review"}
-LOGGED = ("route", "coding", "workflows", "progress", "splash", "experiment", "optimize", "model", "image",
-          "audio", "chat")  # the commands key_for reads: cli.main imports this module only for them
+LOGGED = ("route", "coding", "workflows", "deepmode", "progress", "splash", "experiment", "optimize", "model",
+          "image", "audio", "chat")  # the commands key_for reads: cli.main imports this module only for them
 
 
 def key_for(argv: list[str]) -> tuple[str, str] | None:
@@ -980,6 +989,8 @@ def key_for(argv: list[str]) -> tuple[str, str] | None:
         if len(rest) == 3 and rest[0] in routes.all_roles() and rest[1] in ROUTE_FLAGS and not rest[2].startswith("-"):
             return f"{ROUTE_FLAGS[rest[1]]}-{rest[0]}", rest[2]
         return None
+    if cmd in ("workflows", "deepmode") and len(rest) == 2 and rest[0] == "side":
+        return "deep-side", rest[1]
     if cmd in ("coding", "workflows", "progress", "splash") and len(rest) == 1 and not rest[0].startswith("-"):
         return cmd, rest[0]
     if cmd == "experiment" and len(rest) == 2 and rest[0] == "probe":
@@ -1032,6 +1043,8 @@ def current(key: str):
             return cli.coding_mode()
         if key == "workflows":
             return cli.workflows_mode()
+        if key == "deep-side":
+            return routes.run_side()
         if key == "progress":
             return "on" if progress.settings().get("on") is True else "off"
         if key == "splash":

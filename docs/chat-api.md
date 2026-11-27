@@ -495,7 +495,8 @@ as one JSON string, `{name, label, like, about?}`) or `note` (`text`, standing w
 rows would be). A row may carry `help` (*POST /api/settings*), and `changed: {ts, by}`, its newest
 recorded change within 7 days (#1355). `changes`: the newest 10 recorded changes, newest first,
 `{ts, key, label, from, to, by}`. Read afresh on each request, so a change made at the terminal
-shows (#1392). The `workflows` group holds deepmode (`workflows`), a `run-<run>` action per run not
+shows (#1392). The `workflows` group holds deepmode (`workflows`), which side the runs' items take
+(`deep-side`: `roles`, `gpu` or `api`, #1627), a `run-<run>` action per run not
 closed (its `text` the run's flow, phase, stage counts and spend; its choices `stop`, while it runs, and
 `summary`) and the flows there are (`flows`, info).
 
