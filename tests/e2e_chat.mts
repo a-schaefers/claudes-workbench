@@ -1441,14 +1441,14 @@ async function run(engine: string, device?: string) {
     try {
       wb('chat', 'reply', '--to', sent.message.id, '--text', 'One more nit.')
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('One more nit.'))
-      if (await page.title() !== 'Workbench') throw new Error('counted unread: ' + await page.title())
+      if (await page.title() !== 'Chat · Workbench') throw new Error('counted unread: ' + await page.title())
       wb('chat', 'reply', '--to', 'user', '--text', 'The agent has its review.')
-      await until(async () => await page.title() === '(1) Workbench')
+      await until(async () => await page.title() === '(1) Chat · Workbench')
       if ((await page.locator('.row.claude .meta').last().textContent()).includes(' to ')) throw new Error('the user\'s reply named an addressee')
     } finally {
       await page.evaluate(() => { delete (document as any).hidden; document.dispatchEvent(new Event('visibilitychange')) })
     }
-    await until(async () => await page.title() === 'Workbench')
+    await until(async () => await page.title() === 'Chat · Workbench')
   })
   await check("the mic shows only with a listener; a clip recorded, or a voice memo picked over plain http, comes back as words in the box and nothing is sent; one that meets a busy GPU or a proxy's 502 waits (#1203)", async () => {
     if (await page.locator('#mic').isVisible()) throw new Error('a mic with no listener')
@@ -1614,7 +1614,7 @@ async function run(engine: string, device?: string) {
       })
       const say = () => JSON.stringify(g)
       if (g.tabs.map((t: any) => `${t.view}:${t.label}:${t.icon}`).join() !== 'chat:Chat:true,stats:Stats:true,settings:Settings:true') throw new Error(say())
-      if (g.tabs.map((t: any) => t.current).join() !== 'true,,') throw new Error('the current tab: ' + say())
+      if (g.tabs.map((t: any) => t.current).join() !== 'page,,') throw new Error('the current tab: ' + say())
       const near = (a: number, b: number) => Math.abs(a - b) <= 2
       if (desktop) {
         if (!near(g.nav.left, 0) || !near(g.nav.width, 76) || !near(g.nav.top, 0) || !near(g.nav.height, g.h)) throw new Error('the rail: ' + say())
@@ -1684,8 +1684,12 @@ async function run(engine: string, device?: string) {
     await check('the hash picks the view, Back walks back through them, anything else is the chat, and a notification\'s click opens it', async () => {
       const at = () => page.evaluate(() => ({ view: document.body.dataset.view, hash: location.hash,
         shown: ['chat', 'stats', 'settings'].filter(v => getComputedStyle(document.getElementById('view-' + v)!).display !== 'none'),
-        current: [...document.querySelectorAll<HTMLElement>('#tabbar .tab[aria-current="true"]')].map(b => b.dataset.view) }))
-      const is = async (v: string) => until(async () => { const a = await at(); return a.view === v && a.shown.join() === v && a.current.join() === v })
+        current: [...document.querySelectorAll<HTMLElement>('#tabbar .tab[aria-current="page"]')].map(b => b.dataset.view),
+        title: document.title, h1: [...document.querySelectorAll('h1')].filter(h => h.closest('.view')!.id === 'view-' + document.body.dataset.view).map(h => h.textContent) }))
+      // #1339: the tab's title and the view's (hidden) heading name the view too
+      const NAMES: Record<string, string> = { chat: 'Chat', stats: 'Stats', settings: 'Settings' }
+      const is = async (v: string) => until(async () => { const a = await at(); return a.view === v && a.shown.join() === v && a.current.join() === v
+        && a.title === `${NAMES[v]} · Workbench` && a.h1.join() === NAMES[v] })
         .catch(async () => { throw new Error(JSON.stringify(await at())) })
       await goTo('stats'); await is('stats')
       if ((await at()).hash !== '#stats') throw new Error(JSON.stringify(await at()))

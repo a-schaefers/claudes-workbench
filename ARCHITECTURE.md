@@ -7447,7 +7447,10 @@ views, `<section id="view-chat">` (the strip `#tasks`, `#hint`, `main#scroll`, `
 `#chat`, `#stats`, `#settings`, anything else (none too) the chat; `hashchange` switches (`setView`;
 a tab's press sets the hash, `go`), so Back walks them and a reload keeps its view. `<nav
 id="tabbar" aria-label="Primary">` holds three `button.tab[data-view]`, each a 24 px stroke icon
-over an 11 px `.tab-lbl`; the current one has `aria-current="true"`, colour and a 1 px lift. On a
+over an 11 px `.tab-lbl`; the current one has `aria-current="page"`, colour and a 1 px lift, and the
+page's title names the view (`drawTitle`: `Chat · Workbench`, `Stats · Workbench`, `Settings · Workbench`,
+after the unread count, `(1) Chat · Workbench`), each view with a hidden `<h1>` of its name (#1339: a screen
+reader user couldn't tell which view they were in). On a
 phone (≤600 px) it is the body's last flex child, under the composer, `56px` plus the safe area
 tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidden under
 `body.kb-open` so the composer sits on the keyboard (with the hint and the strip's extra lines;

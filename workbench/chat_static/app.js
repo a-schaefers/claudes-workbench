@@ -918,7 +918,7 @@
         else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
             if (!seen.has(m.id) && !firstVisit && document.hidden && forUser(m)) {
                 unread++;
-                document.title = `(${unread}) Workbench`;
+                drawTitle();
             }
             rich(b, m.text);
             if (!seen.has(m.id) && !firstVisit)
@@ -1314,7 +1314,7 @@
         else {
             clearTimeout(hiddenTimer);
             unread = 0;
-            document.title = 'Workbench';
+            drawTitle();
             if (!conn) {
                 failures = 0;
                 connect();
@@ -2629,6 +2629,11 @@
         tabBadge.textContent = n > 99 ? '99+' : String(n);
         chatTab.setAttribute('aria-label', n ? `Chat, ${n > 99 ? '99+' : n} new` : 'Chat');
     }
+    // The tab's title names the view, after the unread count (#1339, 2026-11-26): a screen reader
+    // user couldn't tell which view they were in; each view has its hidden <h1> too, and the nav's
+    // current tab is aria-current="page"
+    const VIEW_TITLES = { chat: 'Chat', stats: 'Stats', settings: 'Settings' };
+    function drawTitle() { document.title = `${unread ? `(${unread}) ` : ''}${VIEW_TITLES[curView || 'chat']} · Workbench`; }
     let chatTop = 0;
     function setView(name) {
         if (!VIEWS.includes(name))
@@ -2647,7 +2652,8 @@
         curView = name;
         document.body.dataset.view = name;
         for (const b of tabs)
-            b.dataset.view === name ? b.setAttribute('aria-current', 'true') : b.removeAttribute('aria-current');
+            b.dataset.view === name ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current');
+        drawTitle();
         if (name === 'chat') {
             leftAt = null;
             // shown again: at the newest line if it was following, else where the reader left it

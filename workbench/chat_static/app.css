@@ -85,9 +85,9 @@ body[data-view="stats"] #view-stats, body[data-view="settings"] #view-settings {
 .tab svg { width: 24px; height: 24px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8;
   stroke-linecap: round; stroke-linejoin: round; transition: transform .15s ease-out; }
 .tab-lbl { max-width: 100%; font: 500 11px/1.2 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tab[aria-current="true"] { color: var(--accent); }
-.tab[aria-current="true"] .tab-lbl { color: var(--fg); }
-.tab[aria-current="true"] svg { transform: translateY(-1px); }
+.tab[aria-current="page"] { color: var(--accent); }
+.tab[aria-current="page"] .tab-lbl { color: var(--fg); }
+.tab[aria-current="page"] svg { transform: translateY(-1px); }
 .tab:focus-visible { outline: 2px solid var(--fg); outline-offset: -4px; border-radius: 10px; }  /* the accent: under 3:1 (#1410) */
 .tab-badge { position: absolute; top: 4px; left: calc(50% + 5px); min-width: 18px; height: 18px; padding: 0 5px;
   border-radius: 9px; background: var(--accent); color: var(--accent-fg); font: 600 11px/18px var(--sans);

@@ -16,7 +16,7 @@
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/stats.css">
 <link rel="stylesheet" href="/settings.css">
-<title>Workbench</title>
+<title>Chat · Workbench</title>
 </head>
 <body data-view="chat">
 <header class="top">
@@ -29,6 +29,7 @@
 <div class="net" id="net" hidden></div>
 <div class="dstate" id="driver-state" role="status" aria-live="polite" hidden></div>
 <section class="view" id="view-chat" aria-label="Chat">
+  <h1 class="sr-only">Chat</h1>
   <div class="runs" id="runs" role="button" tabindex="0" aria-label="Runs: open their Settings" hidden></div>
   <div class="tasks" id="tasks" role="button" tabindex="0" aria-expanded="false" aria-controls="task-sheet" hidden></div>
   <section class="tasksheet" id="task-sheet" hidden aria-label="Tasks">
@@ -92,6 +93,7 @@
   </form>
 </section>
 <section class="view" id="view-stats" aria-label="Stats">
+  <h1 class="sr-only">Stats</h1>
   <div class="view-in">
     <div id="stats-body"></div>
     <div class="cards">
@@ -108,6 +110,7 @@
   </div>
 </section>
 <section class="view" id="view-settings" aria-label="Settings">
+  <h1 class="sr-only">Settings</h1>
   <div class="view-in">
     <div id="settings-rows"></div>
     <div class="cards" id="settings">
