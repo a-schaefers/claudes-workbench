@@ -127,10 +127,9 @@ agent, follow the subagents' tasks, see your stats and change settings.
 
 ## Models and cost
 
-Workbench is free and open source. A task on a local GPU costs nothing. Your provider bills the
-subagents' API use. In Claude Code, handing a larger task off costs Claude about half the tokens of
-writing it ([measured](ARCHITECTURE.md#what-a-handoff-costs-claude-measured)). Small tasks cost as
-much or more, so batch them.
+Workbench is free and open source. A task on your GPU uses its electricity, and your provider
+bills the subagents' API use. The web app's Stats show what the week's tasks spent: the
+orchestrator agent's tokens, the GPU's energy and the API dollars.
 
 Workbench sorts the subagents' work into large steps, small steps and writing such as docs, and lets
 you give each of these [roles](ARCHITECTURE.md#roles-which-model-a-kind-of-work-goes-to) its own

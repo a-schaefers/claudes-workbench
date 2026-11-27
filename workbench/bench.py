@@ -891,7 +891,7 @@ def paid(task: store.Task) -> dict:
 
 
 def paid_since(since: float = 0) -> dict:
-    """The API replays' money since ``since``, for `wb savings --api`: {tasks, cost, unknown,
+    """The API replays' money since ``since``, for `wb spend --api`: {tasks, cost, unknown,
     prices (meter.basis, #1135)}."""
     rs = [r for r in store.read_jsonl(runs_file())[0] if isinstance(r, dict) and results.api_row(r)
           and (r.get("ts") or 0) >= since]

@@ -201,7 +201,7 @@ def fallback_paid(task: store.Task) -> dict | None:
     """What a task moved to its role's GPU fallback (#1196) paid on its API model first, for its
     row's `fallback_paid`: {cost, prices, provider}, from the day ledger (keyed by task; nothing
     updates the status meter past the move), or None when it booked no dollars. The row is the GPU
-    model's (`kind` gpu, no `api`), so wb accept said no "paid" and wb savings and Stats left the
+    model's (`kind` gpu, no `api`), so wb accept said no "paid" and wb spend and Stats left the
     money out (#1523, 2026-11-26)."""
     rows = [r for r in meter._task_rows(task.name) if r["usd"]]
     if not (cost := round(sum(r["usd"] for r in rows), 6)):

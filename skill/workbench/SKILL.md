@@ -777,11 +777,11 @@ evidence about the model, and the router learns from accept and discard. For a t
 model, `wb accept` (and `wb discard`) ends its line with what the provider was paid (`paid ≈$0.12`,
 `paid: unknown`, or `plan usage …`): pass that on as a cost, an estimate when it says `≈`, never as
 a saving (the live figure while it runs is `api.usd` in its `status.json`, under
-`$WB_HOME/tasks/<name>/`). `wb savings` gives the week's saving when the user asks what it's
-saving (an estimate: call it one); `wb savings --card
-<file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent). The
-saving is the GPU's alone; `wb savings --api` gives what API tasks cost: what was spent (open
-tasks too) by provider and by day, as the day cap counts it, and the tasks closed. Only when the user
+`$WB_HOME/tasks/<name>/`). `wb spend` gives what the week's tasks spent when the user asks:
+your tokens on them, the GPU's energy (and its cost at their price, `--price X`), and the API
+tasks' dollars. Say those figures as they are, never as a saving or against writing it yourself.
+`wb spend --api` gives what API tasks cost: what was spent (open tasks too) by provider and by
+day, as the day cap counts it, and the tasks closed. Only when the user
 compares a figure with their provider's bill, or asks why they differ: `wb model price <id> --input X
 --output Y [--cache-read Z] [--cache-write W]` sets the prices they are billed (a cache price left
 out is the catalog's ratio to input) (`--clear` undoes it); never suggest it otherwise.

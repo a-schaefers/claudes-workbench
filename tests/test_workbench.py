@@ -22939,31 +22939,28 @@ class Savings(Base):
         super().setUp()
         os.environ["WB_SAVINGS"] = str(Path(self.tmp.name) / "savings.json")
 
-    def test_a_task_row_compared_with_claude_writing_it_itself(self):
+    def test_a_gpu_tasks_row_is_claudes_tokens_and_its_energy_with_no_estimate_beside_them_1618(self):
+        # #1618 (the owner, 2026-11-27): "frame things factually as what we spend ... users can
+        # figure out if they're losing or saving money themselves"
         from workbench import savings, spend
         usage = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
                  "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
         self.assertEqual(spend.weighted(usage), 56000)
-        self.assertEqual(savings.per_call(usage), 8200.0)
-        self.assertEqual(savings.estimate_self(62, 8200.0), 58708)
-        row = {"claude": usage, "diff": {"files": 4, "added": 61, "removed": 1}}
-        self.assertEqual(savings.of_row(row),
-                         {"claude": 56000, "self_est": 58708, "saved": 2708, "wh": None})
+        row = {"claude": usage, "diff": {"files": 4, "added": 61, "removed": 1}, "gpu_wh": 12.4}
+        self.assertEqual(savings.of_row(row), {"claude": 56000, "wh": 12.4})
+        self.assertEqual(savings.of_row({"outcome": "discarded", "gpu_wh": 1.0}), {"claude": 0, "wh": 1.0})
+        self.assertIsNone(savings.of_row({"kind": "api", "claude": usage}))
+        for gone in ("score", "card", "estimate_self", "per_call", "QUESTION", "NO_SCORE", "SELF_CALLS"):
+            self.assertFalse(hasattr(savings, gone), gone)
 
-    def test_a_row_with_energy_reads_its_watt_hours_and_a_negative_saving_reads_more(self):
+    def test_the_line_says_the_tasks_claudes_tokens_and_the_energy_and_never_a_saving_1618(self):
         from workbench import savings
-        usage = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
-                 "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
-        row = {"claude": usage, "diff": {"files": 1, "added": 0, "removed": 0}, "gpu_wh": 12.4}
-        self.assertEqual(savings.of_row(row),
-                         {"claude": 21500, "self_est": 40425, "saved": 18925, "wh": 12.4})
-        self.assertIn("· GPU 12 Wh", savings.summary(savings.totals([row]), "week"))
-        # A mostly-output row has a tiny per-call cost, so writing it yourself
-        # is cheaper: the saving goes negative and reads "cost … more".
-        costly = {"turns": 1, "calls": 1, "input": 0, "cache_write_5m": 0,
-                  "cache_write_1h": 0, "cache_read": 0, "output": 1000}
-        big = {"claude": costly, "diff": {"files": 1, "added": 0, "removed": 0}}
-        self.assertIn("cost ~5K more", savings.summary(savings.totals([big]), "week"))
+        usage = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+                 "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
+        line = savings.summary(savings.totals([{"claude": usage, "gpu_wh": 12.4}]), "week")
+        self.assertEqual(line, "the last 7 days: 1 GPU task(s) · Claude 56K tokens · GPU 12 Wh")
+        for word in ("saved", "saving", "more", "yourself", "%", "~"):
+            self.assertNotIn(word, line)
 
     def test_the_shared_summary_has_the_machine_and_model_sizes_but_never_a_name(self):
         # #119: users pool evidence by pasting it; a model's name and the repo stay here
@@ -22972,9 +22969,9 @@ class Savings(Base):
                  "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
         now = store.now()
         rows = [{"ts": now, "model": "ollama/secret-coder:27b", "size": "significant", "repo": "/home/u/acme",
-                 "task": "fix-acme-billing", "claude": usage, "diff": {"files": 4, "added": 61, "removed": 1},
-                 "gpu_wh": 600},
-                {"ts": now, "model": "ollama/other:9b", "size": "trivial", "claude": usage,
+                 "task": "fix-acme-billing", "outcome": "accepted", "claude": usage,
+                 "diff": {"files": 4, "added": 61, "removed": 1}, "gpu_wh": 600},
+                {"ts": now, "model": "ollama/other:9b", "size": "trivial", "outcome": "discarded", "claude": usage,
                  "diff": {"files": 1, "added": 3, "removed": 0}, "remote_gpu": True},
                 {"ts": 1, "model": "ollama/old:1b", "size": "trivial", "claude": usage,
                  "diff": {"files": 1, "added": 3, "removed": 0}}]   # before the period
@@ -22982,33 +22979,20 @@ class Savings(Base):
                             [{"name": "Radeon RX 7900 XTX", "vram": 24 * 10 ** 9}],
                             {"ollama/secret-coder:27b": 17 * 10 ** 9}, "linux")
         self.assertEqual(out.splitlines(), [
-            "workbench savings, the last 7 days (`wb savings --share`)",
+            "workbench spend, the last 7 days (`wb spend --share`)",
             "- machine: linux; GPU: Radeon RX 7900 XTX (24 GB VRAM)",
             "- local models: 2 (size unknown, 17 GB of weights)",
-            "- tasks: 2; Claude used 112K input-equivalent tokens, writing them itself ~100K; handoff/self 1.12",
-            "- the estimate prices the lines Claude would type: not lockfiles or generated files, and "
-            "a file deleted whole as one call",
-            "- score: 1/100. I used about 12% more Claude.",
-            "- by size: significant 0.95 (1), trivial 1.36 (1)",
+            "- tasks: 2; Claude used 112K input-equivalent tokens on them",
+            "- by size: significant 1 (1 accepted, Claude 56K), trivial 1 (0 accepted, Claude 56K)",
             "- GPU energy: 600 Wh"])
         for private in ("secret", "acme", "fix-", "other:9b"):
             self.assertNotIn(private, out)
-        self.assertIn("workbench savings, the last 7 days", run_wb("savings", "--share"))
+        self.assertIn("workbench spend, the last 7 days", run_wb("spend", "--share"))
 
-    def test_a_file_deleted_whole_or_a_lockfile_is_not_priced_as_lines_claude_would_type(self):
-        # #725: deleting a 2,400-line module read 'saved ~725K', a 4,000-line lockfile 'saved
-        # ~1.28M', each priced as lines Claude would have typed
+    def test_a_file_deleted_whole_and_a_lockfile_are_counted_apart_in_the_footprint(self):
+        # #725: deleting a 2,400-line module, or a 4,000-line lockfile, was counted as lines typed
         import subprocess
-        from workbench import gitops, results, savings
-        usage = {"turns": 2, "calls": 12, "input": 0, "cache_write_5m": 0, "cache_write_1h": 0,
-                 "cache_read": 600000, "output": 6000}
-        small = {"claude": usage, "diff": {"files": 1, "added": 30, "removed": 20}}
-        gone = {"claude": usage, "diff": {"files": 2, "added": 30, "removed": 2420,
-                                          "deleted": {"files": 1, "removed": 2400}}}
-        self.assertEqual(savings.of_row(gone)["self_est"],
-                         savings.of_row(small)["self_est"] + round(savings.per_call(usage)))  # one call
-        old = {"claude": usage, "diff": {"files": 2, "added": 30, "removed": 2420}}  # before: priced
-        self.assertGreater(savings.of_row(old)["self_est"], 10 * savings.of_row(gone)["self_est"])
+        from workbench import gitops, results
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)  # noqa
         (self.repo / "old.py").write_text("x = 1\n" * 2400)
         (self.repo / "keep.py").write_text("a\nb\n")
@@ -23026,64 +23010,6 @@ class Savings(Base):
                          {"deleted": {"files": 2, "removed": 2409}})
         self.assertEqual(results._apart(steps[1:], "generated", ("files", "lines", "removed")), {})
 
-    def test_the_badge_scores_the_summed_saving_from_1_to_100_and_says_it_in_words(self):
-        # #101: one number, about the percent of Claude saved; the colour never says it alone
-        from workbench import savings
-        tot = lambda c, b, n=1: {"tasks": n, "claude": c, "self_est": b, "saved": b - c,  # noqa: E731
-                                 "wh": 0, "cost": None}
-        s = savings.score(tot(380_000, 1_000_000))
-        self.assertEqual((s["score"], s["color"]), (62, "green"))
-        self.assertEqual(s["sentence"], "I used about 62% less Claude than if Claude had done this work alone.")
-        s = savings.score(tot(1_200_000, 1_000_000))
-        self.assertEqual((s["score"], s["color"], s["sentence"]), (1, "red", "I used about 20% more Claude."))
-        self.assertEqual(savings.score(tot(1_000_000, 1_000_000))["sentence"],
-                         "I used about the same amount of Claude.")
-        self.assertIsNone(savings.score(tot(0, 0, 0)))                       # nothing to compare
-        self.assertIsNone(savings.score(tot(5000, 0)))                       # a baseline of zero
-        for pct, color in ((9, "red"), (10, "orange"), (24, "orange"), (25, "yellow"),
-                           (49, "yellow"), (50, "green"), (100, "green")):
-            self.assertEqual(savings.score(tot(100 * (100 - pct), 10_000))["color"], color, pct)
-        self.assertEqual(savings.score(tot(0, 10_000))["score"], 100)
-        # summed before dividing: a small win and a big loss weigh as their baselines do
-        usage = lambda out: {"turns": 1, "calls": 1, "input": 0, "cache_write_5m": 0,  # noqa: E731
-                             "cache_write_1h": 0, "cache_read": 0, "output": out}
-        rows = [{"ts": 1, "outcome": "accepted", "claude": usage(1000), "diff": {"added": 1, "removed": 0}},
-                {"ts": 1, "outcome": "accepted", "claude": usage(40000), "diff": {"added": 400, "removed": 0}},
-                {"ts": 1, "outcome": "accepted"}]                             # nothing to compare
-        t = savings.totals(rows)
-        parts = [savings.of_row(r) for r in rows[:2]]
-        self.assertEqual(t["tasks"], 2)
-        want = round(100 * sum(p["saved"] for p in parts) / sum(p["self_est"] for p in parts))
-        self.assertEqual(savings.score(t)["pct"], round(100 * t["saved"] / t["self_est"], 1))
-        self.assertEqual(round(savings.score(t)["pct"]), want)
-        # #1322: the text says the percent once, never a score beside it
-        self.assertNotIn("score", savings.summary(t, "week"))
-        self.assertIn(f"({want}%)", savings.summary(t, "week"))
-
-    def test_the_card_is_made_here_with_the_counts_and_no_name_in_it(self):
-        from workbench import savings
-        usage = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
-                 "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
-        store.append_jsonl(store.home() / "results.jsonl", {
-            "ts": store.now(), "outcome": "accepted", "task": "fix-acme-billing", "repo": "/home/u/acme",
-            "model": "ollama/secret:27b", "claude": usage, "diff": {"files": 4, "added": 61, "removed": 1}})
-        store.append_jsonl(store.home() / "results.jsonl", {"ts": store.now(), "outcome": "discarded",
-                                                            "task": "t2"})
-        card = Path(self.tmp.name) / "badge.svg"
-        out = run_wb("savings", "--card", str(card))
-        self.assertIn("5/100. I used about 5% less Claude", out)
-        svg = card.read_text()
-        self.assertTrue(svg.startswith('<svg xmlns="http://www.w3.org/2000/svg" width="360"'))
-        for said in (">How much Claude did my GPU</text>", ">save me?</text>", ">5<tspan", "Last 7 days · 1 task · estimated",
-                     "Claude alone: about 59,000 weighted tokens.", "With Workbench: 56,000."):
-            self.assertIn(said, svg)
-        for private in ("acme", "secret", "fix-", "/home", socket.gethostname(), "http://", "https://www.w3.org/2000/svg\" "):
-            self.assertNotIn(private, svg.replace('xmlns="http://www.w3.org/2000/svg"', ""))
-        self.assertIn("(5%)", run_wb("savings"))                            # the text agrees, once (#1322)
-        self.assertEqual(json.loads(run_wb("savings", "--json"))["score"]["score"], 5)
-        self.assertIn(">No score yet: we need a task we</text>", savings.card(savings.totals([]), "month"))
-        self.assertNotIn("/ 100", savings.card(savings.totals([]), "month"))
-
     def test_a_task_on_another_machines_gpu_adds_no_energy_and_says_nothing_of_it(self):
         # #117: nothing here reads a remote GPU's power; #1322: a "not measured" note on every
         # line changed nothing anyone did
@@ -23098,16 +23024,6 @@ class Savings(Base):
         self.assertNotIn("remote", t)
         self.assertNotIn("machine", savings.summary(t, "week"))
 
-    def test_of_row_is_none_without_both_sides_or_a_call_count(self):
-        from workbench import savings
-        usage = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
-                 "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
-        self.assertIsNone(savings.of_row({"diff": {"added": 1, "removed": 0}}))
-        self.assertIsNone(savings.of_row({"claude": usage}))
-        self.assertIsNone(savings.of_row({"claude": dict(usage, calls=0),
-                                          "diff": {"added": 1, "removed": 0}}))
-        self.assertIsNone(savings.per_call(None))
-
     def test_the_kwh_price_lives_only_in_the_config_file(self):
         from workbench import savings
         self.assertIsNone(savings.price())  # no file yet
@@ -23118,7 +23034,7 @@ class Savings(Base):
         savings.set_price(0.25)
         self.assertEqual(savings.price(), 0.25)
 
-    def test_totals_adds_the_saved_tokens_energy_and_money_over_measured_rows(self):
+    def test_totals_adds_claudes_tokens_energy_and_money_over_the_periods_gpu_rows(self):
         from workbench import savings
         u1 = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
               "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
@@ -23127,19 +23043,14 @@ class Savings(Base):
         rows = [
             {"ts": 1000.0, "claude": u1, "diff": {"added": 61, "removed": 1}, "gpu_wh": 30.0},
             {"ts": 2000.0, "claude": u2, "diff": {"added": 0, "removed": 0}, "gpu_wh": 12.4},
-            {"ts": 3000.0, "diff": {"added": 10, "removed": 0}},  # no claude: not counted
+            {"ts": 3000.0, "outcome": "discarded"},             # no usage: a task, 0 tokens
+            {"ts": 3000.0, "kind": "api", "claude": u1},        # the API line's
         ]
-        t = savings.totals(rows, since=1500)
-        self.assertEqual(t["tasks"], 1)
-        self.assertEqual(t, {"tasks": 1, "claude": 21500, "self_est": 40425,
-                             "saved": 18925, "wh": 12.4, "cost": None})
+        self.assertEqual(savings.totals(rows, since=1500), {"tasks": 2, "claude": 21500, "wh": 12.4, "cost": None})
         savings.set_price(0.25)
         self.assertEqual(savings.totals(rows, since=1500)["cost"], 0.0)
         t2 = savings.totals(rows, since=0)
-        self.assertEqual(t2["tasks"], 2)
-        self.assertEqual(t2["claude"], 56000 + 21500)
-        self.assertEqual(t2["self_est"], 58708 + 40425)
-        self.assertEqual(t2["wh"], 42.4)
+        self.assertEqual((t2["tasks"], t2["claude"], t2["wh"]), (3, 56000 + 21500, 42.4))
         self.assertEqual(t2["cost"], round(42.4 / 1000 * 0.25, 2))
 
     def test_footprint_counts_removed_lines_as_well_as_added(self):
@@ -23251,18 +23162,7 @@ class Savings(Base):
         self.assertEqual(d["gpu_wh"], 7.0)
         self.assertNotIn("diff", d)
 
-    def test_a_discarded_row_saves_nothing_and_reads_as_discarded(self):
-        from workbench import savings
-        u2 = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
-              "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
-        row = {"outcome": "discarded", "claude": u2, "gpu_wh": 12.4}
-        self.assertEqual(savings.of_row(row),
-                         {"claude": 21500, "self_est": 0, "saved": -21500, "wh": 12.4})
-        # a discarded row with no claude usage is not comparable
-        self.assertIsNone(savings.of_row({"outcome": "discarded", "gpu_wh": 1.0}))
-
-
-    def test_wb_savings_sums_the_period_and_sets_the_price(self):
+    def test_wb_spend_sums_the_period_and_sets_the_price_and_wb_savings_still_runs_it_1618(self):
         from workbench import savings, store
         u = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
              "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
@@ -23272,50 +23172,50 @@ class Savings(Base):
         for ts in (now - 3600, now - 20 * 86400):  # this week, and earlier this month
             store.append_jsonl(store.home() / "results.jsonl", {**row, "ts": ts})
         store.append_jsonl(store.home() / "results.jsonl", {**row, "ts": now, "trial": True})
-        self.assertEqual(run_wb("savings").strip(),
-                         "the last 7 days: 1 task(s) · claude 56K · writing it yourself ~59K "
-                         "· saved ~3K (5%) · GPU 600 Wh")
-        self.assertIn("2 task(s)", run_wb("savings", "--month"))
-        self.assertIn("GPU 1.2 kWh", run_wb("savings", "--all"))
-        out = json.loads(run_wb("savings", "--price", "0.25", "--json"))
-        self.assertEqual((out["period"], out["tasks"], out["cost"]), ("week", 1, 0.15))
+        self.assertEqual(run_wb("spend").strip(), "the last 7 days: 1 GPU task(s) · Claude 56K tokens · GPU 600 Wh")
+        self.assertEqual(run_wb("savings"), run_wb("spend"))   # its name before #1618
+        self.assertIn("2 GPU task(s)", run_wb("spend", "--month"))
+        self.assertIn("GPU 1.2 kWh", run_wb("spend", "--all"))
+        out = json.loads(run_wb("spend", "--price", "0.25", "--json"))
+        self.assertEqual((out["period"], out["tasks"], out["cost"], out["claude"]), ("week", 1, 0.15, 56000))
+        self.assertNotIn("score", out)
+        self.assertNotIn("saved", out)
         self.assertEqual(savings.price(), 0.25)
         # no currency sign: the price is the user's (#609, the audit of v1.90)
-        self.assertTrue(run_wb("savings").strip().endswith("GPU 600 Wh, cost 0.15"))
+        self.assertTrue(run_wb("spend").strip().endswith("GPU 600 Wh, cost 0.15"))
         for bad in ("0", "cheap", "inf", "nan"):
             with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
-                run_wb("savings", "--price", bad)
+                run_wb("spend", "--price", bad)
         self.assertEqual(savings.price(), 0.25)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("spend", "--card", "x.svg")                  # the score's badge went with #1618
 
     def test_a_price_once_set_is_cleared_by_price_off(self):
         # #609: --price took a positive float only, so a set price could only be removed by hand
         from workbench import savings
-        run_wb("savings", "--price", "0.25")
+        run_wb("spend", "--price", "0.25")
         Path(os.environ["WB_SAVINGS"]).write_text(json.dumps({"kwh_price": 0.25, "currency": "x"}))
-        out = json.loads(run_wb("savings", "--price", "off", "--json"))
+        out = json.loads(run_wb("spend", "--price", "off", "--json"))
         self.assertIsNone(out["price"])
         self.assertIsNone(savings.price())
         self.assertEqual(json.loads(Path(os.environ["WB_SAVINGS"]).read_text()), {"currency": "x"})
 
-    def test_the_documented_savings_line_shows_the_cost_as_wb_savings_prints_it(self):
+    def test_the_documented_spend_line_is_the_one_wb_spend_prints(self):
         # Review of #609: ARCHITECTURE.md's example still read `GPU 1.2 kWh ($0.36)` after the
         # `$` was dropped from summary
         from workbench import savings
-        line = savings.summary({"tasks": 3, "claude": 160000, "self_est": 390000, "saved": 230000,
-                                "wh": 1200, "cost": 0.36}, "week")
-        tail = line.split(" · GPU ", 1)[1].split(" · ")[0]
+        line = savings.summary({"tasks": 3, "claude": 160000, "wh": 1200, "cost": 0.36}, "week")
         doc = (Path(__file__).parent.parent / "ARCHITECTURE.md").read_text()
-        example = re.search(r"`the last 7 days: 3 task\(s\)[^`]*`", " ".join(doc.split())).group(0)
-        self.assertIn(f"GPU {tail}`", example)
+        self.assertIn(f"`{line}`", " ".join(doc.split()))
 
-    def test_wb_savings_with_nothing_to_compare_says_so_in_one_line(self):
-        self.assertEqual(run_wb("savings").strip(), "the last 7 days: nothing to compare yet")
+    def test_wb_spend_with_no_task_says_so_in_one_line(self):
+        self.assertEqual(run_wb("spend").strip(), "the last 7 days: no task yet")
 
 
 class Backlog(Base):
     """A batch left to run (overnight): wb start --backlog, then wb backlog in the morning (#109)."""
 
-    def test_a_batch_lists_each_task_and_the_batch_saving(self):
+    def test_a_batch_lists_each_task_and_what_the_batch_spent(self):
         from workbench import store
         self.start("t-a", "ok", "--backlog", "night-1", "--queue")
         self.start("t-b", "ok", "--backlog", "night-1", "--queue")
@@ -23338,7 +23238,7 @@ class Backlog(Base):
         got = json.loads(run_wb("backlog", "night-1", "--json"))
         self.assertEqual([x["task"] for x in got["tasks"]], ["t-a", "t-b"])
         self.assertEqual(got["tasks"][0]["branch"], "delegate/t-a")
-        self.assertIn("saved", got["totals"])
+        self.assertEqual(set(got["totals"]), {"tasks", "claude", "wh", "cost", "api"})
         self.assertEqual(run_wb("backlog").strip(), "night-1: 2 task(s), 0 open")
         # #270 (the audit of 1.2): archived after 30 days, a batch's tasks dropped out of it
         self.assertEqual(store.archive(days=0), ["t-a", "t-b"])
@@ -47615,7 +47515,7 @@ class ApiSpend(Base):
             self.assertNotIn("no price", out, t.name)
         a = savings.api_totals(store.results(trials=True))
         self.assertEqual((a["tasks"], a["unknown"], a["cost"]), (2, 0, 0.0))
-        self.assertNotIn("no price", run_wb("savings", "--api"))
+        self.assertNotIn("no price", run_wb("spend", "--api"))
         # #1106, the review: their $0 is spent money in the totals, never a price a task: three
         # tasks at $0.50 and these two read $0.50 a task, not $0.30 (wb stats, the weekly check)
         from workbench import cli, stats
@@ -49555,7 +49455,7 @@ class ApiStats(Base):
             "ts": ts, "day": meter.day(ts), "kind": "step", "task": task, "round": 1,
             "provider": provider, "model": f"{provider}/flash", "usd": usd_, "source": "opencode"})
 
-    def test_wb_savings_api_by_day_follows_the_ledger_and_counts_open_tasks(self):
+    def test_wb_spend_api_by_day_follows_the_ledger_and_counts_open_tasks(self):
         # #1094 (2026-11-23): by day and the period's money came from results rows, written at a
         # close and dated by it: a task spent yesterday and accepted today, and an open one, read
         # $3 today and $3 for the week where the ledger, the cap's and the pane's, said $2 and $5
@@ -49564,29 +49464,27 @@ class ApiStats(Base):
         self.booked(3.0, now - 86400, task="night", provider="deepinfra")
         self.booked(2.0, now, task="open-one", provider="deepinfra")
         self.rows(self.api_row(cost=3.0, ts=now, task="night", provider="deepinfra"))
-        out = run_wb("savings", "--api").splitlines()
+        out = run_wb("spend", "--api").splitlines()
         # #1322: the ledger's total alone, no second one from the closed tasks
         self.assertEqual(out[0], "api, the last 7 days: ≈$5.00 (≈$2.00 today) · 1 task(s) closed")
         self.assertEqual(out[1], "  by provider: deepinfra ≈$5.00")
         yesterday, today = meter.day(now - 86400)[5:], meter.day(now)[5:]
         self.assertEqual(out[2], f"  by day: {yesterday} ≈$3.00 · {today} ≈$2.00")
-        j = json.loads(run_wb("savings", "--api", "--json"))["spent"]
+        j = json.loads(run_wb("spend", "--api", "--json"))["spent"]
         self.assertEqual((j["usd"], j["today"], j["by_provider"]), (5.0, 2.0, {"deepinfra": 5.0}))
         self.assertEqual(j["today"], cli._spend_today()["usd"])            # the pane's figure
 
-    def test_an_accepted_api_task_leaves_the_gpu_score_as_the_gpu_task_alone_and_gets_its_own_line(self):
+    def test_an_accepted_api_task_leaves_the_gpu_line_as_the_gpu_task_alone_and_gets_its_own_line(self):
         from workbench import savings
         self.rows(self.gpu_row())
         alone = savings.totals(store.results(), since=store.now() - 7 * 86400)
-        gpu_line = run_wb("savings").splitlines()[0]
+        gpu_line = run_wb("spend").splitlines()[0]
         self.rows(self.api_row())
         both = savings.totals(store.results(), since=store.now() - 7 * 86400)
-        self.assertEqual(both, alone)                    # of 1, claude and saved as the GPU task's
-        self.assertEqual(savings.score(both), savings.score(alone))
-        out = run_wb("savings").splitlines()
-        self.assertEqual(out[0], gpu_line)               # the GPU line's saved unchanged
-        self.assertEqual(out[1], "api: 1 task(s) · ≈$0.42 (deepseek ≈$0.42) · claude 56K · "
-                                 "writing it yourself ~59K")
+        self.assertEqual(both, alone)                    # of 1, Claude's tokens as the GPU task's
+        out = run_wb("spend").splitlines()
+        self.assertEqual(out[0], gpu_line)
+        self.assertEqual(out[1], "api: 1 task(s) · ≈$0.42 (deepseek ≈$0.42) · Claude 56K tokens")
         self.assertIsNone(savings.of_row(self.api_row()))
 
     def test_an_api_task_with_no_price_counts_as_one_with_no_known_cost_never_as_0_dollars(self):
@@ -49594,9 +49492,9 @@ class ApiStats(Base):
         self.rows(self.api_row(cost=None, source="unknown"))
         a = savings.api_totals(store.results(trials=True))
         self.assertEqual((a["tasks"], a["cost"], a["unknown"]), (1, 0.0, 1))
-        out = run_wb("savings") + run_wb("savings", "--api") + run_wb("stats")
+        out = run_wb("spend") + run_wb("spend", "--api") + run_wb("stats")
         self.assertIn("api: 1 task(s) · 1 with no known cost", out)
-        self.assertIn("1 with no known cost", run_wb("savings", "--api"))
+        self.assertIn("1 with no known cost", run_wb("spend", "--api"))
         self.assertNotIn("$0.00", out)
         self.assertNotIn("$0 ", out)
         # wb accept's and discard's money: short, the dollars alone (#1322)
@@ -49604,7 +49502,7 @@ class ApiStats(Base):
         self.assertEqual(savings.paid(self.api_row()), "paid ≈$0.42")
         self.assertEqual(savings.paid(self.gpu_row()), "")
 
-    def test_wb_savings_api_says_the_week_by_provider_and_day_with_trials_and_bench_replays_in(self):
+    def test_wb_spend_api_says_the_week_by_provider_and_day_with_trials_and_bench_replays_in(self):
         from workbench import bench
         now = store.now()
         self.rows(self.api_row(cost=0.30, ts=now - 2 * 86400),
@@ -49615,18 +49513,18 @@ class ApiStats(Base):
                                                "model": "deepseek/flash", "paid": {"cost": 0.3, "source": "opencode"}})
         for ago, usd_ in ((2, 0.30), (1, 0.54), (0, 0.43), (0, 0.3), (20, 9.0)):   # the ledger's
             self.booked(usd_, now - ago * 86400)
-        out = run_wb("savings", "--api", "--week").splitlines()
+        out = run_wb("spend", "--api", "--week").splitlines()
         # the ledger's, the closed tasks counted (#1322: their own dollars were a second total)
         self.assertEqual(out[0], "api, the last 7 days: ≈$1.57 (≈$0.73 today) · 3 task(s) closed (incl. 1 trial)")
         self.assertEqual(out[1], "  by provider: deepseek ≈$1.57")
         self.assertTrue(out[2].startswith("  by day: "), out)
         self.assertEqual(out[2].count("$"), 3)
         self.assertEqual(out[3], "  bench replays: ≈$0.30 (1)")
-        j = json.loads(run_wb("savings", "--api", "--week", "--json"))
+        j = json.loads(run_wb("spend", "--api", "--week", "--json"))
         self.assertEqual(j["by_provider"]["deepseek"], {"tasks": 2, "cost": 0.84, "unknown": 0, "prices": "catalog"})
         self.assertEqual(round(sum(j["spent"]["by_day"].values()), 2), 1.57)
         self.assertEqual((j["trials"], j["bench"]["cost"]), (1, 0.3))
-        self.assertEqual(json.loads(run_wb("savings", "--json"))["api"]["tasks"], 3)
+        self.assertEqual(json.loads(run_wb("spend", "--json"))["api"]["tasks"], 3)
 
     def test_wb_stats_shows_kind_paid_and_agent_tok_and_an_api_row_reads_its_mean_cost(self):
         mimo = "ollama/mimo-v2.6:9b-q8_0"
@@ -49663,8 +49561,8 @@ class ApiStats(Base):
         for name, cost in (("n-1", 0.81), ("n-2", 0.42)):
             self.api_task(name, {"phase": "accepted"}, backlog="night")
             self.rows(self.api_row(cost=cost, task=name, provider="deepinfra"))
-        # #1322: with no GPU task to compare, the API line alone
-        out = run_wb("savings").splitlines()
+        # #1322: with no GPU task, the API line alone
+        out = run_wb("spend").splitlines()
         self.assertEqual(len(out), 1, out)
         self.assertTrue(out[0].startswith("api: 2 task(s) · ≈$1.23 (deepinfra ≈$1.23)"), out)
         out = run_wb("backlog", "night").splitlines()
@@ -49674,7 +49572,7 @@ class ApiStats(Base):
         self.assertEqual((j["totals"]["tasks"], j["totals"]["api"]["tasks"], j["totals"]["api"]["cost"]),
                          (0, 2, 1.23))
         from workbench import savings                     # no task at all: one short line
-        self.assertEqual(savings.summary(savings.totals([]), "week"), "the last 7 days: nothing to compare yet")
+        self.assertEqual(savings.summary(savings.totals([]), "week"), "the last 7 days: no task yet")
 
     def test_the_stats_feed_has_the_weeks_api_money_by_provider_trials_in(self):
         self.rows(self.gpu_row(gpu_wh=30.0), self.api_row(gpu_wh=500.0),   # a stray reading: not ours
@@ -49731,7 +49629,7 @@ class ApiStats(Base):
         self.assertEqual(savings.paid(row), "paid ≈$0.42 (before the GPU fallback)")
         a = savings.api_totals([row])
         self.assertEqual((a["tasks"], a["cost"], a["by_provider"]["deepseek"]["cost"]), (1, 0.42, 0.42))
-        self.assertEqual(a["claude"], 0)                               # the GPU score's, not the API side's
+        self.assertEqual(a["claude"], 0)                               # the GPU line's, not the API side's
         self.assertNotIn("fallback_paid", free)
         self.assertEqual((savings.paid(free), savings.api_totals([free])["tasks"]), ("", 0))
 
@@ -49966,11 +49864,11 @@ class ApiStats(Base):
         self.assertEqual((a["tasks"], a["plan"], a["unknown"], a["cost"]), (1, 1, 0, 0.0))
         week = json.loads(run_wb("stats", "--json"))["periods"]["week"]["api"]
         self.assertEqual((week["tasks"], week["plan"]), (1, 1))
-        self.assertEqual(run_wb("savings", "--api").splitlines(),
+        self.assertEqual(run_wb("spend", "--api").splitlines(),
                          ["api, the last 7 days: 1 task(s) closed, 1 on plan usage"])
-        self.assertIn("api: 1 task(s) · 1 on plan usage", run_wb("savings"))
+        self.assertIn("api: 1 task(s) · 1 on plan usage", run_wb("spend"))
         self.assertEqual(savings.paid(store.results()[0]), "plan usage (opencode-go)")
-        self.assertNotIn("$0", run_wb("savings") + run_wb("savings", "--api") + run_wb("stats"))
+        self.assertNotIn("$0", run_wb("spend") + run_wb("spend", "--api") + run_wb("stats"))
 
     def test_only_the_catalogs_cloud_flag_makes_an_ollama_model_plan_usage_never_a_cloud_suffix(self):
         # #1022's review: any provider's `-cloud` model read as plan usage, its dollars uncounted
@@ -51256,7 +51154,7 @@ class FirstRunApi(Base):
         lines = cli.scout_api_lines()
         self.assertIn("  deepseek/deepseek-flash  1 task(s) · 100% accepted · ~<$0.01/task", lines)
         self.assertIn("api spend, the last 7 days: ≈<$0.01 of $5/day at most (deepseek <$0.01)", lines)
-        self.assertIn("<$0.01", run_wb("savings", "--api"))
+        self.assertIn("<$0.01", run_wb("spend", "--api"))
 
     def test_scouts_api_spend_is_the_day_ledgers_as_wb_savings_api_says_it(self):
         # #1094, the review (2026-11-23): wb savings --api took the ledger's figure ($5.00: an open
@@ -51277,7 +51175,7 @@ class FirstRunApi(Base):
         _ledger_step(2.0, now - since / 4, "open-one")
         self.assertIn("api spend, the last 7 days: ≈$5.00 of $5/day at most (deepseek $5.00)",
                       cli.scout_api_lines())
-        self.assertIn("api, the last 7 days: ≈$5.00 (≈$5.00 today)", run_wb("savings", "--api"))
+        self.assertIn("api, the last 7 days: ≈$5.00 (≈$5.00 today)", run_wb("spend", "--api"))
 
     def test_scout_has_no_api_section_with_no_provider_and_no_api_role(self):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())

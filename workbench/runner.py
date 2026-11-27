@@ -2650,7 +2650,7 @@ class _Power(threading.Thread):
         """Add the last reading over the time since it, on the monotonic clock, and read again.
         An interval past FROZEN_SECS (a suspend that clock still counted, as WSL2's may) or
         backwards adds nothing: on the wall clock an 8-hour suspend mid-round added 150 W x 8 h,
-        1.2 kWh, to gpu_wh, the results row and wb savings' cost, and a clock step back took
+        1.2 kWh, to gpu_wh, the results row and wb spend's cost, and a clock step back took
         energy away (#559)."""
         if self.last is not None and self.watts is not None and 0 <= now - self.last <= FROZEN_SECS:
             self.wh += self.watts * (now - self.last) / 3600

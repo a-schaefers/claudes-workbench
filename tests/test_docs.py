@@ -381,7 +381,7 @@ class DocsMatchTheCode(unittest.TestCase):
         import ast
         tree = ast.parse((ROOT / "workbench/chat.py").read_text())
         keys = {}
-        for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("snapshot", "week_saved")):
+        for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("snapshot", "week_spend")):
             ret = next(n.value for n in ast.walk(fn) if isinstance(n, ast.Return))
             keys[fn.name] = {k.value for k in ret.keys if isinstance(k, ast.Constant)}
         self.assertGreater(len(keys["snapshot"]), 8)
@@ -389,9 +389,9 @@ class DocsMatchTheCode(unittest.TestCase):
         state = doc.split("### `GET /api/state`", 1)[1].split("\n### ", 1)[0]
         listed = set(re.findall(r"^- `([a-z_]+)`:", state, re.M))
         self.assertEqual(sorted(keys["snapshot"] - listed), [], "add these to docs/chat-api.md's /api/state")
-        saving = " ".join(next(b for b in state.split("\n- ") if b.startswith("`savings`")).split())
-        self.assertEqual(sorted(k for k in keys["week_saved"] if f"`{k}`" not in saving), [],
-                         "name these in /api/state's `savings`")
+        spent = " ".join(next(b for b in state.split("\n- ") if b.startswith("`spend`")).split())
+        self.assertEqual(sorted(k for k in keys["week_spend"] if f"`{k}`" not in spent), [],
+                         "name these in /api/state's `spend`")
 
     def test_claude_md_stays_under_claude_codes_size_warning(self):
         # Claude Code warns past 40,000 characters, and every session that changes the code
@@ -696,9 +696,9 @@ class TheDriverIsNamedOnThePage(unittest.TestCase):
     # answers", "Claude will offer to set it up") to an OpenCode user. A string in the web app's
     # TypeScript says the driver's name as the state gives it, never "Claude" by itself, but for
     # the name itself (a driver-name table's value, the fallback before 2.2's rows named theirs),
-    # the app's own name, Claude Code (the host) and the savings score, which counts Claude's
-    # tokens by name (savings.py). story.ts is generated from workbench/story.py.
-    ALLOWED = re.compile(r"Claude's Workbench|Claude Code|Claude tokens|saved Claude")
+    # the app's own name, Claude Code (the host) and Stats' Spend card, which counts Claude's
+    # tokens by name (savings.py, #1618). story.ts is generated from workbench/story.py.
+    ALLOWED = re.compile(r"Claude's Workbench|Claude Code|Claude tokens|Claude used")
 
     def test_no_string_in_the_web_apps_typescript_says_claude_where_the_driver_is_meant(self):
         src = ROOT / "workbench" / "chat_static" / "src"

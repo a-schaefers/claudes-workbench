@@ -349,8 +349,8 @@ async function run(engine: string, device?: string) {
     await until(() => page.evaluate((n: string) => document.body.dataset.view === n, name))
   }
   await check('Settings holds what the gear\'s sheet did, as cards, and no way to answer Claude\'s prompts from here (#1350)', async () => {
-    await goTo('stats')                                    // What it saved went to Stats (#1284)
-    if (!(await page.textContent('#saved')).includes('Nothing to compare yet')) throw new Error('a saving shown with no task')
+    await goTo('stats')                                    // the gear's Savings went to Stats (#1284), Spend since #1618
+    if ((await page.textContent('#spend')) !== 'Nothing spent yet this week.') throw new Error('a spend shown with no task')
     await goTo('settings')
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
@@ -510,25 +510,25 @@ async function run(engine: string, device?: string) {
     waits()
     await until(async () => await line.isHidden())
   })
-  await check('Stats shows what the week\'s tasks saved Claude, once: the badge and its one line', async () => {
+  await check('Stats says what the week\'s tasks spent, Claude\'s tokens and the GPU\'s energy, and never a saving (#1618)', async () => {
     const usage = { turns: 2, calls: 5, input: 1000, cache_write_5m: 0, cache_write_1h: 10000, cache_read: 200000, output: 3000 }
     writeFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted',
       claude: usage, diff: { files: 4, added: 61, removed: 1 }, gpu_wh: 600 }) + '\n')
     await page.reload()
     await goTo('stats')
-    await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh.'))
-    // #1322: the saving is the badge's alone, not said again in the paragraph
-    const said = await page.textContent('#saved')
-    if (said.includes('3K') || said.includes('estimate')) throw new Error(said)
+    await until(async () => (await page.textContent('#spend')) === 'Claude used 56K tokens on the week\'s tasks. The GPU used 600 Wh.')
+      .catch(async () => { throw new Error(await page.textContent('#spend')) })
+    // #1618: no score, no badge, no saving against an estimate
+    const shown = await page.textContent('#view-stats')
+    if (/saved|save me|\/ 100|estimate/.test(shown)) throw new Error(shown)
     // #845: a price in the user's own currency showed as dollars on the phone
     writeFileSync(env.WB_SAVINGS, JSON.stringify({ kwh_price: 0.3 }))
     await page.reload()                                    // on #stats still: the hash is the view
     await goTo('stats')
-    await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18.'))
-    if ((await page.textContent('#saved')).includes('$')) throw new Error('a currency sign: ' + await page.textContent('#saved'))
-    // #1022: an API task's dollars carry a `$` (OpenCode's unit), apart from the saving: History's
-    // This week says them, and What it saved no longer does (#1339: spend read under "saved", and
-    // counted trials, 3 tasks against History's 2), while the energy's cost still has none (#845)
+    await until(async () => (await page.textContent('#spend')).includes('The GPU used 600 Wh, cost 0.18.'))
+    if ((await page.textContent('#spend')).includes('$')) throw new Error('a currency sign: ' + await page.textContent('#spend'))
+    // #1022: an API task's dollars carry a `$` (OpenCode's unit): History's This week says them, once
+    // (#1339: they counted trials, 3 tasks against History's 2), while the energy's cost has none (#845)
     const week = () => page.evaluate(() => [...document.querySelectorAll('#stats-body .st-row')]
       .filter(r => r.querySelector('dt')!.textContent === 'This week').map(r => r.querySelector('dd')!.textContent).join(''))
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepseek',
@@ -546,18 +546,11 @@ async function run(engine: string, device?: string) {
     await page.reload()
     await goTo('stats')
     await until(async () => /API ≈\$0\.52 \(.+ ≈\$0\.42 · .+ \$0\.10\)$/.test(await week())).catch(async () => { throw new Error(await week()) })
-    if ((await page.textContent('#saved')) !== 'The GPU used 600 Wh, cost 0.18.') throw new Error(await page.textContent('#saved'))
+    // the API task's Claude tokens join the card's (none recorded here), its dollars stay History's
+    if ((await page.textContent('#spend')) !== 'Claude used 56K tokens on the week\'s tasks. The GPU used 600 Wh, cost 0.18.') throw new Error(await page.textContent('#spend'))
     writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
-    // #101: the badge, its number and its words, legible at phone width
-    if (await page.locator('#badge').isHidden()) throw new Error('no badge')
-    const n = await page.textContent('#badge-n'), cls = await page.getAttribute('#badge-n', 'class')
-    if (n !== '5 / 100' || cls !== 'badge-n red') throw new Error(`${n} ${cls}`)
-    const s = await page.textContent('#badge-s')
-    if (s !== '~3K Claude tokens saved this week') throw new Error(s)
-    const box = await page.locator('#badge').boundingBox()
-    if (box.width > (await page.evaluate(() => innerWidth))) throw new Error('wider than the phone')
     await goTo('chat')
-    await until(async () => await page.locator('#saved').isHidden())
+    await until(async () => await page.locator('#spend').isHidden())
   })
   await check('the app: its worker runs, holds the key, and Settings says how to install it and get notifications', async () => {
     await goTo('settings')
@@ -1500,7 +1493,7 @@ async function run(engine: string, device?: string) {
     if ((await api('/api/settings', { key: 'coding', value: 'ask' }))[0] !== 403) throw new Error('an agent changed the settings')
     // its view is its own conversation: none of the user's messages, no settings
     const [, st] = await api('/api/state')
-    if (st.push || st.savings) throw new Error('an agent read the user\'s state: ' + Object.keys(st))
+    if (st.push || st.spend) throw new Error('an agent read the user\'s state: ' + Object.keys(st))
     if (st.messages.some((m: any) => m.from === 'user')) throw new Error('an agent read the user\'s messages')
     // #1128: Claude's reply to the agent alone read as one to the user, and counted in the tab's
     // unread while the page was hidden; it names the agent, and only a reply to the user counts

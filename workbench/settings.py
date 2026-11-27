@@ -622,7 +622,7 @@ def _build() -> dict:
     out.extend(_run_rows())
     # Stats recording, Live view, Live refresh and the electricity price had rows here, as the
     # pane's Settings tab did until #1322 dropped them (recording always on; wb stats set and wb
-    # savings --price keep the rest): a `recording` row read a key stats.settings() no longer has
+    # spend --price keep the rest): a `recording` row read a key stats.settings() no longer has
     prog = progress.settings()
     after = progress.user_after(prog) or 0
     out.append(_choice("progress", "shared", LABELS["progress"], _progress_stops(after),

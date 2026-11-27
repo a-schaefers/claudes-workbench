@@ -6428,9 +6428,10 @@ def cmd_stats(a):
           + (f"\n(+{rest} more model{'' if rest == 1 else 's'}: wb stats --all)" if rest else ""))
 
 
-def cmd_savings(a):
-    """What the delegated tasks saved Claude over a period, against the estimate of writing them
-    (savings.py). `--price` sets the electricity price the energy is costed at."""
+def cmd_spend(a):
+    """What the delegated tasks spent over a period, as facts (savings.py, #1618): Claude's tokens,
+    the GPU's energy and its cost, the API tasks' dollars. `--price` sets the electricity price the
+    energy is costed at."""
     if a.price is not None:  # "off" clears it: nothing else could, once set (#609)
         try:
             kwh = None if a.price.strip().lower() == "off" else float(a.price)
@@ -6449,15 +6450,11 @@ def cmd_savings(a):
                             {m: models.weights(found[m]) for m in {r.get("model") for r in rows}
                              if m in found}, hardware.system()))
         return
-    if a.api:  # the API tasks' money, apart from the score (#1022)
-        return _api_savings(a, period, since)
+    if a.api:  # the API tasks' money by provider and day (#1022)
+        return _api_spend(a, period, since)
     t = savings.totals(store.results(), since=since)
-    if a.card:  # made here, from the totals alone: the user decides where it goes (#101)
-        Path(a.card).write_text(savings.card(t, period), encoding="utf-8")
-        s = savings.score(t)
-        print(f"wrote {a.card}: " + (f"{s['score']}/100. {s['sentence']}" if s else savings.NO_SCORE))
-    elif a.json:
-        print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price(),
+    if a.json:
+        print(json.dumps({"period": period, **t, "price": savings.price(),
                           "api": savings.api_totals(store.results(trials=True), since)}))
     else:
         api_t = savings.api_totals(store.results(trials=True), since)
@@ -6465,8 +6462,8 @@ def cmd_savings(a):
         _say(savings.api_summary(api_t))
 
 
-def _api_savings(a, period: str, since: float) -> None:
-    """`wb savings --api`: the period's closed API tasks by provider, trials in, the day ledger's
+def _api_spend(a, period: str, since: float) -> None:
+    """`wb spend --api`: the period's closed API tasks by provider, trials in, the day ledger's
     spend and by day (savings.spent, #1094), and the bench's replays (bench.paid_since)."""
     t = savings.api_totals(store.results(trials=True), since)
     replays, paid = bench.paid_since(since), savings.spent(since)
@@ -6478,7 +6475,7 @@ def _api_savings(a, period: str, since: float) -> None:
 
 def cmd_backlog(a):
     """A batch of tasks started with `--backlog`: each one's phase, rounds, minutes and branch,
-    and the batch's saving (the morning summary). Without a name, the batches."""
+    and what the batch spent (the morning summary). Without a name, the batches."""
     tasks = [t for t in store.all_tasks(archived=True) if t.spec.get("backlog")]  # #270
     if not a.name:
         names = {}
@@ -6509,7 +6506,7 @@ def cmd_backlog(a):
                     "minutes": row.get("minutes") or round((store.now() - since) / 60, 1),
                     "branch": t.spec.get("branch") if st.get("phase") == "accepted" else None})
     batch = savings.totals([r for t in tasks if (r := rows.get(t.name)) and not r.get("trial")])
-    # the batch's API money, trials in as wb savings counts it: never summed (#1121, 2026-11-23)
+    # the batch's API money, trials in as wb spend counts it: never summed (#1121, 2026-11-23)
     api_t = savings.api_totals([r for t in tasks if (r := rows.get(t.name))])
     if a.json:
         print(json.dumps({"backlog": a.name, "tasks": out, "totals": {**batch, "api": api_t}}))
@@ -6848,12 +6845,12 @@ def scout_api_lines() -> list[str]:
         out += [f"  {mid}  {_api_record(mid, now - SCOUT_API_DAYS * 86400)}" for mid in mids]
     cap = (f"{routes.money(doc['day_usd'])}/day at most" if doc["day_usd"] is not None else
            "no day cap (off)" if doc.get("no_cap") else "no day cap")
-    # the day ledger's dollars, as wb savings --api's `spent` and the cap beside them count them:
+    # the day ledger's dollars, as wb spend --api's `spent` and the cap beside them count them:
     # the closed tasks' said $3.00 for a week the ledger said $5.00 (#1094, 2026-11-23); the
     # tasks with no known cost are the closed rows' (#1022)
     since = now - SCOUT_SPEND_DAYS * 86400
     paid, t = savings.spent(since), savings.api_totals(store.results(trials=True), since)
-    # meter.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
+    # meter.usd, as wb spend --api and the pane say the same dollars: :.2f said $0.00 for a
     # task paid a fraction of a cent (wave 2's merge)
     by = ", ".join(f"{p} {meter.usd(v)}" for p, v in sorted(paid["by_provider"].items(), key=lambda x: -x[1])
                    if v)
@@ -10567,21 +10564,21 @@ def parser() -> argparse.ArgumentParser:
     x = ss.add_parser("fire", help="the timer's command: one headless run, one runs.jsonl row")
     x.add_argument("name")
     s.set_defaults(f=schedule.cmd)
-    s = sub.add_parser("savings", help="what delegating saved Claude: the week, by default")
+    # `savings`, its name before #1618 (what delegating saved against an estimate), still runs it
+    s = sub.add_parser("spend", aliases=["savings"], help="what the tasks spent: Claude's tokens, GPU "
+                       "energy, API dollars; the week, by default")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--week", action="store_true", help="the last 7 days (the default)")
     g.add_argument("--month", action="store_true", help="the last 30 days")
     g.add_argument("--all", action="store_true", help="every task recorded")
     s.add_argument("--json", action="store_true")
     s.add_argument("--share", action="store_true", help="a plain summary to paste into a "
-                   "discussion: the machine, model sizes (no names), tasks, ratios, energy")
-    s.add_argument("--card", metavar="FILE.svg", help="write the savings badge as an image to keep "
-                   "or post: the score out of 100, the period, the counts (made here; nothing sent)")
+                   "discussion: the machine, model sizes (no names), tasks, Claude's tokens, energy")
     s.add_argument("--price", metavar="X|off", help="set the electricity price per kWh (off "
                    "clears it), then report")
     s.add_argument("--api", action="store_true", help="what the API tasks cost, by provider and "
-                   "day, trials and bench replays in (never part of the score)")
-    s.set_defaults(f=cmd_savings)
+                   "day, trials and bench replays in")
+    s.set_defaults(f=cmd_spend)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)
     s = sub.add_parser("gc", help="archive old closed tasks, rotate old notices, remove leftover "
                                   "rules, runtime dirs and merged branches")

@@ -644,7 +644,7 @@ session's tasks:
 Charging whole turns was wrong (2026-11-17: 5.5M cached tokens of other work on one task). The
 row keeps `input`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `output`, `turns`, `calls`;
 `spend.weighted` gives input-equivalent tokens (`WEIGHTS`: output 5, cache write 1.25 or 2 for an
-hour, read 0.1), which `wb savings`, `wb stats` and the router (`_cheaper`) use. Nothing
+hour, read 0.1), which `wb spend`, `wb stats` and the router (`_cheaper`) use. Nothing
 to read: the row has no `claude`, never a zero (#718: zeros skewed `_cheaper`).
 
 **Each step's share** (`spend.usage_by_step`, #558): `steps[i].claude`, so a one-step bench case
@@ -653,37 +653,30 @@ and its spec's calls (`calls` marks them `ahead`), which belong to the step it h
 failed `wb next` hands nothing (clamped). No split when a charged call lacks a timestamp or the
 step counts disagree.
 
-### What a task saved: an estimate of Claude writing it
-`savings.py` (the user, 2026-11-18: nothing showed the saving). Fitted on 8 paired runs
-(2026-11-17): `SELF_CALLS` 4.9 + lines changed / `SELF_LINES_PER_CALL` 69 calls, each priced at
-this task's own cost per call less output (`per_call`), plus `SELF_OUT_PER_LINE` 36 output tokens
-a line. Rechecked 2026-11-19 on five `wb bench self` runs: mean error 19%, mostly low; a refit
-didn't hold out of sample, so the constants stand (#120); single tasks −36% to +48%, its figures
-marked `~` (no "(estimate)" words after them, #1322). `estimate_self(lines, per_call)` is that sum; `of_row(row)` needs `claude`
-(with `calls`) and `diff`, gives `{claude, self_est, saved, wh}` (`wh` None for another machine's
-GPU, `remote_gpu`: nothing is said for it, #1322); a discarded task saves nothing
-(`self_est` 0, `saved` −claude). Lockfiles and generated files (`gitops.generated`:
-`gitops.LOCKFILES`, `linguist-generated` or `-diff`) are out of `diff`'s lines, and whole
-deletions price as one call (#725: a deleted 2,400-line module "saved ~725K"); `savings.COUNTS`
-says so. `totals(rows, since)` sums them (`{tasks, claude, self_est, saved, wh, cost}`), the
-energy's `cost` at `price()` (`$WB_SAVINGS`, else `savings.json` `kwh_price`; `set_price` through
-`store.edit_config`). `wb savings` prints `summary` (`PERIODS`, default a week): `the last 7 days:
-3 task(s) · claude 160K · writing it yourself ~390K · saved ~230K (59%) · GPU 1.2 kWh, cost 0.36`,
-the percent its one figure (no score beside it, #1322); with nothing to compare `the last 7 days:
-nothing to compare yet`, or nothing at all when an API line follows (#1121, #1322). No saving is
-printed on `wb accept` or `wb discard` (#1322: a line of estimates on every close cost Claude
-tokens and changed nothing it did).
+### What the tasks spent
+`savings.py` (#1618, the owner, 2026-11-27: "instead of framing things as what is saved (cost) can
+we just frame things factually as what we spend, be it electricity or API spend, users can figure
+out if they're losing or saving money themselves, keep our math simple, we just state facts"). It
+sums what was spent and compares with nothing: the estimate of Claude writing a task itself
+(fitted on eight paired runs, 2026-11-18), its score out of 100, the badge (#101), its SVG card
+(`--card`) and every "saved" line went with #1618. *What a handoff costs Claude (measured)* above
+stays as a measurement. The module and its price file (`savings.json`, `$WB_SAVINGS`) keep their
+names, so a price set stays set.
 
-**The badge** (`savings.score`, #101): 100·(B−A)/B over the summed `self_est` (B) and `claude`
-(A), rounded, held to 1–100; `BANDS` 1–9 red, 10–24 orange, 25–49 yellow, 50–100 green; the
-sentence "I used about 62% less Claude than if Claude had done this work alone", "about the same
-amount" or "about 20% more" (both score 1); else `NO_SCORE`. Energy and price stay out. The text
-output never prints it (the percent again, #1322): `--json` carries `{score, color, pct,
-sentence}`; the web app's Stats view shows the badge's number with one line under it, `~3K Claude
-tokens saved this week`, and the GPU's energy in the paragraph below (the saving there only when
-there is no badge; no API line since #1339: History's This week says the week's API money); `wb savings --card FILE.svg` (`savings.card`) writes an
-SVG (`CARD_COLORS`, each past 4.5:1) holding no name, path, host or account, its footer `Last 7
-days · 3 tasks · estimated`.
+`of_row(row)` is a GPU task's `{claude, wh}`: Claude's weighted tokens on it (`claude_of`: its
+`claude` usage through `spend.weighted`, 0 with none recorded) and its GPU energy (`wh` None for
+another machine's GPU, `remote_gpu`: nothing is said for it, #1322), accepted or discarded alike;
+None for a `kind: "api"` row, whose money and tokens are `api_totals`'. `totals(rows, since)` sums
+them (`{tasks, claude, wh, cost}`), the energy's `cost` at `price()` (`$WB_SAVINGS`, else
+`savings.json` `kwh_price`; `set_price` through `store.edit_config`). **`wb spend`** (`savings`,
+its name before #1618, still runs it) prints `summary` (`PERIODS`, default a week): `the last 7
+days: 3 GPU task(s) · Claude 160K tokens · GPU 1.2 kWh, cost 0.36`; with no task `the last 7 days:
+no task yet`, or nothing at all when an API line follows (#1121, #1322). Nothing is printed of it
+on `wb accept` or `wb discard` (#1322: a line on every close cost Claude tokens and changed
+nothing it did). `--json` is the totals with `period`, `price` and `api`. The web app's Stats
+view has a **Spend this week** card (`chat.week_spend`, the state's `spend`; `drawSpend`): `Claude
+used 56K tokens on the week's tasks. The GPU used 600 Wh, cost 0.18.`, Claude's tokens every
+task's, GPU and API; the API dollars are History's This week's, said once (#1339).
 
 The energy: the runner's `_Power` thread samples `hardware.gpu_power_w()` every `POWER_EVERY`
 (10) s of a round into status `gpu_wh` (`runner.measures_power`: not a remote model, `remote_gpu`;
@@ -694,17 +687,12 @@ the GPU twice); `gpu_w_*` stay the GPU's own draw. The size: `gitops.footprint` 
 `lines`, `removed`, apart `generated` and `deleted`), per step (`results.step`), summed as the
 row's `diff`.
 
-**API tasks: their own line, never in the score** (#1022). The score answers `savings.QUESTION`,
-"How much Claude did my GPU save me?": `of_row` returns None for a `kind: "api"` row, so `totals`,
-`score`, `card`, `share` and the badge stay GPU-only (that check is what keeps them so). An API
-task's paid tokens are on the other side, which the
-score can't see: it would read "saved 60%" for a task that cost $3. Its money goes beside it,
-never netted against Claude's tokens. `api_totals(rows, since)` sums the API rows (and a GPU
+**API tasks: their own line** (#1022). An API task's dollars are never netted against Claude's
+tokens. `api_totals(rows, since)` sums the API rows (and a GPU
 fallback's `fallback_paid`, #1523), trials and discards included (money spent is spent): `{tasks, cost, unknown, plan, trials, claude,
-self_est, by_provider: {p: {tasks, cost, unknown, plan?}}}` (`unknown`: no known cost, no price or
+by_provider: {p: {tasks, cost, unknown, plan?}}}` (`unknown`: no known cost, no price or
 a priced model whose figure never came back, #1106, said alike, #1322; closed tasks only: a row is
-written at accept or discard; `claude`/`self_est`
-side by side through `_compare`, of_row's comparison of any kind). Dollars are OpenCode's unit
+written at accept or discard; `claude`, Claude's weighted tokens on them, `claude_of`). Dollars are OpenCode's unit
 (`Money.USD`), printed with `$` by one formatter, `meter.usd` (savings imports it): `$0.42`,
 `$5.00`, `<$0.01` under a cent, a free model's `$0`, `unknown` for None; `meter.money` puts `≈`
 in front of a catalog estimate. The mod's `usd` and the Stats view's `usd` follow the same rule
@@ -714,11 +702,11 @@ cause (`unknown_parts`; a provider's `unknown`, `unpriced`, #1106, one wording s
 `$0.00`; a plan model's (`opencode-go`, a coding plan, an Ollama cloud model) as `on plan usage` (a quota, not
 dollars). `paid(row)` is an API task's money at its close, on `wb accept`'s and `wb discard`'s
 line: `· paid ≈$0.12` (plain at the user's prices or the provider's figure, *Estimates or your
-prices*), `· paid: unknown` or `· plan usage (opencode-go)`; "" for a GPU task. `wb savings` adds,
+prices*), `· paid: unknown` or `· plan usage (opencode-go)`; "" for a GPU task. `wb spend` adds,
 when the period has API rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43) + 1
-with no known cost · claude 210K · writing it yourself ~520K` (`api_summary`); `--json` gains
-`api` (api_totals), in the chat's state (`savings.api`); the web app shows the week's API money in
-Stats' This week (`apiPeriod`) alone (`apiSaved` went with #1339; the pane's footer with #1283). **`wb savings --api`**
+with no known cost · Claude 210K tokens` (`api_summary`); `--json` gains
+`api` (api_totals), in the chat's state (`spend.api`); the web app shows the week's API money in
+Stats' This week (`apiPeriod`) alone (`apiSaved` went with #1339; the pane's footer with #1283). **`wb spend --api`**
 (`api_report`, with `--week`/`--month`/`--all`) reports the day ledger only (`savings.spent(since)`:
 spend-api.jsonl's `step` and `reconcile` rows since then, open tasks and bench replays in, each on
 its own `day`; `today` is `meter.today()`, the pane's): `api, the last 7 days: ≈$1.57 (≈$0.73
@@ -790,10 +778,10 @@ cost is the meter's: an export matching a meter of OpenRouter's own `usage.cost`
 bill labelled `catalog prices`, #1234; a row from before #1135 reads
 `catalog`, `results.row_basis`).
 
-**Sharing it** (`wb savings --share`, `savings.share`, #119): a summary to paste, nothing sent (the user posts it, if they choose; Claude never posts it, a bench report or a badge anywhere without the user's yes):
+**Sharing it** (`wb spend --share`, `savings.share`, #119): a summary to paste, nothing sent (the user posts it, if they choose; Claude never posts it or a bench report anywhere without the user's yes):
 the machine (`hardware.system()`, `hardware.gpus(windows=False)`), the models' count and weights
-(`models.weights`), the tokens and estimate overall and by size, `COUNTS`, the badge, the energy.
-No model name, repo, task name or price.
+(`models.weights`), the GPU tasks and Claude's tokens on them, by size with each size's accepted
+count, and the energy. No model name, repo, task name or price.
 
 ### Spend: what an API task costs
 `workbench/meter.py` (#1019). Nothing recorded money for the agent's model, so an API task could
@@ -930,7 +918,7 @@ first; none, `catalog`), any catalog one makes a sum an estimate, `$0` gets no `
 Status `api.prices`, `meter.today()`'s `basis`, results `api.prices`, `bench.paid`'s, api_totals',
 `spent`'s and the roles' JSON `spend_today.prices` carry it to the start line (` · today ≈$0.42 of
 $5.00`: today's rows' basis, `meter.today()`, no ledger scan for the model's next figures, #1322),
-`wb accept`'s `paid`, the round report, `wb savings`, `wb stats` (and `paid` `≈$0.12`; no footnote under the table, #1322), `wb top`, scout, the stop texts, the pane
+`wb accept`'s `paid`, the round report, `wb spend`, `wb stats` (and `paid` `≈$0.12`; no footnote under the table, #1322), `wb top`, scout, the stop texts, the pane
 (`isEst`; a narrow Tasks row drops the `≈` before its place) and the chat's Stats view (`estUsd`).
 `wb models --json` gives `prices` (`meter.model_basis`). The day cap counts the figure shown: a catalog that runs high
 stops tasks early (the safe side); one that runs low lets real spend pass the cap, which the opt-in
@@ -944,7 +932,7 @@ inode and size tell a new or rewritten one), so the 5 s tick never re-reads it w
 (`{usd, metered, at_catalog, source, tok, prices}`, per row through `Task.set_status`, under the meter's lock: the
 keyhole's thread and the runner's book at once, and a total written after a newer one would leave
 it under the ledger) is the task's own; its results row's `api` reads it at the close
-(`results.metered`, *What an API task cost*). `wb savings --api`'s spend and by day read the
+(`results.metered`, *What an API task cost*). `wb spend --api`'s spend and by day read the
 ledger too (`savings.spent`, #1094).
 
 **The cap at start** (`meter.refusal(m, role=None, advice=True, task=None)`, exit 3; `routes.resolve` on both API paths:
@@ -3565,8 +3553,8 @@ count toward `fresh_at`, one knob per model and window. The slice is shared (`ro
 decision 1, writing slices like significant).
 - **Unchanged**: the lane, the shell allowlist, the guards (the calls without an edit, `runner.no_edit_limit`, still stop a
   writer that only reads, after one nudge), `NUDGE`, the ask server, handovers, feedback and resume (plain review
-  notes), the lessons (Claude's raw material, never handed to an agent by role), and the savings
-  estimate.
+  notes), the lessons (Claude's raw material, never handed to an agent by role), and the spend
+  sums (`savings.py`).
 
 ## Talking to a running agent
 
@@ -3695,10 +3683,10 @@ recently used first; `models` keeps every id split), `sizes`, `stacks` `{tasks, 
 day, passed, of}`, a newer one beside it, never in its place, as `partial` `{…, planned, running}`,
 #570; a run is finished once every replay in its plan.json, times `repeat`, is graded or failed to
 start; one with no plan is finished), `optimized` (optimize.json's `{window, fits, spill, ts}`).
-results.jsonl is read once and the snapshot passed down (#565: 16 reads a feed, 3 s at 20,000 rows). `feed(only=...)` builds just those sections; plain `wb stats` uses `stats.SUMMARY`, `("periods",)`: `stats.summary` prints each period's tasks and landings, no saving, no score, no API line (`wb savings` has them) and none of the tab's other sections (#1322).
+results.jsonl is read once and the snapshot passed down (#565: 16 reads a feed, 3 s at 20,000 rows). `feed(only=...)` builds just those sections; plain `wb stats` uses `stats.SUMMARY`, `("periods",)`: `stats.summary` prints each period's tasks and landings, no saving, no score, no API line (`wb spend` has them) and none of the tab's other sections (#1322).
 Gone (#1322: precision nobody acted on): each period's `savings` and `score`, `spec_gaps` and `energy`
 `{wh, cost?}`, `streak`, `bests`, `milestones`, `absorbed`, `questions`, `days` and each model's
-`claude`; `wb savings` still says the saving and its energy.
+`claude`; `wb spend` says Claude's tokens and the energy (#1618).
 
 **API tasks in the feed** (#1022). `periods[*].api` is `{tasks, cost, unknown, plan, by_provider:
 {p: {tasks, cost, unknown, plan?}}}` (`stats._api_period`, from `savings.api_totals` over every
@@ -4203,7 +4191,7 @@ in the task sheet's note, #1339): while away, the chat is all the user sees.
   shows the phase and says what it does and the time left, or who acts next ("Claude reviews
   next.", #103), as do the transcript's last line and status `last`; then the API day cap's line
   while an API task works (*The Tasks view*), then the modeline. The week's saving and API dollars
-  are the web app's Stats (#1283: the pane runs no `wb savings`, `wb stats` or `wb top`).
+  are the web app's Stats (#1283: the pane runs no `wb spend`, `wb stats` or `wb top`).
   **Settings changed on the web app** (#1283's addendum). The web app's Settings write wb's own
   files through wb, and append each change to `$WB_HOME/settings-changes.jsonl` (`{ts, key, label?,
   from, to, said, help?, by: "web"}`). `settingsTurns` reads its tail (64 KB) at each poll when its
@@ -5247,9 +5235,9 @@ thinking what the model does, `routes.thinking_said`, #1263),
 each role's API model's record over `SCOUT_API_DAYS` 30 (`cli._api_record`: tasks, accepted share,
 `~$/task` from `results.task_cost`, #1022's `row_cost` less the nothing-sent rows (#1106), rate-limited rounds from the tasks' `rate_limited` events),
 the spend over `SCOUT_SPEND_DAYS` 7 beside the day cap (the day ledger's, `savings.spent`, as
-`wb savings --api`'s total, open tasks and bench replays in, per provider: the closed tasks'
+`wb spend --api`'s total, open tasks and bench replays in, per provider: the closed tasks'
 said $3.00 for a week the ledger said $5.00, #1094; then the closed rows' `; task(s) N with no
-known cost`, `savings.api_totals`, trials included, `unknown_parts`, #1106; its dollars and `~$/task` by `meter.usd`, as `wb savings --api` and the web app say them), and one line per connected provider counting its models with tool calls
+known cost`, `savings.api_totals`, trials included, `unknown_parts`, #1106; its dollars and `~$/task` by `meter.usd`, as `wb spend --api` and the web app say them), and one line per connected provider counting its models with tool calls
 (free ones, those the catalog doesn't say, a key wb can't hold): never each id, as a provider may list
 hundreds. Only hosted.json's catalog: no network beyond it. Claude researches primary
 sources, recommends keep / add / retire and changes nothing without the user's yes; `wb scout --done
@@ -5546,7 +5534,7 @@ GPU row, with `fallback_paid` (`results.fallback_paid`: `{cost, prices, provider
 dollars for the task, the API model's provider) when its API rounds booked any: `wb accept` says
 `· paid ≈$0.42 (before the GPU fallback)` (`savings.paid`) and `api_totals` counts it under that
 provider (its Claude side stays the GPU score's); with no `fallback_paid` the money was missing from
-the close, `wb savings` and Stats (#1523). `routes.summary` (and the
+the close, `wb spend` and Stats (#1523). `routes.summary` (and the
 mod's `routesSummary`) end a role's part with `, fallback <id>` or `, fallback GPU`; `wb route` shows
 `fallback <id> (<provider>)` or `fallback GPU (…)` (`(not used while Agents is API)` for one that
 doesn't apply).
@@ -7462,7 +7450,7 @@ old generation's page and Settings until OpenCode removed it, then exited (#1525
   `sw.ts` reads.
 - `GET /api/state`: `{api, messages (the last 200 from `THREAD_BYTES` 4 MiB, user rows with
   `received`; a settled notice left out), push ({key or null, `chat._push_key_or_none`, #924; test}), listener,
-  savings (`chat.week_saved`: `wb savings --json` over 7 days, no `period`; its `api` adds each
+  spend (`chat.week_spend`, #1618: `wb spend --json` over 7 days, no `period`, Claude's tokens every task's; its `api` adds each
   provider's name, `names`, #1022), uploads (`{file,
   message, files}`), build, expire (`MESSAGE_EXPIRE` in seconds), tasks (`chat.open_tasks`, #1016: `[{name,
   phase, model, label, via, provider_name, updated_at}]` for each open task, no bench replay and none parked (`store.parked`,
@@ -7625,8 +7613,7 @@ waiting for their words in `wb-chat-dictate`, bytes in IndexedDB beside the draf
 so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts
 (`receipt.blocked` while the driver waits on a prompt), the state line (`drawState`, *The driver's state line*: a notice is no thread row since
 #1355, and no dialog cards since #1350) and the Settings and Stats cards (*How the chat works*: the story's `lane`, `rule.terminal` (a prompt is answered in the terminal and
-the line at the top says while one waits) and `rule.settings`; *While away*, `#away-when`, the away rule alone; `drawSaved` shows no currency sign, as `wb savings`, #845, and no API dollars, #1339 (History's This week has them); the saving is the badge's
-one line, `~3K Claude tokens saved this week`, #1322) are in `app.ts`. Over plain HTTP
+the line at the top says while one waits) and `rule.settings`; *While away*, `#away-when`, the away rule alone; `drawSpend` shows no currency sign, as `wb spend`, #845, and no API dollars, #1339 (History's This week has them); no score or saving, #1618) are in `app.ts`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
 
 **The shell** (#1284; the owner, 2026-11-24: merecatholicity.com's three buttons at the foot). Three
@@ -7660,9 +7647,9 @@ page opened on another view takes its first live state's `now`), `99+` at most, 
 hidden (`toEnd` waits; `chatTop`). A notification's click posts `{kind: "view", view: "chat"}` to an
 open page, else opens `/#chat` (`sw.ts`). The gear and its sheet are gone: its sections are
 Settings' cards, How the chat works, While away, Notifications, The app, This device (`#settings` is their
-grid), under `#settings-rows`; What it saved (`#badge`, `#saved`) is a Stats card under `#stats-body`;
+grid), under `#settings-rows`; Spend this week (`#spend`, #1618) is a Stats card under `#stats-body`;
 the ids are as they were, and `drawShown` draws the cards of the view shown (`drawSettings`,
-`drawSaved`) on each state and switch. Forget the key goes to the chat. Over the views, `#toast`.
+`drawSpend`) on each state and switch. Forget the key goes to the chat. Over the views, `#toast`.
 The manifest has no shortcuts to the views: the keyed one is built in `chat.py`, and a shortcut without the key
 would open an iPhone app keyless.
 
@@ -7736,7 +7723,7 @@ task sheet's note, `taskNote`, says it, the catalog name the strip's too, else t
 work absorbed, questions, Claude's tokens a task, 30 days' bars, bests or milestone: #1322 took
 them from the feed and the pane. The charts are inline SVG built in `stats.ts` (no library, so the CSP holds),
 coloured by the page's tokens (`--accent`, `--accent-soft`, `--line`, `--ok`, `--warn`, `--bad`) in
-light and dark; its words in a state's colour take the text shades (`--ok-text`, `--warn-text`, `--accent-text`, #1556). What it saved (`#saved-card`) stays below, drawn by `app.ts`.
+light and dark; its words in a state's colour take the text shades (`--ok-text`, `--warn-text`, `--accent-text`, #1556). Spend this week (`#spend-card`) stays below, drawn by `app.ts`.
 
 
 **The task sheet** (#1201, `app.ts`'s `showTaskSheet`): away, the strip's one line was all the
@@ -7811,7 +7798,7 @@ members it uses). Each is still a plain script, an IIFE (the worker's at its top
 `story.ts` (the story's tables and fill, *The story*) is written by `scripts/gen_story.py`, never by
 hand, and loads first: its `STORY_*` names and `storyText` are the pages' globals. Their
 types are global, `src/types.d.ts`: the server's shapes (`ChatState`, `Snapshot`, `Patch`, `Msg`,
-`OpenTask`, `TaskPart`, `Savings`, `SettingRow`), each an `import()` type of *wb's shapes in one module*
+`OpenTask`, `TaskPart`, `Spend`, `SettingRow`), each an `import()` type of *wb's shapes in one module*
 (below), which keeps the file global; the page's own (`Outgoing`, `DraftFile`), `WbApi` (`window.WB`, `declare var WB`),
 what lib.dom lacks (`navigator.standalone`, `beforeinstallprompt`), and `Json` for the Stats feeds
 (`wb stats --json`, `wb top --json`: wide, Python's, read field by field with a fallback each).
@@ -7836,7 +7823,7 @@ the Python writes it, and the web app, the mod and the OpenCode plugin all read 
 task files (`TaskFile`, `TaskDriver`, `StatusFile`: every field optional, as a reader takes `{}`
 for a file missing or torn and an older wb writes fewer, with an `unknown` index signature),
 notify.jsonl's `NoticeRow`, the chat's (`ChatMsg`, `ChatFile`, `About`, `Driver`, `ChatState`,
-`Snapshot`, `Patch`, `OpenTask`, `TaskPart`, `Savings`; chat/listener.json's `ListenerClaim` and the
+`Snapshot`, `Patch`, `OpenTask`, `TaskPart`, `Spend`; chat/listener.json's `ListenerClaim` and the
 state's `Listener`; chat/open.json's `ChatOpen`; `wb chat url --json`'s `ChatLink`), settings.py's
 `SettingRow`, `SettingChoice`, `SettingsOffers` (`wb settings offers --json`) and `SettingsHelp` (`wb settings help --json`), and `WatchLine`
 (`wb watch --json`), `RouteJson` (`wb route --json`), `ModelsJson` and `MediaJson` (`wb models
@@ -7980,7 +7967,7 @@ ask before an offer over an hour old (#1557's review): a key added to `HELP` nee
   `progress` → `wb progress on|off` (On names an `--after` threshold). No *web* group: its one row,
   the web app's reach, went with #1616 (the web app listens on localhost alone). No `record`, `live`,
   `every` or `price` row: #1322 took Stats recording, Live view, Live refresh and the electricity
-  price from the pane's Settings (recording is always on; `wb stats set` and `wb savings --price`
+  price from the pane's Settings (recording is always on; `wb stats set` and `wb spend --price`
   keep the rest).
 - *gpu*: `size-<id>` for every discovered model
   (no six-row cap) → `wb model sizes <id> [size]`; `optimize`, an action (`start`) beside its
@@ -9021,7 +9008,7 @@ drivers on one machine: *Both drivers on one machine*.
   for the clone's (*Local patches*; #1321, finding 7).
 - **Claude Code only**: `wb schedule`'s fires (Claude Code headless, `claude -p`), `ultracode` (a
   Claude Code keyword), `/reload-plugins` (OpenCode reloads a plugin by itself), the marketplace
-  rescue (met on OpenCode only with Claude Code installed too), and the savings score's Claude fit:
+  rescue (met on OpenCode only with Claude Code installed too), and the Claude-token figures' fit:
   no cost machinery is built for a non-Claude driver (#1318, closed by the owner); Stats shows what
   OpenCode reports.
 - **Claude's own files**: an OpenCode driver reads `~/.claude/CLAUDE.md` when the user has no
@@ -10571,7 +10558,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb schedule rm <name>` | | Refused while its fire runs; else the timer disabled and its files, `schedules/<name>/` and its lock removed. The tasks it started stay. |
 | `wb schedule run <name>` | | A fire now, detached (`cli.detach`; its output to `schedules/<name>/fire.log`), refused while one runs. |
 | `wb schedule fire <name>` | | The unit's command (`schedule.fire`): skips while the last fire holds its lock, or for money or an exported key its environment lacks (`schedule.spend_skip`, #1495; a flow's, only for the roles it runs on: `runs.flow_roles`, #1621), each a `skipped` row; else `claude -p` headless on the backlog and one row, or a flow's `wb run start` (`schedule._fire_flow`; skipped while its last run's driver lives, the row saying why: `schedule.held_why`). Exit 1 on an error row. *Scheduled runs*. |
-| `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, claude, self_est, saved, wh, cost, score, price, api}` (the same totals as the web chat's Savings, `chat.week_saved`); `--api`: the day ledger's spend, today's, by provider and by day, open tasks and bench replays in (`savings.spent`, #1094), and the closed API tasks counted, trials in, `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
+| `wb spend` (`wb savings` before #1618, still an alias) | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, claude, wh, cost, price, api}` (the totals the web app's Spend card says, `chat.week_spend`); `--api`: the day ledger's spend, today's, by provider and by day, open tasks and bench replays in (`savings.spent`, #1094), and the closed API tasks counted, trials in, `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022), only the models of `model_lines`' `lines` and `(+N more models: wb stats --all)` (`--all`: every model), or every model when `lines` is empty (none configured now or recent, or OpenCode's config unreadable: the table said `no finished tasks yet` under a headline of N tasks, #1400); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). Beneath the table one line, `left out: N trials, N report tasks, N spec gaps, N outside stops, N never ran` (a report task's row, #1278, never a trial), each kind counted apart and only the nonzero ones (`results.table`, #817, #1245; one line, no `claude` or `≈` footnote, #1322). |
 | `wb gc` | `--days N` (`ARCHIVE_DAYS` 30) | `cli.gc`, writing `gc.json`: archives tasks closed N days (`store.archive`); old handled notices to `notify.old.jsonl` (`_rotate_notices`; `_cap_old_notices` at `NOTIFY_OLD_MAX` 8 MiB); rules of gone tasks (`RULES_GRACE` 1 h); `context.drop_stale_runtime_dirs`; `store.SCRATCH_PREFIXES` scratches (named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`; `wb bench add`'s `.<case>.<pid>.tmp`) `SCRATCH_AGE` old whose maker is gone (`_drop_scratches`, `_maker_alive`: a reused pid with another start is gone, #532; `_scratch_homes`, #589; another machine's after `FAR_SCRATCH_AGE`, as its pid isn't in this process table, #876); half-made starts (`_dead_start`, `_drop_start`: worktree unlocked and removed, and the branch only when `starting.json` says this start made it and it still points at `branch_at`, `delete_branch(at=)`, #416, #376); chat uploads (`chat.drop_old_uploads`); landed `delegate/` branches (`_merged_branches`, `gitops.drop_landed_branch`, never one checked out, `gitops.checked_out_in`, nor one moved past the recorded tip, #930; status `branch_gone`, #686; one squash-merged elsewhere holds commits its target lacks and stays); accepted refs (`_released_refs`, `gitops.drop_accepted`, `accepted_ref_gone`: deleted when the tip is in `base_branch`, else moved into `steps.bundle` first; a `steps.bundle` stays as long as its task, #940); archived tasks past `store.SLIM_DAYS` 90 slimmed (`store.slim_archive`, `SLIM_GLOBS`: logs, test outputs, old exports, shot PNGs with shots.json marked `pruned` first, #821; task.json, status, prompts, summaries, events and asks stay: names stay taken, bench add and the lessons read them); `_drop_leftovers` (old `imports/`, dead `claude-sessions/<pid>`). Then (not in `cli.gc`) `bench.sweep` (#511). Accept and discard run it without the branches once per `GC_EVERY`. Runs closed N days to `runs/.archive/<run>` (`runs.archive`; gc.json `runs`), their names still taken. |
 
@@ -10796,7 +10783,7 @@ $WB_HOME (~/.local/state/workbench)
   chat-token ($WB_CHAT_TOKEN)    mode 600
   chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}, "revoked"?: {"<sha256>": ts}}
                                  (wb chat token; *Other agents*, #1042; revoked: the newest 200, so a revoked token is told so, #1138)
-  savings.json ($WB_SAVINGS)     {"kwh_price": N} (wb savings --price; off removes it; other keys kept)
+  savings.json ($WB_SAVINGS)     {"kwh_price": N} (wb spend --price; off removes it; other keys kept)
   AGENTS.md ($WB_AGENTS_MD)      the user's own file for agents, every project's (*What the agent knows*, #1061); wb only reads it
   flows/*.json ($WB_FLOWS)       the user's deep-workflow flows, before the shipped agent/flows/ (*Deep workflows*, #1278); wb writes one only at wb flow
                                  import or copy (a copy's `from`: the shipped file's git blob sha, #1295), and reset moves it to <name>.json.bak (.bak.2, … when taken, #1520)
@@ -11428,7 +11415,7 @@ every workflow its own permissions, `check` never path-filtered and required fro
 CLAUDE.md under 25,000 characters; since #1288 the README naming the web app's settings and stats and its chat, no Settings or Stats tab in the README or the skill, the terminal primary in the skill, driving.md and here, and
 docs/chat-api.md's agent allow-list holding `chat.AGENT_MAY`; `TheDriverIsNamedOnThePage`, #1355: no string in
 `chat_static/src`'s TypeScript says "Claude" where the driver is meant, the name itself, "Claude's Workbench", Claude Code
-and the savings' "Claude tokens" aside, read by `ts_strings` outside comments and patterns); `test_settings.py` (*The admin table (settings.py)*: every row's group and kind,
+and the Spend card's "Claude used" aside, read by `ts_strings` outside comments and patterns); `test_settings.py` (*The admin table (settings.py)*: every row's group and kind,
 each choice applied running its row's `wb` call through a fake `wb`, a role changed from the web stamped `by: "web"`,
 a click under `CLAUDECODE` still written ungated while Claude's own `WB_ACTOR=web` stays gated, `KeyError` for an
 unknown key and `ValueError` for a value off the choices, an API row taking a free id and leaving it to `wb route`,
@@ -11590,7 +11577,7 @@ tasks at once under one header with their cards and spend at 71 columns, two row
 the status line's `1 stuck` apart from review, a row's press following its task, the day-cap line only while an API
 task runs, and the splash's measured rows. The Tasks-only pane (#1283): no tab Button or 1-3 key, the modeline per link
 state at 140, 90 and 60 columns, `wb chat url --json` read whole (the 3 s recheck, the switch, an older wb's plain
-call), no `wb top`, `wb stats` or `wb savings` run, the `pane-2` and `chat-5` defaults, the splash's bar on the
+call), no `wb top`, `wb stats` or `wb spend` run, the `pane-2` and `chat-5` defaults, the splash's bar on the
 modeline's row above the link's rows, a web settings row with `help` offered once, others a quiet row, and a role
 changed on the web app echoed once as the user's.
 
@@ -11652,7 +11639,7 @@ their types stripped; `tests/tsconfig.json` checks them strict, against `@types/
 `page.evaluate` runs) and `tests/e2e_page.d.ts` (what a check leaves on the page's `window` and `document`,
 and the page's own `types.d.ts`); Playwright stays `any`, loaded from `$PLAYWRIGHT` at run time. `e2e_stats.mts` (#1285): a fixture
 results.jsonl's task count under This week (waited for whole, `3 tasks · 2 landed (67%)`: shown again the view
-draws its last read at once, and the savings check's feed said `3 tasks` too, so a wait on that ended before the new
+draws its last read at once, and the spend check's feed said `3 tasks` too, so a wait on that ended before the new
 read came, #1418), the labels in `statsLines`' order and none of the rows
 #1322 took (Streak, Last 30 days, Bests, Milestone, Questions, a score or estimate); `/api/top` opened on showing Stats with Live view on, let go on leaving it, never opened
 with Live view off; Now from fixed ticks (the GPU and RAM cards, the running rows, the rack folded,
@@ -12267,9 +12254,9 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   *The Stats view*), and `cli.cmd_stats`.
 - **`routes.LABELS`** → `stats.ts`' `ROLE_LABELS` (By size's names while `wb route --json` is unread, #1339).
 - **`cli.CODING`** → the mod's `CODING_RULES`, the skill's *Claude coding* bullet.
-- **`savings.totals`' keys** → `drawSaved` (the web app); the cost's label (no currency sign) → `wb savings`,
-  `drawSaved`.
-- **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share and badge
+- **`savings.totals`' keys** → `drawSpend` (the web app); the cost's label (no currency sign) → `wb spend`,
+  `drawSpend`.
+- **API money** (#1022): `savings.of_row`'s `kind` check is what keeps `totals` and `share`
   GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, the web app's
   `apiMoney`, `apiPeriod` (`stats.ts`); `meter.usd` → the mod's `usd`, `stats.ts`' `usd`; `meter.basis`' values
   (`meter.BASES`: `catalog`, `yours`, `provider`) → the mod's `isEst`, tasks.ts' `est`, `stats.ts`' `isEst`
@@ -12311,7 +12298,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   then the three type checks (*wb's shapes in one module*). **`scripts/install-tsc.sh`'s `version`** → its four hashes, and a rebuild (the
   headers name it). **`tests/e2e_*.mts`' page probes** (`window.<x>` a check sets) → `tests/e2e_page.d.ts`;
   **chat.yml's `NODE_TYPES_VERSION`** → the Node line it runs. **`/api/state`'s asks or messages** → `sw.ts`. **A key of
-  `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
+  `chat.snapshot` or `week_spend`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
 - **listener.json's `parent`** (the mod's `listen`) → `chat.caller_listens`; **a Claude row's `claude_pid`** (`chat.send`)
   → the mod's `owedAtTurnEnd` (#1129). **An OpenCode claim's `session` and `driver`** (the OpenCode plugin's
   listener, #1319: it must say `driver: "opencode"`, and `session` is the listening session's `OPENCODE_SESSION_ID`,

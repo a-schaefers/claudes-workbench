@@ -62,7 +62,7 @@ def line() -> str:
 # --json`). Built from what already computes it; a section with no data is left out, never a
 # zero. The score, the savings estimate, the streak, the bests, the milestones, the work
 # absorbed, the questions, spec-gap discards, the energy and its cost and the 30 days' line were
-# in it too: precision nobody acted on (#1322); `wb savings` still says the saving.
+# in it too: precision nobody acted on (#1322); `wb spend` says the spend (#1618).
 TREND_MIN = 6  # speed samples (tasks) before a model's trend is given
 
 
@@ -322,7 +322,7 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
 
 def summary(f: dict) -> list[str]:
     """`wb stats`' lines above its table: each period's tasks and landings, short (Claude reads it
-    too). The saving is `wb savings`', and the week's API dollars too (#1322)."""
+    too). The week's spend is `wb spend`'s, its API dollars too (#1322, #1618)."""
     lines = []
     for name in ("week", "all"):
         p = f.get("periods", {}).get(name)

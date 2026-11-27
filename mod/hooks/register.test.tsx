@@ -6405,7 +6405,7 @@ test('#1283: what wb chat url --json says is read whole or not at all', () => {
   expect(linkOf({ ok: false, out: 'could not run wb chat url: ENOENT' }, true)).toEqual({ state: 'failed', why: 'could not run wb chat url: ENOENT' })
 })
 
-test('#1283: no wb top, wb stats or wb savings ever runs, the pane shown, brought back and closed, and a task closing', { timeoutMs: 20_000 }, async ($, on) => {
+test('#1283: no wb top, wb stats or wb spend ever runs, the pane shown, brought back and closed, and a task closing', { timeoutMs: 20_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
@@ -6437,7 +6437,7 @@ test('#1283: no wb top, wb stats or wb savings ever runs, the pane shown, brough
   await $.command.run({ command: 'workbench-quit', args: '' } as any)
   await clock.advance(3000)
   const all = [...runs, ...spawned].map(a => a.slice(1, 2).join(''))
-  expect(all.filter(c => ['top', 'stats', 'savings'].includes(c))).toEqual([])
+  expect(all.filter(c => ['top', 'stats', 'spend', 'savings'].includes(c))).toEqual([])
   expect([...new Set(spawned.map(a => a[1]))]).toEqual(['events'])           // only the watcher, never `wb top`
 })
 
