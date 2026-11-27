@@ -290,6 +290,9 @@ def spawn_runner(task: store.Task) -> int:
     # task not checked out, whose runner's #655 guard reads it
     if task.status.get("taken_over") and runner.checked_out(task):
         task.set_status(taken_over=None)
+    # the phase before a takeover says nothing once an agent runs again: the next takeover
+    # records the phase this runner leaves (#1592's second hand-back, 2026-11-27)
+    task.set_status(prior_phase=None)
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
@@ -4967,8 +4970,6 @@ def cmd_takeover(a):
             print("no open delegated tasks to take over")
         refused = 0
         attempts: dict[tuple, list[str]] = {}
-        # each phase before the hand-back set it to review: which try holds a finished change
-        before = {t.name: t.status.get("phase") for t in tasks}
         for t in tasks:  # each refusal said (die's line) and the rest still taken: one refused
             # first left every other runner going (#601, the audit of v1.90). Not ready is skipped,
             # not refused: a task still checking out, or failed at checkout, made every hand-back
@@ -4993,7 +4994,7 @@ def cmd_takeover(a):
                 print(_took_over_line(task))
             _say(aside)  # after its line: "took over" opens the line the mod and plugin key on
         for (run_name, stage, item), names in attempts.items():
-            print(_attempts_line(run_name, stage, item, names, before))
+            print(_attempts_line(run_name, stage, item, names))
         if held:
             print("left parked by an earlier quit (leave them unless the user asks): "
                   + ", ".join(held))
@@ -5028,8 +5029,14 @@ def _take_over(name: str, user: bool) -> tuple[store.Task, str]:
     aside = _stop_aside(task, "the user's hand-back" if user else "wb takeover")  # #1582
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
                 "text": "Claude took over"})
+    # the phase it had before Claude took it over, kept across another takeover: a second
+    # /workbench-quit-and-hand-back-claude read every try as review, and the escalated item's
+    # line had Claude discard the reviewed cheap try, maybe holding Claude's own edits by then,
+    # for the crashed escalation (#1592's second hand-back, 2026-11-27)
+    prior = (task.status.get("prior_phase") if task.status.get("taken_over") else None) \
+        or task.status.get("phase")
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
-                    parked=None)  # Claude's now (#698)
+                    parked=None, prior_phase=prior)  # Claude's now (#698)
     _ack_all(task)
     return task, aside
 
@@ -5053,14 +5060,13 @@ _PHASE_SAID = {"failed": "failed", "stuck": "got stuck", "queued": "never starte
                "running": "was still running", "testing": "was still testing", "asking": "was still asking"}
 
 
-def _attempts_line(run: str, stage, item: str, names: list[str], before: dict | None = None) -> str:
+def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
     """--all's one line for the tries it took over at one code item (runs.tries_of): a compare
     item's attempts (#1576), one kept, the rest discarded, which records them as not chosen
     (runs.not_chosen), never as rejected; or an escalation and the tries it escalated from
-    (#1592), the latest finished one kept (at review before the hand-back: ``before``, each
-    taken-over try's phase then), else the latest, the others discarded, no pick to count them
-    against."""
-    before = before or {}
+    (#1592), the latest finished one kept (at review before Claude first took it over: status
+    ``prior_phase``, which _take_over keeps across another takeover), else the latest, the others
+    discarded, no pick to count them against."""
     tries = runs.tries_of(store.Task(names[0]))[3]
     rest = [t.name for t in tries if t.name not in names]
     kept = [n for n in rest if store.Task(n).status.get("phase") == "accepted"]
@@ -5075,7 +5081,9 @@ def _attempts_line(run: str, stage, item: str, names: list[str], before: dict | 
         return _took_over_line(store.Task(names[0]))
     if escalated:  # the run's own pick: its latest try, started from the base on the next role
         live = [t.name for t in tries if t.name in names or t.name in others]
-        phase = {n: before.get(n, store.Task(n).status.get("phase")) for n in live}
+        # the phase before the first takeover, not this one's: a second hand-back read every
+        # try as review, the first one's (#1592's second hand-back, 2026-11-27)
+        phase = {n: (st := store.Task(n).status).get("prior_phase") or st.get("phase") for n in live}
         # the latest try with a finished change, not merely the latest: a fix-escalate cheap try
         # kept at review (asks left after its refixes) whose escalation crashed was named to
         # discard, and Claude dropped the reviewed change to redo it in the crashed try's worktree

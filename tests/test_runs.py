@@ -1560,6 +1560,14 @@ class Runs(Base):
         self.assertIn("Finish fxe-code-1 in its worktree and wb accept only it", alts)
         self.assertTrue(alts.endswith("then wb discard fxe-code-2"), alts)
         self.assertNotIn("wb discard fxe-code-1", out)                   # the hand-back stopped the run
+        # #1592's second hand-back (2026-11-27): the first set every try to review, so a second
+        # (Claude's finishing turn interrupted) kept the crashed escalation and dropped the
+        # reviewed try, Claude's edits by then with it
+        again = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in again.splitlines() if "alternatives" in ln]
+        self.assertIn("the run escalated fxe-code-1 to fxe-code-2, which failed", alts)
+        self.assertIn("Finish fxe-code-1 in its worktree and wb accept only it", alts)
+        self.assertNotIn("wb discard fxe-code-1", again)
         for n in ("fxe-code-1", "fxe-code-2"):
             if store.Task(n).status.get("phase") not in store.CLOSED:
                 run_wb("discard", n)
