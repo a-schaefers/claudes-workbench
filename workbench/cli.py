@@ -2071,7 +2071,7 @@ def cmd_start(a):
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"mcp": mcp} if mcp else {}),  # the user's MCP servers its agent gets (#1202)
         # the global OpenCode skills the user turned off, fixed for the task (#1463 P4)
-        **({"deny_skills": off} if (off := context.users_denied_skills()) else {}),
+        **({"deny_skills": denied} if (denied := context.users_denied_skills()) else {}),
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
         # the next start counts it as taken until the runner has made it (#676)
