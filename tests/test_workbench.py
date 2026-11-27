@@ -46234,6 +46234,23 @@ class ApiSpend(Base):
         task.set_status(api_stop=None)
         self.assertEqual((self.meter.cap(), self.meter.stop_reason(task)), (20.0, None))
 
+    def test_a_task_with_the_cap_turned_off_is_metered_and_never_held_while_no_cap_set_spends_nothing_1624(self):
+        # #1624: the user's `cap off` (routes.json no_cap) is no limit; a cap never set is still none
+        task = self.api_task("t-off", SPEND_M)
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": None, "no_cap": True, "roles": {
+            "trivial": {"via": "api", "api": SPEND_M, "thinking": "off"}}}))
+        self.spent(50.0)                                        # far past any cap it ever had
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
+        self.assertEqual((self.meter.cap(), self.meter.uncapped()), (None, True))
+        self.assertIsNone(mt.room({"model": "priced-1"}, 400))  # nothing to keep: never refused
+        self.assertIsNone(self.meter.stop_reason(task, ahead=True))
+        self.assertTrue(self.meter.tail(runner.models.lookup(SPEND_M)).endswith(", no day cap"))
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": None, "roles": {
+            "trivial": {"via": "api", "api": SPEND_M, "thinking": "off"}}}))
+        self.assertFalse(self.meter.uncapped())
+        self.assertLess(mt.room({"model": "priced-1"}, 400), 0)  # no cap set: spends nothing
+        self.assertEqual(self.meter.stop_reason(task), self.meter.NO_CAP)
+
     def test_the_start_lines_spend_part_says_todays_spend_of_the_cap(self):
         self.cap(5)
         self.spent(0.30)
@@ -51453,25 +51470,37 @@ class SettingsRoles(Base):
         self.assertEqual((code, routes.read()["busy"]), (0, "wait"), err)
         self.assertEqual(self.wb("route", "busy", "maybe")[0], 1)
 
-    def test_wb_route_cap_off_clears_the_cap_only_while_nothing_can_spend_on_api(self):
+    def test_wb_route_cap_off_works_with_roles_on_api_and_their_tasks_spend_with_no_daily_limit_1624(self):
+        # #1624 (the owner, 2026-11-27: "what if i was rich and didnt care?"): the cap was refused
+        # off while a role or the busy opt-in could spend on API; it is the user's at any time,
+        # kept as no_cap, and an API task then spends metered, with no daily limit
+        from workbench import meter, models
         self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
-        code, _, err = self.wb("route", "cap", "off")               # trivial runs on API
-        self.assertEqual(code, 3)
-        self.assertIn("the day cap stays while trivial can spend on API", err)
-        self.set_role("trivial", "gpu")
         self.set_role("busy", "api")
-        code, _, err = self.wb("route", "cap", "off")               # the busy opt-in can send it there
-        self.assertEqual(code, 3)
-        self.assertIn("the day cap stays while busy can spend on API", err)
-        self.set_role("busy", "wait")
+        off = "day cap $5 → off: API tasks spend with no daily limit"
         os.environ["CLAUDECODE"] = "1"
         asked = json.loads(self.wb("route", "--dry-run", "--json", "cap", "off")[1])
-        self.assertEqual((asked["change"], asked["approval"]["argv"]), ("day cap $5 → none", ["route", "cap", "off"]))
+        self.assertEqual((asked["change"], asked["gate"], asked["approval"]["argv"]), (off, True, ["route", "cap", "off"]))
         store.write_json(self.ok, {**asked["approval"], "at": time.time(), "by": "pane"})
         code, out, err = self.wb("route", "cap", "off")
-        self.assertEqual((code, out), (0, "changed: day cap $5 → none\n"), err)
-        self.assertIsNone(routes.read()["day_usd"])
+        self.assertEqual((code, out), (0, f"changed: {off}\n"), err)
+        doc = routes.read()
+        self.assertEqual((doc["day_usd"], doc.get("no_cap")), (None, True))
+        self.assertIn("day cap off: API tasks spend with no daily limit", self.wb("route")[1])
+        self.assertTrue(meter.uncapped())
+        self.assertIsNone(meter.refusal(models.lookup("deepseek/deepseek-flash"), "trivial"))  # wb start's check
+        # a priced role sent to API while it is off takes no cap of its own, and says so
+        ch = routes.change(doc, "significant", via="api", api="deepseek/deepseek-flash")
+        self.assertEqual((ch.doc["day_usd"], ch.doc.get("no_cap")), (None, True))
+        self.assertIn("no day cap", ch.line)
+        self.assertNotIn("cap $", ch.line)
+        # a number puts a cap back, and no_cap goes
+        ch = routes.change(doc, None, day_usd=7)
+        self.assertEqual((ch.doc["day_usd"], "no_cap" in ch.doc, ch.line), (7, False, "day cap off → $7/day"))
         self.assertEqual(self.wb("route", "cap", "nothing")[0], 1)
+        # a cap never set is not off: the first priced API role still takes the suggested one
+        self.assertEqual(routes.change(routes.normalize({"v": 1}), "writing", via="api",
+                                       api="deepseek/deepseek-flash").doc["day_usd"], routes.DAY_USD_SUGGEST)
 
     def test_with_busy_on_a_change_that_lets_a_role_spend_on_api_takes_the_yes_and_a_cap(self):
         # 2026-11-23 review: Agents back from GPU re-enabled the opt-in with no dialog, and an API

@@ -195,9 +195,6 @@ class Settings(Rows):
         got = settings.apply("api-significant", FREE_ID)                  # the real wb: not in the catalog
         self.assertEqual(got["page"], "Complex coding API model wasn't changed: not in OpenCode's catalog.")
         self.assertTrue(got["said"].startswith("wb: not in OpenCode's catalog: wb models"))   # the driver's, whole
-        self.assertEqual(settings.page_line("cap", "wb: the day cap stays while trivial, busy can spend on API: put "
-                                                   "them on the GPU (or wb route busy wait) first"),
-                         "The day cap stays while Trivial coding, When the GPU is busy can spend on API: put them on the GPU first.")
         self.assertEqual(settings.page_line("role-trivial", "trivial: API (Agents is GPU, so this applies once Agents is "
                                                             "Both (wb route all both))", ok=True), "Set Agents to Both for this to apply.")
         self.assertEqual(settings.page_line("coding", "Claude coding: Ask me first.", ok=True), "")
@@ -578,6 +575,21 @@ class ClaudeSets(Rows):
         self.assertIn("  cap: API day cap: $5. API tasks stop for the day at $5 of spend. Takes a number, or off.", lines)
         self.assertEqual(lines[-1], "wb settings set <key> <value> changes one, on the user's clear ask and yes")
         self.assertEqual(json.loads(tw.run_wb("settings", "--json")), rows)
+
+    def test_the_day_cap_row_sits_in_the_api_card_and_says_when_it_is_off_1624(self):
+        # #1624 (the owner, 2026-11-27): "I dont see anything about spend caps in the settings":
+        # it was in Agents and roles; and off, with a role on API, is the user's to choose
+        cap = next(r for r in settings.rows() if r["key"] == "cap")
+        self.assertEqual((cap["group"], cap["kind"], cap["value"]), ("api", "number", 5.0))
+        self.assertTrue(cap["says"].startswith("API tasks stop for the day at $5 of spend"), cap["says"])
+        doc = json.loads(self.routes.read_text())
+        self.routes.write_text(json.dumps({**doc, "day_usd": None, "no_cap": True}))
+        cap = next(r for r in settings.rows(fresh=True) if r["key"] == "cap")
+        self.assertEqual(cap["value"], None)
+        self.assertTrue(cap["says"].startswith("Off: API tasks spend with no daily limit"), cap["says"])
+        self.routes.write_text(json.dumps({**doc, "day_usd": None}))
+        self.assertIn("None yet: the first API role takes $5",
+                      next(r for r in settings.rows(fresh=True) if r["key"] == "cap")["says"])
 
     def test_wb_settings_set_applies_the_change_and_records_it_by_claude(self):
         from workbench import cli

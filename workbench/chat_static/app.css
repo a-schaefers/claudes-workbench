@@ -137,6 +137,7 @@ body.kb-open #tabbar, body.kb-open .purpose { display: none; }
   transition: opacity .2s ease-out, transform .2s ease-out; }
 .toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
 .toast:empty { padding: 0; }
+.toast.error { cursor: pointer; }  /* a refusal: up 12 s at least, a tap closes it (#1624) */
 /* what a screen reader hears of the thread (#1408): there, never seen */
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; }

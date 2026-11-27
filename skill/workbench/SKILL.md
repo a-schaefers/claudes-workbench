@@ -283,7 +283,8 @@ for an API model or change a role without the user's yes; recommend only. When t
 change, run it as a command of its own (`wb route trivial <exact provider/model id>`, `wb route
 all gpu|api|both`, `wb route <role> --gpu <id|auto>`): the mod shows them the change in a dialog, and a
 "not changed" means they said no, so say it wasn't changed and don't ask again. The first API role
-sets a day cap with it: $5 unless they named one (`--day-usd N`); the dialog shows it. Exit 3 names the fix (a
+sets a day cap with it: $5 unless they named one (`--day-usd N`); the dialog shows it. They may
+turn it off at any time (`wb route cap off`: no daily limit, spend still shown). Exit 3 names the fix (a
 key to add with `opencode auth login <provider>` in their terminal or to export, an exact id). The user's **Agents** switch (`wb route all
 gpu|api|both`) puts every role on one side, or Both: each role as set. A role that can't run
 (no key, no GPU model, Agents on API with no API model for it) exits 3 with one line of choices:

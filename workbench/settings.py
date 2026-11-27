@@ -326,6 +326,18 @@ def _think_stops(row: dict) -> list:
              "after this.") if on.startswith("thinking off") else THINK[1]]
 
 
+def _cap_row(r: dict, quiet: dict) -> dict:
+    """The API day cap: a number of dollars, or off (`wb route cap off`) at any time, even with
+    roles on API (#1624, the owner, 2026-11-27: "what if i was rich and didnt care?"). In the API
+    card, beside the providers: in Agents and roles it went unfound."""
+    cap, spent = r.get("day_usd"), _spent_today(r)
+    so_far = f": {spent} so far today." if spent else "."
+    says = (f"API tasks stop for the day at {routes.money(cap)} of spend{so_far}" if cap is not None else
+            f"Off: API tasks spend with no daily limit{so_far}" if r.get("no_cap") else
+            f"None yet: the first API role takes ${routes.DAY_USD_SUGGEST}, which you can change or turn off.")
+    return {**_number("cap", "api", LABELS["cap"], float(cap) if cap is not None else None, "usd", says), **quiet}
+
+
 def _spend_brief(r: dict) -> str:
     """Today's API spend for the API card's summary: `today ≈$0.07 of $5`."""
     s = r.get("spend_today") or {}
@@ -558,12 +570,6 @@ def _build() -> dict:
     out.append(_choice("coding", "shared", LABELS["coding"], CODING, cli.coding_mode()))
     out.append(_choice("workflows", "workflows", LABELS["workflows"], WORKFLOWS, cli.workflows_mode()))
     out.extend(_run_rows())
-    if r is not None:
-        cap = r.get("day_usd")
-        out.append({**_number("cap", "shared", LABELS["cap"], float(cap) if cap is not None else None, "usd",
-                              "Needed before an API role; $5 suggested." if cap is None else
-                              f"API tasks stop for the day at {routes.money(cap)} of spend" +
-                              (f": {spent} so far today." if (spent := _spent_today(r)) else ".")), **quiet})
     # Stats recording, Live view, Live refresh and the electricity price had rows here, as the
     # pane's Settings tab did until #1322 dropped them (recording always on; wb stats set and wb
     # savings --price keep the rest): a `recording` row read a key stats.settings() no longer has
@@ -595,10 +601,12 @@ def _build() -> dict:
     if r is None:
         out.append(_note("api-why", "api", why or OLDER_WB))
     else:
+        cap_row = _cap_row(r, quiet)  # beside the providers, where spend is looked for (#1624)
         if not stored and not any_api:
             err = r.get("catalog_error")
             out.append({**_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER),
                         "brief": "catalog not read" if err else "no provider connected"})
+            out.append(cap_row)
         else:
             if provs:
                 c = {**_info("api-connected", "api", "Connected", _connected_line(r)),
@@ -611,6 +619,7 @@ def _build() -> dict:
                        for p in provs.values()):
                     c["ask"] = True  # a provider with no key it can run on
                 out.append(c)
+            out.append(cap_row)
             for name, label, row in roles:
                 others = [x.get("api") for n, _, x in roles if n != name and x.get("api")]
                 api = row.get("api") or ""
@@ -820,9 +829,6 @@ def page_line(key: str, said: str, ok: bool = False) -> str:
         return "Set Agents to Both for this to apply." if "once Agents is Both" in said else ""
     if head == "role" and rest in routes.LABELS and "has no API model" in said:
         return f"Pick {routes.LABELS[rest]}'s API model first: tap API, or under More."
-    if m := re.search(r"the day cap stays while (.+?) can spend on API", said):
-        names = _ROLE_WORD.sub(lambda r: routes.LABELS[r.group(1)], m.group(1)).replace("busy", "When the GPU is busy")
-        return f"The day cap stays while {names} can spend on API: put {'it' if ',' not in names else 'them'} on the GPU first."
     text = said.strip().removeprefix("wb: ").strip()
     text = _COMMAND.split(text, 1)[0].strip(" :;,.")
     text = _ROLE_WORD.sub(lambda r: routes.LABELS[r.group(1)], text)

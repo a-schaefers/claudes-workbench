@@ -4427,6 +4427,8 @@ def _route_show(as_json: bool) -> None:
         print(f"{r:<{width}}" + " · ".join(bits))
     if doc["day_usd"] is not None:
         print(f"day cap {routes.money(doc['day_usd'])}")
+    elif doc.get("no_cap"):  # the user's (#1624)
+        print("day cap off: API tasks spend with no daily limit")
     elif routes.any_api(doc):
         print("no day cap yet: wb route cap <usd> sets one")
     if pin := doc.get("driver"):  # the OpenCode path's standing default (#1316)
@@ -6772,7 +6774,8 @@ def scout_api_lines() -> list[str]:
     if mids:
         out.append(f"api models in roles (the last {SCOUT_API_DAYS} days)")
         out += [f"  {mid}  {_api_record(mid, now - SCOUT_API_DAYS * 86400)}" for mid in mids]
-    cap = f"{routes.money(doc['day_usd'])}/day at most" if doc["day_usd"] is not None else "no day cap"
+    cap = (f"{routes.money(doc['day_usd'])}/day at most" if doc["day_usd"] is not None else
+           "no day cap (off)" if doc.get("no_cap") else "no day cap")
     # the day ledger's dollars, as wb savings --api's `spent` and the cap beside them count them:
     # the closed tasks' said $3.00 for a week the ledger said $5.00 (#1094, 2026-11-23); the
     # tasks with no known cost are the closed rows' (#1022)

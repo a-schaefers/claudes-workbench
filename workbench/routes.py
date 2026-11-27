@@ -74,7 +74,10 @@ AUTO = "auto"  # the GPU model the router picks: today's behaviour, the default
 # `agent`, an agent's own call on the dialog's yes (#1310)
 BY = ("dialog", "pane", "terminal", "claude", "web", "opencode", "agent")
 STAMPS = ("said", "by", "ts", "gpu_by", "gpu_ts")  # a role's record of its changes (stamp)
-CAP_OFF = "off"  # `wb route cap off`: no day cap (#1023), refused while anything can spend
+CAP_OFF = "off"  # `wb route cap off`: no day cap, the user's choice at any time (#1023; #1624: routes.json
+                 # `no_cap: true`, API tasks spend with no daily limit, metered and shown)
+NO_LIMIT = float("inf")  # the cap a change works with while it is off: no _NoCap, said as NO_CAP_SAID
+NO_CAP_SAID = "no day cap"
 DAY_USD_SUGGEST = 5  # the cap the first API role takes unless --day-usd gives one (#1322)
 ROUTE_OK = "route-ok.json"  # $WB_HOME/route-ok.json: the mod's dialog approved this one change
 ROUTE_OK_SECS = 120  # the dialog's yes is for the call it let through, run at once, as SEND_OK_SECS
@@ -202,7 +205,9 @@ def normalize(doc) -> dict:
     # 2026-11-25). wb writes only a parsed one (driver_change).
     drv = doc.get("driver")
     pinned = {"driver": drv} if drv != DRIVER_SESSION and driver_ref(drv) is not None else {}
-    return {"v": 1, "use": use, "busy": busy, "day_usd": _cap(doc.get("day_usd")), "roles": out, **pinned}
+    cap = _cap(doc.get("day_usd"))
+    off = {"no_cap": True} if cap is None and doc.get("no_cap") is True else {}  # the user's (#1624)
+    return {"v": 1, "use": use, "busy": busy, "day_usd": cap, **off, "roles": out, **pinned}
 
 
 def effective_via(doc: dict, role: str) -> str:
@@ -474,7 +479,7 @@ def _fallback_part(old: dict, row: dict, cap, who: Callable[[str], str],
         raise _NoCap()
     return [f"fallback {before} → {now}: your code goes to {who(now)} when its API model's provider is down "
             "or out of credit", *([] if priced else [FREE_LINE]), role_thinks({**row, "api": now}, thinks),
-            *([f"cap {money(cap)}/day"] if priced else [])], True
+            *([cap_said(cap)] if priced else [])], True
 
 
 def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda mid: False,
@@ -493,7 +498,7 @@ def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda m
     what = ([f"a role with an API model ({', '.join(has)}) starts on it while the GPU is busy",
              *_thinking_on(has, new, thinks), *_free_part(has, new, free)]
             if has else ["no role has an API model yet, so nothing changes until one does"])
-    capped = f"; cap {money(cap)}/day" if cap is not None else ""
+    capped = f"; {cap_said(cap)}" if cap is not None else ""
     return f"When the GPU is busy: wait → the role's API model ({'; '.join(what)}{capped})", True
 
 
@@ -552,6 +557,20 @@ def money(v) -> str:
     return f"${int(v)}" if float(v).is_integer() else f"${v:.2f}"
 
 
+def cap_said(cap) -> str:
+    """A change line's cap clause: `cap $5/day`, or NO_CAP_SAID while the user has it off."""
+    return NO_CAP_SAID if cap == NO_LIMIT else f"cap {money(cap)}/day"
+
+
+def _cap_was(doc: dict):
+    """The cap a change starts from: NO_LIMIT while it is off (`no_cap`), else day_usd."""
+    return NO_LIMIT if doc.get("no_cap") and doc.get("day_usd") is None else doc.get("day_usd")
+
+
+def _cap_name(cap) -> str:
+    return "none" if cap is None else "off" if cap == NO_LIMIT else money(cap)
+
+
 def _side(row: dict) -> str:
     if row["via"] == "api":
         return f"API {row['api']}"
@@ -605,7 +624,7 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
                 clauses.append(f"fallback {fallback_name(fb, row['gpu'])}"
                                + (f" ({who(fb)})" if fb != FALLBACK_GPU else ""))
             if cap is not None:
-                clauses.append(f"cap {money(cap)}/day")
+                clauses.append(cap_said(cap))
         elif row.get("api"):
             clauses.append(f"API kept: {row['api']}")
         if not on_api and new.get("use", "both") == "both":
@@ -681,7 +700,7 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str],
     if to_api:
         what += [_goes_to(to_api, new, who), *_free_part(to_api, new, free), *_thinking_on(to_api, new, thinks)]
         if cap is not None:
-            what.append(f"cap {money(cap)}/day")
+            what.append(cap_said(cap))
     # to Both only when it newly puts a role on API (from GPU): from API it sends nothing new
     gated = use == "api" or bool(to_api)
     return f"Agents: {USE_NAMES[was]} → {USE_NAMES[use]} ({'; '.join(what)})", gated, moved
@@ -740,8 +759,11 @@ def _change(doc: dict, role: str | None, via: str | None, gpu: str | None, api: 
             thinking_review: str | None = None) -> Change:
     new = copy.deepcopy(doc)
     new.setdefault("use", "both")
-    if day_usd is not None:
-        new["day_usd"] = None if day_usd == CAP_OFF else _cap(day_usd)
+    if day_usd == CAP_OFF:  # the user's, whatever spends (#1624): kept as no_cap, never a missing cap
+        new["day_usd"], new["no_cap"] = None, True
+    elif day_usd is not None:
+        new["day_usd"] = _cap(day_usd)
+        new.pop("no_cap", None)
     if use is not None:
         if use not in USES:
             raise RoutesError(f"Agents is gpu, api or both, not {use!r}")
@@ -750,7 +772,7 @@ def _change(doc: dict, role: str | None, via: str | None, gpu: str | None, api: 
         if busy not in BUSY:
             raise RoutesError(f"busy is wait or api, not {busy!r}")
         new["busy"] = busy
-    cap = new["day_usd"]
+    cap, was = _cap_was(new), _cap_was(doc)
     parts, gated, changed = [], False, []
     for r in (ROLES if role == "all" else (role,) if role else ()):
         old = doc["roles"][r]
@@ -814,23 +836,22 @@ def _change(doc: dict, role: str | None, via: str | None, gpu: str | None, api: 
         if cap is None and _priced(busy_now, new, free):
             raise _NoCap()
         said = [_goes_to(busy_now, new, who), *_free_part(busy_now, new, free),
-                *_thinking_on(busy_now, new, thinks), *([f"cap {money(cap)}/day"] if cap is not None else [])]
+                *_thinking_on(busy_now, new, thinks), *([cap_said(cap)] if cap is not None else [])]
         parts.append(f"when the GPU is busy, {', '.join(busy_now)} {'starts' if len(busy_now) == 1 else 'start'} "
                      f"on {'its' if len(busy_now) == 1 else 'their'} API model ({'; '.join(said)})")
         gated = capped = True
-    if cap is None and doc["day_usd"] is not None:  # `wb route cap off` (#1023): never under an API role
-        if spends := [r for r in ROLES if effective_via(new, r) == "api"] + (["busy"] if busy_api_any(new) else []):
-            raise RoutesError(f"the day cap stays while {', '.join(spends)} can spend on API: put "
-                              f"{'it' if len(spends) == 1 else 'them'} on the GPU (or wb route busy wait) first")
-        parts.append(f"day cap {money(doc['day_usd'])} → none")
+    # `wb route cap off` (#1023) at any time: it was refused while a role could spend on API,
+    # which assumed a budget the user may not keep (#1624, the owner, 2026-11-27: "what if i was
+    # rich and didnt care?"); API spend stays metered and shown, only the daily limit goes
+    if cap == NO_LIMIT and was != NO_LIMIT:
+        parts.append(f"day cap {_cap_name(was)} → off: API tasks spend with no daily limit")
         gated = True
-    elif cap != doc["day_usd"]:
+    elif cap != was:
         gated = True
         # else the role's, its fallback's or busy's "cap $N/day" said it
-        if doc["day_usd"] is not None or not (capped or f"cap {money(cap)}/day" in "; ".join(parts)):
-            parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'}"
-                         f" → {money(cap)}/day")
-    if not changed and not agents and not busy_line and cap == doc["day_usd"]:
+        if was is not None or not (capped or cap_said(cap) in "; ".join(parts)):
+            parts.append(f"day cap {_cap_name(was)} → {money(cap)}/day")
+    if not changed and not agents and not busy_line and cap == was:
         return Change(new, "", False, [])
     return Change(new, "; ".join(parts), gated, changed)
 
@@ -864,8 +885,8 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
         ch = change(new, r, via=via, api=api, day_usd=day_usd if i == 0 else None, who=who, free=free, thinks=thinks)
         new, gated = ch.doc, gated or ch.gated
         roles += [x for x in ch.roles if x not in roles]
-    cap = new["day_usd"]
-    if not roles and cap == doc["day_usd"]:
+    cap, was = _cap_was(new), _cap_was(doc)
+    if not roles and cap == was:
         return Change(new, "", False, [])
     parts, sent = [], []
     for r in roles:
@@ -875,7 +896,7 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
             sent.append(r)  # said once for all below, not per role
             once = {f"your code goes to {who(row['api'])}", role_thinks(row, thinks), FREE_LINE}
             # no cap with only free models (#1193): nothing to leave out, and money(None) raised
-            clauses = [c for c in clauses if c not in once and (cap is None or c != f"cap {money(cap)}/day")]
+            clauses = [c for c in clauses if c not in once and (cap is None or c != cap_said(cap))]
         parts.append(f"{r}: " + " · ".join(clauses))
     if sent:
         by: dict[str, list] = {}
@@ -887,9 +908,9 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
         parts.append(next(iter(said.values())) if len(set(said.values())) == 1 else
                      "thinking " + ", ".join(f"{t.removeprefix('thinking ')} ({r})" for r, t in said.items()))
         if cap is not None:
-            parts.append(f"cap {money(cap)}/day")
-    if cap != doc["day_usd"] and (doc["day_usd"] is not None or not sent):
-        parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'} → {money(cap)}/day")
+            parts.append(cap_said(cap))
+    if cap != was and (was is not None or not sent):
+        parts.append(f"day cap {_cap_name(was)} → " + ("off" if cap == NO_LIMIT else f"{money(cap)}/day"))
     if held := _held(doc, new, roles, True):
         parts.append(held)
     return Change(new, " · ".join(parts), gated, roles)

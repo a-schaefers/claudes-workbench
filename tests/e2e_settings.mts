@@ -221,6 +221,23 @@ export async function check(page: any, ctx: E2eCtx) {
       if (!kept.includes("wasn't changed") || !(await row('workflows').locator('.set-ask').count())) throw new Error('kept: ' + kept)
     })
 
+    await ctx.check('a refusal\'s toast stays to be read past 5 s, marked an error, and a tap closes it (#1624)', async () => {
+      // #1624 (the owner, 2026-11-27): "this message disappeared too fast i couldn't read it"
+      const rows = MOCK_ROWS
+      unmock()
+      mock(async (method: string) => method !== 'POST' ? answer(200, { rows, ts: 1 })
+        : answer(409, { ok: false, error: "wb refused: this test's own refusal", rows }))
+      await reshow()
+      await until(async () => (await row('workflows').count()) === 1)
+      await row('workflows').locator('[data-value="on"]').click()
+      await until(async () => (await toast()).includes("this test's own refusal"))
+      if (!(await page.evaluate(() => document.getElementById('toast')!.classList.contains('error')))) throw new Error('not an error')
+      await new Promise(res => setTimeout(res, 5000))
+      if (!(await toast()).includes("this test's own refusal")) throw new Error('gone before 5 s')
+      await page.locator('#toast').click()
+      await until(async () => (await toast()) === '')
+    })
+
     await ctx.check('a change whose POST never answers is given up after POST_MS: the toast says so, the next change goes, and the control shows the computer\'s value (#1391)', async () => {
       // #1391: with no deadline the hung change stayed lit as applied, and every later click
       // queued behind it, never sent until a reload
