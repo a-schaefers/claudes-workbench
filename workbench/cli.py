@@ -2985,6 +2985,8 @@ def cmd_wait(a):
                 if phase != "asking":  # a question always has its notice, which carries its id
                     print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
                     return
+        elif batch and (left := _batch_left(batch)):
+            die(f"nothing left running in backlog {batch}: {left} wait on you; the batch is done", 2)
         elif not any(t.status.get("phase") not in store.CLOSED and t.name not in theirs
                      for t in store.all_tasks()) and (batch or not any(
                          r.open() for r in runs._runs_in_scope(a))):
@@ -2995,6 +2997,26 @@ def cmd_wait(a):
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
         watcher.wait(min(60.0, deadline - time.time()) if deadline else 60.0)
+
+
+def _batch_left(batch: str) -> str:
+    """The open tasks of backlog ``batch`` ("bl2 (review), bl3 (stuck)") when each waits on
+    Claude with no runner, every notice of theirs claimed by then (wb wait prints an unclaimed one
+    first), else "": none queued (--after too), running, testing or asking. The batch is done,
+    what is left for the morning. Review, stuck and failed aren't CLOSED, so a task left in
+    review with `wb note`, as driving.md says, kept the fire's `wb wait --backlog` saying "timed
+    out" every 280 s, a paid turn each, until FIRE_HOURS stopped it with no summary posted (#1613,
+    bar loop #1030 round 6, M4, 2026-11-27)."""
+    open_ = [t for t in store.all_tasks() if t.spec.get("backlog") == batch
+             and t.status.get("phase") not in store.CLOSED]
+    if not open_ or any(t.status.get("phase") not in ("review", "stuck", "failed") or runner_alive(t)
+                        # another wb reaping it writes the phase before the notice (as cmd_wait's
+                        # named wait, the 0.90 review)
+                        or t.status.get("last") == RUNNER_DIED
+                        and time.time() - (t.status.get("updated_at") or 0) < 10
+                        for t in open_):
+        return ""
+    return ", ".join(f"{t.name} ({t.status['phase']})" for t in open_)
 
 
 def _wait_run(a, deadline) -> None:

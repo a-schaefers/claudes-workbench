@@ -23779,6 +23779,41 @@ class ScheduledRuns(Base):
         self.assertEqual(e.exception.code, 2)
         self.assertNotIn("already delivered", run_wb("wait", "t-day", "--timeout", "2"))
 
+    def backlog_wait(self, batch, timeout="5"):
+        """wb wait --backlog's exit 2: its stderr, and how long it took."""
+        err, began = io.StringIO(), time.time()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+            run_wb("wait", "--backlog", batch, "--timeout", timeout)
+        self.assertEqual(e.exception.code, 2)
+        return err.getvalue(), time.time() - began
+
+    def test_wait_on_a_backlog_whose_tasks_all_wait_on_claude_says_the_batch_is_done(self):
+        # #1613 (bar loop #1030 round 6, M4, 2026-11-27): a task left in review with wb note, as
+        # driving.md says, isn't closed and its notice was claimed, so every wb wait --backlog of
+        # the fire's said "timed out", a paid turn each, until its 12 h stop: no summary posted
+        self.start("t-bd1", "ok", "--backlog", "night-c", "--queue")
+        self.start("t-bd2", "ok", "--backlog", "night-c", "--queue")
+        for n in ("t-bd1", "t-bd2"):
+            wait_phase(n, {"review"})
+        said = {run_wb("wait", "--backlog", "night-c", "--timeout", "5").split()[1] for _ in range(2)}
+        self.assertEqual(said, {"t-bd1", "t-bd2"})
+        run_wb("accept", "t-bd1", "-m", "feat: answer")
+        run_wb("note", "t-bd2", "--text", "needs the user")
+        err, took = self.backlog_wait("night-c")
+        self.assertIn("nothing left running in backlog night-c: t-bd2 (review) wait on you; the "
+                      "batch is done", err)
+        self.assertLess(took, 3)
+        self.start("t-bd3", "hang", "--backlog", "night-c", "--queue")
+        running("t-bd3")
+        err, _ = self.backlog_wait("night-c", "1")              # one still running: wait on
+        self.assertIn("timed out waiting", err)
+        run_wb("stop", "t-bd3")                                 # stuck, its notice acknowledged
+        err, took = self.backlog_wait("night-c")
+        self.assertIn("nothing left running in backlog night-c: ", err)
+        self.assertIn("t-bd2 (review)", err)
+        self.assertIn("t-bd3 (stuck)", err)
+        self.assertLess(took, 3)
+
     def test_a_scheduled_runs_claude_accepts_but_never_merges(self):
         os.environ["WB_SCHEDULE"] = "night"
         err = io.StringIO()
