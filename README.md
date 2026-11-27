@@ -114,6 +114,17 @@ would; the first time, it asks a few questions to set things up. Or open the web
 `http://localhost:1337/#token=…`, linked from the Workbench panel, to chat with the orchestrator
 agent, follow the subagents' tasks, see your stats and change settings.
 
+<p align="center"><img src="docs/web-tour.gif" alt="A tour of the web app: the chat with a task under review, the task's summary and diff, Settings with each kind of work's model, and Stats" width="960"></p>
+
+<details>
+<summary>More screenshots</summary>
+
+<p><img src="docs/web-tasks.png" alt="The chat beside a task's sheet: its round, tests and report" width="960"></p>
+<p><img src="docs/web-settings.png" alt="Settings: which model each kind of work goes to, on the GPU or an API" width="960"></p>
+<p><img src="docs/web-stats.png" alt="Stats: what's running now, the GPU, and each model's record" width="960"></p>
+
+</details>
+
 ## Models and cost
 
 Workbench is free and open source. A task on a local GPU costs nothing. Your provider bills the
