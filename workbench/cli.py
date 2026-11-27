@@ -4940,6 +4940,7 @@ def cmd_takeover(a):
         if not tasks and not held:
             print("no open delegated tasks to take over")
         refused = 0
+        attempts: dict[tuple, list[str]] = {}
         for t in tasks:  # each refusal said (die's line) and the rest still taken: one refused
             # first left every other runner going (#601, the audit of v1.90). Not ready is skipped,
             # not refused: a task still checking out, or failed at checkout, made every hand-back
@@ -4949,10 +4950,20 @@ def cmd_takeover(a):
                       f"or wb discard {t.name}")
                 continue
             try:
-                cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None,
-                                                user=a.user))
+                task = _take_over(t.name, a.user)
             except SystemExit as e:
                 refused = max(refused, e.code if isinstance(e.code, int) else 1)
+                continue
+            # a compare item's attempts are alternatives for one change: each said apart, with its
+            # own "wb accept (it commits)", a hand-back of a best-of run had Claude finish and
+            # merge all three (#1576, the 2.2 bar, 2026-11-26): one line for them, by run and item
+            if (at := runs._attempt_of(task)) is not None and not task.spec.get("report"):
+                run, _rows, me, key = at
+                attempts.setdefault((run.name, me.get("stage"), key.rsplit("#a", 1)[0]), []).append(task.name)
+            else:
+                print(_took_over_line(task))
+        for (run_name, stage, item), names in attempts.items():
+            print(_attempts_line(run_name, stage, item, names))
         if held:
             print("left parked by an earlier quit (leave them unless the user asks): "
                   + ", ".join(held))
@@ -4964,27 +4975,66 @@ def cmd_takeover(a):
         die("--repo and --session go with --all")
     if not a.name:
         die("name a task, or --all")
-    task = need(a.name)
+    print(_took_over_line(_take_over(a.name, getattr(a, "user", False))))
+
+
+def _take_over(name: str, user: bool) -> store.Task:
+    """One task stopped and made Claude's (wb takeover <name>, and each of --all's)."""
+    task = need(name)
     if task.status.get("phase") in store.CLOSED:
-        die(f"{a.name} is {task.status.get('phase')}")
+        die(f"{name} is {task.status.get('phase')}")
     if why := _accepting(task):  # (#878)
         die(why)
     if not runner.checked_out(task):  # the runner's checkout, running or failed: a hand-back made
         # it again from nothing, and Claude's edits went with the old worktree (#655)
-        die(f"{a.name}: its worktree isn't ready yet: wait for it, or wb discard {a.name}")
-    _coding_gate(task, getattr(a, "user", False))
-    if getattr(a, "user", False) and coding_mode() != "decide":  # the user's hand-back: Claude
-        _allow(task, "the whole task: the user handed it to Claude",  # finishes it (the mod's
-               "/workbench-quit-and-hand-back-claude")               # gate reads this)
+        die(f"{name}: its worktree isn't ready yet: wait for it, or wb discard {name}")
+    _coding_gate(task, user)
+    if user and coding_mode() != "decide":  # the user's hand-back: Claude finishes it (the mod's
+        _allow(task, "the whole task: the user handed it to Claude",  # gate reads this)
+               "/workbench-quit-and-hand-back-claude")
     _stop_runner(task)
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
                 "text": "Claude took over"})
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
                     parked=None)  # Claude's now (#698)
     _ack_all(task)
-    print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree} and leave it "
-          f"uncommitted, then wb accept {a.name} -m \"…\" (it commits), or hand it back with "
-          f"wb feedback {a.name} --message <file>")
+    return task
+
+
+def _took_over_line(task: store.Task) -> str:
+    """What Claude does with a task it took over. A report item commits nothing: "wb accept (it
+    commits)" sent Claude to an accept that refused it, a round trip each (#1576, 2026-11-26)."""
+    if task.spec.get("report"):
+        run = task.spec.get("run")
+        keep = (f"wb accept {task.name} keeps the result it wrote (wb report {task.name}), "
+                if (task.dir / runner.RESULT).is_file() else "")
+        return (f"took over {task.name}: the agent is stopped. A report item, nothing to commit: "
+                f"{keep}wb discard {task.name} drops it"
+                + (f" (wb run close {run} does that)" if isinstance(run, str) and run else ""))
+    return (f"took over {task.name}: the agent is stopped. Edit in {task.worktree} and leave it "
+            f"uncommitted, then wb accept {task.name} -m \"…\" (it commits), or hand it back with "
+            f"wb feedback {task.name} --message <file>")
+
+
+def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
+    """--all's one line for the attempts it took over at one compare item (#1576): one is kept,
+    the rest discarded, which records them as not chosen (runs.not_chosen), never as rejected."""
+    rest = [t.name for t in runs._siblings(*runs._attempt_of(store.Task(names[0]))[1:])
+            if t.name not in names]
+    kept = [n for n in rest if store.Task(n).status.get("phase") == "accepted"]
+    where = f"item {item} of stage {stage} in run {run}"
+    if kept:  # the pick is in: these lost to it
+        return (f"took over {', '.join(names)}: the agents are stopped. Attempts at {where}, whose "
+                f"{kept[0]} is accepted: wb discard each of these (they count as not chosen)")
+    others = [n for n in rest if store.Task(n).status.get("phase") not in store.CLOSED]
+    if len(names) == 1 and not others:  # the last attempt left: no alternative to weigh
+        return _took_over_line(store.Task(names[0]))
+    return (f"took over {', '.join(names)}: the agents are stopped. "
+            + ("They are alternatives" if len(names) > 1 else "It is one of the alternatives")
+            + f" for one change, the attempts at {where}"
+            + (f" (with {', '.join(others)})" if others else "")
+            + ": finish the best one in its worktree and wb accept only that one -m \"…\" (it "
+            "commits), then wb discard the rest (they count as not chosen)")
 
 
 @contextmanager

@@ -19,8 +19,8 @@
 //   compaction stays on; the boundary compaction (`compactPlan`, Kernel.Mode) runs before it: when
 //   one of the session's tasks closed since the last look, none waits for the driver and the
 //   session is idle, `session.compact` once the part of the last step's prompt a compaction can
-//   remove (past the session's floor: its first step's prompt, or the first after its last
-//   compaction) reached WB_COMPACT_AT percent (unset: half; 0: never) of the way from that floor
+//   remove (past the session's floor: its first step's prompt, the first after its first switch
+//   to the Workbench agent, or the first after its last compaction) reached WB_COMPACT_AT percent (unset: half; 0: never) of the way from that floor
 //   to OpenCode's own automatic compaction.
 // The facts are the host's: the task files under $WB_HOME (a task is the session's when `wb start`
 // recorded it there, task.json `session`, #1309), notes.md, coding.json, workflows.json, the roles
@@ -269,7 +269,7 @@ export interface Sess {
   keepNext: boolean            // our boundary compaction asked for: KEEP_ON_COMPACT though no task is open
   busy: boolean
   tokens: number               // the last step's prompt
-  floor: number | undefined    // the first step's prompt, or the first's after the last compaction (unset: none yet)
+  floor: number | undefined    // the first step's prompt, or the first's after the first switch to Workbench or the last compaction (unset: none yet)
   model?: ModelRef
   blocks: [string, string][]   // what it should have now
   put: Map<string, string> | undefined  // the entries it has (undefined: not listed yet)
@@ -304,6 +304,11 @@ export class Upkeep {
   setAgent(s: Sess, agent: string): boolean {
     const was = s.agent
     s.agent = agent
+    // the first switch into the mode moves the floor to the next step, the Workbench prompt's: a
+    // session begun on Build kept Build's 10K first prompt as its floor, so its first boundary
+    // compaction came early and freed about 2K (#1578, 2026-11-26). Only the first: a later
+    // return to Workbench would set it from a step mid-conversation and compact too late
+    if (agent === AGENT && !s.delegated) s.floor = undefined
     if (agent === AGENT) s.delegated = true
     return was !== agent
   }

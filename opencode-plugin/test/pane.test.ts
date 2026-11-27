@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test'
-import { AGENT, capOf, COMMAND, diffLines, LINK_MS, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { AGENT, capOf, COMMAND, diffLines, FIRSTRUN_NOTE, LINK_MS, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
   WorkbenchPane, type Files, type PaneTask } from '../pane.ts'
 import { CHANGE, driverRow, FOCUS_PROMPT, footer, Landing, LinkPoll, mine, MODELS, modelineOf, panelRows, Poll, PromptFocus, runOf, scoped, separator, sidebar, target,
   type Here } from '../pane-view.ts'
@@ -125,8 +128,11 @@ test('wb\'s answers read as the panel draws them: diff lines styled, the cap, th
 
 test('/workbench applies the pin, switches the session to the Workbench agent, then sends what was typed after it', async () => {
   const did: unknown[] = []
+  // a task has run here, so /workbench alone sends nothing (a fresh install's note: below)
+  const home = mkdtempSync(join(tmpdir(), 'wb-pane-'))
+  mkdirSync(join(home, 'tasks', 'fix-it'), { recursive: true })
   const host = {
-    options: {},
+    options: { env: { WB_HOME: home } },
     rpc: { register: async () => ({ dispose: async () => {} }) },
     session: {
       switchAgent: async (i: object) => { did.push(['agent', i]) },
@@ -157,6 +163,52 @@ test('/workbench applies the pin, switches the session to the Workbench agent, t
   await workbench(refused, { sessionID: 'ses_1', prompt: { text: 'x' }, delivery: 'steer' }, run).catch(e => { said = String(e) })
   expect(said.includes("the Workbench agent isn't there")).toBe(true)
   expect(did.map(d => (d as unknown[])[0])).toEqual(['model'])   // the pin, the user's own standing choice; nothing sent
+  rmSync(home, { recursive: true, force: true })
+})
+
+test('/workbench alone on a fresh install sends the mod\'s first-run note; a task, a result, an API role or a request sends none (#1574)', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'wb-fresh-'))
+  const sent: { text: string; delivery?: string }[] = []
+  const host = {
+    options: { env: { WB_HOME: home } },
+    rpc: { register: async () => ({ dispose: async () => {} }) },
+    session: {
+      switchAgent: async () => {},
+      switchModel: async () => {},
+      prompt: async (i: { text: string; delivery?: string }) => { sent.push(i) },
+    },
+  }
+  let roles: object = {}
+  const run: Run = async args => ({ code: 0, stderr: '',
+    stdout: args[1] === 'driver' ? '{}' : JSON.stringify({ roles }) })
+  const alone = async (text = '') => {
+    sent.length = 0
+    await workbench(host, { sessionID: 'ses_1', prompt: { text }, delivery: 'steer' }, run)
+    return sent.map(s => s.text)
+  }
+  try {
+    // no tasks/, no results.jsonl, no API role: the mod's note, the story's bytes, as the session's prompt
+    expect(FIRSTRUN_NOTE.startsWith('[workbench-firstrun] A fresh install')).toBe(true)
+    expect(await alone()).toEqual([FIRSTRUN_NOTE])
+    expect(sent[0]).toEqual({ sessionID: 'ses_1', text: FIRSTRUN_NOTE, delivery: 'steer' } as never)
+    expect(await alone('  ')).toEqual([FIRSTRUN_NOTE])      // blank is alone, as the mod trims it
+    // with a request, the request is the work: no note
+    expect(await alone('add a high-score screen')).toEqual(['add a high-score screen'])
+    // a role naming an API model (on API, or kept beside the GPU): set up already
+    roles = { trivial: { via: 'gpu', gpu: 'auto', api: 'prov/model' } }
+    expect(await alone()).toEqual([])
+    roles = {}
+    // one accepted and cleaned up since: results.jsonl has its row
+    writeFileSync(join(home, 'results.jsonl'), '{"task": "fix-it"}\n')
+    expect(await alone()).toEqual([])
+    writeFileSync(join(home, 'results.jsonl'), '')       // empty is none, as the mod reads it
+    expect(await alone()).toEqual([FIRSTRUN_NOTE])
+    // a task ran here: /workbench alone only switches
+    mkdirSync(join(home, 'tasks', 'fix-it'), { recursive: true })
+    expect(await alone()).toEqual([])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 test('the server part registers the panel\'s RPC and /workbench, and the RPC alone where commands aren\'t', async () => {

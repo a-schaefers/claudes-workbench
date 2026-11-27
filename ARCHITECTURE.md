@@ -3639,7 +3639,12 @@ says `paid ~$0.12/task` in place of its write speed.
 
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree uncommitted (accept adds the trailers; a commit made by hand is
-kept as is), then accepts or hands back with `wb feedback`. `wb stop` sets `stuck` ("stopped by the
+kept as is), then accepts or hands back with `wb feedback`. A report item's line says it has
+nothing to commit (`wb accept` keeps a result it wrote, `wb discard` drops it), never `(it commits)`;
+`--all` gives a compare item's attempts one line by run and item (`cli._attempts_line`: finish the
+best, `wb accept` only it, `wb discard` the rest, which count as not chosen; those of an item
+whose pick is accepted, discard each), never a per-task accept each: a best-of hand-back once had
+Claude finish and merge all three (#1576). `wb stop` sets `stuck` ("stopped by the
 reviewer", worktree kept); `wb resume` continues a stuck or failed task in a fresh session with
 `RESUME` and the step's asks, not counted as a review round.
 
@@ -5358,7 +5363,9 @@ goes to API (`fallback <id> (<provider>)`). `routes.fallback_of` is the one that
 none while Agents is API. Claude only recommends one, never sets one (the skill). It applies only to
 a task on its role's own API model (never a `--model` one, nor a busy-routed one, whose GPU is its
 own side), at wb start and in the runner (a round's stop, or a mark before a round) and nowhere else, through `routes.fallback_pick` (the API fallback in the
-catalog, on another provider, able to run, within the day cap; the GPU one found and able to run):
+catalog, on another provider, able to run, within the day cap; the GPU one found and able to run, a pin
+by its exact id in `discover()` as `routes.resolve` finds the role's own, never a model its id is a fragment
+of: `… its GPU model <id>, isn't found (not in OpenCode's config now)`, #1573):
 - **At `wb start`** (`cli._fallback_start`): a role's API model whose provider api-health.json marks
   (`no_credit`, `rate_limited` or `unreachable`; a refused key isn't marked there: it reads as no key
   and still exits 3) starts on the fallback instead, after `_busy_api`'s checks too but the slots
@@ -6730,7 +6737,7 @@ default after 2.0 turned it on.
   `listen`, `grant`, `reply`: how it answers in the chat, `prompts`: the prompts it raises), `TEXTS`
   (each sentence once, a template: `{field}` from the driver and the
   caller, `{Field}` capitalized), `ONLY` (the drivers a key is said for: `next.grant` names a
-  command only Claude Code and OpenCode have; a `refusal.*`, `skill.*` or `tasks.pickup` is a host's, `HOSTS`, and
+  command only Claude Code and OpenCode have; a `refusal.*`, `skill.*`, `tasks.pickup` or `firstrun.note` is a host's, `HOSTS`, and
   `refusal.plan` Claude Code's alone: OpenCode has no plan dialog), `PAGE` (the keys the web app
   reads), `HOST` (the keys the hosts' module carries), `DOCS` (the doc
   blocks). `text(key, driver, **fields)`, `fill(t, fields, partial)`, `driver_of(tool)`. Keys:
@@ -6747,12 +6754,14 @@ default after 2.0 turned it on.
   `AWAY_QUESTION` naming `workbench_chat_reply`); `skill.rule` (SKILL.md's terminal-primary
   paragraph) and `skill.prompts` (reference/driving.md's: prompts are answered in the terminal, and
   the line the chat shows while one waits); `tasks.pickup` (the open-tasks context block's last line,
-  the mod's `workbench` block and the plugin's `TASKS_NOTE`: `wb wait <name>` to follow a task, #1515).
+  the mod's `workbench` block and the plugin's `TASKS_NOTE`: `wb wait <name>` to follow a task, #1515);
+  `firstrun.note` (`[workbench-firstrun] …`, what a fresh install's `/workbench` alone sends: the mod's and
+  the plugin's `FIRSTRUN_NOTE`, #1574).
 - **`scripts/gen_story.py`** writes `chat_static/src/story.ts` (`STORY_DRIVERS`, `STORY_TEXTS` for
   `PAGE`'s keys, `storyFill`, `storyText`; a plain script, loaded before app.js, built into
   `story.js` by `scripts/web.py`), `mod/hooks/story.ts` (`CLAUDE_CODE` and `OPENCODE`, `as const`
   tables of `HOST`'s keys filled for each host, pure data: `register.tsx` imports it as `SAY`,
-  `opencode-plugin/chat.ts`, `skill.ts` and `upkeep.ts` as their own; in the plugin's shared files,
+  `opencode-plugin/chat.ts`, `skill.ts`, `upkeep.ts` and `pane.ts` as their own; in the plugin's shared files,
   `patches.PLUGIN_SHARED`, and the root package.json's `files`) and fills each doc block,
   `<!-- story:KEY[:driver] -->` … `<!-- /story -->` (README.md's `doc.rule`; SKILL.md's
   `skill.rule` and reference/driving.md's `skill.prompts`, both Claude Code's text);
@@ -8079,7 +8088,8 @@ Only the user's two slash commands stop the delegation, never words in a message
   parked, its review); a task an earlier quit parked is left so, `left parked by an earlier quit (leave
   them unless the user asks): …`, never a `took over` line, #1540), then
   DONE_NOTE as a turn (leave the mode; per task taken over `wb diff`, finish it, run the acceptance
-  command, `wb accept`, `--merge` only if asked; carry on without delegating) whenever the output
+  command, `wb accept`, `--merge` only if asked; a run's attempts named as alternatives one accept,
+  the rest `wb discard`; a report item nothing to commit; carry on without delegating) whenever the output
   has a `took over` line, even on a non-zero exit over a refused task (a toast says some weren't
   taken, the note carries the refusals, #918); none taken over, no turn, whatever the exit (exit 0
   with every task parked earlier: the output and `HAND_ONE`, ask for one by name, #1550).
@@ -8235,9 +8245,10 @@ task's sessions the first to deliver wins (the `acked` write is not locked).
 **Workbench mode** (`workbenchMode(on)`, `chat.delegating`). On: the `workbench` skill's prompt
 (`skill.prompt`, which opens the pane via `showPane`; again while on with no task, read by
 `firstTask` from the skill's "**First task:** \`…\`" line, it returns AGAIN_NOTE instead; with no
-task on a fresh install, `freshInstall`: nothing under `tasks/`, `results.jsonl` empty or missing,
+task on a fresh install, core.ts's `freshInstall`: nothing under `tasks/`, `results.jsonl` empty or missing,
 no role on API, read from the files so the mod keeps no state, it returns the whole skill with
-`FIRSTRUN_NOTE` after it, `[workbench-firstrun] A fresh install: …`, which SKILL.md's *First task*
+`FIRSTRUN_NOTE` after it (the story's `firstrun.note`, the OpenCode plugin's too, #1574),
+`[workbench-firstrun] A fresh install: …`, which SKILL.md's *First task*
 reads as "run *First run* now", #1190: in the skill's text, since `prompt.context` fires only at a
 conversation's first message), or a
 Bash call running `wb start|next|feedback|steer|answer|resume` (`delegates`, the kernel's `gateOf` `delegates`; not
@@ -8643,7 +8654,10 @@ one shared types module).
   `rewakePlan(facts)`, `tellPlan(facts)`, `modesPlan(modes, ids, now, on)`, `compactPlan(facts)`,
   `gateOf(words, writes = [])` (its `gate` typed `GateName`), `codingGate` (its `verdict` typed) and
   `editFields(host)` (`editTools`' rows for `claude-code` or `opencode`, as a tool-to-field map),
-  typed from `kernel.d.ts`. It maps (a phase to a string, a mark to a boolean) and decides nothing.
+  typed from `kernel.d.ts`. It maps (a phase to a string, a mark to a boolean) and decides nothing
+  but `freshInstall(reads)` (a fresh install: no task entry, `results.jsonl` empty or missing, no
+  role naming an API model; each host's reads injected, asked in that order; both hosts' rule for
+  `/workbench` alone, too small for the kernel, #1574).
 - **`Kernel.Tables`** (`kernel/src/Kernel/Tables.purs`) is generated by `scripts/kernel.py tables`
   from wb's Python: `sorted()` of `store.ACTIVE`, `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `WORKING` and
   `STOPPED`, `store.OPEN_ORDER` in its own order (`openOrder`),
@@ -8835,6 +8849,7 @@ drivers on one machine: *Both drivers on one machine*.
 | Claude Code (the mod, the skill) | OpenCode (the plugin) | Where |
 |---|---|---|
 | `/workbench [request]`: the skill, the mode on, the pane | `/workbench [request]`, a server command: the driver pin applied, the session switched to the Workbench agent, whose prompt is the procedure; the panel opens on that switch, and as a TUI comes to a session already on it (`opencode -s`, a new TUI); run again in a session already on it, it publishes no switch and opens nothing (the footer's `⚒ wb` or the palette does) | `pane.ts`, `agent.ts`, *The driver* |
+| `/workbench` alone on a fresh install (core.ts's `freshInstall`): the skill with `FIRSTRUN_NOTE` after it, so *First run* starts at once (#1190) | the same rule (`freshAt`: the roles from `wb route --json`) and the same note, the story's `firstrun.note`, sent as the session's prompt after the switch (#1574) | `pane.ts` |
 | `/workbench-quit`, `/workbench-quit-and-hand-back-claude`, `/workbench-models`, `/workbench-update` | `/workbench-quit`, `/workbench-quit-and-hand-back` (switching to Build ends the mode and closes the panel), `/workbench-models`, `/workbench-update` | `commands.ts` |
 | SKILL.md and `reference/`, read through the skill link | the same files rendered for OpenCode when the plugin starts (`skill.ts`): the agent's prompt, the `workbench` skill and one `workbench-<name>` skill per reference file, Claude Code's lines replaced by OpenCode's facts | `skill.ts`, `agent.ts` |
 | `wb` recipes typed in Bash | typed tools in the `workbench` namespace (`workbench_start`, `_status`, `_diff`, `_feedback`, `_accept`, `_discard`, `_wait`), the shell for the rest | `tools.ts` |
@@ -9188,7 +9203,10 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     (`session.switchAgent`, `AGENT`; one that isn't there throws
     `the Workbench agent isn't there (…): wb doctor says why`) and sends what was typed after it, untrimmed,
     with what the TUI attached (`files`, `agents`, `skills`, as OpenCode's `/goal` forwards them),
-    if anything, as the session's prompt with the invocation's delivery. Once the switch took, it
+    if anything, as the session's prompt with the invocation's delivery; with nothing, on a fresh
+    install (`freshAt`: core.ts's `freshInstall` over `tasks/`, `results.jsonl` and `wb route
+    --json`'s roles, a failed route read as none), `FIRSTRUN_NOTE` instead, the mod's note, so the
+    procedure's *First run* starts at once (#1574). Once the switch took, it
     emits the RPC's `open` event (`{sessionID}`): a switch to the agent the session already has
     publishes no selection, so `/workbench` after the panel closed opened nothing (#1517). Nothing in the pane hands
     OpenCode a task's worktree: no `location`, no `/diff` and no `vcs` call (the host-shape
@@ -9434,10 +9452,13 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       kept free, at least 16K from a 32K window) and the last step's prompt (`session.step.ended`'s
       tokens: input, cache reads and writes, `promptTokens`), and calls `session.compact` once the
       prompt reaches `WB_COMPACT_AT` percent (unset half; 0 never) of the way there, both measured
-      past the session's floor (`floor`: the first step's prompt, and the first's after each
+      past the session's floor (`floor`: the first step's prompt, the first's after the session's
+      first switch to the Workbench agent, `setAgent`, and the first's after each
       `session.compaction.ended`), the part a compaction can remove (#1569: a 64K driver's fixed
       prompt, about 28K, was over half of its 49.5K point, so every task close compacted and freed
-      about 2K). A floor at or over the point (#1487's band) is never compacted early; neither is
+      about 2K; #1578: a session begun on Build kept Build's 10K first prompt as its floor, so its
+      first boundary compaction freed about 2K too; only the first switch, as a later return to
+      the agent would set it from a step mid-conversation). A floor at or over the point (#1487's band) is never compacted early; neither is
       a window OpenCode doesn't list. OpenCode's own automatic compaction stays on as it is.
   - `commands.ts` (#1315): the user's commands as server commands (`command.transform`,
     `registerCommands`; `definitions(host, deps)`), so the TUI, Desktop and the web app list them,
@@ -9624,7 +9645,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   open) and removed once back, before the turn of a prompt the user typed; `workbench-wake` with the `wake` option off, in the mode or with a task open; without the entries API the blocks
   in the session's own requests' system prompt; a task closing compacts at half of OpenCode's own
   point, not below it, once, measured from the first step's prompt (a 64K driver's fixed 28K
-  never alone, nor a floor over the point) and again from the first after a compaction (#1569); `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
+  never alone, nor a floor over the point) and again from the first after a compaction (#1569), a session
+  begun on Build from its first Workbench step (#1578); `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
   OpenCode doesn't list; KEEP_ON_COMPACT once, only for a session that delegated with a task open or in the boundary compaction after the last one closed;
   which tasks are the session's; the setup's three hooks),
   `opencode-plugin/test/commands.test.ts` (#1315: each command's wb argv as the session in its
@@ -9674,6 +9696,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   once it moved, a running one's every `LIVE_MS`; one tasks loop however often a press asks (`Poll`);
   the cap only while an API task works; the diff's styles, the cap, the link;
   `/workbench`'s pin, agent and prompt in that order (with what the TUI attached), and its error without the agent;
+  alone on a fresh install `FIRSTRUN_NOTE`, none after a task, a result, an API role or with a request (#1574);
   its `open` event once the switch took, none on a refused one (#1517); the driver
   row (its side, another pin, `not known yet`, cut from the pin first, `change` kept); the registrations with and
   without commands; ownership through the kernel; the footer, the sidebar (its head cut to its
@@ -10298,7 +10321,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb run status [<run>]` | `--all`, `--json`, `--all-sessions` (and, suppressed, `--repo DIR`, `--session ID`) | Reaps a dead driver (`runs.reap`: `stopped`, one `run_stopped`); a line per run in the caller's scope (`runs.status_line`). |
 | `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, results (each done item of a stage no later one reads, with its trail: best-of's reviews, #1504), filtered, superseded, null, not_run, pending, code (each code item's task that exists: one refused at its start is `not_run` alone, and the `run_done` notice's `change(s) at review` counts none, #1531), spend; every item accounted for. |
 | `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`); from the web app (`WB_ACTOR=web`, no model's variables) its why is `runs.WEB_STOP` and a `run_stopped` notice tells the run's session. Resume (refused closed or at `review`, `runs._ended`; refused, naming `wb run feed`, while a `claude` stage's inputs are in, its checkpoint raised (its journalled `notice` row) and it isn't fed, `runs.awaiting_feed`: the resume acked the checkpoint tick raises once and left the run running with nothing due, #1546; one not yet raised, under an item's checkpoint, is resumed, so tick raises it, #1510): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
-| `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items are `not_run`. |
+| `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items not started are `not_run` (`skipped`), and its items at work are stopped (`wb stop`, journalled `stopped` with `skip`, never resumed: `runs._stop_skipped`, each tick too, for one a pass started after the skip), `not_run` (`stopped mid-run`), the line saying `stopped N running item(s): <names>` (#1577). |
 | `wb run feed <run> <stage> --file <json\|->` | | A `claude` checkpoint's merge: a JSON list, `inbox/<stage>-feed`; the run goes on. Refused on a closed run or one at `review`, before the inbox is written. |
 | `wb run close <run>` | | Refused while a code item (a task not started as a report) is open (accept or discard it); stops the driver, discards report items never taken, writes `result.json`, phase `closed`. |
 | `wb run flows` | `--repo DIR`, `--json` (`runs.flow_rows`: `{name, where, description, mark, command, params}`, the hosts' read for the flows' slash commands) | Every flow: yours (`$WB_FLOWS`; `shadows shipped`, `; shipped changed since` when the shipped file's blob is no longer the copy's `from`: `cards.shadow_mark`), shipped (`agent/flows/`), a repo's `.workbench/flows/` (read it first, then `--plan`), each `/<command>` it has (never a repo's). |
@@ -10414,8 +10437,8 @@ $WB_HOME (~/.local/state/workbench)
                                  repo (the top), package_dir? (the directory started from, under it: each item's --repo, #1494), base, base_ref, base_branch (`gitops.start_branch`: each item's, #1541), cwd, budget_usd, budget_min, overnight, trial, no_claude_md, created, driver {python, machine},
                                  session? (Claude Code's, or an OpenCode driver's with session_kind: opencode, #1309), claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,
                                  why, cause? (item: a checkpoint an item's null raised, runs._going), pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
-                                 budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|escalate|escalated|fed|amend|notice|resumed|reaped,
-                                 stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), ok?, day?, cap?, model? (retry: runs._cap_held)}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
+                                 budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|escalate|escalated|fed|amend|notice|stopped|resumed|reaped,
+                                 stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), skip? (stopped: wb run amend --skip's stage), ok?, day?, cap?, model? (retry: runs._cap_held)}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
                                  {key, input, result, task}; specs/<stage>-<n>.md (each item's spec); schemas/<stage>-<n>.json (a batch's schema, runs.batch_schema); notify.jsonl (its items' notices, the driver's);
                                  result.json (runs.report_of at the end); acked (its notices taken); driver.log
   runs/.archive/<run>/           a run closed ARCHIVE_DAYS, moved by gc (runs.archive)
@@ -11642,7 +11665,8 @@ OpenRouter's pick, and new backends on a busy role count as newly sent (`routes.
 `gpu` and `none` with neither, the role's own provider or model and OpenRouter refused; a kept one named when its role
 goes to API; at `wb start` a provider marked out of credit starts the API fallback (task.json `fallback`, the line, the
 where-note, the results row) and a held one the GPU fallback, a fallback that can't take it (out of credit too, the
-cap, a repo kept local, commands.json's standing copy) or none leaves the start as before, a busy-routed start and a
+cap, a repo kept local, commands.json's standing copy, a GPU pin gone from the config whose id is a fragment of
+another's, #1573) or none leaves the start as before, a busy-routed start and a
 `--model` never move, and one with its slots full, or a GPU fallback with the GPU busy, queues with `--queue` and
 exits 4 without (the fallback line said), or for a held provider leaves the start on the role's model; in the runner a `quota`
 round (the fake's `WB_FAKE_API`) moves to an API fallback (each keyhole one model, a fresh session that is no
@@ -12184,8 +12208,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   create v<version> --generate-notes` linking the checklist. **`wb setup`'s links** → README's quickstart, *Installing*.
 - **Where the marketplace clone is** (#1190): `mod/bin/wb`'s lookup ↔ the mod's `marketplaceClone` (the same order)
   ↔ `gateConf`'s directories ↔ `cli.plugins_dir`, `cli._install_kind`; a `wb patch init` clone is found as
-  `known_marketplaces.json`'s `installLocation`. **`FIRSTRUN_NOTE`** (`[workbench-firstrun]`) ↔ SKILL.md's *First
-  task* and *First run*; `freshInstall`'s files ↔ `tasks/`, `results.jsonl`, routes.json.
+  `known_marketplaces.json`'s `installLocation`. **`FIRSTRUN_NOTE`** (`[workbench-firstrun]`, the story's
+  `firstrun.note`: the mod's and `opencode-plugin/pane.ts`'s, #1574) ↔ SKILL.md's *First
+  task* and *First run*; core.ts's `freshInstall` ↔ the mod's reads (`tasks/`,
+  `results.jsonl`, routes.json) and the plugin's (`freshAt`: the same files, `wb route --json`'s roles).
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), `routes.thinking_of` (the dialog's thinking clause, `cli.start_line`, `routes.model_line` and `routed_line`, #1237), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
 - **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → `stats.ts`'s `GUARD_WORDS`, *Stats recording*'s list.
