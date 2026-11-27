@@ -454,7 +454,7 @@
     // the ticks are the words beside them, drawn: a screen reader hears the words alone (#1339)
     const tick = (mark) => { const t = span('tick', mark); t.setAttribute('aria-hidden', 'true'); return t; };
     // whose a row is and when, for a screen reader (#1339): the user's messages were never named theirs
-    const rowName = (m) => `${m.role === 'agent' ? m.from : m.from === 'user' ? 'You' : nameOf(m.driver) || 'Claude'}, ${clock(m.ts)}`;
+    const rowName = (m) => (m.role === 'agent' ? m.from : m.from === 'user' ? 'You' : nameOf(m.driver) || 'Claude') + ', ' + clock(m.ts);
     // an unread message's line: delivered, behind a prompt in the terminal (the driver can't read it
     // until that is answered, #1355), or waiting for a session
     const delivered = (who) => !state.listener ? `Waiting for ${aSession(who)} · `
@@ -1054,6 +1054,9 @@
         storyFor = kind;
         for (const el of document.querySelectorAll('[data-story]'))
             storyInto(el, storyText(el.dataset.story, kind));
+        // the box names whom it messages in the story's word: `Message Claude or OpenCode` before a
+        // driver is known, beside the story's own (#1339, 2026-11-26: "your driver" beside "Message Claude")
+        input.placeholder = 'Message ' + (STORY_DRIVERS[kind] || STORY_DRIVERS['any']).who;
     }
     // ---- the connection ----
     let online = navigator.onLine, conn = null, failures = 0, retryTimer = 0, lastRx = 0, hiddenTimer = 0;

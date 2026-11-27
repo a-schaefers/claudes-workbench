@@ -110,10 +110,14 @@ async function run(engine: string, device?: string) {
     await page.goto(base + '#token=' + token)
     await until(async () => (await page.textContent('#presence-text')).includes('no session listening'))
     if (page.url().includes('token')) throw new Error('token still in the URL: ' + page.url())
+    // #1339: no driver known yet, so the box and the story name both, never "your driver"
+    await until(async () => (await page.getAttribute('#input', 'placeholder')) === 'Message Claude or OpenCode'
+      && (await page.textContent('#intro p')).includes('Message Claude or OpenCode from anywhere'))
   })
   await check('shows a listening session at once', async () => {
     listen(false)
     await until(async () => (await page.textContent('#presence-text')).includes('listening in ~/project'))
+    await until(async () => (await page.getAttribute('#input', 'placeholder')) === 'Message Claude')  // the listener's (#1339)
   })
   // #1341: the chat says what it is for, in the empty state, and over a thread as a hint until
   // dismissed, naming the driver that listens (#1355: the story's `purpose`, story.ts)

@@ -52,8 +52,8 @@
     </div>
   </section>
   <div class="purpose" id="hint" hidden>
-    <p id="hint-text" data-story="purpose">Message your driver from anywhere: most work can run from here. A prompt your driver raises
-    waits in its terminal (<code>ssh</code> + <code>tmux</code>); run your driver with permissions granted to skip those.
+    <p id="hint-text" data-story="purpose">Message Claude or OpenCode from anywhere: most work can run from here. A prompt Claude or OpenCode raises
+    waits in its terminal (<code>ssh</code> + <code>tmux</code>); run Claude or OpenCode with permissions granted to skip those.
     Your settings live here too.</p>
     <button id="hint-x" type="button" aria-label="Dismiss this hint">✕</button>
   </div>
@@ -61,8 +61,8 @@
     <div class="thread" id="thread">
       <div class="intro" id="intro">
         <div class="intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
-        <p data-story="purpose">Message your driver from anywhere: most work can run from here. A prompt your driver raises
-        waits in its terminal (<code>ssh</code> + <code>tmux</code>); run your driver with permissions granted to skip those.
+        <p data-story="purpose">Message Claude or OpenCode from anywhere: most work can run from here. A prompt Claude or OpenCode raises
+        waits in its terminal (<code>ssh</code> + <code>tmux</code>); run Claude or OpenCode with permissions granted to skip those.
         Your settings live here too.</p>
         <div class="chips"><button class="chip" type="button">Status?</button><button class="chip" type="button">What needs me?</button><button class="chip" type="button">What are you working on?</button></div>
       </div>
@@ -85,7 +85,7 @@
       <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
     </button>
     <input id="pick-voice" type="file" accept="audio/*" capture hidden>
-    <textarea id="input" rows="1" placeholder="Message Claude" enterkeyhint="send" aria-label="Message"></textarea>
+    <textarea id="input" rows="1" placeholder="Message Claude or OpenCode" enterkeyhint="send" aria-label="Message"></textarea>
     <button id="send" type="submit" aria-label="Send" disabled>
       <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
     </button>
@@ -113,14 +113,14 @@
     <div class="cards" id="settings">
       <div class="card" id="how">
         <h3>How the chat works</h3>
-        <p class="small" data-story="rule.terminal">The terminal is where your driver lives, on this machine or over <code>ssh</code> + <code>tmux</code>: a prompt your driver raises is answered there, never in the chat.</p>
-        <p class="small" data-story="rule.chat">Most work can still run from the chat, more so with your driver run with permissions granted.</p>
-        <p class="small" data-story="rule.settings">The web app's Settings are the source of truth: your driver changes one only when you ask and say yes.</p>
+        <p class="small" data-story="rule.terminal">The terminal is where Claude or OpenCode lives, on this machine or over <code>ssh</code> + <code>tmux</code>: a prompt Claude or OpenCode raises is answered there, never in the chat.</p>
+        <p class="small" data-story="rule.chat">Most work can still run from the chat, more so with Claude or OpenCode run with permissions granted.</p>
+        <p class="small" data-story="rule.settings">The web app's Settings are the source of truth: Claude or OpenCode changes one only when you ask and say yes.</p>
       </div>
       <div class="card">
         <h3>While away</h3>
         <p class="small" id="away-when">You're away from the moment you use the chat on another device (open it or send a message here) after using the terminal, until you type or answer a prompt in the terminal again. Stats and Settings don't count, nor this page opened on the computer itself (its localhost link) unless you send a message. Away ends by itself 6 hours after you last used the chat, unless a night's batch is still running.</p>
-        <p class="small" id="away-prompts" data-story="prompts">Your driver's prompts (a permission, a question, a plan) are answered in the terminal, never here. While one waits, the line at the top of the chat says so. Run your driver with permissions granted to work from the chat.</p>
+        <p class="small" id="away-prompts" data-story="prompts">Claude or OpenCode's prompts (a permission, a question, a plan) are answered in the terminal, never here. While one waits, the line at the top of the chat says so. Run Claude or OpenCode with permissions granted to work from the chat.</p>
       </div>
       <div class="card">
         <h3>Notifications</h3>
@@ -132,10 +132,10 @@
       </div>
       <div class="card">
         <h3>This chat</h3>
-        <p data-story="lane">A second lane to your driver, not a copy of the terminal. What you send here reaches the session
-        listening on your computer; your driver answers here with what matters: results, questions, its plans.
+        <p data-story="lane">A second lane to Claude or OpenCode, not a copy of the terminal. What you send here reaches the session
+        listening on your computer; Claude or OpenCode answers here with what matters: results, questions, its plans.
         Its prompts wait in the terminal, and the terminal's full output stays on the computer.
-        Ask your driver to keep you posted here, and it will.</p>
+        Ask Claude or OpenCode to keep you posted here, and it will.</p>
       </div>
       <div class="card">
         <h3>This device</h3>

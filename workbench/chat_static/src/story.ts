@@ -19,8 +19,8 @@ const STORY_DRIVERS: Record<string, Record<string, string>> = {
     "prompts": "a permission, a question, an MCP server's form"
   },
   "any": {
-    "who": "your driver",
-    "app": "your driver",
+    "who": "Claude or OpenCode",
+    "app": "Claude Code or OpenCode",
     "listen": "and run /workbench",
     "grant": "",
     "reply": "`wb chat reply`",

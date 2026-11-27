@@ -6686,7 +6686,8 @@ first message is sent from it (`send`; #1339: what the chat is for is known by t
 (`localStorage` `wb-chat-hint`, read and written in try/catch: a storage that throws shows it on
 each open); it hides while the state line shows (`drawHint`: the two said the same) and under
 `body.kb-open` (#1339). Both are the story's `purpose` (*The story*), naming the driver that listens (else the
-last that wrote, else "your driver").
+last that wrote, else both, "Claude or OpenCode": the story's `any`, never "your driver" beside the
+box's "Message Claude", #1339), and the box's placeholder says the same name (`Message <who>`, `drawStory`).
 
 ### The story
 
@@ -6696,7 +6697,8 @@ the driver lives and a prompt it raises is answered there; most work can still r
 more so with permissions granted; the web app's Settings are the source of truth). They had
 drifted: the page said "Run Claude" to an OpenCode user, and the docs called the chat off by
 default after 2.0 turned it on.
-- **`workbench/story.py`**: `DRIVERS` (`claude-code`, `opencode`, `any`: each one's `who`, `app`,
+- **`workbench/story.py`**: `DRIVERS` (`claude-code`, `opencode`, `any`, no driver known, naming both:
+  `Claude or OpenCode`, `Claude Code or OpenCode`, #1339; each one's `who`, `app`,
   `listen`, `grant`, `reply`: how it answers in the chat, `prompts`: the prompts it raises), `TEXTS`
   (each sentence once, a template: `{field}` from the driver and the
   caller, `{Field}` capitalized), `ONLY` (the drivers a key is said for: `next.grant` names a

@@ -23,7 +23,9 @@ from __future__ import annotations
 import re
 
 # The drivers by the name the story uses: `claude-code`, `opencode`, and `any` (no driver known:
-# the page before a session listened, the README). `who` is the name the user talks to; `app` the
+# the page before a session listened, the README; both drivers named, never "your driver", the
+# story's own word beside the box's "Message Claude" on the first screen, #1339, 2026-11-26).
+# `who` is the name the user talks to; `app` the
 # program they run; `listen` how a session there starts listening to the chat (Claude Code's in
 # workbench mode; OpenCode's plugin, the session the user last typed in, #1319); `grant` the way
 # to run it with permissions granted, said only for a
@@ -38,7 +40,7 @@ DRIVERS: dict[str, dict[str, str]] = {
                     "prompts": "a permission, an AskUserQuestion question, a plan, an MCP server's form"},
     "opencode": {"who": "OpenCode", "app": "OpenCode", "listen": "and type in a session", "grant": "opencode --auto",
                  "reply": "the workbench_chat_reply tool", "prompts": "a permission, a question, an MCP server's form"},
-    "any": {"who": "your driver", "app": "your driver", "listen": "and run /workbench", "grant": "",
+    "any": {"who": "Claude or OpenCode", "app": "Claude Code or OpenCode", "listen": "and run /workbench", "grant": "",
             "reply": "`wb chat reply`", "prompts": "a permission, a question, a plan, an MCP server's form"},
 }
 

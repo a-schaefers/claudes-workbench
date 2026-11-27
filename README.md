@@ -65,7 +65,7 @@ Settings and Stats live in the web app (or ask Claude to change a setting for yo
 you message your driver from anywhere, a phone through your tailnet (`wb chat reach tailnet`, or the
 Web app reach row in Settings).
 <!-- story:doc.rule -->
-The terminal is where your driver lives (locally, or over `ssh` + `tmux`), and a prompt it raises is answered there. Most work can still run from the web app's chat, more so with your driver run with permissions granted. The web app's Settings are the source of truth: your driver changes one only on your ask and yes, and never undoes a change you made.
+The terminal is where Claude or OpenCode lives (locally, or over `ssh` + `tmux`), and a prompt it raises is answered there. Most work can still run from the web app's chat, more so with Claude or OpenCode run with permissions granted. The web app's Settings are the source of truth: Claude or OpenCode changes one only on your ask and yes, and never undoes a change you made.
 <!-- /story -->
 
 ### In Claude Code, inside your project
