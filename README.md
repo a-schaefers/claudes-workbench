@@ -68,12 +68,11 @@ work, and OpenCode subagents via API or GPU write the code.
 ```
 
 You describe a change to the orchestrator agent, which splits it into steps, writes a test for each
-one, and hands each step to a subagent running a cheaper model on your GPU or an API. Each subagent
-works on its own branch in a separate copy of the project. After each attempt the step's test runs;
-if it fails, the subagent sees the error and tries again without involving the orchestrator agent.
-When the test passes, the orchestrator agent reviews the change and reports to you. Small models do
-well on short, tested steps, so each step is sized to the model that writes it
-([why](ARCHITECTURE.md#why-its-built-this-way)).
+one, and hands each step to a subagent running the model you chose for it, on your GPU or an API.
+Each subagent works on its own branch in a separate copy of the project. After each attempt the
+step's test runs; if it fails, the subagent sees the error and tries again without involving the
+orchestrator agent. When the test passes, the orchestrator agent reviews the change and reports to
+you. Each step is sized to the model that writes it ([why](ARCHITECTURE.md#why-its-built-this-way)).
 
 ## What you need
 
