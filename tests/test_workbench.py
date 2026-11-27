@@ -297,6 +297,21 @@ def writers_left(root: str) -> list[tuple[int, str]]:
     return out
 
 
+def kill_group(proc: subprocess.Popen, secs: float = 10) -> None:
+    """Kill ``proc``'s process group (it was started with start_new_session) and wait until none
+    of it is left: on macOS, with no /proc for writers_left, a child still writing is unseen."""
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait()
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        try:
+            os.killpg(proc.pid, 0)
+        except OSError:  # the group is gone
+            return
+        time.sleep(0.1)
+
+
 def wait_writers(root: str, secs: float) -> list[tuple[int, str]]:
     deadline = time.time() + secs
     while (left := writers_left(root)) and time.time() < deadline:
@@ -12797,9 +12812,10 @@ class RealOpenCode(Base):
         tokens, _ = context.fixed_prompt(task)
         time.sleep(0.5)
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
-        cmd = lane.wrap(context.writable(task), ["opencode", "run", "--standalone", "-m", "cap/cap",
-                                                 "--format", "json", "--", prompt],
-                        context.readable(task), context.unix_paths(task))
+        # the lane as the runner draws it (context.lane_wrap): lane.wrap with Landlock's list alone
+        # gave Seatbelt no read rules, and on macOS ~/notes reached the model (the nightly, 2026-11-27)
+        cmd = context.lane_wrap(task, [])(["opencode", "run", "--standalone", "-m", "cap/cap",
+                                           "--format", "json", "--", prompt])
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         agent = max(reqs, key=lambda r: len(r.get("tools", [])))  # not the title request
@@ -13706,7 +13722,8 @@ class RealOpenCodeRun(Base):
                                    str(drequests), json.dumps([{"name": "shell", "arguments": {
                                        "command": start, "workdir": str(self.repo)}}])])
         self.addCleanup(driver.kill)
-        marks = "printenv OPENCODE_SESSION_ID AI_AGENT WB_TASK; echo driver=${WB_DRIVER-none}"
+        # one name per printenv: macOS's (BSD's) reads only its first (the nightly, 2026-11-27)
+        marks = "printenv OPENCODE_SESSION_ID; printenv AI_AGENT; printenv WB_TASK; echo driver=${WB_DRIVER-none}"
         self.serve([{"name": "shell", "arguments": {"command": marks}}, WRITE_42])
         ran = subprocess.run(["opencode", "run", "--standalone", "-m", "drv/drv", "--auto", "--format", "json",
                               "start the task"], cwd=self.repo, env={**os.environ, "PWD": str(self.repo)},
@@ -15287,7 +15304,9 @@ class Lane(Base):
         def given():
             env = runner.agent_env(task)
             return env.get("npm_config_store_dir"), context.writable(task)
-        for env, where in (({}, ".local/share/pnpm/store"), ({"XDG_DATA_HOME": str(home / "data")},
+        # with nothing set, pnpm's data dir is ~/Library/pnpm on macOS (the macOS nightly, 2026-11-27)
+        default = "Library/pnpm/store" if sys.platform == "darwin" else ".local/share/pnpm/store"
+        for env, where in (({}, default), ({"XDG_DATA_HOME": str(home / "data")},
                                                               "data/pnpm/store"),
                            ({"PNPM_HOME": str(home / "pnpmhome"), "XDG_DATA_HOME": str(home / "data")},
                             "pnpmhome/store")):
@@ -36572,10 +36591,13 @@ class RealOpenCodePlugin(Base):
         self.addCleanup(log.close)
         # opencode by its path on this process's PATH: Popen looks a bare name up on the child's,
         # which a test may narrow to where opencode isn't (CI's, outside /usr/bin: PR #1432)
+        # its own process group, killed whole: the wb and installs its plugin spawned outlived a
+        # kill of the server alone and wrote into the test's directory as it went, which only
+        # Linux's /proc lets writers_left wait on (the macOS nightly, 2026-11-27)
         proc = subprocess.Popen([shutil.which("opencode") or "opencode", "serve", "--hostname", "127.0.0.1", "--port", str(port),
                                  "--print-logs"], cwd=self.project, stdout=log, stderr=log,
-                                env={**os.environ, "PWD": str(self.project), **env})
-        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+                                env={**os.environ, "PWD": str(self.project), **env}, start_new_session=True)
+        self.addCleanup(kill_group, proc)
         return f"http://127.0.0.1:{port}"
 
     def ask(self, url: str, *argv) -> str:
