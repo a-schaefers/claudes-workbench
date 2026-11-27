@@ -5304,7 +5304,8 @@ line says so.
 (`routes.BUSY`: `wait`, missing, or `api`; any other value a `RoutesError`), set by `wb route busy
 wait|api` and the web app's **When the GPU is busy** row (`busy`). With `api`, a `wb start` that would wait for
 the GPU (queued) for a role with an API model, no `--model` asked for and
-Agents not GPU (`routes.busy_api`) starts on the role's API model instead (`cli._busy_api`), and says
+Agents not GPU (`routes.busy_api`) starts on the role's API model instead (`cli._busy_api`; never a run's item, `--run`: the run sequences its own
+GPU items and its estimate and budget are the GPU side's, so its item waits for the GPU, #1567), and says
 `GPU busy: on the role's API model, as you set` (`routes.BUSY_LINE`) under its model line and in
 task.json's `route` (`busy: true`, `routes.busy_routed`, with an OpenRouter role's `order` as
 `routes.resolve`'s). A role with no API model queues
@@ -10151,7 +10152,8 @@ raised after `wb run resume`, journalled `notice` only once raised; a `claude` s
 then starts what is ready (`runs.state`, rebuilt
 each pass from the flow, the journal and the tasks: a pipeline item once its input is in, a barrier's once all
 are) and has room (`_room`: `IN_FLIGHT` 6 items; an API stage's provider slots, `cli._api_slots_free`, and none
-while a task of the user's waits for one, `cli._api_pending`; on the GPU one waiting item per stage). Each start
+while a task of the user's waits for one, `cli._api_pending`; on the GPU one waiting item per stage, which queues for the GPU: the busy opt-in never moves a run's item to
+API, `cli._busy_api`, #1567). Each start
 is `wb start <run>-<stage>-<n> --spec specs/… --role R --queue --group <run> --run --stage --item --checkin 0`,
 a report's with `--report --card --schema --tools --ask-budget 0 --no-self-review --no-base-check --setup ''`
 (`runs._start`). Its `--base` is the run's, but for a report over one code item (no compare) the reviewed
@@ -11607,7 +11609,7 @@ exit 3 with it; `wb scout`'s API section (one line per provider at 300 models, a
 
 **The busy-GPU opt-in** (`BusyGpu`, #1023): with `busy` api a start the GPU would make wait runs on the
 role's API model (task.json `busy`, the start line with today's spend, the role's thinking, API's
-auto-fix); `wait`, Agents GPU, a `--model` and a free GPU never do; a role with no API model, full
+auto-fix); `wait`, Agents GPU, a `--model`, a run's item (`--run`, #1567) and a free GPU never do; a role with no API model, full
 slots, the day cap, `--local-only`, a repo kept local and a standing `copy` that holds a credential leave the
 start as before after a note; an OpenRouter role keeps its backends (`order`), with none the backend is
 OpenRouter's pick, and new backends on a busy role count as newly sent (`routes._busy_newly`).
