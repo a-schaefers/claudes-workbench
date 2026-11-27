@@ -7655,8 +7655,9 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   API whose `api_status` says it can't run says `<Label> can't run on <id>: <why>.`, #1529); then, `more`:
   `gpu-<role>` → `wb route <role> --gpu <id>|auto` (with GPU models); `api-<role>` (the role's model, the
   others', those used, then the catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`,
-  `think-<role>` (the pane's `thinkStops`) → `wb route <role> --thinking on|off` and `review-<role>`, only
-  for a role with an API model (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off` (these three
+  `think-<role>` (the pane's `thinkStops`) → `wb route <role> --thinking on|off` and `review-<role>`
+  (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`, both only for a role with an API model
+  (thinking is an API model's alone: with none the switch did nothing, the web app's review, 2026-11-26) (these three
   with a provider connected or a role's API model, as the *api* group's rows).
 - *shared*: `agents` → `wb route all gpu|api|both`; `busy` → `wb route busy wait|api`; `driver`
   (#1316, after the roles' rows) → `wb route driver <id>|session`: with the OpenCode plugin

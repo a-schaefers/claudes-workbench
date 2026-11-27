@@ -572,10 +572,13 @@ def _build() -> dict:
                 if not api:
                     c["says"] = f"{label} has no API model: it runs on the GPU."
                 out.append(c)
+            # thinking is an API model's alone: a role with none got a switch that did nothing (the
+            # web app's review, 2026-11-26), so its row comes with the model, as review-<role>'s does
             for name, label, row in roles:
-                out.append(_choice(f"think-{name}", name, label_of(f"think-{name}"),
-                                   _think_stops({"api": None, "thinking": "off", **row}), row.get("thinking") or "off",
-                                   more=True))
+                if row.get("api"):
+                    out.append(_choice(f"think-{name}", name, label_of(f"think-{name}"),
+                                       _think_stops({"api": None, "thinking": "off", **row}), row.get("thinking") or "off",
+                                       more=True))
             for name, label, row in roles:
                 if row.get("api"):
                     out.append(_choice(f"review-{name}", name, label_of(f"review-{name}"), REVIEW,

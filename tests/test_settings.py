@@ -110,6 +110,16 @@ class Settings(Rows):
         self.assertEqual([r["group"] for r in rows if r["key"].startswith(("size-", "optimize"))],
                          ["gpu"] * len([k for k in by if k.startswith(("size-", "optimize"))]))
 
+    def test_a_role_with_no_api_model_has_no_thinking_row_as_it_has_no_self_review_row(self):
+        # the web app's review (2026-11-26): think-<role> was drawn for a role with no API model,
+        # a switch that did nothing; review-<role> already came only with the model (#1059)
+        keys = [r["key"] for r in settings.rows()]
+        self.assertIn("think-trivial", keys)                       # trivial has one
+        for name in ("significant", "writing"):
+            self.assertNotIn(f"think-{name}", keys)
+            self.assertNotIn(f"review-{name}", keys)
+            self.assertIn(f"api-{name}", keys)                     # its picker stays
+
     def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
         # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
         home = Path(self.tmp.name) / "home"
