@@ -109,10 +109,10 @@ Open Claude Code in your project, choose the strongest Claude model for the orch
 
 ## Using it
 
-After `/workbench`, work with the orchestrator agent as you normally would. The first time, it asks
-a few questions to set things up. Workbench shows a link to its web app,
-`http://localhost:1337/#token=…`, where you can follow the subagents' tasks, see your stats and
-change settings.
+After `/workbench`, you get work done in two places. Talk to the orchestrator agent as you normally
+would; the first time, it asks a few questions to set things up. Or open the web app at
+`http://localhost:1337/#token=…`, linked from the Workbench panel, to chat with the orchestrator
+agent, follow the subagents' tasks, see your stats and change settings.
 
 ## Models and cost
 
@@ -159,9 +159,8 @@ model's provider, unless that model is local.
   them.
 - Accepted commits carry your name as author and a
   [trailer](ARCHITECTURE.md#git-commits-and-projects) naming the model that wrote the code.
-- The web app has a [chat](ARCHITECTURE.md#the-web-chat) for talking to the orchestrator agent and
-  following tasks. To reach it from your phone or another computer, over Tailscale or any network
-  you choose, ask the orchestrator agent.
+- To reach the web app and its [chat](ARCHITECTURE.md#the-web-chat) from your phone or another
+  computer, over Tailscale or any network you choose, ask the orchestrator agent.
 - When a review turns up a lesson, the orchestrator agent records it as a
   [skill](ARCHITECTURE.md#the-skill-library) and gives it to later subagents.
 - The orchestrator agent can also direct local [image](ARCHITECTURE.md#images) and
