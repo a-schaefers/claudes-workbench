@@ -2237,8 +2237,13 @@ def cmd_start(a) -> None:
                                     + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
                                     for s in stages(flow) if not (s.get("final") or s.get("claude"))))
     est = (meter.usd(est_usd) if est_usd is not None else "unpriced") + (f", GPU ~{est_min:g} min" if est_min else "")
+    # tracked files only, as wb start's (#1322): every item starts from the base without them,
+    # and the driver drops each wb start's own note, so a whole run of paid items worked on the
+    # tree without the edits it was about, unsaid (#1570, 2026-11-26)
+    dirty = [] if not gitops.git(repo, "status", "--porcelain", "--untracked-files=no").strip() else \
+        [f"note: the repo has uncommitted changes; every item starts from {a.base or 'HEAD'} without them"]
     if getattr(a, "dry_run", False):
-        for line in dry_run(a.name, flow, params, exists, ctx, base, est, later, usd_):
+        for line in dry_run(a.name, flow, params, exists, ctx, base, est, later, usd_) + dirty:
             print(line)
         for line in said:
             print(line)
@@ -2274,7 +2279,7 @@ def cmd_start(a) -> None:
     print(f"run {a.name}: flow {flow['name']} · {roles} · estimate {est}"
           + (f" (and {', '.join(later)} as their items come)" if later else "")
           + (f" · budget {meter.usd(usd_)}" if usd_ is not None else "") + f" · driver pid {pid}")
-    for line in said:
+    for line in dirty + said:
         print(line)
     # its notices wake the session that started it, through the mod or the OpenCode plugin, as a
     # task's do (#1278's S9); with neither, wb wait in the background is the wake (#1278's review)
