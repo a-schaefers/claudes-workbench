@@ -2462,8 +2462,187 @@ def import_command(text: str, name: str, card: str | None = None, source: str = 
     return flow
 
 
+# --- a flow shared (#1463 P7): a bundle is a directory, or a git repo of one -----------------------
+# bundle.json {v, flow, cards, schemas, skills, shipped_cards}; flows/<flow>.json; roles/<card>.md
+# (the user's own cards only: a shipped one is the receiver's already); roles/schemas/<s>.json;
+# skills/<skill>/ from the library. No marketplace: a path or a URL handed over, read by Claude.
+BUNDLE = "bundle.json"
+BUNDLE_MAX = 2 * 1024 * 1024  # bytes in a bundle's files, all told: flows, cards and skills are text
+
+
+def _mine(path: Path | None, d: Path) -> bool:
+    return bool(path) and path.resolve().parent == d.resolve()
+
+
+def export_bundle(name: str, dest: Path) -> dict:
+    """Flow ``name`` (the user's or the shipped one) as a bundle in ``dest`` (new or empty): the
+    flow, the user's own cards and schemas its stages name, and the library skills those cards
+    name. What it wrote, as bundle.json says."""
+    import shutil
+    from . import skills
+    src = next((d / f"{name}.json" for _, d in flow_places() if (d / f"{name}.json").is_file()), None)
+    if src is None:
+        raise RuntimeError(f"no flow {name!r} (wb run flows)")
+    if dest.exists() and any(dest.iterdir()):
+        raise RuntimeError(f"{dest} isn't empty: a bundle goes in a new directory")
+    flow = json.loads(src.read_text(encoding="utf-8"))
+    flow.pop("from", None)  # the sender's shipped copy's mark: not the receiver's
+    cards_named = sorted({s["card"] for s in flow.get("stages") or () if isinstance(s, dict) and s.get("card")})
+    mine, shipped_cards, schemas, skill_names = [], [], set(), set()
+    for s in flow.get("stages") or ():
+        if isinstance(s, dict) and isinstance(s.get("schema"), str):
+            schemas.add(s["schema"])
+    for c in cards_named:
+        card = cards.load(c)
+        (mine if _mine(card.path, cards.roles_dir()) else shipped_cards).append(c)
+        if card.schema:
+            schemas.add(card.schema)
+        skill_names.update(card.skills)
+    my_schemas = sorted(n for n in schemas if _mine(cards.schema_path(n), cards.roles_dir() / "schemas"))
+    lib = sorted(n for n in skill_names if (skills.library() / n / "SKILL.md").is_file())
+    (dest / "flows").mkdir(parents=True)
+    store.write_json(dest / "flows" / f"{name}.json", flow)
+    for c in mine:
+        (dest / "roles").mkdir(exist_ok=True)
+        (dest / "roles" / f"{c}.md").write_bytes(cards.card_path(c).read_bytes())
+    for n in my_schemas:
+        (dest / "roles" / "schemas").mkdir(parents=True, exist_ok=True)
+        (dest / "roles" / "schemas" / f"{n}.json").write_bytes(cards.schema_path(n).read_bytes())
+    for n in lib:
+        shutil.copytree(skills.library() / n, dest / "skills" / n, symlinks=False,
+                        ignore=shutil.ignore_patterns(".git"))
+    doc = {"v": 1, "flow": name, "cards": mine, "shipped_cards": shipped_cards, "schemas": my_schemas,
+           "skills": lib}
+    store.write_json(dest / BUNDLE, doc)
+    return doc
+
+
+def _bundle_files(root: Path) -> list[Path]:
+    """A bundle's files, refused (RuntimeError) when one is a link, the whole past BUNDLE_MAX, or a
+    flow, card or schema isn't named as its kind's names are."""
+    files, size = [], 0
+    for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root)
+        if ".git" in rel.parts:
+            continue
+        if p.is_symlink():
+            raise RuntimeError(f"{rel} is a link: a bundle holds files only")
+        if p.is_file():
+            size += p.stat().st_size
+            files.append(p)
+    if size > BUNDLE_MAX:
+        raise RuntimeError(f"{size:,} bytes, over {BUNDLE_MAX:,}: a bundle is a flow, cards and skills")
+    for p in files:
+        rel = p.relative_to(root).parts
+        if rel[0] == "flows" and not (len(rel) == 2 and p.suffix == ".json" and RUN_RE.match(p.stem)):
+            raise RuntimeError(f"{p.relative_to(root)}: flows/ holds <flow>.json only")
+        if rel[0] == "roles" and not ((len(rel) == 2 and p.suffix == ".md" and cards.NAME_RE.match(p.stem)) or
+                                      (len(rel) == 3 and rel[1] == "schemas" and p.suffix == ".json"
+                                       and cards.NAME_RE.match(p.stem))):
+            raise RuntimeError(f"{p.relative_to(root)}: roles/ holds <card>.md and schemas/<schema>.json only")
+    return files
+
+
+def install_bundle(root: Path, force: bool = False) -> list[str]:
+    """A bundle Claude has read, put in place: its flows in $WB_FLOWS, cards in $WB_ROLES, schemas in
+    $WB_ROLES/schemas; never over the user's own without ``force``. Its skills stay out: each goes
+    through the library (wb skill import, Claude's read, wb skill add). What it put where; a flow
+    that then doesn't hold is taken out again (RuntimeError)."""
+    _bundle_files(root)
+    from . import scan
+    if scan.verdict(scan.scan(root)) == "dangerous":
+        raise RuntimeError("the scan says dangerous: nothing taken")
+    moves = [(p, flows_dir() / p.name) for p in sorted((root / "flows").glob("*.json"))]
+    moves += [(p, cards.roles_dir() / p.name) for p in sorted((root / "roles").glob("*.md"))]
+    moves += [(p, cards.roles_dir() / "schemas" / p.name) for p in sorted((root / "roles" / "schemas").glob("*.json"))]
+    if not moves:
+        raise RuntimeError(f"{root}: no flows/, roles/ in it: not a bundle")
+    there = [str(d) for _, d in moves if d.exists()]
+    if there and not force:
+        raise RuntimeError(f"yours already: {', '.join(there)} (--force replaces them)")
+    old = {d: d.read_bytes() if d.exists() else None for _, d in moves}
+    for p, d in moves:
+        d.parent.mkdir(parents=True, exist_ok=True)
+        store.replace_bytes(d, p.read_bytes())
+    errs = []
+    for p, _ in moves[:len(list((root / "flows").glob("*.json")))]:
+        try:
+            errs += [f"{p.stem}: {e}" for e in validate(load_flow(p.stem))]
+        except RuntimeError as e:
+            errs.append(f"{p.stem}: {e}")
+    if errs:
+        for d, b in old.items():
+            if b is None:
+                d.unlink(missing_ok=True)
+            else:
+                store.replace_bytes(d, b)
+        raise RuntimeError("it doesn't hold here, nothing taken: " + "; ".join(errs))
+    return [f"{p.relative_to(root)} -> {d}" for p, d in moves]
+
+
+def cmd_flow_export(a) -> None:
+    """wb flow export <name> [--to DIR] (#1463 P7)."""
+    if not RUN_RE.match(a.name or ""):
+        _die(f"{a.name!r}: a flow's name is lowercase letters, digits and hyphens, at most 24")
+    dest = Path(a.to or a.name).expanduser().resolve()
+    try:
+        doc = export_bundle(a.name, dest)
+    except (RuntimeError, OSError, ValueError) as e:
+        _die(str(e))
+    said = [f"cards {', '.join(doc['cards'])} (yours)" if doc["cards"] else "",
+            f"schemas {', '.join(doc['schemas'])}" if doc["schemas"] else "",
+            f"skills {', '.join(doc['skills'])}" if doc["skills"] else "",
+            f"shipped cards named, not copied: {', '.join(doc['shipped_cards'])}" if doc["shipped_cards"] else ""]
+    print(f"wrote {dest}: flow {a.name}" + "".join(f"; {s}" for s in said if s) +
+          f"\nshare the directory, or a git repo of it; they take it with: wb flow import <dir or git URL>")
+
+
+def _import_bundle(a) -> None:
+    from . import scan, skills
+    try:
+        root, meta, found = skills.fetch(a.file)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        _die(str(e))
+    if not (root / BUNDLE).is_file():
+        if found:  # a Claude Code or Agent Plugins bundle: its skills, each through the library
+            print(f"{meta['source']} is no flow bundle (no {BUNDLE}); its skills, each taken on its own:")
+            for d in found[:40]:
+                print(f"  wb skill import {a.file} --path {d.relative_to(root)}")
+            return
+        _die(f"{meta['source']}: no {BUNDLE} and no SKILL.md: nothing to take")
+    try:
+        _bundle_files(root)
+    except RuntimeError as e:
+        _die(f"{meta['source']}: {e}")
+    findings = scan.scan(root)
+    verdict = scan.verdict(findings)
+    if a.install:
+        if not Path(a.file).expanduser().is_dir():
+            _die("--install takes the directory wb flow import printed, once Claude has read it")
+        try:
+            put = install_bundle(root, a.force)
+        except (RuntimeError, OSError, ValueError) as e:
+            _die(str(e))
+        skills_in = sorted(p.name for p in (root / "skills").iterdir() if p.is_dir()) if (root / "skills").is_dir() else []
+        print("took:" + "".join(f"\n  {x}" for x in put) +
+              "".join(f"\n  skill {s}: wb skill import {root / 'skills' / s}, then wb skill add as it says" for s in skills_in))
+        return
+    print(f"bundle from {meta['source']}" + (f"@{meta['rev'][:12]}" if meta["rev"] else "") +
+          f"\nscan: {verdict}" + "".join(f"\n  {x}" for x in scan.lines(findings)))
+    if verdict == "dangerous":
+        import shutil
+        if root.is_relative_to(store.home() / "imports"):
+            shutil.rmtree(root, ignore_errors=True)
+        _die("refused: don't take anything from this bundle")
+    for p in _bundle_files(root):
+        print(f"  {p.relative_to(root)}")
+    print(f"\nread it all: {root}\nthen take it: wb flow import {root} --install")
+
+
 def cmd_flow_import(a) -> None:
     src = Path(a.file).expanduser()
+    if not (src.is_file() and src.suffix == ".md"):  # a bundle: a directory, or a git URL of one (#1463 P7)
+        return _import_bundle(a)
     try:
         text = src.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
