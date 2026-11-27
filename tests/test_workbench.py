@@ -25738,6 +25738,23 @@ class Setup(Base):
         out = self.setup(cmd="doctor")[1]
         self.assertIn("BAD wb isn't on PATH: Claude runs it by name in Bash; the mod runs ~/.local/bin/wb (wb setup's link);", out)
 
+    def test_wb_setup_done_records_the_first_run_once_and_links_nothing(self):
+        # #1606, 2026-11-27: First run's last step, the marker both hosts' /workbench reads; a
+        # second call (a trial run after a declined one) keeps the first time
+        home = Path(self.tmp.name) / "donehome"
+        home.mkdir()
+        os.environ.update(HOME=str(home), WB_HOME=str(home / "state"))
+        code, out = self.setup("--done")
+        self.assertEqual(code, 0, out)
+        marker = json.loads((home / "state/setup.json").read_text())
+        self.assertEqual(set(marker), {"done", "version"})
+        self.assertEqual(marker["version"], cli.__version__)
+        self.assertEqual(out, f"ok  setup done ({marker['done']}): /workbench now goes straight to work\n")
+        self.assertFalse((home / ".local").exists())                       # no link, no service
+        code, out = self.setup("--done")
+        self.assertEqual((code, out), (0, f"ok  setup done already ({marker['done']})\n"))
+        self.assertEqual(json.loads((home / "state/setup.json").read_text()), marker)
+
     def opencode_home(self) -> Path:
         """A home with nothing of Claude Code's in it, for the OpenCode path (#1311)."""
         home = Path(self.tmp.name) / "ochome"

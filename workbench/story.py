@@ -61,9 +61,10 @@ DRIVERS: dict[str, dict[str, str]] = {
 # (the open-tasks context block's last line, both hosts' word for word: it named `wb watch`, which
 # follows a task until it closes, so a driver on one at review waited out its shell's timeout,
 # #1515, 2026-11-26; `wb wait` ends when the task needs the driver), and `firstrun.note` (what a
-# fresh install's /workbench alone sends after the procedure, both hosts' word for word: the mod's
-# FIRSTRUN_NOTE, #1190, and the OpenCode plugin's, which sent nothing, #1574, 2026-11-26; SKILL.md's
-# *First task* reads its `[workbench-firstrun]` tag by name).
+# fresh install's /workbench sends after the procedure, both hosts' word for word: the mod's
+# FIRSTRUN_NOTE, #1190, and the OpenCode plugin's, which sent nothing, #1574, 2026-11-26; with a
+# request too, which it keeps for after First run, #1606, 2026-11-27; SKILL.md's *First task*
+# reads its `[workbench-firstrun]` tag by name).
 TEXTS: dict[str, str] = {
     "purpose": "Message {who} from anywhere: most work can run from here. A prompt {who} raises waits in "
                "its terminal (`ssh` + `tmux`); run {who} with permissions granted to skip those. "
@@ -101,9 +102,10 @@ TEXTS: dict[str, str] = {
                       "/deepmode on turns it on.",
     "tasks.pickup": "Pick them up from here: `wb report <name>` for one (`wb run report <name>` for a run), "
                     "`wb wait <name>` to follow it until it needs you.",
-    "firstrun.note": "[workbench-firstrun] A fresh install: no task has run here yet and no role is on API. "
-                     "Run the skill's *First run* now, from its step 1, each install or download on the user's yes; "
-                     "don't wait for a first request.",
+    "firstrun.note": "[workbench-firstrun] A fresh install: setup was never completed here and no task has run. "
+                     "Run the skill's *First run* now, from its step 1, each install or download on the user's yes, "
+                     "and end it with `wb setup --done`; don't wait for a first request. A request given with "
+                     "/workbench waits until First run is done: then do it.",
     "refusal.question": "The user is away: ask in the web chat ({reply}) and end your turn.",
     "refusal.plan": "Post the plan in the web chat and end your turn; approval is at the terminal.",
     "refusal.consent": "{Who} is waiting on a workbench dialog in the terminal: answer it there.",

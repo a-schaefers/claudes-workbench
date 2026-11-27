@@ -315,7 +315,7 @@ test('a scripted session on a fresh install runs no wb setup: the next one with 
   expect(seen.toasts).toEqual([])
 })
 
-test('/workbench alone on a fresh install starts the first run at once; a task, one run before, or an API role waits as before (#1190)', async ($, on) => {
+test('/workbench on a fresh install starts the first run at once, a request kept for after it; setup done, a task or a result waits as before, an API role no longer does (#1190, #1606)', async ($, on) => {
   const files: Record<string, string> = { [SKILL_AT]: '(the skill)', '/usr/bin/wb': '' }
   const seen = freshMachine(on, files)
   let held: any[] = []
@@ -331,24 +331,35 @@ test('/workbench alone on a fresh install starts the first run at once; a task, 
   expect(first).toContain('First task')                                // the whole skill
   expect(first).toContain('[workbench-firstrun] A fresh install')
   expect(first).toContain('*First run* now')
+  expect(first).toContain('`wb setup --done`')                         // its last step, the marker
   // run again with the mode on and still nothing run: the skill again, not "reply in one line"
   const again = await skill('')
   expect(again).toContain('[workbench-firstrun]')
   expect(again).not.toContain('The user ran /workbench again')
-  // with a task given, the task is the work: no first run note
+  // with a task given (#1606: it skipped setup), the note after the skill, the task kept in it
+  const asked = await skill('add a high-score screen')
+  expect(asked).toContain('add a high-score screen')
+  expect(asked).toContain('[workbench-firstrun]')
+  expect(asked.indexOf('add a high-score screen')).toBeLessThan(asked.indexOf('[workbench-firstrun]'))
+  // a role on API, set before setup finished: still fresh, setup still to do (#1606)
+  files['/home/u/.config/workbench/routes.json'] = JSON.stringify({ roles: { trivial: { via: 'api', api: 'prov/model' } } })
+  expect(await skill('')).toContain('[workbench-firstrun]')
+  delete files['/home/u/.config/workbench/routes.json']
+  // setup done (`wb setup --done`'s marker): /workbench alone is the pane again, a task the task
+  files['/wb/setup.json'] = '{"done": "2026-11-27T10:00:00+00:00", "version": "2.2"}\n'
+  expect(await skill('')).toContain('The user ran /workbench again')
   expect(await skill('add a high-score screen')).not.toContain('workbench-firstrun')
-  // a task ran here (its files under tasks/): /workbench alone is the pane again
+  delete files['/wb/setup.json']
+  // a task ran here (its files under tasks/), from before the marker: set up, nothing written
   files['/wb/tasks/fix-it/task.json'] = '{}'
   expect(await skill('')).toContain('The user ran /workbench again')
+  expect(await skill('add a high-score screen')).not.toContain('workbench-firstrun')
   delete files['/wb/tasks/fix-it/task.json']
   // one accepted and cleaned up since: results.jsonl has its row
   files['/wb/results.jsonl'] = '{"task": "fix-it"}\n'
   expect(await skill('')).not.toContain('workbench-firstrun')
   delete files['/wb/results.jsonl']
-  // a role on API: the user set the roles up already
-  files['/home/u/.config/workbench/routes.json'] = JSON.stringify({ roles: { trivial: { via: 'api', api: 'prov/model' } } })
-  expect(await skill('')).not.toContain('workbench-firstrun')
-  delete files['/home/u/.config/workbench/routes.json']
+  expect(Object.keys(files).filter(f => f.endsWith('setup.json'))).toEqual([])  // the mod writes no marker
   expect(await skill('')).toContain('[workbench-firstrun]')
 })
 

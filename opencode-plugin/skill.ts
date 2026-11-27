@@ -118,8 +118,8 @@ export const HOST_LINES: readonly Rule[] = [
     'Workbench mode is the Workbench agent: `/workbench` switches this session to it;'),
   line('`/workbench-quit-and-hand-back-claude`. Running `/workbench` again',
     '`/workbench-quit-and-hand-back`, or switch to another agent. Running `/workbench` again'),
-  line('`$ARGUMENTS`. Empty? With a `workbench-firstrun` note after this skill',
-    'what the user typed after `/workbench`, if anything. Nothing? With a `workbench-firstrun` note'),
+  line('`$ARGUMENTS`. Empty? With no `workbench-firstrun` note after this skill, reply',
+    'what the user typed after `/workbench`, if anything. Empty? With no `workbench-firstrun` note, reply'),
   // `wb coding`'s rows say Claude, the driver on Claude Code's path: `decide` is the key either way
   line('**Claude coding**', '**Your coding**'),
   line('"Let Claude decide" (the default) is this skill as written.', '`decide` (the default) is these instructions as written.'),
@@ -290,8 +290,8 @@ export const HOST_LINES: readonly Rule[] = [
   { from: /\bBash call\b/g, to: 'shell call', files: '*' },
   { from: /\byour Bash\b/g, to: 'your shell', files: '*' },
   // the mod is Claude Code's; this plugin is OpenCode's (never `mod/`, nor the mod's own tests)
+  // (a bare "mod's" was First task's alone, "the\n  mod's" across a line break: gone with #1606)
   { from: /\b(the|The|workbench) mod\b(?!\/|'s tests)/g, to: '$1 plugin', files: '*' },
-  { from: /(?<!Claude Code )\bmod's(?! tests)/g, to: "plugin's", files: '*' },
   // the reference parts are skills of their own on OpenCode ("read" one becomes "load": `loads`)
   { from: /`reference\/(\w+)\.md`\s+beside\s+this\s+file/g, to: 'the `workbench-$1` skill', files: '*' },
   { from: /`reference\/(\w+)\.md`/g, to: 'the `workbench-$1` skill', files: '*' },

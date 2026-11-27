@@ -5,6 +5,7 @@ resource, and by a person at a terminal.
 """
 import argparse
 import contextlib
+import datetime
 import fnmatch
 import functools
 import io
@@ -8384,7 +8385,10 @@ def cmd_setup(a):
     then the web app's service (install_service), unless --no-service. With --opencode, the
     OpenCode path's fallback (#1311): the wb link and the OpenCode plugin's entry
     (ocplugin.install), never Claude Code's skill link, which OpenCode would also list (it scans
-    ~/.claude/skills: #1296, row 8)."""
+    ~/.claude/skills: #1296, row 8). With --done, only setup.json: First run is over."""
+    if a.done:
+        setup_done()
+        sys.exit(0)
     if _install_kind() == "opencode":
         # a generation directory OpenCode replaces on its next update and later removes: links, a
         # service unit and options naming it would outlive it, and pin the plugin to an old wb.
@@ -8462,6 +8466,24 @@ def cmd_setup(a):
         print("--  " + story.text("link.where", "opencode" if a.opencode else "claude-code"))
     print("next: wb doctor")
     sys.exit(1 if bad else 0)
+
+
+SETUP_DONE = "setup.json"
+
+
+def setup_done() -> None:
+    """`wb setup --done`, First run's last step: $WB_HOME/setup.json, so neither host's /workbench
+    sends FIRSTRUN_NOTE again. Guessing "set up" from a role on API missed an install whose roles
+    were set before setup finished, so First run never came back (#1606, 2026-11-27). Ungated:
+    either driver, Claude or OpenCode's, runs it; a second call keeps the first `done`."""
+    path = store.home() / SETUP_DONE
+    was = store.read_json(path)
+    if isinstance(was, dict) and was.get("done"):
+        print(f"ok  setup done already ({was['done']})")
+        return
+    when = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    store.write_json(path, {"done": when, "version": __version__})
+    print(f"ok  setup done ({when}): /workbench now goes straight to work")
 
 
 def _tool_version(argv: list[str]) -> tuple[bool, str]:
@@ -10561,6 +10583,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="replace the web app's service unit link "
                    "when it points elsewhere")
     s.add_argument("--no-service", action="store_true", help="install no service for the web app")
+    s.add_argument("--done", action="store_true", help="only record that First run is complete "
+                   "(setup.json): /workbench stops starting it")
     s.set_defaults(f=cmd_setup)
     s = sub.add_parser("update", help="update workbench (wb, the skill and the mod) from its origin")
     s.add_argument("--check", action="store_true", help="only say whether there is an update")

@@ -767,16 +767,16 @@ async function onPath($: any, name: string): Promise<boolean | null> {
   return false
 }
 
-// A fresh install (#1190), read from the task files so the mod keeps no state; the rule is
-// core.ts's `freshInstall`, the OpenCode plugin's too (#1574). /workbench alone then starts the
-// skill's *First run* at once: told to wait for a first request, a new user saw nothing happen.
+// A fresh install (#1190), read from wb's files so the mod keeps no state; the rule is core.ts's
+// `freshInstall`, the OpenCode plugin's too (#1574). /workbench then starts the skill's *First
+// run* at once: told to wait for a first request, a new user saw nothing happen.
 const fresh = ($: any): Promise<boolean> => freshInstall({
+  done: async () => !!(await $.fs.stat(`${mem.root}/setup.json`).catch(() => undefined)),
   tasks: async () => (await $.fs.list(`${mem.root}/tasks`).catch(() => []))?.length ?? 0,
   results: async () => (await $.fs.stat(`${mem.root}/results.jsonl`).catch(() => undefined))?.size ?? 0,
-  api: async () => (await readRoutes($)).api,
 })
 
-// What a fresh install's /workbench alone carries after the skill's text, the story's (#1574);
+// What a fresh install's /workbench carries after the skill's text, the story's (#1574);
 // SKILL.md's *First task* reads its `[workbench-firstrun]` tag by name
 const FIRSTRUN_NOTE: string = SAY['firstrun.note']
 
@@ -3463,7 +3463,7 @@ export const register: Register = (on, options) => {
 
   // /workbench turns workbench mode on for the session, with or without a task, and shows the pane.
   // Run again while it is on, it brings the pane back; alone, that is all it does, except on a
-  // fresh install (FIRSTRUN_NOTE).
+  // fresh install (FIRSTRUN_NOTE, with a task too).
   on('skill.prompt', { skill: SKILL }, async ($, e, next) => {
     if (e.path) mem.skill = e.path
     const again = (await read($, chat)).delegating
@@ -3480,10 +3480,12 @@ export const register: Register = (on, options) => {
     }
     await workbenchMode($, true)
     await showPane($)
-    // alone on a fresh install, the skill's whole text and the note to run its *First run* now
-    // (#1190), the mode on already or not: in this text, since prompt.context fires only at a
-    // conversation's first message, and /workbench may come later in it
-    const first = !firstTask(e.text) && await fresh($)
+    // on a fresh install, the skill's whole text and the note to run its *First run* now (#1190),
+    // the mode on already or not: in this text, since prompt.context fires only at a
+    // conversation's first message, and /workbench may come later in it. With a task too, kept
+    // in the skill's text for after First run: typed with the command, it skipped setup (#1606,
+    // 2026-11-27)
+    const first = await fresh($)
     if (again && !firstTask(e.text) && !first) return { text: add(AGAIN_NOTE(mem.skill)) }
     const r = await next(e)
     return { ...r, text: add(first ? `${r.text}\n\n${FIRSTRUN_NOTE}` : r.text) }

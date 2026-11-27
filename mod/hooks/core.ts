@@ -114,16 +114,19 @@ export const editFields = (host: 'claude-code' | 'opencode'): Readonly<Record<st
   Object.assign(Object.create(null),
     Object.fromEntries(K.editTools.filter(t => t.host === host).map(t => [t.tool, t.field])))
 
-// A fresh install (#1190): no task ever ran (nothing under tasks/, no results.jsonl rows) and no
-// role is on API, so /workbench alone starts the procedure's *First run* (the story's
-// `firstrun.note`). Not the kernel's (three facts, one AND), but both hosts' (#1574, 2026-11-26:
-// only the mod had it, so OpenCode's bare /workbench on a fresh install did nothing). Each host
-// reads its own facts, asked in this order and only while the install still looks fresh: the
-// task entries, results.jsonl's size, whether a role names an API model.
+// A fresh install (#1190): setup never completed (no setup.json, `wb setup --done`'s) and no task
+// ever ran (nothing under tasks/, no results.jsonl rows), so any /workbench, with a request or
+// without, starts the procedure's *First run* (the story's `firstrun.note`). A role on API no
+// longer counts as set up: roles set before setup finished kept First run from ever coming back,
+// and a request typed with /workbench skipped it (#1606, 2026-11-27); an install with tasks or
+// results from before the marker is set up, nothing written for it. Not the kernel's (three
+// facts, one AND), but both hosts' (#1574, 2026-11-26: only the mod had it, so OpenCode's bare
+// /workbench on a fresh install did nothing). Each host reads its own facts, asked in this order
+// and only while the install still looks fresh: setup.json, the task entries, results.jsonl's size.
 export interface FreshReads {
+  readonly done: () => Promise<boolean>
   readonly tasks: () => Promise<number>
   readonly results: () => Promise<number>
-  readonly api: () => Promise<boolean>
 }
 export const freshInstall = async (read: FreshReads): Promise<boolean> =>
-  !(await read.tasks()) && !(await read.results()) && !(await read.api())
+  !(await read.done()) && !(await read.tasks()) && !(await read.results())

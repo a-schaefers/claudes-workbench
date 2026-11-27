@@ -57,18 +57,18 @@ the user's sign that it is on. The user then works with you as usual, in plain w
 request is handled the way this skill says, until they run `/workbench-quit` or
 `/workbench-quit-and-hand-back-claude`. Running `/workbench` again while it is on only brings
 the pane back (the mod answers it; with a task, the task is yours to take as usual).
-- **First task:** `$ARGUMENTS`. Empty? With a `workbench-firstrun` note after this skill (the
-  mod's, on a fresh install: no task ever ran, no role is on API), run *First run* below now.
-  Otherwise reply in one line that workbench mode is on and wait for their first request; don't
-  scan the repo or check models until there is work.
+- **First task:** `$ARGUMENTS`. Empty? With no `workbench-firstrun` note after this skill, reply
+  in one line that workbench mode is on and wait for their first request; don't scan the repo or
+  check models until there is work. With that note, empty or not (sent on a fresh install: setup
+  was never completed and no task ever ran), run *First run* below now, then the task, if any.
 - **What goes to the agents:** the coding: features, fixes, refactors, tests, boilerplate.
   Answer questions, read code, plan, and do what is yours (git, CLAUDE.md, `.claude/`, anything
   outward) yourself, as always. An edit that costs less to make than to spec (a typo, one line)
   you may just make.
 - **First run** (a `workbench-firstrun` note; no role can run: `wb start` exits 3 with the
   router's `no GPU model…` line and no role is on API, `wb setup` says what is missing; or the
-  user wants to see it work), in this order, each install or download on the user's yes. Once a
-  task has run or a role is on API, no note comes and `/workbench` goes straight to work.
+  user wants to see it work), in this order, each install or download on the user's yes. Once
+  setup is done (step 7) or a task has run, no note comes and `/workbench` goes straight to work.
   1. `wb setup`: its `first run:` lines say what is missing, and which API keys OpenCode holds.
   2. **No GPU model, a provider with a stored key** (`ok  API keys: …`; a GitHub Copilot sign-in,
      `signed in to Copilot`, is one too: its usage is the plan's premium requests, not dollars, and
@@ -115,8 +115,10 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      GPU; `wb optimize report` once done.
   6. `wb try` proves it on a tiny sample (with trivial on API, it goes to that provider): review
      it as any task and run the hidden check it printed. Then `wb accept` it (the sample is a
-     scratch repo of its own) and show the user the result and the line accept prints. Then ask
-     what they'd like built.
+     scratch repo of its own) and show the user the result and the line accept prints.
+  7. `wb setup --done` once a role can run: after the trial run, or when the user declines it.
+     Without it the note comes back at every `/workbench` until a task has run. Then do the task
+     given with `/workbench`, if there was one; else ask what they'd like built.
 - **Claude coding** (the user's choice, `wb coding`): when you may write a task's code yourself,
   a one-line fix in review or `wb takeover` alike. "Let Claude decide" (the default) is this
   skill as written. Otherwise a `claude-coding` context block gives the rule: "Ask me first", or
