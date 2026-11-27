@@ -3741,6 +3741,61 @@ class Lifecycle(Base):
                                 "delegate/t-run-pyc"], check=True, capture_output=True, text=True)
         self.assertEqual(files.stdout.split(), ["answer.txt"])
 
+    def test_accept_leaves_out_a_large_unignored_venvs_pycache(self):
+        # #1593 (bar loop #1030 round 4, 2026-11-27): #1580 passed one exclude per cache file
+        # in argv, so a Python 3.11 venv in a directory the repo doesn't ignore, pip's 30,000
+        # .pyc, failed every wb accept on "Argument list too long", --include too
+        self.start("t-venv", "ok", "--test", TEST_CMD, "--no-self-review")
+        wait_phase("t-venv", {"review"})
+        t = store.Task("t-venv")
+        site = t.worktree / ".venv" / "lib" / "python3.11" / "site-packages"
+        for k in range(300):
+            cache = site / f"a_dependency_package_numbered_{k:03}" / "__pycache__"
+            cache.mkdir(parents=True)
+            for i in range(100):
+                (cache / f"a_module_of_that_package_numbered_{i:03}.cpython-311.pyc").write_bytes(b"\0")
+        out = run_wb("accept", "t-venv", "-m", "feat: one")
+        self.assertIn("accepted t-venv", out)
+        self.assertIn("note: the commit leaves out a run's caches, which nobody wrote: "
+                      ".venv/lib/python3.11/site-packages/a_dependency_package_numbered_000/__pycache__/ "
+                      "(100 files)", out)
+        files = subprocess.run(["git", "-C", str(self.repo), "show", "--name-only", "--format=",
+                                "delegate/t-venv"], check=True, capture_output=True, text=True)
+        self.assertEqual(files.stdout.split(), ["answer.txt"])
+
+    def test_a_later_steps_review_notice_leaves_out_the_run_caches_wb_next_left(self):
+        # #1593 (bar loop #1030 round 4, 2026-11-27): wb next leaves a test run's __pycache__
+        # out of its commit (#1580) and in the worktree, and step 2's review notice, its agent
+        # having changed nothing, listed it as the agent's changed file with a binary diff; a
+        # feedback round after Claude ran the tests again did the same
+        self.start("t-nxc", "ok", "--test", TEST_CMD, "--no-self-review")
+        wait_phase("t-nxc", {"review"})
+        t = store.Task("t-nxc")
+        (t.worktree / "__pycache__").mkdir()
+        (t.worktree / "__pycache__" / "x.cpython-311.pyc").write_bytes(b"\0bytecode")
+        os.environ["FAKE_SCENARIO"] = "say"
+        self.assertIn("__pycache__/ (1 file)", run_wb("next", "t-nxc", "--spec", str(self.spec),
+                                                      "-m", "feat: step one"))
+        wait_phase("t-nxc", {"review"})
+        review = lambda: [r["text"] for r in store.notices()  # noqa: E731
+                          if r["task"] == "t-nxc" and r["kind"] == "review"]
+        step2 = review()[-1]
+        self.assertIn("files changed:\n(none)", step2)
+        self.assertNotIn("file changed", step2)  # the closing diffstat too (#1593's review)
+        self.assertIn("the diff: (no changes)", step2)
+        self.assertIn("note: the commit leaves out a run's caches, which nobody wrote: "
+                      "__pycache__/ (1 file)", step2)
+        self.assertEqual(run_wb("diff", "t-nxc").strip(), "(no changes)")
+        (t.worktree / "__pycache__" / "y.cpython-311.pyc").write_bytes(b"\0bytecode")
+        run_wb("feedback", "t-nxc", "--text", "1. answer.txt: keep it.")
+        wait_phase("t-nxc", {"review"})
+        fb = review()
+        self.assertEqual(len(fb), 3)
+        self.assertIn("files changed:\n(none)", fb[-1])
+        self.assertNotIn("files changed,", fb[-1])
+        self.assertIn("the diff since your last review: (no changes)", fb[-1])
+        self.assertIn("__pycache__/ (2 files)", fb[-1])
+
     def test_wb_next_names_an_ignored_file_its_step_commit_leaves_out(self):
         # #1179's review (2026-11-24): wb next's commit dropped what hand_written's filters took
         # for a test run's without a word; it stays in the worktree, and the note says so
@@ -3985,6 +4040,27 @@ class Lifecycle(Base):
         one = chat.task_diff(t, full=True, path="lib/util.py")
         self.assertIsNotNone(one)
         self.assertIn("+++ b/lib/util.py", one["diff"])
+
+    def test_a_failed_tasks_sheet_counts_the_ignored_files_its_agent_wrote(self):
+        # #1591 (the 2.2 bar loop, 2026-11-27): the agent wrote only answer.txt, which the repo
+        # ignores, and OpenCode exited 1; the sheet's lead said "The agent stopped before writing
+        # anything" and "No files changed." beside the Diff tab listing answer.txt, and offered
+        # "Discard it"
+        from workbench import chat
+        (self.repo / ".gitignore").write_text("answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore answer.txt"], check=True)
+        os.environ["FAKE_EXIT"] = "1"
+        self.start("t-lost", "ok")
+        self.assertEqual(wait_phase("t-lost", {"review", "stuck", "failed"})["phase"], "failed")
+        t = store.Task("t-lost")
+        s = chat.task_summary(t)
+        self.assertNotIn("before writing anything", s["happened"])
+        self.assertIn("partway", s["happened"])
+        self.assertEqual(s["changed"], [f["path"] for f in chat.task_diff(t)["files"]])
+        self.assertEqual(s["changed"], ["answer.txt"])
+        # a round with no report yet: the worktree's ignored file is an edit too
+        self.assertIn("partway", chat.report_lead(t, "", False)["happened"])
 
     def test_wb_verify_and_wb_shot_run_the_candidate_with_the_ignored_files_accept_commits(self):
         # #1275 (the 2.0 bar loop, 2026-11-24): #1259 put the agent's lib/util.py, under

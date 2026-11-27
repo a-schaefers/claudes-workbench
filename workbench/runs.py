@@ -1225,6 +1225,36 @@ def _siblings(rows: list, me: dict, key: str) -> list[store.Task]:
             and (t := store.Task(r["task"])).exists]
 
 
+def _base_item(key: str) -> str:
+    """The item a try belongs to: ``key`` without its escalation (`#e<k>`, escalation_key's)
+    and then its attempt (`#a<n>`)."""
+    return re.sub(r"#a\d+\Z", "", re.sub(r"#e\d+\Z", "", key))
+
+
+def tries_of(task: store.Task):
+    """``task``'s tries at its code item, itself among them, as the hand-back groups them:
+    (its run, the stage, the item, the tasks that still exist, in start order), or None for a
+    task with no other try. A compare item's attempts (`#a`) and an escalation's (`#e`) with
+    the try it escalated from are alternatives for one change: _attempt_of saw `#a` alone, so
+    the hand-back of a fix-escalate run had Claude finish and accept the failed or superseded
+    try and its escalation both (#1592, 2026-11-27). _attempt_of stays `#a`'s, for not_chosen:
+    a failed cheap try is its model's failure, never a loss to the pick."""
+    name = task.spec.get("run")
+    if not (isinstance(name, str) and RUN_RE.match(name) and Run(name).exists):
+        return None
+    run = Run(name)
+    rows = [r for r in run.journal() if r.get("kind") == "item" and isinstance(r.get("task"), str)]
+    me = next((r for r in rows if r["task"] == task.name), None)
+    if me is None:
+        return None
+    item = _base_item(str(me.get("key") or ""))
+    mine = [r for r in rows if r.get("stage") == me.get("stage") and _base_item(str(r.get("key") or "")) == item]
+    if len({r.get("key") for r in mine}) < 2:  # one try (a start the cap held, then made again, is one)
+        return None
+    tries = [t for n in dict.fromkeys(r["task"] for r in mine) if (t := store.Task(n)).exists]
+    return run, me.get("stage"), item, tries
+
+
 def _chosen(run: Run, rows: list, stage: str, item: str) -> str | None:
     """The label (a1..aN) a compare stage over code stage ``stage`` named best for ``item``: its
     result's `best`, else its `ranking`'s first; None before a chooser answered."""
@@ -1535,7 +1565,19 @@ def _take(run: Run, stage: dict, it: Item) -> None:
                 if over := _budget_stop(run, src_stage, stage_model(src_stage, src_item)):
                     _pause_at_budget(run, over)
                     return
+                # and at the day cap, as a start is (_start, _cap_held): wb feedback's refusal
+                # was logged as output done and the review accepted, the run said done with the
+                # must_fix never sent, under --overnight too (#1589, 2026-11-27)
+                if capped := _refix_held(run, stage, it, code):
+                    _pause_at_cap(run, capped)
+                    return
                 r = _wb(["feedback", src_item.task, "--text", text], run)
+                if r.returncode == 3 and meter.RESETS in (r.stderr or "") + (r.stdout or ""):
+                    # its day, cap and model, so the next pass doesn't run wb feedback again while they hold
+                    run.log(kind="refix_held", stage=stage["id"], key=it.key, src=it.src, task=src_item.task,
+                            day=meter.day(), cap=meter.cap(), model=code.spec.get("model"), why=_last_line(r))
+                    _pause_at_cap(run, _last_line(r))
+                    return
                 if r.returncode == 0:
                     run.log(kind="refix", stage=stage["id"], src=it.src, task=src_item.task,
                             count=len(fixes) + 1, round=was)
@@ -1730,6 +1772,31 @@ def _cap_held(run: Run, stage: dict, it: Item, m) -> str | None:
     why = meter.refusal(m, item_role(stage, it), advice=False,
                         tokens=runner.first_tokens(prompt=_spec_of(run, stage, it)))
     return why if why and meter.RESETS in why else None  # any other refusal is wb start's to say
+
+
+def _refix_held(run: Run, stage: dict, it: Item, code: store.Task) -> str | None:
+    """The day cap's refusal of review ``it``'s refix to ``code`` while it still holds (that
+    day, that cap, the code task's model: its rounds keep it), else None: as _cap_held holds
+    a start, on the journal's `refix_held` row alone, so a pass at the cap runs no wb feedback
+    and writes nothing, which would wake the driver at once (#1543); past midnight or a cap
+    raised, wb feedback is asked again (#1589, 2026-11-27)."""
+    rows = [r for r in run.journal() if r.get("stage") == stage["id"] and r.get("key") == it.key
+            and r.get("kind") == "refix_held"]
+    last = rows[-1] if rows else {}
+    if last.get("day") == meter.day() and last.get("cap") == meter.cap() \
+            and last.get("model") == code.spec.get("model"):
+        return last.get("why") or f"the day cap ({meter.RESETS})"
+    return None
+
+
+def _pause_at_cap(run: Run, why: str) -> None:
+    """A refix the day cap holds (_take): under --overnight the run goes on and the review waits
+    for midnight; else the run paused, said once, as _start's cap pause is."""
+    if run.spec.get("overnight"):
+        return
+    if run.set_status_if(_going, phase="paused", why=why):
+        run.notify("run_paused", f"paused: {why}. Done work is kept, and a review's refix waits: "
+                                 f"wb run resume {run.name} once the cap allows")
 
 
 def _room(run: Run, stage: dict, st: dict, m) -> str | None:
@@ -2015,6 +2082,7 @@ def report_of(name: str) -> dict:
             if cur is not None:
                 out.append({"stage": cur.stage, "key": cur.key, "result": cur.output})
         return out
+    held = {(r.get("stage"), r.get("key")): r.get("why") for r in run.journal() if r.get("kind") == "refix_held"}
     rep = {"run": name, "flow": flow.get("name"), "phase": run.status.get("phase"),
            "final": [], "results": [], "filtered": [], "superseded": [], "null": [], "not_run": [], "code": [], "pending": []}
     for s in sts:
@@ -2029,10 +2097,13 @@ def report_of(name: str) -> dict:
             # the report named a task that never was (#1531, 2026-11-26), as cmd_close filters
             if is_code(s) and it.task and store.Task(it.task).exists:
                 rep["code"].append({"key": k, "task": it.task, "phase": store.Task(it.task).status.get("phase")})
+            # a done review's why is its refix not sent, and why: the final entry showed the
+            # `changes` verdict alone, as if its must_fix had gone to the coder (#1589, 2026-11-27)
+            said = {"why": it.why} if it.why else {}
             if it.state == "done" and s["id"] == feeds and not is_code(s):
-                rep["final"].append({"key": k, "result": it.output, "trail": trail(it)})
+                rep["final"].append({"key": k, "result": it.output, "trail": trail(it), **said})
             elif it.state == "done" and s["id"] not in read and not (is_code(s) or s.get("claude")):
-                rep["results"].append({"key": k, "result": it.output, "trail": trail(it)})
+                rep["results"].append({"key": k, "result": it.output, "trail": trail(it), **said})
             elif it.state == "filtered":
                 rep["filtered"].append({"key": k, "why": it.why, "result": it.output})
             elif it.state == "superseded":
@@ -2043,7 +2114,8 @@ def report_of(name: str) -> dict:
             elif it.state == "not_run":
                 rep["not_run"].append({"key": k, "why": it.why})
             elif it.state in ("pending", "running", "waiting"):
-                rep["pending"].append({"key": k, "task": it.task})
+                why = held.get((s["id"], it.key))
+                rep["pending"].append({"key": k, "task": it.task, **({"why": f"refix held: {why}"} if why else {})})
             for mk in unanswered(s, it):
                 rep["not_run"].append({"key": f"{s['id']}:{mk}", "why": f"unjudged: {k} returned nothing for it"})
     used = spent(run)
@@ -2068,11 +2140,13 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
         for r in rows:
             if what in ("final", "results"):
                 out.append(f"  {r['key']}: {js(r['result'])}" + (f"  ← {js([t['result'] for t in r['trail']])}"
-                                                                if r["trail"] else ""))
+                                                                if r["trail"] else "")
+                           + (f"  ({r['why']})" if r.get("why") else ""))
             elif what in ("filtered", "superseded"):
                 out.append(f"  {r['key']}: {r['why']}: {js(r['result'])}")
             elif what == "pending":
-                out.append(f"  {r.get('key') or r.get('stage')}: {r.get('task') or r.get('why')}")
+                out.append(f"  {r.get('key') or r.get('stage')}: {r.get('task') or r.get('why')}"
+                           + (f" · {r['why']}" if r.get("task") and r.get("why") else ""))
             else:
                 out.append(f"  {r['key']}: {r['why']}" + (f" (its items: {', '.join(r['members'])})"
                                                          if r.get("members") else ""))
@@ -2117,8 +2191,12 @@ def estimate(flow: dict, params: dict, exists: dict | None = None) -> tuple[floa
         n = min(n, int(s.get("max_items") or MAX_ITEMS)) * int(s.get("attempts") or 1)
         if (s.get("batch") or 1) > 1:
             n = math.ceil(n / s["batch"])
+        # a code stage with no card is a coding task as the build card's (a flow wb flow import
+        # made, a plan's "kind": "code"): counted as nothing, an API run read "estimate $0" and
+        # spent its budget (#1590, 2026-11-27)
         try:
-            est = cards.load(s["card"]).est if s.get("card") else {}
+            est = cards.load(s["card"]).est if s.get("card") else \
+                cards.load("build").est if s.get("kind") == "code" else {}
         except RuntimeError:
             est = {}
         m = stage_model(s)
@@ -2128,6 +2206,9 @@ def estimate(flow: dict, params: dict, exists: dict | None = None) -> tuple[floa
         p = meter.price(m)
         if not p:
             priced = priced and (meter.is_plan(m) or meter.is_free(m))
+            continue
+        if n > 0 and not (est.get("in") or est.get("out")):
+            priced = False  # a paid stage with no tokens to count (a card with no est): unpriced, never $0
             continue
         usd += n * (float(est.get("in") or 0) * p[0]["input"] + float(est.get("out") or 0) * p[0]["output"]) / 1e6
     return (round(usd, 4) if priced else None), mins, later

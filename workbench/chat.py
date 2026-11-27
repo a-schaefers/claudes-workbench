@@ -1188,12 +1188,14 @@ LEAD_CAUSE_CHARS = 160  # the cause in the task sheet's "what happened" line, cu
 def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
     """What the task sheet leads with (#1339, 2026-11-26), read from the report runner.summary_text
     writes: the agent's summary (`agent_summary`), the files it changed (`changed`, the status
-    lines' paths; None with no report) and the tests' line (`tests`, `tests: PASS (…)`), and for a
+    lines' paths, then the ignored files --include commits, runner.ignored_to_commit, as task_diff
+    lists them; None with no report) and the tests' line (`tests`, `tests: PASS (…)`), and for a
     failed or stuck task one plain line of what happened (`happened`: `The agent stopped before
     writing anything (OpenCode exited).`; with no report, `The task stopped before the agent ran (…).`
     only for a stop before the agent with a clean worktree). The sheet showed only `opencode exited 1 (see
     <path>/runner.log)`, a path the phone can't open, with Reply below the fold. Never
     runner.log's tail: OpenCode's raw stderr, which Claude reads when asked."""
+    from . import runner
     lines = report.split("\n")
     out: dict = {"happened": "", "agent_summary": None, "changed": None, "tests": ""}
     if has_report:
@@ -1207,7 +1209,11 @@ def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
                     break
                 if line != "(none)":
                     files.append(line[3:] if re.match(r"^[ MADRCU?!]{2} ", line) else line)
-            out["changed"] = files
+            # the ignored files the commit takes count: git status leaves them out, and the
+            # sheet of a failed task whose agent wrote only lib/ said "before writing anything"
+            # and "No files changed." beside the Diff tab listing them, then offered "Discard
+            # it" (#1591, 2026-11-27; the Diff tab's own fix was #1548)
+            out["changed"] = files + [p for p in runner.ignored_to_commit(t) if p not in files]
         out["tests"] = next((x for x in lines if re.match(r"tests: (PASS|FAIL)\b", x)), "")
     phase = t.status.get("phase")
     if phase in ("failed", "stuck"):
@@ -1225,8 +1231,8 @@ def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
             # own stops before the agent (status infra setup, repo, model, which each runner
             # start clears) with a clean worktree say it never ran.
             from . import gitops
-            try:
-                edits = bool(gitops.changed(t.worktree))
+            try:  # an ignored file the commit takes is an edit too (#1591)
+                edits = bool(gitops.changed(t.worktree) or runner.ignored_to_commit(t))
             except (OSError, gitops.GitError):
                 edits = False
             if edits:

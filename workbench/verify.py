@@ -421,8 +421,10 @@ def candidate_tree(task: store.Task) -> tuple[str, list[str]]:
     (runner.ignored_to_commit, as the review diff since #1259): left out, verify said "the
     candidate fails it" (ModuleNotFoundError: lib) for an agent's lib/util.py under
     Python.gitignore's lib/ that passed in the worktree, and an edit to it left the last check
-    fresh, so --include landed code no check ran on (#1275, 2026-11-24)."""
-    return gitops.snapshot_left(task.worktree, landing=True, force=runner.ignored_to_commit(task))
+    fresh, so --include landed code no check ran on (#1275, 2026-11-24). Without the run caches
+    accept leaves out (runner.run_caches, #1593)."""
+    return gitops.snapshot_left(task.worktree, landing=True, force=runner.ignored_to_commit(task),
+                                skip=runner.run_caches(task))
 
 
 def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int = LIMIT,
