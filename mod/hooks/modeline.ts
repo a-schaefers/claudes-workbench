@@ -8,6 +8,9 @@ import type { ChatLink, WatchLine } from '../types/wire.js'
 import { FACE } from './apprentice'
 
 export const MODELINE = "Claude's Workbench"
+/** The modeline's badge while deepmode is on (workflows.json `deepmode: on`, #1628), as Claude Code's
+ * `/effort` shows ultracode: after the name, dropped first when the pane is narrow. */
+export const DEEP_BADGE = '[deepcode]'
 
 /** The link a modeline shows: `wb chat url --json` as the mod last read it (WbChat's `link`). */
 export type Link = WbChat['link']
@@ -34,9 +37,10 @@ const cut = (s: string, n: number) => (width(s) <= n ? s : n <= 0 ? '' : [...s].
  * there: the link cut by characters, `cols` a row and never at a word, so it stays one link.
  * `name`: the pane's name (OpenCode's panel says `Workbench` alone, #1312).
  */
-export function modeline(link: Link, cols: number, name: string = MODELINE): { bar: string; rows: string[] } {
+export function modeline(link: Link, cols: number, name: string = MODELINE, deep = false): { bar: string; rows: string[] } {
   const room = Math.max(1, cols - 2) // paddingX 1
-  const head = `${FACE.rest} ${name}`
+  // the badge only where the name is: the link's own rows come out as without it (target, #1628)
+  const head = `${FACE.rest} ${name}${deep ? ` ${DEEP_BADGE}` : ''}`
   const url = link.url ?? ''
   if ((link.state === 'up' || link.state === 'started') && url) {
     const whole = `${head} - ${url}`

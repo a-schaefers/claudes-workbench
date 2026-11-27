@@ -6,7 +6,7 @@
 //   `context` hook; the mod's hidden context entry); a line `deepmode on|off` is the user's own
 //   yes, so wb deepmode runs as the session, and its turn is told it ran. Never a prompt another
 //   part or plugin made (metadata), an agent's (`[agent `) or a `[workbench]` one.
-// - `/deepmode [on|off]`: a server command (OpenCode's `command.transform`), listed in the TUI:
+// - `/workbench-deepmode [on|off]` (and `/deepmode`, its alias): a server command (OpenCode's `command.transform`), listed in the TUI:
 //   it sets or shows the choice, and says it without starting a turn. upkeep.ts's
 //   `dynamic-workflows` entry follows workflows.json at the session's next prompt.
 // Its prompt hook is registered before upkeep's (server.ts), so a toggle is in workflows.json
@@ -16,6 +16,8 @@ import { SOURCE as CHAT_SOURCE, WEB } from './chat.ts'
 import { sessionRunner, whereOf, type Command, type CommandHost, type SessionRun } from './commands.ts'
 
 export const DEEPMODE = 'deepmode'
+// the family's name, as /workbench-quit's (#1628); /deepmode stays its alias
+export const WORKBENCH_DEEPMODE = 'workbench-deepmode'
 const SOURCE = 'workbench.command'
 export const FALLBACK = 'The user wrote `deepcode` (Workbench\'s word, not Claude\'s `ultracode`): run this ' +
   'request as a deep workflow, as your Workbench instructions\' *Deep workflows* says.'
@@ -103,17 +105,19 @@ export class Deep {
     for (const text of n.texts) input.system.push({ type: 'text', text })
   }
 
-  command(): Command {
+  command(name: string = WORKBENCH_DEEPMODE): Command {
     return {
-      name: DEEPMODE,
-      description: 'workbench: Dynamic workflows (deepmode): /deepmode on or off, alone to see it',
+      name,
+      description: name === WORKBENCH_DEEPMODE
+        ? 'workbench: Deepmode (dynamic workflows): on or off, alone to see it; on, the panel shows [deepcode]'
+        : 'workbench: Deepmode, as /workbench-deepmode: on or off, alone to see it',
       execute: async ({ sessionID, prompt }) => {
         const arg = String(prompt?.text ?? '').trim().toLowerCase()
-        if (arg && arg !== 'on' && arg !== 'off') throw new Error('/deepmode on, /deepmode off, or /deepmode alone to see it')
+        if (arg && arg !== 'on' && arg !== 'off') throw new Error(`/${name} on, /${name} off, or /${name} alone to see it`)
         const r = await this.run(['deepmode', ...(arg ? [arg] : [])], { session: sessionID, cwd: await this.where(sessionID) })
         if (!r.ok) throw new Error(`wb deepmode failed: ${r.out}`)
         if (!this.host.session?.synthetic) return
-        await this.host.session.synthetic({ sessionID, text: `[workbench] The user ran /${DEEPMODE}${arg ? ` ${arg}` : ''}: ${r.out}\nNothing to do now.`,
+        await this.host.session.synthetic({ sessionID, text: `[workbench] The user ran /${name}${arg ? ` ${arg}` : ''}: ${r.out}\nNothing to do now.`,
           description: `Workbench: ${r.out.split('\n')[0]}`, metadata: { source: SOURCE }, resume: false })
       },
     }
@@ -134,7 +138,7 @@ export async function deep(host: DeepHost, run?: SessionRun): Promise<(() => Pro
   const transform = host.command?.transform
   if (transform) {
     try {
-      regs.push(await transform((editor) => editor.add(d.command())))
+      regs.push(await transform((editor) => { editor.add(d.command()); editor.add(d.command(DEEPMODE)) }))
     } catch { /* no commands on this server */ }
   }
   if (!regs.length) return undefined

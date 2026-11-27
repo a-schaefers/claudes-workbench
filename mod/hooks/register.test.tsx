@@ -6276,6 +6276,29 @@ test('#1283: the pane is the Tasks view alone, with no tab to press and no 1, 2 
   await ui.unmount()
 })
 
+test('#1628: with deepmode on the modeline wears [deepcode] after the name, however it was turned on, and drops it when it goes off', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/workflows.json': JSON.stringify({ deepmode: 'on' }) }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', chatWb({}, () => ({ state: 'up', url: LINK })))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 140 } })
+  expect(await modelineOf(ui)).toEqual([`[•_•] Claude's Workbench [deepcode] - ${LINK}`])
+  await ui.unmount()
+  files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'off' })   // the web app's switch, or a terminal
+  await clock.advance(3000)
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 140 } })
+  expect(await modelineOf(again)).toEqual([`[•_•] Claude's Workbench - ${LINK}`])
+  await again.unmount()
+  // narrow, the badge goes with the name: the link alone, as without it
+  expect(modeline({ state: 'up', url: LINK }, 90, undefined, true)).toEqual({ bar: `[•_•] ${LINK}`, rows: [] })
+  expect(modeline({ state: 'off' }, 140, undefined, true).bar).toBe("[•_•] Claude's Workbench [deepcode] - web app off (wb chat on)")
+})
+
 test('#1283: the modeline reads the web app\'s state, at 140, 90 and 60 columns', () => {
   const name = "[•_•] Claude's Workbench"
   const why = 'another program answers on port 8090: wb chat on <free port> moves the web app there'
@@ -6874,6 +6897,10 @@ test('#1278: deepmode on typed alone runs wb deepmode on and starts no turn; wit
   expect((await $.command.run({ command: 'deepmode', args: '' })).text).toBe('Dynamic workflows (deepmode): On.')
   expect((await $.command.run({ command: 'deepmode', args: 'maybe' })).text).toContain('/deepmode on, /deepmode off')
   expect(ran.filter(a => a[0] === 'deepmode').slice(2)).toEqual([['deepmode', 'off'], ['deepmode']])
+  // #1628: /workbench-deepmode, the family's name, does the same
+  expect((await $.command.run({ command: 'workbench-deepmode', args: 'on' })).text).toBe('Dynamic workflows (deepmode): On.')
+  expect((await $.command.run({ command: 'workbench-deepmode', args: 'x' })).text).toContain('/workbench-deepmode on, /workbench-deepmode off')
+  expect(ran.filter(a => a[0] === 'deepmode').slice(4)).toEqual([['deepmode', 'on']])
 })
 
 test('#1295: a flow with a command is a slash command of the session; running it queues the turn that starts it, the line as typed, and starts none itself', async ($, on) => {

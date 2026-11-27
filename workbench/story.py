@@ -98,7 +98,7 @@ TEXTS: dict[str, str] = {
                   "/workbench pane's modeline, and `wb chat url` prints it (the token in it is the key: keep it private).",
     "moved.deepmode": "Deepmode is off: in 2.2, on runs every substantive request as a deep workflow (wb run) on "
                       "your agents, within the day cap, so 2.1's Dynamic workflows on didn't carry over. "
-                      "/deepmode on turns it on.",
+                      "/workbench-deepmode on turns it on.",
     "tasks.pickup": "Pick them up from here: `wb report <name>` for one (`wb run report <name>` for a run), "
                     "`wb wait <name>` to follow it until it needs you.",
     "firstrun.note": "[workbench-firstrun] A fresh install: setup was never completed here and no task has run. "

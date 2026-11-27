@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { keywords, onlyToggles } from '../../mod/hooks/keywords.ts'
-import { Deep, DEEPMODE, deep, FALLBACK, usersWords, type ContextEvent, type DeepHost } from '../deep.ts'
+import { Deep, DEEPMODE, WORKBENCH_DEEPMODE, deep, FALLBACK, usersWords, type ContextEvent, type DeepHost } from '../deep.ts'
 import type { Ran, SessionRun } from '../commands.ts'
 
 // Deep workflows' words in OpenCode (#1278): `BUN_BE_BUN=1 opencode test opencode-plugin/test/deep.test.ts`.
@@ -75,7 +75,8 @@ test('deepmode on typed runs wb deepmode on as the session, and its turn is told
   expect(w.ctx()[0]!.endsWith('Dynamic workflows (deepmode): Off.')).toBe(true)
   await w.d.prompted({ sessionID: 's1', prompt: { text: 'turn deepmode on please' } })
   expect(w.ran.length).toBe(2)
-  const cmd = w.d.command()
+  expect(w.d.command().name).toBe(WORKBENCH_DEEPMODE)  // #1628: the family's name, /deepmode its alias
+  const cmd = w.d.command(DEEPMODE)
   expect(cmd.name).toBe(DEEPMODE)
   await cmd.execute({ sessionID: 's1', prompt: { text: ' OFF ' } })
   await cmd.execute({ sessionID: 's1', prompt: { text: '' } })
@@ -98,7 +99,7 @@ test("a subagent's prompt is the driver's words, never the user's: its deepmode 
   expect(w.ran.map(r => r.args)).toEqual([['deepmode', 'off']])
 })
 
-test('the server part takes the prompt and context hooks and adds /deepmode, each where the server has it', async () => {
+test('the server part takes the prompt and context hooks and adds /workbench-deepmode and /deepmode, each where the server has it', async () => {
   const hooks: string[] = []
   const added: string[] = []
   const host: DeepHost = {
@@ -108,6 +109,6 @@ test('the server part takes the prompt and context hooks and adds /deepmode, eac
   }
   expect(typeof await deep(host, async () => ({ ok: true, out: '' }))).toBe('function')
   expect(hooks).toEqual(['prompt', 'context'])
-  expect(added).toEqual([DEEPMODE])
+  expect(added).toEqual([WORKBENCH_DEEPMODE, DEEPMODE])
   expect(await deep({ options: {} })).toBeUndefined()
 })

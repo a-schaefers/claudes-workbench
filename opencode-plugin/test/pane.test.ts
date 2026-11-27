@@ -435,6 +435,19 @@ test('the splash ends where the panel pins its modeline and apprentice: the foot
   // a small panel: the face on one line, not the pixels
   expect(target(14, 60, checking, false)).toEqual({ stage: 12, bar: 13 })
   expect(modelineOf({ state: 'up', url: 'http://h/' }, 60).bar).toBe('[•_•] Workbench - http://h/')
+  expect(modelineOf({ state: 'up', url: 'http://h/' }, 60, true).bar).toBe('[•_•] Workbench [deepcode] - http://h/')  // #1628
+})
+
+test('the panel reads deepmode from workflows.json for its [deepcode] badge, off when the file is missing (#1628)', async () => {
+  const run: Run = async () => ({ code: 0, stdout: '', stderr: '' })
+  const base = files({})
+  let doc: string | undefined
+  const data = new PaneData(HOME, run, () => NOW, { ...base, read: p => p === `${HOME}/workflows.json` ? doc : base.read(p) })
+  expect((await data.tasks()).deep).toBe(false)
+  doc = JSON.stringify({ deepmode: 'on' })
+  expect((await data.tasks()).deep).toBe(true)
+  doc = JSON.stringify({ deepmode: 'off', mode: 'on' })  // 2.1's `mode` is not deepmode (#1507)
+  expect((await data.tasks()).deep).toBe(false)
 })
 
 test('no pane module hands OpenCode a task\'s worktree: no location, move or vcs call (the host-shape decision\'s critic 1)', async () => {
