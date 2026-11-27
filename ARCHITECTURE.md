@@ -10206,7 +10206,7 @@ Chooser).
 that ends null (stuck, failed, discarded), or whose review's asks are left once refix's `max` is spent (`_take`
 journals `escalate` {stage, key, task, why} and supersedes that review: `escalated: …`; the attempt's task
 stays at review for Claude), is tried again from the base as `<key>#e<k>` on the k-th role (`runs.escalation`,
-`escalation_key`, `item_role`: `wb start --role`; `stage_model(stage, it)` for its room, budget and
+`escalation_key`, `item_role`: `wb start --role`; `stage_model(stage, it)`, through `paid_model`, for its room, budget and
 `request_floor`), its start journalled `escalated` {key, after, role}; a stuck code item checkpoints Claude only
 when it was the last role's, and `wb run start` refuses an escalate API role with no day cap as it does the
 stage's, its line `<stage> <role> (GPU|API), then <roles>`. Shipped: `fix-escalate` (fix on trivial, then
@@ -10247,7 +10247,7 @@ dead an item's notice is Claude's, a task's as any), refuses an item's open ask 
 its step whose cause passes or is the user's to lift (`_held`, `runs._outside`: `cli._interrupted`, a restart, a
 killed runner, a shutdown's signal, an update, or `cli.stopped_outside` in `runs.held_infra`: the day cap in a
 round, a provider's rate limit, outage or refusal, a repo made local-only, `wb stop --all`; `wb resume`, journal
-`resumed` `by: driver`; never Claude's own `wb stop <item>`, `last` `runs.STOPPED_BY_CLAUDE`, whatever `infra`
+`resumed` `by: driver`, unless past the run's budget, *Budgets*; never Claude's own `wb stop <item>`, `last` `runs.STOPPED_BY_CLAUDE`, whatever `infra`
 it left: one made while the item waited behind a told cap kept the wait's `spend`, and the driver resumed it, #1588's). The rest of `cli.stopped_outside`'s, a model that failed, a setup, a crash, a full disk,
 the repo gone, OpenCode unusable, end the item as its own failure (its stage's `on_failure`, `null` by default),
 as `wb resume --all` leaves them (`cli.INTERRUPTED`). A resume refused with exit 3
@@ -10300,7 +10300,13 @@ cap's midnight instead of pausing. A stage on an API role with no cap refuses th
 The run's budgets are checked before each start only, and a review's refix counts as one (`runs._take`: past the
 budget it pauses the run as a start does, and while the run isn't going, `runs._going`, the review waits, retaken
 each pass, so the first pass after `wb run amend --budget-usd N` and `wb run resume` sends it; sent at once, each
-refix paid a coding round past the budget, while the run read `paused`, #1586): items already running finish
+refix paid a coding round past the budget, while the run read `paused`, #1586), and so does a resume of a held
+item, the driver's (`runs._held`) and `wb run resume`'s (`runs._resume_items`): past the budget the item stays
+held, its work kept, and the run pauses (`--overnight` waits past the day cap only, never past the run's own
+budget). Each is priced by `runs.paid_model(stage, it)`: the item's task's own model once it has one (a resume or
+a refix runs on the model its rounds began on), else its role's now (`stage_model`); resumed unchecked, an
+overnight item went on each midnight past `--budget-usd`, and a refix priced by its role read the GPU once the
+role moved there and ran on the task's API model (#1600). Items already running finish
 their rounds, so a run can end past `--budget-usd` by what they spend (the day cap still stops every one).
 The estimate: each card's `est` × `meter.price` for the stages whose items are known (`runs.estimate`); a code
 stage with no card (`wb flow import`'s, a plan's `"kind": "code"`) counts as the build card's `est`, and a stage

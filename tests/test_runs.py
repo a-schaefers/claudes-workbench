@@ -1815,6 +1815,35 @@ class RunsApi(Base):
         self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
         run_wb("discard", "bgr-code-1")
 
+    def test_a_reviews_refix_past_the_runs_budget_is_held_even_after_its_role_moved_to_the_gpu(self):
+        # #1600 (bar loop #1030, 2026-11-27): the refix was priced by the role's model now, so once
+        # the role moved to the GPU (as the cap's notices advise) it ran on the task's API model,
+        # past --budget-usd, checked against the GPU minutes only
+        seq = Path(self.tmp.name) / "seq.json"
+        seq.write_text(json.dumps([
+            {"verdict": "changes", "must_fix": ["name the answer file in the README"], "nits": [], "summary": "close"},
+            {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_SEQ=str(seq))
+        with mock.patch.object(runs, "spawn", return_value=0):
+            code, _, err = wb("run", "start", "bgm", "--flow", "build", "--param", "request=Write answer.txt.",
+                              "--repo", str(self.repo), "--budget-usd", "1")
+        self.assertEqual(code, 0, err)
+        run = runs.Run("bgm")
+        runs.tick(run)
+        self.wait_item("bgm-code-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        runs.tick(run)
+        self.wait_item("bgm-review-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.spent(1.0, "bgm-code-1")                                    # the run's budget, all spent
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+            "significant": {"via": "gpu", "api": SPEND_FLASH}}})         # the role on the GPU, its api kept
+        runs.tick(run)
+        coder = store.Task("bgm-code-1")
+        self.assertEqual(coder.status["round"], 1)
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "refix"])
+        self.assertEqual(run.status["phase"], "paused")
+        self.assertIn("the run's budget: $", run.status["why"])
+        run_wb("discard", "bgm-code-1")
+
     def test_a_review_at_the_day_cap_holds_its_refix_until_midnight_or_a_higher_cap(self):
         # #1589 (bar loop #1030, 2026-11-27): wb feedback's day-cap refusal was logged as the
         # review's output, done, the review accepted, and the run said done (`run_done`) with the
@@ -2166,6 +2195,39 @@ class RunsApi(Base):
         self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
         self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
         self.assertEqual(runs.report_of("ovn")["null"], [])
+
+    def test_an_overnight_item_the_cap_stopped_after_its_run_spent_its_budget_is_held_at_the_budget_not_resumed(self):
+        # #1600 (bar loop #1030, 2026-11-27): the driver's resume of a held item checked the day
+        # cap (wb resume's) but never the run's budget, so under --overnight each midnight sent
+        # paid rounds past --budget-usd with the run still `running`
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_BY=json.dumps(
+            {"Audit area": {"findings": [], "covered": ["README.md"]}}))
+        run, _ = self.start("ovb", "--budget-usd", "1", "--overnight")
+        why = f"significant role: API spend today is $5.03 of the $5.00 day cap ({meter.RESETS})"
+        task = self.stopped_mid_round(run, "ovb-find-1", phase="stuck", last=why, infra=runner.SPEND,
+                                      guard=runner.SPEND)
+        self.spent(5.03, "ovb-find-1")                                   # the run's own: past its budget
+        runs.tick(run)
+        self.roles(SPEND_FLASH, 50)                                      # past midnight: room again
+        runs.tick(run)
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "resumed"])
+        self.assertEqual(run.status["phase"], "paused")
+        self.assertIn("the run's budget: $5.03 spent of $1.00", run.status["why"])
+        self.assertEqual(len(self.notices("ovb")), 1)
+        self.assertEqual(task.status["phase"], "stuck")                  # its work kept, held
+        with mock.patch.object(runs, "driver_alive", return_value=True):  # resumed under a live driver
+            self.assertEqual(wb("run", "resume", "ovb")[0], 0)           # no amend: still held
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "resumed"])
+        self.assertEqual(run.status["phase"], "paused")
+        runs.tick(run)
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "resumed"])
+        self.assertEqual(wb("run", "amend", "ovb", "--budget-usd", "10")[0], 0)
+        with mock.patch.object(runs, "spawn", return_value=0):
+            self.assertEqual(wb("run", "resume", "ovb")[0], 0)
+        runs.tick(run)
+        self.assertEqual([r["by"] for r in run.journal() if r.get("kind") == "resumed"], ["driver"])
+        self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
 
     OVERNIGHT_CODE = {"v": 1, "name": "ovc", "params": {"areas": "list"}, "stages": [
         {"id": "code", "card": "build", "escalate": ["significant"], "items": "{params.areas}",

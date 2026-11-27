@@ -1172,6 +1172,23 @@ def stage_model(stage: dict, it: "Item | None" = None):
     return m if m is not None and m.kind == "api" else None
 
 
+def paid_model(stage: dict, it: "Item | None" = None):
+    """The API model item ``it``'s next paid round is priced by, or None for the GPU: its task's
+    own once it has one (a resume and a refix run on the model its rounds began on, whatever
+    the role is on now), else its role's now (stage_model), as a start's. Every round the
+    driver sends for an item (_start's, _held's and _resume_items' resumes, _take's refix) is
+    checked against the run's budget with this: a resume had no check, so under --overnight
+    each midnight sent paid rounds past --budget-usd, and a refix priced by the role read the
+    GPU once the role moved there and ran on the task's API model unchecked (#1600, 2026-11-27)."""
+    t = store.Task(it.task) if it is not None and it.task else None
+    if t is None or not t.exists:
+        return stage_model(stage, it)
+    if t.spec.get("via") != "api":
+        return None
+    m = models.lookup(str(t.spec.get("model") or ""), cached=True)
+    return m if m is not None and m.kind == "api" else None
+
+
 def role_cant_run(role: str) -> str:
     """wb start's own line for a role on API whose model can't be found (routes.resolve's: no
     API model, or one the catalog doesn't list, a missing key named), or "". Read fresh, not
@@ -1562,7 +1579,7 @@ def _take(run: Run, stage: dict, it: Item) -> None:
                 # past the run's budget, and while the run said it was paused there (#1586, 2026-11-26)
                 if not _going(run.status):
                     return
-                if over := _budget_stop(run, src_stage, stage_model(src_stage, src_item)):
+                if over := _budget_stop(run, src_stage, paid_model(src_stage, src_item)):
                     _pause_at_budget(run, over)
                     return
                 # and at the day cap, as a start is (_start, _cap_held): wb feedback's refusal
@@ -1697,6 +1714,12 @@ def _resume_items(run: Run) -> list[str]:
             cli.reap(t, quiet=True)  # one notice at most: this resume is the news
         st = t.status
         if _resumable(run, n, st) and not cli.runner_alive(t):
+            row = next(r for r in run.journal() if r.get("kind") == "item" and r.get("task") == n)
+            stage = stage_by(run.flow, str(row.get("stage"))) or {}
+            if over := _budget_stop(run, stage, paid_model(stage, Item(stage=str(row.get("stage")),
+                                                                       key=str(row.get("key")), task=n))):
+                _pause_at_budget(run, over)  # a resume is a start (#1600): held, its work kept
+                continue
             r = _wb(["resume", n], run)
             run.log(kind="resumed", task=n, by="resume", ok=r.returncode == 0,
                     why="" if r.returncode == 0 else _last_line(r))
@@ -1704,7 +1727,7 @@ def _resume_items(run: Run) -> list[str]:
     return out
 
 
-def _held(run: Run, it: Item) -> bool:
+def _held(run: Run, stage: dict, it: Item) -> bool:
     """Whether item ``it``, stopped from outside its step (_outside), goes on rather than being
     taken as null: `wb resume`d here while the run runs; held for wb run resume while it doesn't.
     A resume refused with exit 3 (the day cap, which clears at midnight; a repo made local-only,
@@ -1712,7 +1735,8 @@ def _held(run: Run, it: Item) -> bool:
     tried again each pass while the cap's refusal stands. A second stop from outside after the
     driver's resume is a checkpoint, Claude's call, never a loop of resumes (a spend stop aside:
     one a night, each past midnight). False for any other item, and for one whose resume was
-    refused otherwise (its null, said)."""
+    refused otherwise (its null, said). Past the run's budget it is held, the run paused there:
+    --overnight waits past the day cap only, never past the run's own budget (#1600)."""
     from . import cli, runner
     st = store.Task(it.task).status
     if not _outside(st):
@@ -1725,6 +1749,9 @@ def _held(run: Run, it: Item) -> bool:
                                 for r in mine):
         _checkpoint(run, f"{it.task} was stopped from outside again ({why_out}: {st.get('last') or ''}); "
                          f"its work is kept: wb run resume {run.name} takes it up again, or wb discard {it.task}")
+        return True
+    if over := _budget_stop(run, stage, paid_model(stage, it)):
+        _pause_at_budget(run, over)
         return True
     r = _wb(["resume", it.task], run)
     if r.returncode == 0:
@@ -1872,7 +1899,7 @@ def tick(run: Run) -> bool:
                 # asking for a path outside its lane held the GPU its 20-minute ask_timeout while
                 # the other finder queued (the real GPU audit of #1278, 2026-11-26); as the bench does
                 ask_mcp.answer_once(t, qid, RUN_REFUSED)
-            if t.status.get("phase") not in cli.LIVE and _held(run, it):
+            if t.status.get("phase") not in cli.LIVE and _held(run, s, it):
                 held.add(it.task)
             elif not is_code(s) and it.state == "running" and t.status.get("phase") not in cli.LIVE:
                 _take(run, s, it)
@@ -1900,9 +1927,9 @@ def tick(run: Run) -> bool:
                     continue
                 if s["id"] in (run.spec.get("skip") or ()):
                     break  # skipped since this pass read the stages (#1577): never started
-                m = stage_model(s, it)
                 if it.task and store.Task(it.task).exists:  # started, its runner not up yet
                     continue
+                m = paid_model(s, it)  # no task yet: its role's model now
                 if _room(run, s, st, m):
                     break
                 if why := _budget_stop(run, s, m):
