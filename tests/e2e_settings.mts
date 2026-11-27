@@ -387,8 +387,8 @@ export async function check(page: any, ctx: E2eCtx) {
       await until(async () => (await row('cap').locator('.set-off').getAttribute('aria-pressed')) === 'true')
       await row('probe').locator('[data-value="on"]').click()
       await until(() => sent.length === 3)
-      // named as the state names the driver (#1355): "Your driver" with none known
-      await until(async () => /^probe: on, not set up: probe isn't installed\. (Claude|OpenCode|Your driver) will offer to set it up\.$/.test(await toast()))
+      // named as the state names the driver (#1355): "Claude or OpenCode" with none known (#1339)
+      await until(async () => /^probe: on, not set up: probe isn't installed\. (Claude|OpenCode|Claude or OpenCode) will offer to set it up\.$/.test(await toast()))
       if (JSON.stringify(sent) !== JSON.stringify([{ key: 'cap', value: '7.5' }, { key: 'cap', value: null }, { key: 'probe', value: 'on' }])) throw new Error(JSON.stringify(sent))
     })
 

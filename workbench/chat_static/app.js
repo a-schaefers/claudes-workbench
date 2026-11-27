@@ -750,9 +750,11 @@
         const times = [j.created_at && `started ${agoSecs(j.now - j.created_at)} ago`, j.updated_at && `last change ${agoSecs(j.now - j.updated_at)} ago`].filter(Boolean);
         if (times.length)
             out.push(mk('p', 'ts-dim', times.join(' · ')));
+        // `last` only when it says more than what happened does: `opencode exited 1` under "The agent
+        // stopped … (OpenCode exited)." said the cause twice (#1339)
         if (j.happened)
             out.push(mk('p', 'ts-happened', j.happened));
-        if (j.last)
+        if (j.last && !(j.happened && (j.happened.includes(j.last) || /^opencode exited /.test(j.last))))
             out.push(mk('p', '', j.last));
         const lead = !!(j.agent_summary || j.changed || j.tests);
         if (j.agent_summary)

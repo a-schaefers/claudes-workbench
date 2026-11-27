@@ -7558,8 +7558,8 @@ same words or its first, and Escape from inside the sheet `#tasks` (it fell to `
 reader said nothing); a task gone says it is no longer
 open. Its report, diff and log are agent-written, drawn with `textContent` and `<pre>` alone, never
 markup: the page holds the user's token, which changes their Settings, so markup an agent wrote
-would be a way to both. The Summary leads with the phase, a failed or stuck task's `happened` line,
-then the report's own lines (the agent's summary, `Files changed: …`, the tests' line), and the rest
+would be a way to both. The Summary leads with the phase, a failed or stuck task's `happened` line
+(the status's `last` after it only when it says more: never `opencode exited …` again), then the report's own lines (the agent's summary, `Files changed: …`, the tests' line), and the rest
 under a `Full report` `<details>` (open when the report has none of those lines) (#1339: it showed
 only `opencode exited 1 (see <path>/runner.log)`). "Reply about this task" is pinned to the
 sheet's foot (`.ts-foot`, sticky) and sets `about: {task}` (`setAbout`), so the next message

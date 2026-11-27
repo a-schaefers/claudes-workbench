@@ -127,7 +127,7 @@ async function run(engine: string, device?: string) {
     if (await page.locator('#hint').isVisible()) throw new Error('the hint shows over the empty state')
     // #1339: the starter chips, the first tap on the simple path, are 44 px to tap
     const chips = await page.$$eval('#intro .chip', (x: Element[]) => x.map(c => Math.round(c.getBoundingClientRect().height)))
-    if (!chips.length || chips.some(h => h < 44)) throw new Error('the chips: ' + chips)
+    if (!chips.length || chips.some((h: number) => h < 44)) throw new Error('the chips: ' + chips)
   })
   await check('a sent message lands once, with its tick', async () => {
     await page.fill('#input', 'hello from the phone')
@@ -799,6 +799,9 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.textContent('.ts-row:has-text("fix-sheet")')).includes('· failed'))
       await page.click('.ts-row:has-text("fix-sheet")')
       await until(async () => (await page.textContent('.ts-happened')) === 'The agent stopped before writing anything (OpenCode exited).')
+      // what happened says the cause, so the status's last line, its same words, isn't said again (#1339)
+      const lead = await page.evaluate(() => [...document.querySelectorAll('#ts-body > *:not(.ts-full)')].map(e => e.textContent).join('\n'))
+      if (lead.includes('opencode exited 1')) throw new Error('the cause said twice: ' + lead)
       const next = await page.$$eval('#ts-next .chip', (x: Element[]) => x.map(c => c.textContent).join())
       if (next !== 'Why did it fail?,Try it again,Discard it') throw new Error('the next steps: ' + next)
       await page.click('#ts-next .chip:has-text("Why did it fail?")')

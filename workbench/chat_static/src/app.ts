@@ -587,8 +587,10 @@
     const out: HTMLElement[] = [mk('p', '', `${j.phase} · round ${j.round}${j.step! > 1 ? ` · step ${j.step}` : ''} · ${taskNote(j)}`)]
     const times = [j.created_at && `started ${agoSecs(j.now - j.created_at)} ago`, j.updated_at && `last change ${agoSecs(j.now - j.updated_at)} ago`].filter(Boolean)
     if (times.length) out.push(mk('p', 'ts-dim', times.join(' · ')))
+    // `last` only when it says more than what happened does: `opencode exited 1` under "The agent
+    // stopped … (OpenCode exited)." said the cause twice (#1339)
     if (j.happened) out.push(mk('p', 'ts-happened', j.happened))
-    if (j.last) out.push(mk('p', '', j.last))
+    if (j.last && !(j.happened && (j.happened.includes(j.last) || /^opencode exited /.test(j.last)))) out.push(mk('p', '', j.last))
     const lead = !!(j.agent_summary || j.changed || j.tests)
     if (j.agent_summary) out.push(mk('h4', '', "The agent's summary"), mk('p', 'ts-said', j.agent_summary))
     if (j.changed) out.push(mk('p', '', j.changed.length ? 'Files changed: ' + j.changed.join(', ') : 'No files changed.'))
