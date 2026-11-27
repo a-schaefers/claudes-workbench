@@ -2034,7 +2034,7 @@ def set_aside(task: store.Task, n: int, began: str | None, how: str, passed: boo
         return None
     steps = task.status.get("steps", 1)
     trees = {k: v for k, v in (task.status.get("review_trees") or {}).items() if v.get("step") == steps}
-    kept = next((v for v in trees.values() if v.get("green") == green), None)
+    back, kept = next(((k, v) for k, v in trees.items() if v.get("green") == green), (None, None))
     if not kept or not gitops.has_tree(task.worktree, kept["tree"]):
         return None
     force, key, caches = ignored_to_commit(task), f"{n}s", run_caches(task)
@@ -2047,6 +2047,14 @@ def set_aside(task: store.Task, n: int, began: str | None, how: str, passed: boo
                             now_keep=keep, force=force, skip=caches)
     except (gitops.GitError, OSError):
         return None
+    if not committed:
+        # the self-review is over, as after a wb rewind to its green round: the next wb feedback
+        # or wb next says the edits are gone (REWOUND_LINE) in a fresh session, and an infra
+        # stop's feedback carries no green tree on. Unsaid, the next feedback kept the session
+        # that remembered the reverted files, and a feedback after wb stop --all and a takeover
+        # was held to the old green tree: Claude's own edits set aside under tests: PASS, then
+        # committed without them (#1610, bar loop #1030 round 6, M1, 2026-11-27)
+        task.set_status(rewound_to=int(back) if back.isdigit() else back)
     said = "weren't run" if passed is None else "pass" if passed else "fail"
     line = (f"self-review {how}; its edits set aside as {key} (the tests {said} on them, git tree "
             f"{now[:12]}), not committed: the tree its tests passed on is what's committed"
@@ -2054,6 +2062,27 @@ def set_aside(task: store.Task, n: int, began: str | None, how: str, passed: boo
             f"self-review {how}; its edits set aside (the tests {said} on them), the tree its "
             f"tests passed on put back: wb rewind {task.name} {key} brings them back")
     task.event({"ts": store.now(), "round": n, "kind": "set_aside", "text": line})
+    return line
+
+
+def stopped_aside(task: store.Task, how: str, committed: bool = False) -> str:
+    """set_aside for the round a stop from outside drive ended, once: wb stop (--all: a quit),
+    wb takeover, wb accept --force and wb update --stop (cli._stop_aside), a signal (main) and
+    a reaped runner (cli.reap); its line, else "". A round whose tree this step already keeps
+    (`<n>s`, an earlier stop's set-aside; `<n>`, a review of it or a rewind's save), or that an
+    earlier stop handled (status `aside_done`: its step, round and `round_started_at`), is over:
+    what is on disk since is Claude's or the user's (#1596's review, 2026-11-27). An update's,
+    a signal's or a reaped runner's stop left the unfinished tree to whatever came next, and a
+    wb feedback resumed the self-review's session on it (#1610, 2026-11-27)."""
+    st = task.status
+    n = int(st.get("round") or 1)
+    steps = st.get("steps", 1)
+    mark = {"step": steps, "round": n, "began": st.get("round_started_at")}
+    done = {k for k, v in (st.get("review_trees") or {}).items() if v.get("step") == steps}
+    if {str(n), f"{n}s"} & done or st.get("aside_done") == mark or not task.worktree.is_dir():
+        return ""
+    line = set_aside(task, n, None, f"stopped mid-check ({how})", None, committed) or ""
+    task.set_status(aside_done=mark)  # handled, on the green tree or not (#1596's review)
     return line
 
 
@@ -7367,6 +7396,8 @@ def main():
             task.event({"ts": store.now(), "round": st.get("round"), "kind": "stopped",
                         "by": "signal", "text": SIGNAL_STOP})
             at = SIGNALLED[0] if SIGNALLED else time.time()
+            _end_agent(task)  # before its tree is read: the agent may still be writing
+            stopped_aside(task, "a signal")  # a self-review's edits aside, as wb stop's (#1610)
             task.set_status(phase="stuck", last=SIGNAL_STOP, signalled=at, infra=SIGNAL_INFRA)
             _signal_notice(task, at)
     except Exception as e:

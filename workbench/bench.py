@@ -40,7 +40,10 @@ FOLD = "\n---\nHow to work"
 # lines (`set -e` and a script) read as none (#941, the v1.90.24 review). Only for a task from
 # before status `step_tests`, which records each step's command as data
 TEST_LINE = re.compile(r"^- The acceptance command is `(.+?)`\. Run it before you finish", re.M | re.S)
-STEP_HEAD = re.compile(r"\AStep (\d+) of this task is done and committed \([^)]*\)\. The next step:\n\n")
+# (with cli.REWOUND_LINE after a rewind or a self-review's set-aside, #1610)
+STEP_HEAD = re.compile(r"\AStep (\d+) of this task is done and committed \([^)]*\)\. "
+                       r"(?:Your files were reset to round [^\n]*? the edits after it are gone\. )?"
+                       r"The next step:\n\n")
 BASE_CHECK_SECS = 120  # the hidden checks on the base, at add time; past this, not checked
 
 

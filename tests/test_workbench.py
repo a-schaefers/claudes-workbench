@@ -8429,10 +8429,10 @@ class Context(Base):
         self.assertTrue(settled and all("on a tree it changed" in x for x in settled), settled)
         self.assert_set_aside("t-srig", st, "stopped mid-check (the same call 4 times in a row")
 
-    def mid_check(self, name):
+    def mid_check(self, name, test=TEST_CMD):
         """A self-review stalled mid-check, "41" on disk (FAKE_SELF_STALL, no nudge)."""
         os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
-        self.start(name, "selfreads", "--test", TEST_CMD, "--self-review", "--think-timeout", "120",
+        self.start(name, "selfreads", "--test", test, "--self-review", "--think-timeout", "120",
                    "--silence-timeout", "120")
         t = store.Task(name)
         deadline = time.time() + 30
@@ -8538,26 +8538,106 @@ class Context(Base):
         self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "40\n")
         self.assertNotIn("2s", t.status["review_trees"])
 
-    def test_a_takeover_of_a_self_review_an_update_stopped_mid_check_puts_the_green_tree_back(self):
+    def aside_said(self, t):
+        """The set-aside events' lines, for a stop that prints none."""
+        return "\n".join(e["text"] for e in store.read_jsonl(t.dir / "events.jsonl")[0]
+                         if e.get("kind") == "set_aside")
+
+    def test_a_self_review_an_update_stopped_mid_check_is_set_aside_by_the_stop(self):
         # #1582 (2026-11-26): _stop_aside set aside only a live runner's round, so wb update
         # --stop mid-check left a dead runner, stuck, and the takeover (or the hand-back) left
-        # "41" under the green round's tests:ok, which wb accept committed
+        # "41" under the green round's tests:ok, which wb accept committed. #1610 (2026-11-27):
+        # the stop sets it aside, so a wb feedback after it is no resume of the self-review on "41"
         t = self.mid_check("t-rupd")
         cli._stop_for_update([t])
         self.assertEqual((t.status["phase"], t.status["last"]), ("stuck", cli.UPDATE_STOP))
-        out = run_wb("takeover", "t-rupd")
+        self.assertEqual(t.status["rewound_to"], 1)
+        self.assertNotIn("set aside", run_wb("takeover", "t-rupd"))   # handled once, by the stop
         self.assertEqual(t.status["phase"], "review")
-        self.assert_green_back(t, out, "wb takeover")
+        self.assert_green_back(t, self.aside_said(t), "wb update --stop")
 
-    def test_a_takeover_of_a_self_review_whose_runner_a_signal_stopped_mid_check_puts_the_green_tree_back(self):
+    def test_a_self_review_whose_runner_a_signal_stopped_mid_check_is_set_aside_by_the_runner(self):
         # #1582: a logout's SIGTERM, no `stopping` set: stuck on SIGNAL_STOP, the runner gone,
-        # and the takeover left "41" the same
+        # and the takeover left "41" the same; #1610: the runner sets it aside as it stops
         t = self.mid_check("t-rsig")
         os.kill(t.status["pid"], signal.SIGTERM)
         st = wait_phase("t-rsig", {"stuck", "failed"}, timeout=30)
         self.assertEqual(st["last"], runner.SIGNAL_STOP)
-        out = run_wb("takeover", "t-rsig")
-        self.assert_green_back(t, out, "wb takeover")
+        self.assertNotIn("set aside", run_wb("takeover", "t-rsig"))
+        self.assert_green_back(t, self.aside_said(t), "a signal")
+
+    def test_a_self_review_whose_runner_died_mid_check_is_set_aside_by_the_reap(self):
+        # #1610: a runner killed without a word (out of memory, SIGKILL) was failed by the reap
+        # with "41" left on disk for the next wb feedback to resume the self-review's session on
+        t = self.mid_check("t-rdie")
+        os.kill(t.status["pid"], signal.SIGKILL)
+        wait_gone(t.status["pid"])
+        backdate("t-rdie")
+        self.assertTrue(cli.reap(t))
+        self.assertEqual((t.status["phase"], t.status["rewound_to"]), ("failed", 1))
+        self.assert_green_back(t, self.aside_said(t), "its runner died")
+
+    def test_a_feedback_after_a_quit_and_a_takeover_keeps_claudes_edits(self):
+        # #1610 (bar loop #1030 round 6, M1, 2026-11-27): wb stop --all set the self-review's "41"
+        # aside, but the takeover kept its green tree and the hand-back resumed under it: its
+        # tests failing on Claude's unfinished edits, drive set them aside as the self-review's,
+        # no auto-fix, a tests: PASS notice, and wb accept committed without feature.txt. The
+        # same after a quit on the green tree (nothing set aside), and with no takeover at all
+        for name, green, take in (("t-qtf", False, True), ("t-qtg", True, True), ("t-qtn", False, False)):
+            with self.subTest(green=green, takeover=take):
+                os.environ["FAKE_SELF_STALL"] = "1"
+                t = self.mid_check(name, "grep -qx 42 answer.txt && ! grep -qs broken notes.txt")
+                if green:
+                    t.worktree.joinpath("answer.txt").write_text("42\n")   # it had only read
+                self.assertEqual("set aside" in run_wb("stop", "--all"), not green)
+                if take:
+                    run_wb("takeover", name)
+                t.worktree.joinpath("feature.txt").write_text("Claude's work\n")
+                t.worktree.joinpath("notes.txt").write_text("broken\n")    # handed back to be finished
+                os.environ.pop("FAKE_SELF_STALL")  # the hand-edit note's round plays ok's
+                run_wb("feedback", name, "--text", "1. Finish the change and make the tests pass.")
+                st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+                events = store.read_jsonl(t.dir / "events.jsonl")[0]
+                self.assertFalse([e for e in events if e.get("kind") == "set_aside" and e["round"] >= 3])
+                self.assertTrue([e for e in events if e.get("kind") == "autofix"])  # the code's failure
+                self.assertFalse(st["tests"]["ok"])
+                self.assertEqual(t.worktree.joinpath("feature.txt").read_text(), "Claude's work\n")
+                run_wb("accept", name, "-m", "Finish", "--force")
+                shown = subprocess.run(["git", "-C", str(self.repo), "show", f"{t.spec['branch']}:feature.txt"],
+                                       capture_output=True, text=True, check=True).stdout
+                self.assertEqual(shown, "Claude's work\n")
+
+    def set_aside_at_review(self, name):
+        """A self-review that finished on its own on "43", set aside for the green tree (#1582)."""
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="0", FAKE_SELF_DONE="1")
+        self.start(name, "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+        self.assertIn("2s", st["review_trees"], st.get("last"))
+        self.assertEqual(st["rewound_to"], 1)
+        return store.Task(name)
+
+    def test_a_self_review_set_aside_tells_the_next_feedback_its_edits_are_gone_in_a_fresh_session(self):
+        # #1610 (2026-11-27): the feedback after a set-aside went to the self-review's session,
+        # which remembered "43", with no word that its files were put back
+        self.set_aside_at_review("t-saf")
+        run_wb("feedback", "t-saf", "--text", "1. Add a trailing comment line.")
+        wait_phase("t-saf", {"review", "stuck", "failed"}, timeout=60)
+        from workbench import lessons
+        [row] = [r for r in self.runs() if lessons.FEEDBACK_HEAD in r["prompt"]]
+        self.assertFalse(row["session"])
+        self.assertIn(cli.REWOUND_LINE.format(1), row["prompt"])
+
+    def test_a_self_review_set_aside_tells_the_next_step_its_edits_are_gone_in_a_fresh_session(self):
+        # #1610: wb next the same
+        self.set_aside_at_review("t-san")
+        spec = Path(self.tmp.name) / "next.md"
+        spec.write_text("Write 7 to seven.txt.\n")
+        run_wb("next", "t-san", "--spec", str(spec), "-m", "Write answer")
+        wait_phase("t-san", {"review", "stuck", "failed"}, timeout=60)
+        [row] = [r for r in self.runs() if "Write 7 to seven.txt." in r["prompt"]]
+        self.assertFalse(row["session"])
+        self.assertIn("is done and committed (", row["prompt"])
+        self.assertIn(cli.REWOUND_LINE.format(1) + " The next step:", row["prompt"])
 
     def quiet_self_review(self, name, *flags, **env):
         """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
