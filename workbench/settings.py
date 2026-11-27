@@ -772,7 +772,7 @@ def _row(key: str) -> dict:
 
 def apply(key: str, value, by: str = "web") -> dict:
     """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?, "detail"?, "page"?}
-    (`page`: a refusal in the page's words, page_line)
+    (`page`: a refusal in the page's words, or a note to a change that went through: page_line)
     (`detail`: a run's Summary, its report, cut at RUN_DETAIL_CHARS). KeyError for no
     such row, ValueError for a value it doesn't take (nothing runs for either); `ok` false is wb's
     refusal, `said` its line. `help`, when the value chosen needs Claude's help to work (HELP).
@@ -786,7 +786,7 @@ def apply(key: str, value, by: str = "web") -> dict:
         finally:
             drop()
     result = {"ok": ok, "said": _said(argv, ok, out, err)}
-    if not ok and (line := page_line(key, result["said"])):
+    if line := page_line(key, result["said"], ok):
         result["page"] = line
     if ok and argv[:2] == ["run", "report"]:  # a run's Summary: its report, drawn under the row
         text = out.strip()
@@ -798,15 +798,32 @@ def apply(key: str, value, by: str = "web") -> dict:
     return result
 
 
-def page_line(key: str, said: str) -> str:
-    """A refusal as the web app says it: in the page's words, by the row's label, with no `wb:` and
-    no command (wb's whole line stays `said`, for the driver, which reads it); "" for none known.
-    A role put on API before it had a model was told `wb route trivial <provider/model>`, a terminal
-    command naming the key the row calls Trivial coding (#1558, 2026-11-26)."""
+# what wb's line says after a role or a value it names, cut at the first command it suggests: a
+# `…` span, or a `wb …` (the page's toast has no command: the driver reads wb's whole line)
+_COMMAND = re.compile(r"[\s:;,(]+(?:`|wb [a-z]|run\s+`)")
+_ROLE_WORD = re.compile(r"\b(" + "|".join(routes.ROLES) + r")\b")
+
+
+def page_line(key: str, said: str, ok: bool = False) -> str:
+    """wb's line as the web app says it: in the page's words, by the row's label and the roles'
+    (routes.LABELS), with no `wb:` and no command; wb's whole line stays `said`, which the driver
+    reads (settings-changes.jsonl, Recent changes, the mods' relay). A refusal always has one; a
+    change that went through only a note the page adds to its own words ("" for none). A role put
+    on API before it had a model was told `wb route trivial <provider/model>`, a gated command
+    naming the key the row calls Trivial coding (#1558), and every refusal was wb's stdout, `wb:`
+    and its commands too (the web app's review, 2026-11-26)."""
     head, _, rest = key.partition("-")
+    if ok:  # a role moved while Agents isn't Both: kept, applied once it is
+        return "Set Agents to Both for this to apply." if "once Agents is Both" in said else ""
     if head == "role" and rest in routes.LABELS and "has no API model" in said:
         return f"Pick {routes.LABELS[rest]}'s API model first: tap API, or under More."
-    return ""
+    if m := re.search(r"the day cap stays while (.+?) can spend on API", said):
+        names = _ROLE_WORD.sub(lambda r: routes.LABELS[r.group(1)], m.group(1)).replace("busy", "When the GPU is busy")
+        return f"The day cap stays while {names} can spend on API: put {'it' if ',' not in names else 'them'} on the GPU first."
+    text = said.strip().removeprefix("wb: ").strip()
+    text = _COMMAND.split(text, 1)[0].strip(" :;,.")
+    text = _ROLE_WORD.sub(lambda r: routes.LABELS[r.group(1)], text)
+    return f"{label_of(key)} wasn't changed: {text}." if text else f"{label_of(key)} wasn't changed."
 
 
 def dry_run(key: str, value) -> tuple[int, str, str]:

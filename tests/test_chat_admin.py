@@ -208,6 +208,15 @@ class AdminSet(Base):
             self.assertEqual(chat.admin_set("coding", "ask"), (409, {"ok": False, "error": "wb: no", "rows": rows}))
         self.assertFalse(chat.changes_path().exists())
 
+    def test_a_refusal_carries_its_line_in_the_pages_words_beside_wbs_1563(self):
+        # #1563 and the web app's review (2026-11-26): the page toasted wb's stdout
+        rows = [{"key": "role-trivial", "label": "Trivial coding", "kind": "choice", "value": "gpu"}]
+        done = {"ok": False, "said": "wb: trivial has no API model yet: wb route trivial <provider/model>",
+                "page": "Pick Trivial coding's API model first: tap API, or under More."}
+        with mock.patch.object(settings, "rows", return_value=rows), mock.patch.object(settings, "apply", return_value=done):
+            self.assertEqual(chat.admin_set("role-trivial", "api"),
+                             (409, {"ok": False, "error": done["said"], "rows": rows, "page": done["page"]}))
+
     def test_a_change_needing_claudes_help_carries_it_to_the_page_and_leaves_the_record_to_wbs_child(self):
         # #1355: one writer logs every Settings write, cli.main around the row's own wb (the
         # server's child here, stood in for): the POST logging it too would log it twice

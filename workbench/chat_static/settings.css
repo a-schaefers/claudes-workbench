@@ -57,3 +57,6 @@
 .view-in .set-ask:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; border-radius: 6px; }
 /* a role's API model list opened under its GPU|API by the API choice (#1558) */
 .set-pick { margin: 2px 0 6px; padding-left: 10px; border-left: 2px solid var(--line); }
+/* a refusal kept under its row until its next change goes through (#1563) */
+.view-in .card p.set-refused { margin: 4px 0 0; color: var(--fg); overflow-wrap: anywhere; }
+.view-in .card p.set-refused::before { content: '\26A0\FE0E  '; color: var(--warn); }

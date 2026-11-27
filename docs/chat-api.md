@@ -487,7 +487,8 @@ closed (its `text` the run's flow, phase, stage counts and spend; its choices `s
 ### `POST /api/settings` (user only)
 `{key, value}` (`value`: a string, a number, or null for a number row's off), JSON only (else 415
 `json only`). It runs that row's `wb` command as the user, not as the driver:
-- 200 `{"ok": true, "said": <wb's line>, "rows": [...], "changes": [...], "help"?: <note>, "detail"?: <text>}`. `help` comes when the
+- 200 `{"ok": true, "said": <wb's line>, "rows": [...], "changes": [...], "help"?: <note>, "detail"?: <text>, "page"?: <a note in
+  the page's words, such as "Set Agents to Both for this to apply.">}`. `help` comes when the
   value just chosen needs the driver's help to work (Agent code navigation on with probe not set
   up). The server returns it and records it (below), and the driver in the terminal offers to set it up
   (installing nothing without the user's yes); showing it is the Settings view's job. `detail` comes

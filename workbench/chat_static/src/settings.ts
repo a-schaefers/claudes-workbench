@@ -51,6 +51,10 @@
   // an action's answer to draw under its row (a run's Summary: its report, #1278's S12), by key;
   // agent-written results among it, so text alone, never markup
   const details = new Map<string, string>()
+  // a refusal kept under its row until that row's next change goes through: the toast alone was gone
+  // before a phone user could read it, and the reverted row said nothing of it (#1563). Its line in
+  // the page's words, and wb's whole line for the row's Ask link
+  const refused = new Map<string, { line: string; said: string }>()
   let focusGroup = ''                   // a group to bring into view at the next draw (the runs strip's tap)
   let picking = ''                      // the row whose choice opened its needed row's list under it (#1558)
   const opened = new Set<string>()      // the role cards whose More is open: a redraw keeps it so
@@ -93,11 +97,32 @@
     draw()
     pump()
   }
+  // A change as the page says it (the web app's review, 2026-11-26: every toast was wb's stdout, role
+  // keys and `wb route …` commands under rows named otherwise): `<label>: <the choice's label>`, the
+  // row's new sentence when it changed, the server's note (`page`), and the driver's offer with
+  // `help`. wb's own line stays in settings-changes.jsonl, Recent changes and the hosts' relay
+  const sentence = (t: string) => t && !/[.!?]$/.test(t) ? t + '.' : t
+  const plainLabel = (t: string) => t.replace(/ \(default\)$/, '')
+  const valueLabel = (row: SettingRow | undefined, v: unknown) => {
+    if (v == null || v === '' || v === 'off' && row && row.kind === 'number') return 'off'
+    if (row && row.kind === 'number' && row.unit === 'usd') return `$${v}/day`
+    const c = row && Array.isArray(row.choices) && row.choices.find(x => x.value === v)
+    return c ? plainLabel(c.label) : String(v)
+  }
+  function okWords(before: SettingRow | undefined, after: SettingRow | undefined, value: unknown, body: any) {
+    if (!before) return body.said || 'Done.'
+    const parts = [before.kind === 'action' ? `${before.label}: ${body.said || 'done'}` : `${before.label}: ${valueLabel(before, value)}`]
+    if (after && after.says && after.says !== before.says) parts.push(after.says)
+    if (body.page) parts.push(body.page)
+    if (body.help) parts.push(helpSaid())
+    return parts.map(sentence).join(' ')
+  }
   async function pump() {
     if (busy || !queue.length) return
     busy = true
     const { key, value, then } = queue[0]
     let said = '', lost = false, went = false
+    const before = rows ? rows.find(r => r.key === key) : undefined
     try {
       // given up after the page's POST_MS, into the lost path below: with no deadline a POST that
       // hung kept its value lit as applied and every later click queued behind it (#1391)
@@ -107,9 +132,15 @@
       if (Array.isArray(body.changes)) changes = body.changes
       if (r.ok && body.ok && typeof body.detail === 'string') details.set(key, body.detail)
       went = r.ok && !!body.ok
-      // a refusal in the page's words when the server has them (`page`, settings.page_line, #1558)
-      said = r.ok && body.ok ? body.said || 'Done.' : body.page || body.error || body.said || `the server said ${r.status}`
-      if (r.ok && body.ok && body.help) said = `${/[.!?]$/.test(said) ? said : said + '.'} ${helpSaid()}`
+      if (went) {
+        refused.delete(key)
+        said = okWords(before, rows ? rows.find(x => x.key === key) : undefined, value, body)
+      } else {
+        // the server's own words (`page`, settings.page_line), else its error by the row's label, no `wb:`
+        const raw = String(body.error || body.said || `the server said ${r.status}`)
+        said = body.page || `${before ? before.label : key} wasn't changed: ${sentence(raw.replace(/^wb: /, ''))}`
+        refused.set(key, { line: said, said: raw })
+      }
     } catch { said = "The computer didn't answer: Settings shows what it says now."; lost = true }
     wrote = reads + 1
     lastWrite = Date.now()
@@ -281,6 +312,13 @@
     else if (row.kind === 'action') action(row, box)
     else if (row.text) box.append(el('p', 'small', row.text))
     if (row.changed) box.append(el('p', 'small set-changed', `Changed by ${byWord(row.changed.by)} · ${ago(row.changed.ts)}`))
+    const no = refused.get(row.key)
+    if (no) {                            // kept until its next change goes through (#1563)
+      box.append(el('p', 'small set-refused', no.line))
+      const a = askLink({ ...row, ask: true }, title, `${row.label}: ${no.said}`)
+      if (a) box.append(a)
+      return box
+    }
     return ask(`${row.label}: ${row.says || row.text || ''}`)
   }
 

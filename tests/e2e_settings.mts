@@ -158,21 +158,23 @@ export async function check(page: any, ctx: E2eCtx) {
       if (idx.some((v: number, i: number) => v < 0 || (i && v <= idx[i - 1]))) throw new Error('the groups out of order: ' + got.groups.join())
     })
 
-    await ctx.check('choosing Claude coding → "Ask me first" lights at once, runs wb coding ask and writes coding.json; the toast is wb\'s line', async () => {
+    await ctx.check('choosing Claude coding → "Ask me first" lights at once, runs wb coding ask and writes coding.json; the toast says it in the page\'s words', async () => {
       const file = join(home, 'state', 'coding.json')
       const mode = () => existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).mode : undefined
       const ask = row('coding').locator('[role="radio"][data-value="ask"]')
       await ask.click()
       if ((await ask.getAttribute('aria-checked')) !== 'true') throw new Error('not lit at once')
       await until(() => mode() === 'ask').catch(() => { throw new Error('coding.json: ' + mode()) })
-      await until(async () => (await toast()).length > 0)
+      // the row's label and the choice's, then its new sentence: never wb's stdout (the web app's review, 2026-11-26)
+      await until(async () => (await toast()).startsWith('Claude coding: Ask me first. '))
+        .catch(async () => { throw new Error('toast: ' + await toast()) })
       await until(async () => (await row('coding').locator('[aria-checked="true"]').getAttribute('data-value')) === 'ask')
       if (!ctx.wb('coding').startsWith('Claude coding: Ask me first.')) throw new Error('wb coding disagrees: ' + ctx.wb('coding'))
       await row('coding').locator('[role="radio"][data-value="decide"]').click()  // as it was
       await until(() => mode() === 'decide')
     })
 
-    await ctx.check('a refused change (409) puts the control back and toasts wb\'s refusal; one request at a time, the next click waits', async () => {
+    await ctx.check('a refused change (409) puts the control back, toasts the refusal by the row\'s label and keeps it under the row past the toast; one request at a time, the next click waits (#1563)', async () => {
       let rows = MOCK_ROWS, inFlight = 0, most = 0, posts: any[] = []
       mock(async (method: string, body: any) => {
         if (method !== 'POST') return answer(200, { rows, ts: 1 })
@@ -190,11 +192,15 @@ export async function check(page: any, ctx: E2eCtx) {
       await on.click()
       if ((await on.getAttribute('aria-checked')) !== 'true') throw new Error('not lit at once')
       await row('splash').locator('[data-value="off"]').click()                    // made meanwhile: it waits
-      await until(async () => (await toast()).includes('wb refused: workflows are off for this test'))
+      await until(async () => (await toast()).includes("Dynamic workflows wasn't changed: wb refused: workflows are off for this test"))
       await until(async () => (await row('workflows').locator('[aria-checked="true"]').getAttribute('data-value')) === 'off')
       await until(() => posts.length === 2)
       await until(async () => (await row('splash').locator('[aria-checked="true"]').getAttribute('data-value')) === 'off')
       if (most !== 1 || posts.map(p => p.key).join() !== 'workflows,splash') throw new Error(JSON.stringify({ most, posts }))
+      // #1563: the toast went in 3.5 s, and the reverted row said nothing of the refusal
+      await until(async () => !(await toast()).includes('workflows are off'), 30000)
+      const kept = await row('workflows').locator('.set-refused').textContent()
+      if (!kept.includes("wasn't changed") || !(await row('workflows').locator('.set-ask').count())) throw new Error('kept: ' + kept)
     })
 
     await ctx.check('a change whose POST never answers is given up after POST_MS: the toast says so, the next change goes, and the control shows the computer\'s value (#1391)', async () => {
@@ -288,11 +294,11 @@ export async function check(page: any, ctx: E2eCtx) {
       await row('splash').locator('[data-value="off"]').focus()
       await page.keyboard.press('Space')
       if (await at() !== 'splash:BUTTON:off:true') throw new Error('after the press: ' + await at())
-      await until(async () => (await toast()) === 'splash: off')
+      await until(async () => (await toast()) === 'Opening animation: Off.')
       if (await at() !== 'splash:BUTTON:off:true') throw new Error('after the answer: ' + await at())
       await row('cap').locator('input').fill('6')
       await row('cap').locator('input').press('Enter')
-      await until(async () => (await toast()) === 'cap: 6')
+      await until(async () => (await toast()) === 'API day cap: $6/day.')
       if (await at() !== 'cap:INPUT::') throw new Error('after Enter: ' + await at())
       await page.evaluate(() => (document.activeElement as HTMLElement).blur())
     })
@@ -393,7 +399,7 @@ export async function check(page: any, ctx: E2eCtx) {
       await row('probe').locator('[data-value="on"]').click()
       await until(() => sent.length === 3)
       // named as the state names the driver (#1355): "Your driver" with none known
-      await until(async () => /^probe: on, not set up: probe isn't installed\. (Claude|OpenCode|Your driver) will offer to set it up\.$/.test(await toast()))
+      await until(async () => /^Agent code navigation: On \(large files only\)\. (Claude|OpenCode|Your driver) will offer to set it up\.$/.test(await toast()))
       if (JSON.stringify(sent) !== JSON.stringify([{ key: 'cap', value: '7.5' }, { key: 'cap', value: null }, { key: 'probe', value: 'on' }])) throw new Error(JSON.stringify(sent))
     })
 

@@ -173,6 +173,24 @@ class Settings(Rows):
         self.assertIn("wb route trivial", got["said"])                    # wb's whole line, for the driver
         self.assertNotIn("page", settings.apply("coding", "ask"))
 
+    def test_wbs_line_reaches_the_page_in_its_words_by_the_rows_label_with_no_wb_and_no_command_1563(self):
+        # the web app's review (2026-11-26) and #1563: every toast was wb's stdout, `wb:`, role keys
+        # and `wb route …` commands under rows labelled otherwise
+        got = settings.apply("api-significant", FREE_ID)                  # the real wb: not in the catalog
+        self.assertEqual(got["page"], "Complex coding API model wasn't changed: not in OpenCode's catalog.")
+        self.assertTrue(got["said"].startswith("wb: not in OpenCode's catalog: wb models"))   # the driver's, whole
+        self.assertEqual(settings.page_line("cap", "wb: the day cap stays while trivial, busy can spend on API: put "
+                                                   "them on the GPU (or wb route busy wait) first"),
+                         "The day cap stays while Trivial coding, When the GPU is busy can spend on API: put them on the GPU first.")
+        self.assertEqual(settings.page_line("role-trivial", "trivial: API (Agents is GPU, so this applies once Agents is "
+                                                            "Both (wb route all both))", ok=True), "Set Agents to Both for this to apply.")
+        self.assertEqual(settings.page_line("coding", "Claude coding: Ask me first.", ok=True), "")
+        for key, said in (("gpu-trivial", "wb: x isn't a model trivial can use (wb models)"),
+                          ("probe", "wb: probe: run `wb experiment probe` again")):
+            line = settings.page_line(key, said)
+            self.assertTrue(line.startswith(f"{settings.label_of(key)} wasn't changed"), line)
+            self.assertNotRegex(line, r"wb |`|\btrivial\b")
+
     def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
         # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
         home = Path(self.tmp.name) / "home"

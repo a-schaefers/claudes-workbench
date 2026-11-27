@@ -7600,10 +7600,14 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 - `rows(fresh=False) -> list[dict]`: every row, kept `ROWS_CACHE_S` 10 s (`fresh` reads again);
   `reads(fresh=False)`, the same cache's `{routes, models}` (`wb route --json`, `wb models --json`,
   or None); `drop()` forgets it.
-- `apply(key, value, by="web") -> {ok, said, help?, detail?, page?}` (`page`: a refusal in the page's words,
-  `page_line(key, said)`, by the row's label with no `wb:` and no command: a role put on API with no model was
-  told `wb route trivial <provider/model>`, a gated command naming the key the row calls Trivial coding,
-  #1558; wb's whole line stays `said`, for the driver): `KeyError` for no such row, `ValueError` for
+- `apply(key, value, by="web") -> {ok, said, help?, detail?, page?}` (`page`: wb's line in the page's words,
+  `page_line(key, said, ok)`, by the row's label and `routes.LABELS` with no `wb:` and no command (cut at the
+  first `` `…` `` or `wb …` it suggests): on a refusal always (a role put on API with no model: `Pick <Label>'s
+  API model first: tap API, or under More.`, where it was told `wb route trivial <provider/model>`, a gated
+  command naming the key the row calls Trivial coding, #1558; the cap: `The day cap stays while <labels> can
+  spend on API: put it|them on the GPU first.`; else `<label> wasn't changed: <wb's reason>.`), on a change
+  that went through only a note (`Set Agents to Both for this to apply.`); wb's whole line stays `said`, for
+  the driver, which reads it): `KeyError` for no such row, `ValueError` for
   a value it doesn't take (a read-only row, a value off its choices, a number not positive; nothing
   runs), or a `by` not in `BY` (`web`, `claude`). `said` is the child's last non-empty stdout line,
   or its stderr's on failure; a run's Summary's is its report's first line, and `detail` the report,
@@ -7758,7 +7762,8 @@ The chat server's side of the web app's Stats and Settings views, the user's tok
   string, a number or null; JSON only, 415 otherwise) → `chat.admin_set` → `settings.apply`: 200
   `{ok: true, said, rows, changes, help?}`; 400 `no such setting` (a `KeyError`) or `not one of its choices`
   (a `ValueError`, or a value neither string, number nor null); 409 `{ok: false, error: <wb's line>,
-  page?: <the refusal in the page's words, settings.page_line>, rows}` when wb refused. `rows` are read again after the write (apply dropped the cache).
+  page?: <the refusal in the page's words, settings.page_line>, rows}` when wb refused; a 200 carries
+  `page` too when there is a note. `rows` are read again after the write (apply dropped the cache).
 - **The record.** A change that went through is `{ts, key, label, from (the row's value
   before), to (its value after), said, help?, by: "web"}` in `$WB_HOME/settings-changes.jsonl`
   (`chat.CHANGES`, `chat.changes_path`, `store.append_jsonl`), which the row's wb child logs
@@ -7850,12 +7855,19 @@ alone, and a generic renderer: a new setting touches only Python.
   the user, ungated, as at the terminal). No confirm step, no warning. A click sends even the value
   lit, and Off even when off: what's shown may be stale, and a click to put back a value changed at
   the terminal sent nothing (#1392). The choice lights at once (its
-  `says` too), then `POST /api/settings` `{key, value}`. On `ok`, `WB.toast(said)` and a redraw from
-  the answer's `rows`. When the answer carries `help` (the value needs Claude's help to work, such
-  as Agent code navigation on with no probe), the toast adds "<Who> will offer to set it up." (the
-  pane's words, the driver named as the state's `driver.who` names it, "Your driver" with none known,
-  #1355), and the terminal's driver offers (#1283). On a refusal (400, 409), `WB.toast(error)`
-  and a redraw from the answer's rows, else the last ones, which puts the control back. With no
+  `says` too), then `POST /api/settings` `{key, value}`. The toasts are the page's words, never wb's
+  stdout (the web app's review, 2026-11-26: role keys and `wb route …` commands under rows named
+  otherwise; wb's own line stays in settings-changes.jsonl, Recent changes and the hosts' relay). On
+  `ok`, `<label>: <the choice's label>` (" (default)" dropped; a number `$N/day` or `off`; an action
+  `<label>: <said>`), then the row's new `says` when it changed, the answer's `page` note, and with
+  `help` (the value needs Claude's help to work, such as Agent code navigation on with no probe)
+  "<Who> will offer to set it up." (the pane's words, the driver named as the state's `driver.who`
+  names it, "Your driver" with none known, #1355), and the terminal's driver offers (#1283); a redraw
+  from the answer's `rows`. On a refusal (400, 409), the answer's `page`, else `<label> wasn't changed:
+  <error, no wb:>`, toasted and kept under the row (`.set-refused`, with an Ask link carrying wb's
+  whole line) until that row's next change goes through: the toast alone was gone before a phone user
+  read it, and the reverted row said nothing of it (#1563); a redraw from the answer's rows, else the
+  last ones, which puts the control back. With no
   answer (the POST goes through `WB.post`, so one silent for `POST_MS` 15 s is given up: with no
   deadline a hung one stayed lit as applied and held every later change, #1391), the same, then a
   fresh read once nothing waits, since the change may have landed.
@@ -11259,7 +11271,8 @@ real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's rout
 requests once the worker registers (#1223). The Settings
 view's (#1286): the groups in order, a card per role first, its role row unlabelled and the rest of the role under a
 closed More, then "Agents and roles" (#1553), above the device cards (the gear's old cards are
-`#settings`'s alone); with no API provider a role's sentence alone, a `hidden` row not drawn, and the line's Ask link filling the chat's box; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
+`#settings`'s alone); the toasts in the page's words (`<label>: <choice>`, a refusal by the row's label, kept
+under the row past the toast, #1563); with no API provider a role's sentence alone, a `hidden` row not drawn, and the line's Ask link filling the chat's box; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the
