@@ -1108,10 +1108,14 @@ components:
           items:
             type: object
             properties:
-              command: {type: string}
-              flow: {type: string}
-              description: {type: string}
-              hint: {type: string}
+              command:
+                type: string
+              flow:
+                type: string
+              description:
+                type: string
+              hint:
+                type: string
         dictate:
           type: boolean
           description: the computer has a listener for /transcribe
