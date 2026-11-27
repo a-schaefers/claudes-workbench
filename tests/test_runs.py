@@ -915,6 +915,41 @@ class Runs(Base):
         run.set_status(phase="stopped")
         run_wb("discard", "bld-code-1")
 
+    def test_the_hand_back_names_a_best_of_runs_attempts_as_alternatives_and_offers_no_accept_for_its_report_items(self):
+        # #1576 (bar loop #1030, 2026-11-26): `wb takeover --all` said each attempt apart, each with
+        # "wb accept <name> (it commits)", so a hand-back had Claude finish and merge all three
+        # attempts at one change, and told it to accept the reviewer's report, which commits nothing
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"bo5-review-1": "hang"})
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Pick the best attempt": {"best": "a1", "ranking": ["a1", "a2", "a3"], "why": "a1"}})
+        run_wb("run", "start", "bo5", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        code = ["bo5-code-1", "bo5-code-2"]  # the third may queue behind the reviewer, which holds the GPU
+        deadline = time.time() + 60
+        while not (all(store.Task(n).exists and store.Task(n).status.get("phase") == "review" for n in code)
+                   and store.Task("bo5-review-1").exists and store.Task("bo5-review-1").status.get("session")):
+            self.assertLess(time.time(), deadline, f"never two at review with the reviewer going: {runs.Run('bo5').journal()}")
+            time.sleep(0.2)
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        lines = out.splitlines()
+        (alts,) = [ln for ln in lines if "alternatives" in ln]
+        self.assertTrue(alts.startswith("took over bo5-code-1, bo5-code-2"), alts)  # the hosts' turn keys on it
+        self.assertIn("the attempts at item 1 of stage code in run bo5", alts)
+        self.assertIn("bo5-code-3", alts)  # taken over too, or still queued ("with bo5-code-3"): one of them
+        self.assertIn("wb accept only that one", alts)
+        self.assertIn("wb discard the rest (they count as not chosen)", alts)
+        for n in code:
+            self.assertNotIn(f"wb accept {n} ", out)
+            self.assertNotIn(f"took over {n}: the agent is stopped", out)
+            self.assertEqual(store.Task(n).status.get("taken_over"), True, n)
+        (rev,) = [ln for ln in lines if ln.startswith("took over bo5-review-1")]
+        self.assertIn("A report item, nothing to commit", rev)
+        self.assertIn("wb discard bo5-review-1 drops it (wb run close bo5 does that)", rev)
+        self.assertNotIn("(it commits)", rev)
+        self.assertNotIn("wb accept bo5-review-1", rev)  # it wrote no result to keep
+        for n in runs.run_tasks(runs.Run("bo5")):
+            run_wb("discard", n)
+
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
         seq.write_text(json.dumps([

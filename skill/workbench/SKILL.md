@@ -523,7 +523,8 @@ workbench mode; the mod runs them, closes the pane and tells you what it did:
 - **`/workbench-quit-and-hand-back-claude`**: take over. This session's agents are already stopped
   (`wb takeover --all --user --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave workbench mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
-  `wb accept`, then carry on with the rest of the request directly, without delegating.
+  `wb accept` (a run's attempts, named together as alternatives: the best one only, `wb discard` the
+  rest; a report item commits nothing), then carry on with the rest of the request directly, without delegating.
 - **`/workbench-quit`**: stop. This session's delegated agents are already stopped (`wb stop
   --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Work directly from now on. Don't finish, restart or clean up anything
   unless asked; worktrees are kept.

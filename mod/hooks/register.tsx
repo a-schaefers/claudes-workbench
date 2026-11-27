@@ -1388,7 +1388,10 @@ const DONE_NOTE = (out: string) =>
   `handed to you (\`wb takeover --all\`):\n${out}\n\nLeave workbench mode and finish the work ` +
   `yourself, without pausing to ask. For each task taken over: read what the agent left (\`wb diff <name>\`), ` +
   `complete it in its worktree to your own standard, run its acceptance command, then ` +
-  `\`wb accept <name> -m "…"\` (add --merge only if the user asked for merging). Tasks left ` +
+  `\`wb accept <name> -m "…"\` (add --merge only if the user asked for merging). ` +
+  // a best-of hand-back had all three attempts finished and merged (#1576, 2026-11-26)
+  `A run's attempts named as alternatives for one change get one accept, the best one's, and a ` +
+  `\`wb discard\` each for the rest; a report item has nothing to commit. Tasks left ` +
   `alone belong to another session: don't touch them unless the user asks. Then carry on ` +
   `with the rest of the user's request directly, without delegating, and report briefly at the end.`
 // With the plugin's wake setting off, no [workbench] prompt comes: Claude must not end its turn

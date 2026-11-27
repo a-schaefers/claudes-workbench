@@ -3625,7 +3625,12 @@ says `paid ~$0.12/task` in place of its write speed.
 
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree uncommitted (accept adds the trailers; a commit made by hand is
-kept as is), then accepts or hands back with `wb feedback`. `wb stop` sets `stuck` ("stopped by the
+kept as is), then accepts or hands back with `wb feedback`. A report item's line says it has
+nothing to commit (`wb accept` keeps a result it wrote, `wb discard` drops it), never `(it commits)`;
+`--all` gives a compare item's attempts one line by run and item (`cli._attempts_line`: finish the
+best, `wb accept` only it, `wb discard` the rest, which count as not chosen; those of an item
+whose pick is accepted, discard each), never a per-task accept each: a best-of hand-back once had
+Claude finish and merge all three (#1576). `wb stop` sets `stuck` ("stopped by the
 reviewer", worktree kept); `wb resume` continues a stuck or failed task in a fresh session with
 `RESUME` and the step's asks, not counted as a review round.
 
@@ -8065,7 +8070,8 @@ Only the user's two slash commands stop the delegation, never words in a message
   parked, its review); a task an earlier quit parked is left so, `left parked by an earlier quit (leave
   them unless the user asks): …`, never a `took over` line, #1540), then
   DONE_NOTE as a turn (leave the mode; per task taken over `wb diff`, finish it, run the acceptance
-  command, `wb accept`, `--merge` only if asked; carry on without delegating) whenever the output
+  command, `wb accept`, `--merge` only if asked; a run's attempts named as alternatives one accept,
+  the rest `wb discard`; a report item nothing to commit; carry on without delegating) whenever the output
   has a `took over` line, even on a non-zero exit over a refused task (a toast says some weren't
   taken, the note carries the refusals, #918); none taken over, no turn, whatever the exit (exit 0
   with every task parked earlier: the output and `HAND_ONE`, ask for one by name, #1550).
