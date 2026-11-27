@@ -47,7 +47,8 @@ function entriesHost(list: { key: string; value: unknown }[] = []) {
       } },
     },
     event: { subscribe: async function* () {} },
-    model: { list: async () => ({ data: [{ providerID: 'p', id: 'm', limit: { context: 100_000, output: 8_000 } }] }) },
+    model: { list: async () => ({ data: [{ providerID: 'p', id: 'm', limit: { context: 100_000, output: 8_000 } },
+      { providerID: 'p', id: 'm64', limit: { context: 65_536, output: 8_000 } }] }) },
   }
   return { host: host as unknown as UpkeepHost, calls, compacted }
 }
@@ -273,9 +274,10 @@ test("the workbench-wake block says wakes are off while the plugin's wake option
   expect(v.sess('s1').put!.has('workbench-wake')).toBe(false) // wakes on (no option): no block
 })
 
-// a session in the mode, its task t1 open at one look and closed at the next, the last step's
-// prompt `tokens` long, on a 100K window (OpenCode compacts by itself at 84K)
-async function boundary(tokens: number, opts: { env?: Record<string, string>; agent?: string; also?: string; model?: string } = {}) {
+// a session in the mode, its first step's prompt `first` long (the fixed prompt: 1K unless
+// given), its task t1 open at one look and closed at the next, the last step's prompt `tokens`
+// long, on a 100K window (OpenCode compacts by itself at 84K)
+async function boundary(tokens: number, opts: { env?: Record<string, string>; agent?: string; also?: string; model?: string; first?: number } = {}) {
   const w = world({}, {}, opts.env)
   task(w.files, 't1', RUNNING)
   if (opts.also) task(w.files, 't9', opts.also)
@@ -283,6 +285,7 @@ async function boundary(tokens: number, opts: { env?: Record<string, string>; ag
   const u = new Upkeep(core, host, w.io, HOME)
   await u.context({ sessionID: 's1', agent: opts.agent ?? 'workbench', model: { providerID: 'p', id: opts.model ?? 'm' }, system: [] })
   await u.event({ type: 'session.execution.started', data: { sessionID: 's1' } })
+  await u.event({ type: 'session.step.ended', data: { sessionID: 's1', tokens: { input: opts.first ?? 1_000 } } })
   await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
   expect(compacted).toEqual([]) // nothing closed yet
   task(w.files, 't1', CLOSED)
@@ -297,14 +300,47 @@ async function boundary(tokens: number, opts: { env?: Record<string, string>; ag
 test("a task closing compacts the Workbench session once it is halfway to OpenCode's own compaction", async () => {
   expect(autoCeiling(100_000)).toBe(84_000)
   expect(promptTokens({ input: 1, output: 5, cache: { read: 2, write: 3 } })).toBe(6)
+  // halfway from the 1K first step to 84K: 42.5K
   const past = await boundary(43_000)
   expect(past.first).toEqual(['s1'])
   expect(past.compacted).toEqual(['s1'])
-  expect((await boundary(41_000)).compacted).toEqual([])
+  expect((await boundary(42_000)).compacted).toEqual([])
+})
+
+// #1569 (2026-11-26): a 64K OpenCode driver (the fit note's) compacted at every task close: its
+// fixed prompt, the procedure and OpenCode's own (about 28K), was over half of its 49.5K
+// compaction point, and each compaction freed about 2K
+test('the boundary compaction of a 64K OpenCode driver waits for its conversation, not its fixed prompt (#1569)', async () => {
+  const ceiling = autoCeiling(65_536)
+  expect(ceiling).toBe(49_536)
+  const at = (last: number) => boundary(last, { model: 'm64', first: 28_000 })
+  expect((await at(30_700)).compacted).toEqual([])
+  expect((await at(28_000 + 0.5 * (ceiling - 28_000) + 1)).compacted).toEqual(['s1'])
+  // a first step over the compaction point (#1487's band): OpenCode compacts every request itself
+  expect((await boundary(80_000, { model: 'm64', first: 50_000 })).compacted).toEqual([])
+})
+
+test('after a compaction the boundary is measured from the first step that follows it (#1569)', async () => {
+  const w = world({})
+  task(w.files, 't1', RUNNING)
+  const { host, compacted } = entriesHost()
+  const u = new Upkeep(core, host, w.io, HOME)
+  const step = async (input: number) => {
+    await u.event({ type: 'session.execution.started', data: { sessionID: 's1' } })
+    await u.event({ type: 'session.step.ended', data: { sessionID: 's1', tokens: { input } } })
+    await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
+  }
+  await u.context({ sessionID: 's1', agent: 'workbench', model: { providerID: 'p', id: 'm' }, system: [] })
+  await step(1_000)
+  await u.event({ type: 'session.compaction.ended', data: { sessionID: 's1' } }) // OpenCode's own, say
+  await step(30_000) // the summary and the fixed prompt: the new floor
+  task(w.files, 't1', CLOSED)
+  await step(50_000) // 20K past the floor, under half of the 54K left: measured from 1K it would compact
+  expect(compacted).toEqual([])
 })
 
 test('the boundary compaction follows WB_COMPACT_AT, waits for every task waiting on the driver, and is the mode\'s alone', async () => {
-  expect((await boundary(1_000, { env: { WB_COMPACT_AT: '1' } })).first).toEqual(['s1'])
+  expect((await boundary(2_000, { env: { WB_COMPACT_AT: '1' } })).first).toEqual(['s1'])
   expect((await boundary(80_000, { env: { WB_COMPACT_AT: '0' } })).compacted).toEqual([])
   expect((await boundary(80_000, { also: WAITING })).compacted).toEqual([])
   expect((await boundary(80_000, { agent: 'build' })).compacted).toEqual([])
@@ -348,6 +384,7 @@ test('the boundary compaction after the last task closed is told what to keep, o
     await u.event({ type: 'session.compaction.ended', data: { sessionID } })
   }
   await u.context({ sessionID: 's1', agent: 'workbench', model: { providerID: 'p', id: 'm' }, system: [] })
+  await u.event({ type: 'session.step.ended', data: { sessionID: 's1', tokens: { input: 1_000 } } })
   await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
   task(w.files, 't1', CLOSED)
   await u.event({ type: 'session.step.ended', data: { sessionID: 's1', tokens: { input: 60_000 } } })

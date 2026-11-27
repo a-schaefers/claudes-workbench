@@ -800,8 +800,10 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
     Agents GPU, a --model asked for, a role with no API model: it queues as before); a
     line saying why the role's API model can't take it now, which never changes the start either.
     Only here, at a start: a running task never moves, and nothing goes from API to the GPU, but
-    by the role's fallback, the user's explicit exception (_fallback_start, #1196)."""
-    if a.model:
+    by the role's fallback, the user's explicit exception (_fallback_start, #1196). Never a run's
+    item (--run): the run sequences its own GPU items, and its estimate and budget are the GPU
+    side's, so item 2 went to the paid API model behind item 1 on a "$0" run (#1567, 2026-11-26)."""
+    if a.model or getattr(a, "run", None):
         return ""
     try:
         doc = routes.read()
@@ -5216,6 +5218,8 @@ def cmd_accept(a):
                     unrecorded={"outcome": "accepted", "step": measured, "extra": extra}, closing=None)
     row = results.record(task, "accepted", measured, **extra)
     task.set_status(unrecorded=None)
+    # a best-of attempt's siblings discarded before this pick: their rows lost (#1568, 2026-11-26)
+    store.mark_not_chosen(runs.discarded_siblings(task))
     _ack_all(task)
     _closed(task)
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)

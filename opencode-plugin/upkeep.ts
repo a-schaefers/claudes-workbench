@@ -18,8 +18,10 @@
 //   (KEEP_ON_COMPACT, the mod's words) by the `compaction` hook. OpenCode's own automatic
 //   compaction stays on; the boundary compaction (`compactPlan`, Kernel.Mode) runs before it: when
 //   one of the session's tasks closed since the last look, none waits for the driver and the
-//   session is idle, `session.compact` once the last step's prompt reached WB_COMPACT_AT percent
-//   (unset: half; 0: never) of the way to OpenCode's own automatic compaction.
+//   session is idle, `session.compact` once the part of the last step's prompt a compaction can
+//   remove (past the session's floor: its first step's prompt, or the first after its last
+//   compaction) reached WB_COMPACT_AT percent (unset: half; 0: never) of the way from that floor
+//   to OpenCode's own automatic compaction.
 // The facts are the host's: the task files under $WB_HOME (a task is the session's when `wb start`
 // recorded it there, task.json `session`, #1309), notes.md, coding.json, workflows.json, the roles
 // (`wb route`, read when routes.json changes), `wb status` and `wb chat away` as the session (the
@@ -267,6 +269,7 @@ export interface Sess {
   keepNext: boolean            // our boundary compaction asked for: KEEP_ON_COMPACT though no task is open
   busy: boolean
   tokens: number               // the last step's prompt
+  floor: number | undefined    // the first step's prompt, or the first's after the last compaction (unset: none yet)
   model?: ModelRef
   blocks: [string, string][]   // what it should have now
   put: Map<string, string> | undefined  // the entries it has (undefined: not listed yet)
@@ -291,7 +294,7 @@ export class Upkeep {
   sess(sessionID: string): Sess {
     let s = this.sessions.get(sessionID)
     if (!s) {
-      s = { agent: '', dir: '', delegated: false, open: [], boundary: false, keepNext: false, busy: false, tokens: 0, blocks: [],
+      s = { agent: '', dir: '', delegated: false, open: [], boundary: false, keepNext: false, busy: false, tokens: 0, floor: undefined, blocks: [],
         put: undefined, tasksSig: '', tasksText: '', chain: Promise.resolve() }
       this.sessions.set(sessionID, s)
     }
@@ -466,8 +469,16 @@ export class Upkeep {
     if (!this.host.session.compact) return false
     const window = await this.window(s.model)
     if (!(window > 0)) return false // an unknown window: OpenCode never compacts it by itself either
-    const plan = this.k.compactPlan({ ...at, percentSet, percent: percentSet ? Number(set) : 0, tokens: s.tokens,
-      window, autoCompact: true, threshold: autoCeiling(window) })
+    // #1569 (2026-11-26): measured on what a compaction can remove, past the session's floor. A
+    // 64K driver's fixed prompt (the procedure and OpenCode's own, about 28K) is over half of its
+    // 49.5K compaction point, so the whole prompt passed the halfway mark at every task close and
+    // each compaction freed about 2K. A floor over the point is #1487's band: every request
+    // compacts by itself, ours would add nothing. A session first seen mid-conversation (a
+    // server restarted) has a high floor: its boundary compaction comes later, never wrongly.
+    const floor = s.floor ?? s.tokens, ceiling = autoCeiling(window) - floor
+    if (!(ceiling > 0)) return false
+    const plan = this.k.compactPlan({ ...at, percentSet, percent: percentSet ? Number(set) : 0,
+      tokens: Math.max(0, s.tokens - floor), window, autoCompact: true, threshold: ceiling })
     if (!plan.compact) return false
     s.keepNext = true // cleared by session.compaction.ended
     try {
@@ -491,8 +502,8 @@ export class Upkeep {
         if (this.setAgent(s, String(ev.data?.agent ?? '')) || !s.put) await this.refresh(sid)
         return
       case 'session.execution.started': s.busy = true; return
-      case 'session.step.ended': s.tokens = promptTokens(ev.data?.tokens); return
-      case 'session.compaction.ended': s.tokens = 0; s.keepNext = false; return
+      case 'session.step.ended': s.tokens = promptTokens(ev.data?.tokens); s.floor ??= s.tokens; return
+      case 'session.compaction.ended': s.tokens = 0; s.floor = undefined; s.keepNext = false; return
       case 'session.execution.succeeded':
       case 'session.execution.failed':
       case 'session.execution.interrupted':

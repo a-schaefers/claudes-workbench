@@ -50978,6 +50978,21 @@ class BusyGpu(Base):
         self.assertEqual(store.Task("t-free").spec["via"], "gpu")   # never API while the GPU has room
         self.assertNotIn(routes.BUSY_LINE, out)
 
+    def test_a_runs_item_queues_for_the_gpu_and_never_takes_the_busy_move(self):
+        # #1567 (bar loop #1030, 2026-11-26): a run's GPU item 2 waited behind item 1 and moved to
+        # the paid API model, on a run announced "(GPU) · estimate $0" whose budget never counted it
+        self.opt_in()
+        store.write_json(cli.runs.run_dir("bz") / "run.json", {"name": "bz", "flow": {}})
+        code, out, err = self.begin("bz-find-2", "--role", "trivial", "--run", "bz", "--stage", "find",
+                                    "--item", "2")
+        self.assertEqual(code, 0, err)
+        task = store.Task("bz-find-2")
+        self.assertEqual((task.spec["via"], task.spec.get("busy"), task.status["phase"]), ("gpu", None, "queued"))
+        self.assertNotIn(routes.BUSY_LINE, out)
+        self.assertIn("waits as queued", out)
+        self.assertEqual(self.begin("t-own", "--role", "trivial")[0], 0)   # the user's own start: the move
+        self.assertEqual(store.Task("t-own").spec["via"], "api")
+
     def test_a_role_with_no_api_model_queues_on_the_gpu_as_before(self):
         self.opt_in("trivial")
         code, out, err = self.begin("t-queued", "--role", "significant")

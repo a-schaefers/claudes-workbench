@@ -1162,25 +1162,68 @@ def run_tasks(run: Run) -> list[str]:
     return [r["task"] for r in run.journal() if r.get("kind") == "item" and r.get("task")]
 
 
-def not_chosen(task: store.Task) -> bool:
-    """Whether ``task`` is an attempt of a compare item (key `<item>#a<n>`) that lost: another
-    attempt at the same item in its stage was accepted. best-of's `wb run close` wants every
-    attempt accepted or discarded, and each losing one was recorded as the model's rejected work,
-    so every run scored the role's model 1 of N and the router steered away from it (#1473, the
-    #1373 audit, 2026-11-26)."""
+def _attempt_of(task: store.Task):
+    """``task``'s place as an attempt of a compare item (key `<item>#a<n>`): (its run, the run's item
+    rows, its own row, its key), or None for a task that is no attempt."""
     name = task.spec.get("run")
     if not (isinstance(name, str) and RUN_RE.match(name) and Run(name).exists):
-        return False
-    rows = [r for r in Run(name).journal() if r.get("kind") == "item" and isinstance(r.get("task"), str)]
+        return None
+    run = Run(name)
+    rows = [r for r in run.journal() if r.get("kind") == "item" and isinstance(r.get("task"), str)]
     me = next((r for r in rows if r["task"] == task.name), None)
     key = str((me or {}).get("key") or "")
-    if "#a" not in key:
-        return False
+    return (run, rows, me, key) if "#a" in key else None
+
+
+def _siblings(rows: list, me: dict, key: str) -> list[store.Task]:
+    """The other attempts at ``me``'s item in its stage, as tasks that still exist."""
     item = key.rsplit("#a", 1)[0]
-    return any(r["task"] != task.name and r.get("stage") == me.get("stage")
-               and "#a" in (k := str(r.get("key") or "")) and k.rsplit("#a", 1)[0] == item
-               and store.Task(r["task"]).exists and store.Task(r["task"]).status.get("phase") == "accepted"
-               for r in rows)
+    return [t for r in rows if r["task"] != me["task"] and r.get("stage") == me.get("stage")
+            and "#a" in (k := str(r.get("key") or "")) and k.rsplit("#a", 1)[0] == item
+            and (t := store.Task(r["task"])).exists]
+
+
+def _chosen(run: Run, rows: list, stage: str, item: str) -> str | None:
+    """The label (a1..aN) a compare stage over code stage ``stage`` named best for ``item``: its
+    result's `best`, else its `ranking`'s first; None before a chooser answered."""
+    for s in stages(run.flow):
+        if not (s.get("compare") and s.get("from") == stage):
+            continue
+        for r in reversed(rows):
+            if r.get("stage") == s.get("id") and r.get("key") == item and isinstance(r.get("n"), int):
+                res = (store.read_json(run.output_file(s["id"], r["n"]), {}) or {}).get("result")
+                res = res if isinstance(res, dict) else {}
+                best = res.get("best") or next(iter(res.get("ranking") or ()), None)
+                if isinstance(best, str):
+                    return best
+    return None
+
+
+def not_chosen(task: store.Task) -> bool:
+    """Whether ``task`` is an attempt of a compare item (key `<item>#a<n>`) that lost: another
+    attempt at the same item was accepted, or the run's chooser named another one, or (before any
+    chooser answered) another one waits at review. best-of's `wb run close` wants every attempt
+    accepted or discarded, and each losing one was recorded as the model's rejected work, so every
+    run scored the role's model 1 of N and the router steered away from it (#1473, the #1373
+    audit, 2026-11-26). Read from the accepted sibling only, a loser discarded before the pick was
+    accepted was still scored so (#1568, 2026-11-26): wb accept marks those (discarded_siblings)."""
+    if (at := _attempt_of(task)) is None:
+        return False
+    run, rows, me, key = at
+    phases = {t.status.get("phase") for t in _siblings(rows, me, key)}
+    if "accepted" in phases:
+        return True
+    best = _chosen(run, rows, str(me.get("stage")), key.rsplit("#a", 1)[0])
+    return best != attempt_label(key) if best else "review" in phases
+
+
+def discarded_siblings(task: store.Task) -> set[str]:
+    """The attempts at ``task``'s compare item already discarded: wb accept of ``task`` marks their
+    rows not_chosen, whatever order they were closed in (#1568, 2026-11-26)."""
+    if (at := _attempt_of(task)) is None:
+        return set()
+    _, rows, me, key = at
+    return {t.name for t in _siblings(rows, me, key) if t.status.get("phase") == "discarded"}
 
 
 def tasks_of(name: str) -> set[str]:
@@ -2194,8 +2237,13 @@ def cmd_start(a) -> None:
                                     + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
                                     for s in stages(flow) if not (s.get("final") or s.get("claude"))))
     est = (meter.usd(est_usd) if est_usd is not None else "unpriced") + (f", GPU ~{est_min:g} min" if est_min else "")
+    # tracked files only, as wb start's (#1322): every item starts from the base without them,
+    # and the driver drops each wb start's own note, so a whole run of paid items worked on the
+    # tree without the edits it was about, unsaid (#1570, 2026-11-26)
+    dirty = [] if not gitops.git(repo, "status", "--porcelain", "--untracked-files=no").strip() else \
+        [f"note: the repo has uncommitted changes; every item starts from {a.base or 'HEAD'} without them"]
     if getattr(a, "dry_run", False):
-        for line in dry_run(a.name, flow, params, exists, ctx, base, est, later, usd_):
+        for line in dry_run(a.name, flow, params, exists, ctx, base, est, later, usd_) + dirty:
             print(line)
         for line in said:
             print(line)
@@ -2231,7 +2279,7 @@ def cmd_start(a) -> None:
     print(f"run {a.name}: flow {flow['name']} · {roles} · estimate {est}"
           + (f" (and {', '.join(later)} as their items come)" if later else "")
           + (f" · budget {meter.usd(usd_)}" if usd_ is not None else "") + f" · driver pid {pid}")
-    for line in said:
+    for line in dirty + said:
         print(line)
     # its notices wake the session that started it, through the mod or the OpenCode plugin, as a
     # task's do (#1278's S9); with neither, wb wait in the background is the wake (#1278's review)
