@@ -565,6 +565,42 @@ class RunRows(Rows):
         self.assertEqual([json.loads(x) for x in log.read_text().splitlines()],
                          [["run", "stop", "night"], ["run", "report", "night"]])
 
+    def test_customize_lists_the_users_own_cards_and_flows_with_a_diff_and_a_reset_for_a_shipped_ones_copy_1463(self):
+        # #1463 P6: what the user changed, read on the phone; Reset keeps theirs as a .bak
+        from workbench import cards, chat, runs
+        tmp = Path(self.tmp.name)
+        with mock.patch.dict(os.environ, {"WB_ROLES": str(tmp / "roles"), "WB_FLOWS": str(tmp / "flows")}):
+            tw.run_wb("card", "copy", "find")
+            mine = tmp / "roles" / "find.md"
+            mine.write_text(mine.read_text() + "- Also read the tests.\n")
+            (tmp / "flows").mkdir()
+            (tmp / "flows" / "night.json").write_text(json.dumps({**runs.load_flow("audit"), "name": "night"}))
+            by = {r["key"]: r for r in settings.rows(fresh=True)}
+            find = by["mine-card-find"]
+            self.assertEqual((find["group"], find["kind"], find["label"]), ("workflows", "action", "Card find"))
+            self.assertTrue(find["text"].startswith("Yours, shadows shipped: "), find["text"])
+            self.assertEqual([c["value"] for c in find["choices"]], ["diff", "reset"])
+            self.assertTrue(find["ask"].startswith(f"Help me change my card find ({mine})"))
+            night = by["mine-flow-night"]
+            self.assertEqual((night["kind"], night["text"].split(":")[0]), ("info", "Yours, your own"))
+            self.assertEqual(settings._argv(find, "diff"), ["card", "diff", "find"])
+            self.assertEqual(settings.key_for(["flow", "reset", "night"]), ("mine-flow-night", "reset"))
+            self.assertEqual(settings.label_of("mine-flow-night"), "Flow night")
+            got = settings.apply("mine-card-find", "diff")
+            self.assertTrue(got["ok"], got)
+            self.assertEqual(got["said"], "find: 1 line(s) changed from the shipped one")
+            self.assertIn("+- Also read the tests.", got["detail"])
+            self.assertNotIn("from: ", got["detail"])
+            self.assertIsNone(settings.record(find, "mine-card-find", "diff", got, "web"))
+            self.assertTrue(settings.apply("mine-card-find", "reset")["ok"])
+            self.assertFalse(mine.exists())
+            self.assertTrue((tmp / "roles" / "find.md.bak").is_file())
+            self.assertEqual(cards.load("find").path, cards.SHIPPED / "find.md")
+            self.assertNotIn("mine-card-find", [r["key"] for r in settings.rows(fresh=True)])
+            self.assertFalse(chat.changes_path().exists())
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                tw.run_wb("flow", "diff", "night")                    # nothing shipped by its name
+
     def test_the_web_apps_stop_and_summary_run_wb_and_neither_is_recorded_as_a_change(self):
         from workbench import chat, runs
         self.make_run("night", "running")
