@@ -3673,8 +3673,10 @@ best, `wb accept` only it, `wb discard` the rest, which count as not chosen; tho
 whose pick is accepted, discard each), never a per-task accept each: a best-of hand-back once had
 Claude finish and merge all three (#1576). An escalation (`<item>#e<k>`) and the tries it escalated from
 are grouped the same way (`runs.tries_of`, by the key without `#e<k>`, then `#a<n>`): "the run escalated A
-to B", finish and accept only B, discard A, never counted as not chosen (`runs._attempt_of` stays `#a`'s,
-for `not_chosen`); a fix-escalate hand-back had Claude finish and commit both (#1592). `wb stop` sets `stuck` ("stopped by the
+to B", finish and accept only the latest try that was at `review` before the hand-back (a finished
+change), else B, discard the others, never counted as not chosen (`runs._attempt_of` stays `#a`'s,
+for `not_chosen`); a fix-escalate hand-back had Claude finish and commit both, and then, its cheap try
+kept at review and its escalation crashed, discard the reviewed change for the crashed one (#1592). `wb stop` sets `stuck` ("stopped by the
 reviewer", worktree kept); either, mid self-review off its green tree, sets its files aside and
 puts the green tree back, printing the `wb rewind <task> <n>s` line (`cli._stop_aside`, #1582);
 `wb resume` continues a stuck or failed task in a fresh session with `RESUME` and the step's

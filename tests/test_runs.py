@@ -1550,7 +1550,16 @@ class Runs(Base):
                          ("trivial", "review"))                         # kept for Claude, never discarded
         rep = runs.report_of("fxe")
         self.assertIn("escalated: 1 ask(s) of fxe-code-1 left after 2 refix(es)", [x["why"] for x in rep["superseded"]])
-        run_wb("run", "stop", "fxe")
+        # #1592 (the bar loop's M5, 2026-11-27): the hand-back named the latest try, the crashed
+        # escalation, to finish and the reviewed change to discard (its worktree with it)
+        self.assertEqual(store.Task("fxe-code-2").status["phase"], "failed")
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertTrue(alts.startswith("took over fxe-code-1, fxe-code-2"), alts)
+        self.assertIn("the run escalated fxe-code-1 to fxe-code-2, which failed", alts)
+        self.assertIn("Finish fxe-code-1 in its worktree and wb accept only it", alts)
+        self.assertTrue(alts.endswith("then wb discard fxe-code-2"), alts)
+        self.assertNotIn("wb discard fxe-code-1", out)                   # the hand-back stopped the run
         for n in ("fxe-code-1", "fxe-code-2"):
             if store.Task(n).status.get("phase") not in store.CLOSED:
                 run_wb("discard", n)
