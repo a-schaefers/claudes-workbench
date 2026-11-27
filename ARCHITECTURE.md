@@ -1,7 +1,7 @@
 # How Claude's Workbench works
 
 The full account, for agents and contributors: every piece, what it does, how and why.
-[README.md](README.md) is for people (the pitch and a quickstart); [CLAUDE.md](CLAUDE.md) is the
+[README.md](README.md) is for people (the pitch, a quickstart for each path, a map and a FAQ); [CLAUDE.md](CLAUDE.md) is the
 compact reference loaded into every session that changes the code, and points here for detail.
 A change that alters what this file says (a command, a flag, a default, a guard, a file, a format)
 updates it in the same commit.
@@ -11450,7 +11450,7 @@ doc needs its own `!/` line).
 
 ## Couplings: change one, change the other
 
-- **The README's bold opening line and the sentence after it** → the GitHub repository's About description, word for word (the owner, 2026-11-24, on #1357: keep the two in sync while iterating). `tests/test_docs.py` pins the README side; the About side is set by hand (`gh repo edit --description`).
+- **The README's bold opening line and the sentence after it** → the GitHub repository's About description, word for word, the Markdown (bold, backticks) aside (the owner, 2026-11-24, on #1357: keep the two in sync while iterating). `tests/test_docs.py` pins the README side; the About side is set by hand (`gh repo edit --description`).
 - **What a scheduled fire lets headless Claude use** (`schedule.TOOLS`, `ALLOWED`, `DENIED`, the permission mode) and `schedule.PROMPT`'s section names → driving.md's *Headless: a scheduled run* (a spec on stdin, `wb wait --backlog <batch> --timeout 100` loops), and `tests.test_workbench.ScheduledRuns`. The fire's batch name (`<name>-YYYY-MM-DD[-N]`, `schedule.batch_name`, N up to `SAME_DAY` 99) → `schedule.NAME_RE`'s 34 against `store.NAME_RE`'s 48 (#1204).
 - **`launchd/workbench.chat.plist`, in a release** → the release before's sha256 into `cli.SHIPPED_PLISTS`, or `wb setup` keeps a copy of it as the user's (#1406).
 - **SKILL.md or a reference file reworded** (`skill/workbench/`) → `opencode-plugin/skill.ts`'s
