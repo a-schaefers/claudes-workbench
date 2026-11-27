@@ -36,7 +36,7 @@ well on short, tested steps, so each step is sized to the model that writes it
   orchestrator agent suggests a model for your GPU and can install Ollama and pull it for you.
 - To use it in [Claude Code](https://claude.com/claude-code), a Claude subscription or an API key.
 
-Workbench runs in the OpenCode TUI and the Claude Code CLI. Desktop apps and IDE extensions are not
+Workbench runs in the OpenCode CLI and the Claude Code CLI. Desktop apps and IDE extensions are not
 supported.
 
 ## Install
