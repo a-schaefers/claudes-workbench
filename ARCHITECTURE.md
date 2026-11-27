@@ -6656,8 +6656,8 @@ line (no turn; `sayRules`' row tells Claude); else the rest goes on. `/workbench
 mod's `WORKBENCH_DEEPMODE`, #1628) sets or shows it, and `/deepmode` (`DEEPMODE`, the user's word) is its
 alias, the one command not named `workbench-*`; while it is on both hosts' modelines wear `[deepcode]`
 (`DEEP_BADGE`, after the name and dropped with it when the pane is narrow, as Claude Code's `/effort` shows
-ultracode): the mod reads workflows.json each poll and after the command (`readDeep`, `mem.deepmode`), so a
-switch from the web app or a terminal shows too, and the minimized strip opens with `deepcode`; the
+ultracode): the mod reads workflows.json each poll (30 s apart when idle, `SAFETY_MS`) and at once after the command
+(`readDeep`, `mem.deepmode`), so a switch from the web app or a terminal shows too, and the minimized strip opens with `deepcode`; the
 OpenCode panel reads it with the task files (`PaneData.tasks`' `deep`). In OpenCode
 (`opencode-plugin/deep.ts`, its prompt hook registered before upkeep's so that a toggle is in workflows.json
 when upkeep reads it): the session `prompt` hook reads a typed prompt (no metadata) or the chat's delivery of

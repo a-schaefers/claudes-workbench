@@ -6290,7 +6290,7 @@ test('#1628: with deepmode on the modeline wears [deepcode] after the name, howe
   expect(await modelineOf(ui)).toEqual([`[•_•] Claude's Workbench [deepcode] - ${LINK}`])
   await ui.unmount()
   files['/wb/workflows.json'] = JSON.stringify({ deepmode: 'off' })   // the web app's switch, or a terminal
-  await clock.advance(3000)
+  await clock.advance(31_000)                                         // the idle poll's SAFETY_MS
   const again = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 140 } })
   expect(await modelineOf(again)).toEqual([`[•_•] Claude's Workbench - ${LINK}`])
   await again.unmount()
