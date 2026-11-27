@@ -7410,7 +7410,10 @@ hears the thread through `#say` (`role=log`, `.sr-only`), outside it: each new m
 whole (`say`, after the reveal), and "Claude is on it" (the driver's name) once; the thread was the live region, and every update read
 each row's time and `copy` out again, a reply in its reveal's fragments (#1408). A row's `.meta` is made anew only
 when its words change (`dataset.said`), so its buttons keep the focus (#1409), or once the copy a pressed
-*send again* sent (its `data-cid`) has left the outbox, landed or deleted, so the button is pressable again. The message box, focused, has a
+*send again* sent (its `data-cid`) has left the outbox, landed or deleted, so the button is pressable again. Each row
+is a `role=group` named whose and when (`rowName`: `You, 5:05 PM`, `Claude, 5:05 PM`, an agent's name), its copy
+button `Copy this reply`, its ✓/✓✓ `aria-hidden` (`tick`; #1339: 'copy copy copy', and the user's messages were
+never named theirs). The message box, focused, has a
 2 px ring, the accent toward `--fg` (3:1 on the page in light; the border's tint alone was 1.6:1, #1411). The common
 tap targets are 44 px (#1339): the starter and next-step chips (`.chip`), the hint's ✕, and `#jump` and the state
 line's Copy by a hit area past their edge (`::after`, as `.meta`'s buttons pad theirs), so neither grows. Claude's words are built as DOM, never HTML (`rich`): code fences,

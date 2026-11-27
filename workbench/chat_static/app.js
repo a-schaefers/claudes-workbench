@@ -382,8 +382,10 @@
                 meta.append(span('', who + ' · ' + clock(m.ts) + ' · '));
             else
                 meta.append(span('', who + ' to '), span('agent-name', m.to.join(', ')), span('', ' · ' + clock(m.ts) + ' · '));
+            // named for a screen reader: 'copy copy copy' said nothing of what each copies (#1339)
             const c = document.createElement('button');
             c.textContent = 'copy';
+            c.setAttribute('aria-label', 'Copy this reply');
             c.onclick = async () => {
                 c.textContent = await copyText(m.text) ? 'copied' : 'copy failed';
                 setTimeout(() => { c.textContent = 'copy'; }, 1500);
@@ -435,7 +437,7 @@
         // one short line, one time: the receipt's once the driver has it (#103)
         const who = driverName();
         if (m.received)
-            meta.append(span('tick', '✓✓'), span('', (m.received.how === 'queued'
+            meta.append(tick('✓✓'), span('', (m.received.how === 'queued'
                 ? `Queued for ${readBy(m)} · ` : `Read by ${readBy(m)} · `) + clock(m.received.ts)));
         else if (m.expired) { // unread too long: no session is given it, so never "Delivered" (#536)
             const h = Math.round((state.expire || 21600) / 3600);
@@ -446,9 +448,13 @@
             meta.append(b);
         }
         else
-            meta.append(span('tick', '✓'), span('', delivered(who) + clock(m.ts)));
+            meta.append(tick('✓'), span('', delivered(who) + clock(m.ts)));
         return meta;
     }
+    // the ticks are the words beside them, drawn: a screen reader hears the words alone (#1339)
+    const tick = (mark) => { const t = span('tick', mark); t.setAttribute('aria-hidden', 'true'); return t; };
+    // whose a row is and when, for a screen reader (#1339): the user's messages were never named theirs
+    const rowName = (m) => `${m.role === 'agent' ? m.from : m.from === 'user' ? 'You' : nameOf(m.driver) || 'Claude'}, ${clock(m.ts)}`;
     // an unread message's line: delivered, behind a prompt in the terminal (the driver can't read it
     // until that is answered, #1355), or waiting for a session
     const delivered = (who) => !state.listener ? `Waiting for ${aSession(who)} · `
@@ -782,6 +788,10 @@
                 nodes.set(w.key, el);
             }
             if (w.m) {
+                if (el.getAttribute('aria-label') !== rowName(w.m)) {
+                    el.setAttribute('role', 'group');
+                    el.setAttribute('aria-label', rowName(w.m));
+                }
                 el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.m.from === 'claude' && !forUser(w.m) ? ' to-agent' : ''}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}`;
                 // a row's line made anew only when it says something new: one made on every update was
                 // read out again and took the focus from its buttons (#1408, #1409)

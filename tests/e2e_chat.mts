@@ -131,6 +131,10 @@ async function run(engine: string, device?: string) {
     await until(() => messages().length === 1)
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Delivered'))
     if (await page.inputValue('#input')) throw new Error('the box was not cleared')
+    // #1339: a row says whose it is and when; its tick is drawn, not read out
+    const named = await page.evaluate(() => { const r = [...document.querySelectorAll('.row.user')].at(-1)!
+      return { role: r.getAttribute('role'), label: r.getAttribute('aria-label'), tick: r.querySelector('.tick')!.getAttribute('aria-hidden') } })
+    if (named.role !== 'group' || !/^You, \d/.test(named.label || '') || named.tick !== 'true') throw new Error(JSON.stringify(named))
     // #1339: what the chat is for is known once a message is sent: the hint goes, for good
     if (await page.locator('#hint').isVisible() || await page.evaluate(() => localStorage.getItem('wb-chat-hint')) !== 'true')
       throw new Error('the hint stayed after the first message sent')
@@ -185,6 +189,9 @@ async function run(engine: string, device?: string) {
     await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('make test passes'))
     await until(async () => (await page.locator('.row.claude .bubble strong').count()) === 1)
     if (await page.locator('.thread .working').count()) throw new Error('still shows working')
+    const named = await page.evaluate(() => { const r = [...document.querySelectorAll('.row.claude')].at(-1)!
+      return { label: r.getAttribute('aria-label'), copy: r.querySelector('.meta button')!.getAttribute('aria-label') } })
+    if (!/^Claude, \d/.test(named.label || '') || named.copy !== 'Copy this reply') throw new Error(JSON.stringify(named))  // #1339
   })
   await check("Claude's reply copies over plain http at a LAN address, where navigator.clipboard is missing", async () => {
     // #745 (the 2026-11-21 audit, finding 104): navigator.clipboard exists only in a secure
