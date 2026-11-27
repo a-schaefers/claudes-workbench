@@ -1764,6 +1764,54 @@ async function run(engine: string, device?: string) {
       })
       if (got.p !== got.card || got.margins !== `${got.p} ${got.p}` || got.code !== got.p || got.introCode !== got.intro) throw new Error(JSON.stringify(got))
     })
+    await check('text drawn green, amber, in the accent or as secondary stands 4.5:1 or more on what is under it, light and dark (#1556, #1560)', async () => {
+      // #1556, #1560 (2026-11-26): in light the task sheet's links (the accent, 2.81:1), the diff's
+      // added lines (--ok, 3.72:1) and Stats' state words were drawn in the fills' colours, and the
+      // day divider, the about tag, captions and "Changed by" in --faint (2.35:1; 3.29:1 dark).
+      // Each as the page draws it, in its own place, so what is under it is the page's, read with
+      // its view shown: WebKit kept a hidden view's light colours after the switch to dark
+      await page.evaluate(() => {
+        const put = (where: string, html: string) => {
+          const box = document.createElement('div'); box.innerHTML = html
+          box.dataset.e2eProbe = where.startsWith('#view-') ? where.slice(6, where.indexOf(' ')) : 'chat'
+          document.querySelector(where)!.append(box)
+        }
+        put('#ts-body', '<button class="ts-link" data-e2e-text="ts-link">Show the whole diff</button>'
+          + '<pre><span class="add" data-e2e-text="diff add">+world</span></pre>')
+        put('#thread', '<div class="day" data-e2e-text="day">Today</div>'
+          + '<div class="row"><span class="about-tag" data-e2e-text="about-tag">About fix</span><div class="meta"><span class="tick" data-e2e-text="tick">✓</span></div></div>'
+          + '<div class="shots"><figure><div class="missing" data-e2e-text="shots missing">Expired</div></figure></div>'
+          + '<div class="shots-of" data-e2e-text="shots-of">Two screenshots</div>'
+          + '<div class="takes"><figure class="take"><span class="take-line" data-e2e-text="take-line">-14 LUFS</span>'
+          + '<span class="missing" data-e2e-text="take missing">Gone</span></figure></div>')
+        put('#view-stats .view-in', '<div class="card"><span class="ok" data-e2e-text="stats ok">resident</span>'
+          + '<span class="warn" data-e2e-text="stats warn">split</span><span class="claude" data-e2e-text="stats claude">fix-nav</span>'
+          + '<p class="st-note" data-e2e-text="st-note">Not updated</p>'
+          + '<ul class="st-list"><li><span class="st-mark dim" data-e2e-text="st-mark dim">•</span></li></ul></div>')
+        put('#view-settings .view-in', '<div class="card"><p class="small set-changed" data-e2e-text="set-changed">Changed by the web app · just now</p></div>')
+      })
+      try {
+        const names: [string, string][] = [['#ts-back', 'chat'], ['#ts-refresh', 'chat'], ...await page.$$eval('[data-e2e-text]',
+          (x: HTMLElement[]) => x.map(e => [`[data-e2e-text="${e.dataset.e2eText}"]`, e.closest<HTMLElement>('[data-e2e-probe]')!.dataset.e2eProbe]))]
+        if (names.length !== 17) throw new Error('probes: ' + JSON.stringify(names))
+        const low: string[] = []
+        for (const scheme of ['light', 'dark']) {
+          await page.emulateMedia({ colorScheme: scheme })
+          for (const view of ['chat', 'stats', 'settings']) {
+            await goTo(view)
+            for (const [sel] of names.filter(([, v]) => v === view)) {
+              const got = await page.locator(sel).evaluate(settingsView.textContrast)
+              if (got.ratio < 4.5) low.push(`${scheme} ${sel}: ${JSON.stringify(got)}`)
+            }
+          }
+        }
+        if (low.length) throw new Error(low.join('; '))
+      } finally {
+        await page.emulateMedia({ colorScheme: 'light' })  // Playwright's default, as the checks after expect
+        await page.evaluate(() => document.querySelectorAll('[data-e2e-probe]').forEach(e => e.remove()))
+        await goTo('chat')
+      }
+    })
     if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px, Settings\' as CSS columns, short cards under short ones', async () => {
       await goTo('settings')
       // CSS columns, not a grid: a grid row as tall as its taller card left 1,000 px empty (the web app's review, 2026-11-26)

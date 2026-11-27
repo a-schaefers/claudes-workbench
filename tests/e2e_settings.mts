@@ -73,6 +73,18 @@ export function ringContrast(el: Element, outside = false) {
     under: getComputedStyle(under || document.body).backgroundColor }
 }
 
+// In the page, of an element's text: its colour's contrast against the nearest fill behind it
+// (WCAG's ratio; text needs 4.5:1), as ringContrast reckons it (#1556, #1560)
+export function textContrast(el: Element) {
+  const rgb = (s: string) => { const n = (s.match(/[\d.]+/g) || []).map(Number); return s.startsWith('color(') ? n.map(x => x * 255) : n }
+  const lum = (c: number[]) => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * r + 0.7152 * g + 0.0722 * b }
+  let under: Element | null = el
+  while (under && (rgb(getComputedStyle(under).backgroundColor)[3] ?? 1) === 0) under = under.parentElement
+  const text = getComputedStyle(el).color, fill = getComputedStyle(under || document.body).backgroundColor
+  const a = lum(rgb(text)), b = lum(rgb(fill))
+  return { ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100, text, fill }
+}
+
 export async function check(page: any, ctx: E2eCtx) {
   const { base, token, env, home, until, goTo, desktop, sleep } = ctx
   const view = () => page.locator('#settings-rows')

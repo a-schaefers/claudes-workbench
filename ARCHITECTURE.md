@@ -7533,6 +7533,13 @@ call: Settings' Ask link), `on('state' | 'view', fn)` (each snapshot applied; ea
 `WindowEventMap`) shows the Chat view with the task sheet open on that task (`openTask`, as a tap on the
 strip and its row; focus on `#ts-back`), which Stats' Running rows dispatch. Each view's files are its own,
 so the two are built apart.
+The colours are `app.css`'s tokens on `:root`, light and dark (`prefers-color-scheme`). Text in the
+green, amber or accent takes `--ok-text`, `--warn-text`, `--accent-text`, 4.5:1 or more on the page
+(in dark, the fills themselves): the task sheet's links, the diff's added lines, a message's tick and
+Stats' state words were drawn in the fills, 2.8 to 4:1 in light (#1556); fills, meters, marks and
+icons keep `--ok`, `--warn`, `--accent`. Secondary text is `--dim`; `--faint` is a border or
+decoration only, never text (2.35:1 in light, 3.29:1 in dark: the day divider, the about tag,
+captions, "Changed by", #1560).
 
 **The Stats view** (#1285; `stats.ts`, `stats.css`; it took over the pane's Stats tab, *Seeing
 what the agent does*). `WB.view('stats', …)`: `mount` puts two sections in `#stats-body`, Now
@@ -7574,7 +7581,7 @@ task sheet's note, `taskNote`, says it, the catalog name the strip's too, else t
 work absorbed, questions, Claude's tokens a task, 30 days' bars, bests or milestone: #1322 took
 them from the feed and the pane. The charts are inline SVG built in `stats.ts` (no library, so the CSP holds),
 coloured by the page's tokens (`--accent`, `--accent-soft`, `--line`, `--ok`, `--warn`, `--bad`) in
-light and dark. What it saved (`#saved-card`) stays below, drawn by `app.ts`.
+light and dark; its words in a state's colour take the text shades (`--ok-text`, `--warn-text`, `--accent-text`, #1556). What it saved (`#saved-card`) stays below, drawn by `app.ts`.
 
 
 **The task sheet** (#1201, `app.ts`'s `showTaskSheet`): away, the strip's one line was all the
@@ -11460,7 +11467,7 @@ outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting
 `/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
 `computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
 in no live region (a presence change re-adds no row's line, and a focused `copy` keeps the focus; a reply said once,
-whole, in `#say`, #1408, #1409; *send again* pressable again once its copy landed), the message box's focus ring at 3:1 on the page (#1411), a lead-in line and its bullets as a paragraph and a list
+whole, in `#say`, #1408, #1409; *send again* pressable again once its copy landed), the message box's focus ring at 3:1 on the page (#1411), text in the green, amber and accent, and secondary text, at 4.5:1 or more on what is under it in light and dark (`textContrast`, #1556, #1560), a lead-in line and its bullets as a paragraph and a list
 (#1416), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a 25-task backlog's strip at most three lines on a phone, the queued counted apart

@@ -32,7 +32,7 @@
 .view-in .set-card > h3, .view-in .set-changes > h3 { margin-bottom: 2px; font: 600 16px/1.3 var(--serif); letter-spacing: .01em; }
 
 /* who changed a row, and the newest changes (#1355) */
-.view-in .set-changed { margin: 4px 0 0; color: var(--faint); }
+.view-in .set-changed { margin: 4px 0 0; color: var(--dim); }
 .view-in .set-change-list { margin: 0; padding-left: 18px; }
 .view-in .set-change-list li { margin: 2px 0; overflow-wrap: anywhere; }
 /* an action's answer under its row: a run's Summary (#1278's S12), wrapped, scrolled past a screen */
