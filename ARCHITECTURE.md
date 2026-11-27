@@ -9430,10 +9430,13 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       kept free, at least 16K from a 32K window) and the last step's prompt (`session.step.ended`'s
       tokens: input, cache reads and writes, `promptTokens`), and calls `session.compact` once the
       prompt reaches `WB_COMPACT_AT` percent (unset half; 0 never) of the way there, both measured
-      past the session's floor (`floor`: the first step's prompt, and the first's after each
+      past the session's floor (`floor`: the first step's prompt, the first's after the session's
+      first switch to the Workbench agent, `setAgent`, and the first's after each
       `session.compaction.ended`), the part a compaction can remove (#1569: a 64K driver's fixed
       prompt, about 28K, was over half of its 49.5K point, so every task close compacted and freed
-      about 2K). A floor at or over the point (#1487's band) is never compacted early; neither is
+      about 2K; #1578: a session begun on Build kept Build's 10K first prompt as its floor, so its
+      first boundary compaction freed about 2K too; only the first switch, as a later return to
+      the agent would set it from a step mid-conversation). A floor at or over the point (#1487's band) is never compacted early; neither is
       a window OpenCode doesn't list. OpenCode's own automatic compaction stays on as it is.
   - `commands.ts` (#1315): the user's commands as server commands (`command.transform`,
     `registerCommands`; `definitions(host, deps)`), so the TUI, Desktop and the web app list them,
@@ -9620,7 +9623,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   open) and removed once back, before the turn of a prompt the user typed; `workbench-wake` with the `wake` option off, in the mode or with a task open; without the entries API the blocks
   in the session's own requests' system prompt; a task closing compacts at half of OpenCode's own
   point, not below it, once, measured from the first step's prompt (a 64K driver's fixed 28K
-  never alone, nor a floor over the point) and again from the first after a compaction (#1569); `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
+  never alone, nor a floor over the point) and again from the first after a compaction (#1569), a session
+  begun on Build from its first Workbench step (#1578); `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
   OpenCode doesn't list; KEEP_ON_COMPACT once, only for a session that delegated with a task open or in the boundary compaction after the last one closed;
   which tasks are the session's; the setup's three hooks),
   `opencode-plugin/test/commands.test.ts` (#1315: each command's wb argv as the session in its
