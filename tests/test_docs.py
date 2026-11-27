@@ -168,7 +168,7 @@ class DocsMatchTheCode(unittest.TestCase):
         low = ".".join(map(str, runner.OPENCODE_TESTED[0]))
         self.assertIn(f"[OpenCode](https://opencode.ai) {low} or newer", readme)
         self.assertIn(f"{models.MIN_WINDOW // 1024}K at the least", readme)
-        self.assertIn("32K context window recommended", readme)
+        self.assertIn("a 32K context window (16K at the least)", readme)
 
     def test_the_pane_keeps_no_copy_of_a_setting_wb_owns(self):
         # the review of #857's off and on (2026-11-22) caught the pane's probe sentence copying
@@ -429,13 +429,15 @@ class DocsFor20(unittest.TestCase):
     says so; an API-only user read "A local model" as "not for me"."""
 
     def test_the_readme_pitch_names_the_api_and_the_gpu(self):
-        # #1357 (2.2): the pitch leads with OpenCode, either host drives, and the pinned clause
-        # (the owner, 2026-11-23: agents, not subagents) stays word for word
+        # #1357 (2.2): the pinned clause (the owner, 2026-11-23: agents, not subagents) stays word
+        # for word in the pitch, the README's first line after its title and the GitHub About text;
+        # the rewrite of 2026-11-27 (the owner's six findings) keeps it, and both hosts in the pitch
         readme = (ROOT / "README.md").read_text()
-        self.assertIn("**Workbench is a harness: OpenCode agents via API or GPU write the code.**", readme)
-        self.assertIn("Drive them from OpenCode with any model, or from Claude Code with `/workbench`.", readme)
-        self.assertIn("**The crew** are OpenCode agents, on your GPU or an API model.", readme)
-        self.assertIn("- A model for the agents: one you connected in OpenCode (`/connect`), or a local one.", readme)
+        pitch = readme.split("\n# ", 1)[1].split("\n\n")[1]
+        self.assertIn("OpenCode agents via API or GPU write the code", pitch)
+        self.assertIn("OpenCode and Claude Code", pitch)
+        self.assertLess(len(pitch), 200)                     # it is the About text too
+        self.assertIn("- A model for the agents: an API provider connected in `opencode` with `/connect`, or a local model", readme)
         self.assertNotIn("local LLM", readme)
         self.assertNotIn("subagent", readme)
 
@@ -490,12 +492,11 @@ class DocsForTheWebApp(unittest.TestCase):
     (2026-11-24) that the terminal stays primary, the web chat a second lane, the web app's Settings
     the settings' home, with Claude helping on a clear ask."""
 
-    def test_the_readme_quickstart_names_the_web_apps_settings_and_stats_and_its_link(self):
-        readme = (ROOT / "README.md").read_text()
-        quick = readme[readme.index("## Quickstart"):readme.index("## What it does")]
-        self.assertIn("Settings and Stats live in the web app", quick)
-        self.assertIn("`[•_•] Claude's Workbench - http://localhost:1337/#token=…`", quick)
-        self.assertIn("`wb chat reach tailnet`", quick)  # #1355's phone reach: chat.json's `bind` by command
+    def test_the_readme_names_the_web_apps_settings_and_stats_and_its_phone_chat(self):
+        # #1288, and the rewrite of 2026-11-27: one line, the detail in *The web chat*
+        readme = " ".join((ROOT / "README.md").read_text().split())
+        self.assertIn("A web app shows your settings and stats", readme)
+        self.assertIn("(ARCHITECTURE.md#the-web-chat)", readme)
 
     def test_what_people_and_claude_read_names_no_pane_tab(self):
         # the pane is Tasks only since #1283: a Settings or Stats tab there no longer exists

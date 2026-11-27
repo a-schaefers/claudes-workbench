@@ -6807,7 +6807,7 @@ default after 2.0 turned it on.
   `consent`: what `state.waiting`'s `{what}` is), `note.waiting` and `note.grant` (the notice row's
   bytes, `chat.WAITING`, `WAITING_GRANT`), `receipt.blocked`, `lane` (with `rule.terminal` and `rule.settings`,
   Settings' *How the chat works*: three short lines where "prompts wait in the terminal" was said five times over
-  three cards, `rule.chat` and `prompts` folded in, the web app's review, 2026-11-26), `doc.rule`;
+  three cards, `rule.chat` and `prompts` folded in, the web app's review, 2026-11-26);
   `link.where` (wb setup's last line: where the web app's link is) and `link.reach` (`wb chat on`'s
   and doctor's: `wb chat reach tailnet`), read by cli.py; `moved.deepmode` (`wb deepmode --moved`'s
   line, both hosts' toast, #1507); `refusal.question`, `refusal.plan`,
@@ -6824,7 +6824,7 @@ default after 2.0 turned it on.
   tables of `HOST`'s keys filled for each host, pure data: `register.tsx` imports it as `SAY`,
   `opencode-plugin/chat.ts`, `skill.ts`, `upkeep.ts` and `pane.ts` as their own; in the plugin's shared files,
   `patches.PLUGIN_SHARED`, and the root package.json's `files`) and fills each doc block,
-  `<!-- story:KEY[:driver] -->` … `<!-- /story -->` (README.md's `doc.rule`; SKILL.md's
+  `<!-- story:KEY[:driver] -->` … `<!-- /story -->` (SKILL.md's
   `skill.rule` and reference/driving.md's `skill.prompts`, both Claude Code's text);
   `--check` writes nothing and names each copy that
   differs. `tests/test_story.py` runs the check, so CI holds the copies to the source.
@@ -10969,7 +10969,7 @@ on an API model `kind: "api"` and `paid {cost, source}` (`bench.paid`, from `res
 
 ## Installing
 
-**Users** (the README's quickstart, Claude's Workbench; OpenCode Workbench's one line,
+**Users** (the README's *Install*, Claude's Workbench; OpenCode Workbench's one line,
 `opencode plugin add 'github:a-schaefers/workbench#main'`: *The OpenCode plugin*):
 ```sh
 claude plugin marketplace add a-schaefers/workbench
@@ -11307,7 +11307,7 @@ local or down, `wb chat url`'s QR code at a terminal only, and `GET /api/phone-q
 filling its codewords, byte capacities, alignment positions, a version 1 symbol under each mask and a version 7 module for module as
 qrencode 4.1.1 made them, `tests/fixtures/qr-qrencode.json`; the smallest version, 2,332 bytes refused, the SVG's and the
 half blocks' modules and colours);
-`test_story.py` (*The story*: `gen_story.py --check` clean, a one-byte edit to either `story.ts`, README.md's block or a
+`test_story.py` (*The story*: `gen_story.py --check` clean, a one-byte edit to either `story.ts` or a
 skill block failing it, the hosts' refusals byte for byte as each said them and imported from `mod/hooks/story.ts`, the
 skill blocks Claude Code's with OpenCode's in the module,
 `tests/fixtures/story/fill.json` through Python's `fill` and, with node, the page's `storyFill`, every key rendered for
@@ -11328,8 +11328,7 @@ every workflow its own permissions, `check` never path-filtered and required fro
 `suite` shard, `mod`, `kernel` and `opencode-plugin` are, the `kernel` job's steps in order, the `opencode-plugin` job's (#1328: OpenCode, then `patches.PLUGIN_TESTS`' two), the macOS nightly's kernel `check` on shard 1 and `opencode.yml`'s Bun goldens, the shards dealing each test once, the ruleset without bypass, the plugin without
 `version`, `owner-merge.yml` approving only the owner's pull requests without running their code); `test_docs.py`
 (every command and flag in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable in CLAUDE.md,
-CLAUDE.md under 25,000 characters; since #1288 the README's quickstart naming the web app's Settings and Stats and its
-link, no Settings or Stats tab in the README or the skill, the terminal primary in the skill, driving.md and here, and
+CLAUDE.md under 25,000 characters; since #1288 the README naming the web app's settings and stats and its chat, no Settings or Stats tab in the README or the skill, the terminal primary in the skill, driving.md and here, and
 docs/chat-api.md's agent allow-list holding `chat.AGENT_MAY`; `TheDriverIsNamedOnThePage`, #1355: no string in
 `chat_static/src`'s TypeScript says "Claude" where the driver is meant, the name itself, "Claude's Workbench", Claude Code
 and the savings' "Claude tokens" aside, read by `ts_strings` outside comments and patterns); `test_settings.py` (*The admin table (settings.py)*: every row's group and kind,
@@ -12255,7 +12254,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
 - **A sentence of the story** (`workbench/story.py`'s `TEXTS`, `DRIVERS`) → `python3 scripts/gen_story.py` (its copies:
-  `chat_static/src/story.ts`, then `scripts/web.py build`'s `story.js`; README.md's block), `tests/test_story.py` (a key
+  `chat_static/src/story.ts`, then `scripts/web.py build`'s `story.js`; the skill's blocks), `tests/test_story.py` (a key
   with no reader fails), `e2e_chat.mts` and `e2e_settings.mts` where they read it, and the HTML's own text of a
   `data-story` element (`any`'s words). A new key read by a computed name (`state.*`, `next.*`, `wait.*`) → its family
   in `chat.driver_state` (`WAIT_KINDS`). **The driver's state** (`chat.driver_state`) → wire.d.ts's `DriverState`,

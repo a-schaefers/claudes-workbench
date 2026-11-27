@@ -56,7 +56,6 @@ class Story(unittest.TestCase):
         host = Path("mod") / "hooks" / "story.ts"
         skill = Path("skill") / "workbench"
         for rel, old, new in ((page, "Message {who}", "Message {who}!"),
-                              (Path("README.md"), "never undoes a change you made", "never undoes a change"),
                               (host, "and end your turn.", "and end your turn"),
                               (skill / "SKILL.md", "never undo a change the user made there", "never undo a change"),
                               (skill / "reference" / "driving.md", "it clears when the prompt is answered", "it clears")):
