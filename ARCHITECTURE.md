@@ -10188,7 +10188,10 @@ the repo gone, OpenCode unusable, end the item as its own failure (its stage's `
 as `wb resume --all` leaves them (`cli.INTERRUPTED`). A resume refused with exit 3
 (the cap, local-only, Agents on the GPU) holds the item (journal `held`) and pauses the run, or under
 `--overnight` with the cap's `meter.RESETS` is tried again each pass, so past midnight it goes on; any other
-refusal is its null. A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
+refusal is its null. While the run is open a held code item reads `running` (`runs._live`), so its stage stays
+incomplete and no escalate role's attempt starts beside it, unless the driver's last resume of it was refused
+(journal `resumed` `by: driver`, `ok: false`: its null); read as null, a code item the cap stopped mid-round under
+`--overnight` ended the run in the pass that held it (#1581). A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
 Claude's, its work kept; while the run isn't `running` the item waits for `wb run resume`. It takes each report item that ended (`_take`: its object to `outputs/`,
 through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fix` list, at most `max`, the review
 `superseded`; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
