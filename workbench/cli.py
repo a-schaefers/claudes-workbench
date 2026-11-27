@@ -290,6 +290,9 @@ def spawn_runner(task: store.Task) -> int:
     # task not checked out, whose runner's #655 guard reads it
     if task.status.get("taken_over") and runner.checked_out(task):
         task.set_status(taken_over=None)
+    # the phase before a takeover says nothing once an agent runs again: the next takeover
+    # records the phase this runner leaves (#1592's second hand-back, 2026-11-27)
+    task.set_status(prior_phase=None)
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
@@ -2422,9 +2425,9 @@ def cmd_rewind(a):
     # the ignored files the agent wrote, as the runner's review trees hold them (#1259): without
     # them every rewind from a reviewed round said "your edits … kept nowhere" and named the
     # restored file "not as round N's" (the merge of 2.1 into main, 2026-11-25)
-    ignored = runner.ignored_to_commit(task)
+    ignored, caches = runner.ignored_to_commit(task), runner.run_caches(task)  # as the trees (#1593)
     try:
-        now, now_left, now_keep = gitops.review_snapshot(wt, force=ignored)
+        now, now_left, now_keep = gitops.review_snapshot(wt, force=ignored, skip=caches)
     except (gitops.GitError, OSError) as e:
         die(f"can't read the worktree: {e}")
     saved = ""
@@ -2452,7 +2455,7 @@ def cmd_rewind(a):
         return
     try:
         done = gitops.restore_tree(wt, want["tree"], want.get("keep") or [], now=now,
-                                   now_keep=now_keep, force=ignored)
+                                   now_keep=now_keep, force=ignored, skip=caches)
     except (gitops.GitError, OSError) as e:
         die(f"the rewind stopped partway ({e}): wb rewind {a.name} {a.round} again")
     # the stat names no file left as it is: a grown file the tree has read as deleted (#1198)
@@ -3316,9 +3319,11 @@ def cmd_diff(a):
             f"git -C {repo} diff {task.spec['base'][:12]} {tip}")
     base = gitops.diff_base(task, a.all)  # the web chat's task sheet's too (#1201)
     try:
-        # the ignored files --include commits too, as the review diff shows them (#1259)
+        # the ignored files --include commits too, as the review diff shows them (#1259), and
+        # not the run caches it leaves out (#1593)
         print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths,
-                          force=runner.ignored_to_commit(task)) or "(no changes)")
+                          force=runner.ignored_to_commit(task), skip=runner.run_caches(task))
+              or "(no changes)")
     except gitops.GitError as e:
         die(f"{e}\nthe branch's commits: git -C {repo} diff {task.spec['base'][:12]} {tip}")
 
@@ -4976,16 +4981,17 @@ def cmd_takeover(a):
                       f"or wb discard {t.name}")
                 continue
             try:
-                task, aside = _take_over(t.name, a.user)
+                task, aside = _take_over(t.name, a.user, hand_back=True)
             except SystemExit as e:
                 refused = max(refused, e.code if isinstance(e.code, int) else 1)
                 continue
             # a compare item's attempts are alternatives for one change: each said apart, with its
             # own "wb accept (it commits)", a hand-back of a best-of run had Claude finish and
-            # merge all three (#1576, the 2.2 bar, 2026-11-26): one line for them, by run and item
-            if (at := runs._attempt_of(task)) is not None and not task.spec.get("report"):
-                run, _rows, me, key = at
-                attempts.setdefault((run.name, me.get("stage"), key.rsplit("#a", 1)[0]), []).append(task.name)
+            # merge all three (#1576, the 2.2 bar, 2026-11-26): one line for them, by run and item;
+            # an escalation and the try it escalated from too (#1592, 2026-11-27)
+            if (at := runs.tries_of(task)) is not None and not task.spec.get("report"):
+                run, stage, item, _tries = at
+                attempts.setdefault((run.name, stage, item), []).append(task.name)
             else:
                 print(_took_over_line(task))
             _say(aside)  # after its line: "took over" opens the line the mod and plugin key on
@@ -5007,7 +5013,7 @@ def cmd_takeover(a):
     _say(aside)
 
 
-def _take_over(name: str, user: bool) -> tuple[store.Task, str]:
+def _take_over(name: str, user: bool, hand_back: bool = False) -> tuple[store.Task, str]:
     """One task stopped and made Claude's (wb takeover <name>, and each of --all's), and
     _stop_aside's line ("" for none)."""
     task = need(name)
@@ -5025,8 +5031,17 @@ def _take_over(name: str, user: bool) -> tuple[store.Task, str]:
     aside = _stop_aside(task, "the user's hand-back" if user else "wb takeover")  # #1582
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
                 "text": "Claude took over"})
+    # the phase it had before Claude took it over, kept across another takeover: a second
+    # /workbench-quit-and-hand-back-claude read every try as review, and the escalated item's
+    # line had Claude discard the reviewed cheap try, maybe holding Claude's own edits by then,
+    # for the crashed escalation (#1592's second hand-back, 2026-11-27)
+    # A by-name takeover is Claude choosing to write that try: it counts as at review, so a
+    # later hand-back keeps it (Claude's own edits are in its worktree), never the cheap try
+    # (#1592's review, 2026-11-27); only --all's own takeover records the phase it found
+    prior = (task.status.get("prior_phase") if task.status.get("taken_over") else None) \
+        or (task.status.get("phase") if hand_back else "review")
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
-                    parked=None)  # Claude's now (#698)
+                    parked=None, prior_phase=prior)  # Claude's now (#698)
     _ack_all(task)
     return task, aside
 
@@ -5046,19 +5061,47 @@ def _took_over_line(task: store.Task) -> str:
             f"wb feedback {task.name} --message <file>")
 
 
+_PHASE_SAID = {"failed": "failed", "stuck": "got stuck", "queued": "never started",
+               "running": "was still running", "testing": "was still testing", "asking": "was still asking"}
+
+
 def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
-    """--all's one line for the attempts it took over at one compare item (#1576): one is kept,
-    the rest discarded, which records them as not chosen (runs.not_chosen), never as rejected."""
-    rest = [t.name for t in runs._siblings(*runs._attempt_of(store.Task(names[0]))[1:])
-            if t.name not in names]
+    """--all's one line for the tries it took over at one code item (runs.tries_of): a compare
+    item's attempts (#1576), one kept, the rest discarded, which records them as not chosen
+    (runs.not_chosen), never as rejected; or an escalation and the tries it escalated from
+    (#1592), the latest finished one kept (at review before Claude first took it over: status
+    ``prior_phase``, which _take_over keeps across another takeover), else the latest, the others
+    discarded, no pick to count them against."""
+    tries = runs.tries_of(store.Task(names[0]))[3]
+    rest = [t.name for t in tries if t.name not in names]
     kept = [n for n in rest if store.Task(n).status.get("phase") == "accepted"]
     where = f"item {item} of stage {stage} in run {run}"
+    escalated = not any("#a" in str(t.spec.get("item") or "") for t in tries)
     if kept:  # the pick is in: these lost to it
-        return (f"took over {', '.join(names)}: the agents are stopped. Attempts at {where}, whose "
-                f"{kept[0]} is accepted: wb discard each of these (they count as not chosen)")
+        return (f"took over {', '.join(names)}: the agents are stopped. "
+                + ("Tries" if escalated else "Attempts") + f" at {where}, whose {kept[0]} is accepted: "
+                "wb discard each of these" + ("" if escalated else " (they count as not chosen)"))
     others = [n for n in rest if store.Task(n).status.get("phase") not in store.CLOSED]
     if len(names) == 1 and not others:  # the last attempt left: no alternative to weigh
         return _took_over_line(store.Task(names[0]))
+    if escalated:  # the run's own pick: its latest try, started from the base on the next role
+        live = [t.name for t in tries if t.name in names or t.name in others]
+        # the phase before the first takeover, not this one's: a second hand-back read every
+        # try as review, the first one's (#1592's second hand-back, 2026-11-27)
+        phase = {n: (st := store.Task(n).status).get("prior_phase") or st.get("phase") for n in live}
+        # the latest try with a finished change, not merely the latest: a fix-escalate cheap try
+        # kept at review (asks left after its refixes) whose escalation crashed was named to
+        # discard, and Claude dropped the reviewed change to redo it in the crashed try's worktree
+        # (#1592, the bar loop's M5, 2026-11-27)
+        keep = next((n for n in reversed(live) if phase[n] == "review"), live[-1])
+        drop = [n for n in live if n != keep]
+        why = ("" if keep == live[-1] else
+               f", which {_PHASE_SAID.get(phase[live[-1]], 'never finished')}: {keep} holds the latest "
+               f"finished change")
+        return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for one "
+                f"change, {where}: the run escalated {', '.join(live[:-1])} to {live[-1]}{why}. Finish "
+                f"{keep} in its worktree and wb accept only it -m \"…\" (it commits), then wb discard "
+                f"{', '.join(drop)}")
     return (f"took over {', '.join(names)}: the agents are stopped. "
             + ("They are alternatives" if len(names) > 1 else "It is one of the alternatives")
             + f" for one change, the attempts at {where}"

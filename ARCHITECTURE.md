@@ -1029,7 +1029,9 @@ midnight, and the cap now no higher than its status `cap_told`, the cap it stopp
 a new question, any other routes.json write is none, #1304; a stop without `cap_told`, from before it,
 counts while its `noticed` is since routes.json's mtime) waits as `phase:
 queued`, `last: waiting: <why>; <task>'s stop has asked the user: it goes on once the cap is raised
-(wb route cap <usd>) or at local midnight (wb stop gives up)`, its provider slot let go and taken
+(wb route cap <usd>) or at local midnight (wb stop gives up)`, status `infra` `spend` (cleared once
+the wait ends: a wb discard meanwhile is outside the step, `cli.stopped_outside`, never the model's
+rejected work, #1588), its provider slot let go and taken
 again after (then the lease's load once more, the credit wait, and `_agents_gpu` again), on a watch
 of routes.json's directory, looking again at most every `API_WAIT`'s 30 s and at midnight. A raised
 cap lets it go on, and so does Agents switched to GPU (its own stop, `_agents_gpu`); a role moved to
@@ -1502,7 +1504,18 @@ or not, nor counted by `_bulk`, `cli._to_commit` or `cli._gained_work`: Claude's
 unittest` in the worktree had `wb accept` commit its `.pyc` in a repo that ignores no
 `__pycache__`, shown by neither the review nor the accept line (#1580). `wb next` and `wb accept`
 say "note: the commit leaves out a run's caches, which nobody wrote: `__pycache__/` (2 files)"
-(`gitops.run_caches_line`); they stay in the worktree, and go with it.
+(`gitops.run_caches_line`); they stay in the worktree, and go with it. The commit's `add -A` takes
+its pathspecs on stdin (`add_all`'s `specs`, `--pathspec-from-file`), one exclude per outermost
+directory holding nothing but caches (`gitops.cache_specs`: no tracked file, no other new file;
+else the file itself), and `gitops.changed` leaves them out of `git status`'s lines in Python: one
+exclude per file in argv failed every `wb accept` and `wb next` on "Argument list too long" for an
+un-ignored venv's 30,000 `.pyc` (#1593). The review leaves the same paths out (`runner.run_caches`:
+`accept_writes` are kept): the round report's "files changed" and its closing diffstat (its
+`(none)` then said `1 file changed`: #1593's review) and the check-in's, the review
+snapshots (`review_snapshot`'s and `restore_tree`'s `skip`, so a rewind or a self-review's
+set-aside leaves them as they are), the review diff, `wb diff` and `wb verify`'s candidate; the
+report names them in one `run_caches_line`. Shown, the `.pyc` `wb next` left read as the agent's
+new binary file in every later review notice (#1593).
 
 **`run_round(task, n)`.** Writes the config layer and environment (*What the agent knows*),
 prepends `skills_note` to the prompt argument (not `prompt.md`), wraps the lane, starts in its own
@@ -2002,7 +2015,8 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
    (`claude_files_changed`: CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/`), `NOTE: edits in
    submodule <path> can't land: …` (`gitops.submodule_edits`, #419), `NOTE: new files in submodule
    <path> won't be committed: …` (`gitops.submodule_check`, #889), and the diffstat's last line
-   (after `wb next`, the step's, from HEAD, as the files list and `wb diff` are: #1404).
+   (after `wb next`, the step's, from HEAD, as the files list and `wb diff` are: #1404; both
+   without the run caches, `runner.run_caches`: #1593).
 
 **Speed** (`measure_speed`): after each round the export's new messages give write and read samples
 (`router.record_speed`; a cut-short request with a first token still gives a read sample). A round
@@ -3671,7 +3685,13 @@ nothing to commit (`wb accept` keeps a result it wrote, `wb discard` drops it), 
 `--all` gives a compare item's attempts one line by run and item (`cli._attempts_line`: finish the
 best, `wb accept` only it, `wb discard` the rest, which count as not chosen; those of an item
 whose pick is accepted, discard each), never a per-task accept each: a best-of hand-back once had
-Claude finish and merge all three (#1576). `wb stop` sets `stuck` ("stopped by the
+Claude finish and merge all three (#1576). An escalation (`<item>#e<k>`) and the tries it escalated from
+are grouped the same way (`runs.tries_of`, by the key without `#e<k>`, then `#a<n>`): "the run escalated A
+to B", finish and accept only the latest try that was at `review` before Claude first took it over
+(a finished change: status `prior_phase`, kept across a second hand-back, which read every try as
+`review` and kept the crashed escalation; a try Claude took over by name counts as at `review`, so its own edits are kept), else B, discard the others, never counted as not chosen (`runs._attempt_of` stays `#a`'s,
+for `not_chosen`); a fix-escalate hand-back had Claude finish and commit both, and then, its cheap try
+kept at review and its escalation crashed, discard the reviewed change for the crashed one (#1592). `wb stop` sets `stuck` ("stopped by the
 reviewer", worktree kept); either, mid self-review off its green tree, sets its files aside and
 puts the green tree back, printing the `wb rewind <task> <n>s` line (`cli._stop_aside`, #1582);
 `wb resume` continues a stuck or failed task in a fresh session with `RESUME` and the step's
@@ -5355,7 +5375,8 @@ Agents stop has told Claude (`runner._agents_told`: phase `stuck`, guard `agents
 routes.json's mtime, so a stop from an earlier switch, never resumed, holds no new task untold) waits
 instead, before round 1 or before its next (`_agents_gpu` with the lease, `runner._agents_wait`):
 `phase: queued`, `last: waiting: Agents is GPU, so nothing spends; <task>'s stop has asked the user: it
-goes on once Agents is Both or API (wb stop gives up)`, its provider slot let go and taken again after,
+goes on once Agents is Both or API (wb stop gives up)`, status `infra` `spend` until the wait ends (a
+discard meanwhile is outside the step, #1588), its provider slot let go and taken again after,
 on a watch of routes.json's directory, looking again at most every `API_WAIT`'s 30 s. Agents Both or API
 lets it go on with no `wb resume`; that stop gone (resumed, taken over, discarded) it looks again, and
 stops and tells when none stands: never a wait untold. The look and the stop are under
@@ -6410,7 +6431,7 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   objects refused every accept, #889); an uncheckable one says "… can't be checked: … wb relocate"
   (#682), never skipped. The directories stay writable: in-tree builds write there.
 - **Commits are the user's** (`gitops.commit_all`: `add -A`, but for a run's caches nobody wrote,
-  `gitops.run_caches`, #1580; refused with nothing staged, a nested repo, or, without
+  `gitops.run_caches`, #1580, excluded by `gitops.cache_specs` on stdin, #1593; refused with nothing staged, a nested repo, or, without
   `--include`, a file git ignores). `wb accept` commits under the user's identity,
   no AI co-author line, only provenance:
   ```
@@ -7429,12 +7450,15 @@ address (#534).
   `created_at`/`updated_at`, model, label (`chat.model_label`), via, provider_name, the round's report (`store.Task.report`, as
   `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`),
   and what the sheet leads with (`chat.report_lead`, #1339), read from the report `runner.summary_text`
-  writes: `agent_summary`, `changed` (the files' paths, `[]` for `(none)`, null with no report),
+  writes: `agent_summary`, `changed` (the files' paths, `[]` for `(none)`, then the ignored files
+  `--include` commits, `runner.ignored_to_commit`, as the Diff tab lists them: a failed task whose agent
+  wrote only those said `before writing anything` and `No files changed.` above 'Discard it', #1591;
+  null with no report),
   `tests` (its `tests: PASS|FAIL …` line) and, for a failed or stuck task, `happened`: one plain line
   (`The agent stopped before writing anything (OpenCode exited).`, `The agent was stopped partway:
   what it changed so far is in the worktree (<the STOPPED reason>).`, and with no report for the
   round `The task stopped partway (<last>): what the agent changed so far is in the worktree.` when
-  `gitops.changed` lists any, else `The task stopped before the agent ran (<last>).` for status
+  `gitops.changed` or `runner.ignored_to_commit` lists any, else `The task stopped before the agent ran (<last>).` for status
   `infra` setup, repo or model, else `The task stopped (<last>).`; the cause cut at `LEAD_CAUSE_CHARS`
   160). A reaped runner (a restart, a dead runner) or a round failing after an earlier round's work
   leaves no report either: the sheet said the agent never ran, under 'Discard it'. Never runner.log's tail: OpenCode's
@@ -10223,7 +10247,8 @@ dead an item's notice is Claude's, a task's as any), refuses an item's open ask 
 its step whose cause passes or is the user's to lift (`_held`, `runs._outside`: `cli._interrupted`, a restart, a
 killed runner, a shutdown's signal, an update, or `cli.stopped_outside` in `runs.held_infra`: the day cap in a
 round, a provider's rate limit, outage or refusal, a repo made local-only, `wb stop --all`; `wb resume`, journal
-`resumed` `by: driver`). The rest of `cli.stopped_outside`'s, a model that failed, a setup, a crash, a full disk,
+`resumed` `by: driver`; never Claude's own `wb stop <item>`, `last` `runs.STOPPED_BY_CLAUDE`, whatever `infra`
+it left: one made while the item waited behind a told cap kept the wait's `spend`, and the driver resumed it, #1588's). The rest of `cli.stopped_outside`'s, a model that failed, a setup, a crash, a full disk,
 the repo gone, OpenCode unusable, end the item as its own failure (its stage's `on_failure`, `null` by default),
 as `wb resume --all` leaves them (`cli.INTERRUPTED`). A resume refused with exit 3
 (the cap, local-only, Agents on the GPU) holds the item (journal `held`) and pauses the run, or under
@@ -10234,7 +10259,12 @@ incomplete and no escalate role's attempt starts beside it, unless the driver's 
 `--overnight` ended the run in the pass that held it (#1581). A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
 Claude's, its work kept; while the run isn't `running` the item waits for `wb run resume`. It takes each report item that ended (`_take`: its object to `outputs/`,
 through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fix` list, at most `max`, the review
-`superseded`, held as a start is, *Budgets*; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
+`superseded`, held as a start is, *Budgets*, and at the day cap: wb feedback's exit 3 with `meter.RESETS` writes
+no output and accepts nothing, journal `refix_held` with its `day`, `cap` and the code task's `model`, on which
+`runs._refix_held` holds the review each pass without running wb feedback or writing, as `_cap_held` holds a start;
+the run paused (`run_paused`), or under `--overnight` running and tried again past midnight or a raised cap; the
+report's pending entry says `refix held: <why>`, and a refix not sent otherwise is the review's final entry's
+`why`: the review was accepted and the run said done with its must_fix never sent, #1589; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
 `cause: item`, as an `on_failure` report item's: it holds only that item, and while it is open the driver still starts
 and resumes the others, `runs._going`, though it never finishes the run or pauses it; a second item's null then is
 raised after `wb run resume`, journalled `notice` only once raised; a `claude` stage's checkpoint waits for the resume, never replacing it, #1510),
@@ -10272,7 +10302,10 @@ budget it pauses the run as a start does, and while the run isn't going, `runs._
 each pass, so the first pass after `wb run amend --budget-usd N` and `wb run resume` sends it; sent at once, each
 refix paid a coding round past the budget, while the run read `paused`, #1586): items already running finish
 their rounds, so a run can end past `--budget-usd` by what they spend (the day cap still stops every one).
-The estimate: each card's `est` × `meter.price` for the stages whose items are known (`runs.estimate`).
+The estimate: each card's `est` × `meter.price` for the stages whose items are known (`runs.estimate`); a code
+stage with no card (`wb flow import`'s, a plan's `"kind": "code"`) counts as the build card's `est`, and a stage
+on a paid API model with no `in` or `out` to count (a card with no `est`) makes it `unpriced`, never `$0`: a
+cardless code stage read `estimate $0` on a paid role, and spent its budget (#1590).
 
 **Notices** (`runs.Run.notify`; *Waking Claude, exactly once*): `run_checkpoint`, `run_done`, `run_paused`,
 `run_stopped`, `run_failed`, each text the wake whole, opening `[workbench] Run `<run>` <headline>:`
@@ -10483,8 +10516,8 @@ $WB_HOME (~/.local/state/workbench)
                                  repo (the top), package_dir? (the directory started from, under it: each item's --repo, #1494), base, base_ref, base_branch (`gitops.start_branch`: each item's, #1541), cwd, budget_usd, budget_min, overnight, trial, no_claude_md, created, driver {python, machine},
                                  session? (Claude Code's, or an OpenCode driver's with session_kind: opencode, #1309), claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,
                                  why, cause? (item: a checkpoint an item's null raised, runs._going), pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
-                                 budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|escalate|escalated|fed|amend|notice|stopped|resumed|reaped,
-                                 stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), skip? (stopped: wb run amend --skip's stage), ok?, day?, cap?, model? (retry: runs._cap_held)}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
+                                 budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|refix_held|escalate|escalated|fed|amend|notice|stopped|resumed|reaped,
+                                 stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), skip? (stopped: wb run amend --skip's stage), ok?, day?, cap?, model? (retry: runs._cap_held; refix_held: runs._refix_held)}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
                                  {key, input, result, task}; specs/<stage>-<n>.md (each item's spec); schemas/<stage>-<n>.json (a batch's schema, runs.batch_schema); notify.jsonl (its items' notices, the driver's);
                                  result.json (runs.report_of at the end); acked (its notices taken); driver.log
   runs/.archive/<run>/           a run closed ARCHIVE_DAYS, moved by gc (runs.archive)
@@ -10805,7 +10838,7 @@ off), not `wb start`'s.
 | `rewound_to` | the round `wb rewind` went back to (`"<N>h"` for kept edits by hand), until the next runner starts (`spawn_runner`): the next `wb feedback` says so and starts a fresh session, `wb next` too (#1198) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` (`exit`: code, `timeout`, `output limit`; `lane`: devices refused; `proxy`: variables left out, on a connection failure; `hang`: `{base, limit}`, a timeout where the base check ran it in a quarter of the limit or less) |
 | `base_check` | `{ok, exit, tail, limit, secs, cmd}`, `runner.base_check` in the lane before round 1, with `--test` and no `--no-base-check` (`exit` may be `"timeout"`, `"setup failed"`, `"filtered"`: not the task's bytes) |
-| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019), `updated` (runners before #1322's `_updated`), `opencode` (`runner.opencode_moved`, OpenCode below 2.0, #1176), `local_only` (an API task's repo marked local-only since it started, `runner._local_only_stop`, #1215), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`), `update` (`wb update --stop`, `cli._stop_for_update`), `stopped` (`wb stop --all`, `cli.stop_everything`), `signal` (a SIGTERM not wb's, `runner.SIGNAL_STOP`), `repo` (`runner._repo_gone`) (these four #1260); `wb feedback` then counts no review (#1153) and `wb discard`'s row carries it (#1245): both read it through `cli.stopped_outside`, which reads the first three (`update`, `stopped`, `signal`) from `last` too for a status written before they set it (the update that installs #1260 stops its tasks with the old code); cleared at runner start; a replay with it is an `error` row |
+| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019; the Agents switch's stop too; and while a task waits queued behind a told one of either, `runner._cap_wait`, `runner._agents_wait`, cleared once the wait ends, #1588), `updated` (runners before #1322's `_updated`), `opencode` (`runner.opencode_moved`, OpenCode below 2.0, #1176), `local_only` (an API task's repo marked local-only since it started, `runner._local_only_stop`, #1215), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`), `update` (`wb update --stop`, `cli._stop_for_update`), `stopped` (`wb stop --all`, `cli.stop_everything`), `signal` (a SIGTERM not wb's, `runner.SIGNAL_STOP`), `repo` (`runner._repo_gone`) (these four #1260); `wb feedback` then counts no review (#1153) and `wb discard`'s row carries it (#1245): both read it through `cli.stopped_outside`, which reads the first three (`update`, `stopped`, `signal`) from `last` too for a status written before they set it (the update that installs #1260 stops its tasks with the old code); cleared at runner start; a replay with it is an `error` row |
 | `env_skip` | with phase `review`: the cause of a skipped auto-fix whose fix ends `then wb feedback` (`runner.THEN_FEEDBACK`: a tool the agent's environment lacks, `GIVE_TOOL`; a lane grant): `wb feedback` then counts no review, and `wb discard`'s row has `infra` `environment` (#1257); cleared at runner start |
 | `step_note` | true once a smaller step's note (`runner.STEP_NOTE`, `wb steer --step`) is delivered (`runner.step_noted`: `_steer_round`, `_early_notes`, `_full_round`, `wb resume`): the rounds after it get no auto-fix (`runner.STEP_SKIP`) and no self-review; the plain `wb feedback` after it counts no review and clears it, `wb next` clears it (#1300) |
 | `prepared`, `setup_secs` | the worktree is set up (`_prepare`), so a later runner doesn't again; how long (older tasks: `prepared_paths`, `prepared_marks`, `prepared_bytes`, `runner.prepared_record`) |
@@ -10817,6 +10850,7 @@ off), not `wb start`'s.
 | `ran_wrote` | where the runner's own setup or `--test` run in the worktree, or its base check in the scratch checkout, wrote a file `gitops.hand_written` would take for Claude's (`gitops.ran_wrote`: its outermost ignored directory, else the file), grown after each run: a file changed there is build or test output (`hand_left`), as Claude's rerun of the acceptance command wrote `mvn test`'s reports there (#1211) |
 | `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output, or a build or test command of Claude's wrote (`runner._claude_built`), but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
+| `prior_phase` | `wb takeover` (`cli._take_over`): the phase before Claude first took the task over, kept by another takeover (a by-name `wb takeover <task>` records `review`: Claude chose to write that try; only `--all`'s own takeover records the phase it found); the hand-back's escalated item keeps the try that was at `review` then (`cli._attempts_line`, #1592); cleared by `spawn_runner` |
 | `branch_made` | the commit `runner.checkout` makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists: the only branch a cut-short cleanup deletes (#416) |
 | `failed_before` | `setup` or `load`: before the agent ran; the row copies it |
 | `stopping` | `cli._stop_runner`; cleared by `spawn_runner` and the runner's exit |
@@ -11820,7 +11854,7 @@ doc needs its own `!/` line).
   is the one each host names as acting next; modeline.ts's `modeline(link, cols, name)` (`MODELINE` by default,
   `Workbench` in OpenCode); the colour names `Part` uses → `pane-view.ts`'s `TOKEN`; `wb watch --json`'s and `wb diff`'s
   output → `pane.ts`'s `parseLines`, `diffLines`; the owner keys `owns` reads → `pane.ts`'s `PaneTask`.
-- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ `mod/hooks/keywords.ts` (both hosts' detection; the root package.json's `files` brings it to the OpenCode plugin, `opencode-plugin/test/deep.test.ts` reads the fixture); `runs.PLACES`' `{report}` ↔ the shipped build, fix and best-of reviews and the review card; `runs.compare_schema`'s `best` and `ranking` ↔ `agent/schemas/choice.json` and the choose card; `runs.answers_key` (an array of objects requiring `id`) ↔ judgments' and triage's schemas; an item key's suffixes (`#a<k>` attempts, `#e<k>` escalations, `~r<k>` refixes, `.<j>` splits) ↔ `runs.escalation`, the compare stage's grouping and `attempt_label`; `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` and the plugin's (upkeep.ts) ↔ SKILL.md's *Deep workflows* step 2 (end the turn: the notices wake; `wb wait <run>` without the mod, skill.ts's line for wakes off) ↔ `wb run start`'s last line; a run notice's row (`run`, no `task`, `phase` from `runs.NOTICE_PHASE`) ↔ core.ts's `runNoticesDue`/`runNoticePlan` ↔ the mod's `deliverRuns` and `RUN_HEADLINE` ↔ the plugin's `deliverRuns`, `parseRunLines`, `RUN_HEADLINE`, `RUN_NAME` (`runs.RUN_RE`) ↔ `runs.due`; `wb ack --run --if` ↔ both hosts' `release`; `runs.WEB_STOP` ↔ settings.py's `RUN_STOP` (said to the session); `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's run strip, and ↔ `chat.open_runs` (`RUN_FIELDS`) ↔ `mod/types/wire.d.ts`'s `OpenRun` ↔ app.ts's runs strip; settings.py's `run-<run>` rows (`stop` → `wb run stop`, `summary` → `wb run report`, `detail`) ↔ settings.ts's `pre.set-detail` ↔ docs/chat-api.md; `wb run flows --json` (`runs.flow_rows`) ↔ `mod/types/wire.d.ts`'s `FlowRow` ↔ `mod/hooks/flows.ts` (both hosts' flow commands; the root package.json's `files` and `opencode-plugin/package.json`'s `flows.ts`), `FLOW_NOTE`'s `--args` ↔ `runs.parse_args` ↔ `tests/fixtures/flow_args.json`; `runs.RESERVED_COMMANDS` ↔ the mod's and the plugin's own command names and both hosts' built-ins; `runs.PARAM_KEYS`, `FILE_KEYS`, `unless_exists` ↔ deep.md; a copy's `from` ↔ `runs.FLOW_KEYS`, `cards.KEYS` and `schema.load`'s drop; a flow schedule's run name `<name>-YYMMDD[-N]` ↔ `schedule.FLOW_NAME_MAX` and `runs.RUN_RE`.
+- **Deep workflows** (#1278): `cli.REPORT_PROTOCOL` keeps PROTOCOL's fold `\n---\nHow to work` and its `Lesson:` line (the ReportTasks tests); `runner.SCHEMA_FIX`'s opening `rejected:` ↔ `tests/fake_opencode.py`'s report scenario (its repair round); a run notice's opening `[workbench] Run `<run>`` (`runs.Run.notify`) ↔ `spend.RUN_WAKE` and the hosts' relay; `runs.keywords` ↔ `tests/fixtures/keywords.json` ↔ `mod/hooks/keywords.ts` (both hosts' detection; the root package.json's `files` brings it to the OpenCode plugin, `opencode-plugin/test/deep.test.ts` reads the fixture); `runs.PLACES`' `{report}` ↔ the shipped build, fix and best-of reviews and the review card; `runs.compare_schema`'s `best` and `ranking` ↔ `agent/schemas/choice.json` and the choose card; `runs.answers_key` (an array of objects requiring `id`) ↔ judgments' and triage's schemas; an item key's suffixes (`#a<k>` attempts, `#e<k>` escalations, `~r<k>` refixes, `.<j>` splits) ↔ `runs.escalation`, the compare stage's grouping, `attempt_label` and the hand-back's (`runs.tries_of`); `runs.STAGE_KEYS`, `FLOW_KEYS`, `PLACES` ↔ `skill/workbench/reference/deep.md`; `cards.KEYS` ↔ the same file and *Deep workflows*; a run's item names `<run>-<stage>-<n>` ↔ `runs.RUN_RE` (24) and `STAGE_RE` (8) fitting `store.NAME_RE`; the start argv `runs._start` passes ↔ wb start's flags; `meter.RESETS` in `meter.refusal`'s two cap lines ↔ `runs._start`'s pause (no other exit 3 may say it); the mod's `WORKFLOWS_RULE` and the plugin's (upkeep.ts) ↔ SKILL.md's *Deep workflows* step 2 (end the turn: the notices wake; `wb wait <run>` without the mod, skill.ts's line for wakes off) ↔ `wb run start`'s last line; a run notice's row (`run`, no `task`, `phase` from `runs.NOTICE_PHASE`) ↔ core.ts's `runNoticesDue`/`runNoticePlan` ↔ the mod's `deliverRuns` and `RUN_HEADLINE` ↔ the plugin's `deliverRuns`, `parseRunLines`, `RUN_HEADLINE`, `RUN_NAME` (`runs.RUN_RE`) ↔ `runs.due`; `wb ack --run --if` ↔ both hosts' `release`; `runs.WEB_STOP` ↔ settings.py's `RUN_STOP` (said to the session); `wb top --json`'s `runs` (`runs.snapshot`) ↔ the pane's run strip, and ↔ `chat.open_runs` (`RUN_FIELDS`) ↔ `mod/types/wire.d.ts`'s `OpenRun` ↔ app.ts's runs strip; settings.py's `run-<run>` rows (`stop` → `wb run stop`, `summary` → `wb run report`, `detail`) ↔ settings.ts's `pre.set-detail` ↔ docs/chat-api.md; `wb run flows --json` (`runs.flow_rows`) ↔ `mod/types/wire.d.ts`'s `FlowRow` ↔ `mod/hooks/flows.ts` (both hosts' flow commands; the root package.json's `files` and `opencode-plugin/package.json`'s `flows.ts`), `FLOW_NOTE`'s `--args` ↔ `runs.parse_args` ↔ `tests/fixtures/flow_args.json`; `runs.RESERVED_COMMANDS` ↔ the mod's and the plugin's own command names and both hosts' built-ins; `runs.PARAM_KEYS`, `FILE_KEYS`, `unless_exists` ↔ deep.md; a copy's `from` ↔ `runs.FLOW_KEYS`, `cards.KEYS` and `schema.load`'s drop; a flow schedule's run name `<name>-YYMMDD[-N]` ↔ `schedule.FLOW_NAME_MAX` and `runs.RUN_RE`.
 - **The wb the mod runs** (`findWb` in register.tsx: `WB_BIN`, `wb` on PATH, `~/.local/bin/wb`) → `cli.mod_wb`, what wb
   doctor says the mod runs, and wb setup's PATH note (#1200).
 - **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).
