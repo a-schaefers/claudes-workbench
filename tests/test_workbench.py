@@ -14772,12 +14772,14 @@ class Lane(Base):
     def test_a_pnpm_projects_agent_is_given_the_users_store_in_the_lane_unless_they_set_one(self):
         # #1583 (bar round 3 of 2.2, 2026-11-26): pnpm couldn't link in its data dir, so it put
         # its store in <worktree>/.pnpm-store, and a setup's `pnpm install --frozen-lockfile`
-        # failed as unclean before round 1; on macOS ~/Library/pnpm/store wasn't in the lane
+        # failed as unclean before round 1; on macOS ~/Library/pnpm/store wasn't in the lane.
+        # Its review: pnpm 11 and 12 read only `pnpm_config_store_dir`, 9 and 10 only `npm_`
         self.start("t-1583", "ok")
         wait_phase("t-1583", {"review"})
         task = store.Task("t-1583")
         home = self.fake_home()
-        self.assertNotIn("npm_config_store_dir", runner.agent_env(task))   # not pnpm's: npm warns
+        for name in ("npm_config_store_dir", "pnpm_config_store_dir"):
+            self.assertNotIn(name, runner.agent_env(task))             # not pnpm's: npm warns
         (task.worktree / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
 
         def given():
@@ -14790,6 +14792,8 @@ class Lane(Base):
             with mock.patch.dict(os.environ, env):
                 named, w = given()
             self.assertEqual(named, str(home / where), env)            # made first, then named
+            with mock.patch.dict(os.environ, env):                      # pnpm 11's name too
+                self.assertEqual(runner.agent_env(task)["pnpm_config_store_dir"], named, env)
             self.assertIn(str(home / where), w, env)
         self.assertNotIn(str(home / "pnpmhome"), w)                    # its global bin stays out
         with mock.patch.object(sys, "platform", "darwin"):
@@ -14803,6 +14807,15 @@ class Lane(Base):
             rc.write_text("registry=https://r.example/\nstore-dir = /srv/store\n")
             self.assertIsNone(given()[0], rc)
             rc.unlink()
+        # pnpm 11's global config.yaml, where its `pnpm config set store-dir` writes
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(home / "cfg")}):
+            (home / "cfg/pnpm").mkdir(parents=True)
+            (home / "cfg/pnpm/config.yaml").write_text("storeDir: /srv/store\n")
+            self.assertIsNone(given()[0])
+        with mock.patch.dict(os.environ, {"pnpm_config_store_dir": "/srv/pnpm-store"}):
+            env = runner.agent_env(task)
+            self.assertEqual(env["pnpm_config_store_dir"], "/srv/pnpm-store")
+            self.assertNotIn("npm_config_store_dir", env)
         self.assertEqual(given()[0], str(home / ".local/share/pnpm/store"))
 
     @home_outside_the_lane

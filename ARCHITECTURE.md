@@ -2817,12 +2817,13 @@ default);
 it; `PANTS_REMOTE_CACHE_WRITE=false`, `PANTS_REMOTE_EXECUTION=false`, which beat `pants.toml`: reads
 stay, and a repo whose toolchain lives only on remote workers fails in the lane);
 `POETRY_VIRTUALENVS_IN_PROJECT=true`, `PIPENV_VENV_IN_PROJECT=1` unless set (lane on, #825);
-`npm_config_store_dir`, pnpm's store in the lane (`context.pnpm_store`: `<data dir>/store`, the
+`npm_config_store_dir` and `pnpm_config_store_dir` (pnpm 9 and 10 read only the first, 11 and 12
+only the second), pnpm's store in the lane (`context.pnpm_store`: `<data dir>/store`, the
 data dir as pnpm finds it, `PNPM_HOME`, `$XDG_DATA_HOME/pnpm`, `~/Library/pnpm` on macOS,
 `~/.local/share/pnpm`, from the user's environment), lane on, in a pnpm project only
 (`PNPM_MARKS`, `packageManager`: npm 12 warns on every call of an env config it doesn't know),
 never over a store-dir the user set (`STORE_DIR_VARS`, an `.npmrc`'s, pnpm's `rc`,
-`pnpm-workspace.yaml`'s `storeDir`): pnpm couldn't link in its data dir, so it put its store in
+`pnpm-workspace.yaml`'s or pnpm 11's global `config.yaml`'s `storeDir`): pnpm couldn't link in its data dir, so it put its store in
 the worktree, and a setup's `pnpm install` failed as unclean before round 1 (#1583); build
 daemons of its own (`daemon_env`, lane on: Gradle's registry under the runtime dir in
 `GRADLE_OPTS`, `SCCACHE_SERVER_PORT` from `free_port` in `SCCACHE_PORTS`, `DAEMONS_OFF` for MSBuild

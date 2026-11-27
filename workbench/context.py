@@ -1823,7 +1823,8 @@ def pnpm_store(task: store.Task) -> Path | None:
     `~/.local/share/pnpm`), from the user's environment, never OpenCode's moved XDG_DATA_HOME.
     None for a repo that isn't pnpm's (PNPM_MARKS, package.json's packageManager), a data dir
     that isn't absolute, or a store-dir the user set (STORE_DIR_VARS; the worktree's or the
-    package's .npmrc, the user's, pnpm's rc; pnpm-workspace.yaml's storeDir)."""
+    package's .npmrc, the user's, pnpm's rc; pnpm-workspace.yaml's storeDir, pnpm 11's
+    config.yaml's)."""
     roots = dict.fromkeys((task.worktree, task.workdir))
     try:
         manager = str(json.loads((task.workdir / "package.json").read_text()).get("packageManager", ""))
@@ -1843,12 +1844,14 @@ def pnpm_store(task: store.Task) -> Path | None:
                 return None
         except OSError:
             pass
-    try:
-        if re.search(r"^\s*storeDir\s*:", (task.worktree / "pnpm-workspace.yaml").read_text(
-                errors="replace"), re.M):
-            return None
-    except OSError:
-        pass
+    # pnpm-workspace.yaml's storeDir, and pnpm 11's global config.yaml, where `pnpm config set
+    # store-dir` writes on 11 (#1583's review, 2026-11-26)
+    for yaml in (task.worktree / "pnpm-workspace.yaml", conf / "config.yaml"):
+        try:
+            if re.search(r"^\s*storeDir\s*:", yaml.read_text(errors="replace"), re.M):
+                return None
+        except OSError:
+            pass
     data = env.get("PNPM_HOME") or (os.path.join(env["XDG_DATA_HOME"], "pnpm") if env.get("XDG_DATA_HOME")
                                     else home / ("Library/pnpm" if sys.platform == "darwin"
                                                  else ".local/share/pnpm"))

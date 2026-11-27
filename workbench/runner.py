@@ -846,11 +846,15 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         env.setdefault("POETRY_VIRTUALENVS_IN_PROJECT", "true")
         env.setdefault("PIPENV_VENV_IN_PROJECT", "1")
         # pnpm's store, the user's, granted (context.pnpm_store): without it pnpm put its store
-        # in the worktree, and a setup's `pnpm install` failed as unclean (#1583, 2026-11-26)
+        # in the worktree, and a setup's `pnpm install` failed as unclean (#1583, 2026-11-26).
+        # Both names (STORE_DIR_VARS): pnpm 9 and 10 read only `npm_config_`, 11 and 12 only
+        # `pnpm_config_` (#1583's review, 2026-11-26: on 11.29.0 the setup still failed with
+        # `.pnpm-store/v11/files/…`); npm 12 warns on neither of the `pnpm_` prefix
         pnpm = context.pnpm_store(task)
         if pnpm and any(os.path.realpath(pnpm) == os.path.realpath(p)
                         or context._under(os.path.realpath(pnpm), os.path.realpath(p)) for p in places):
-            env.setdefault("npm_config_store_dir", str(pnpm))
+            for name in context.STORE_DIR_VARS:
+                env.setdefault(name, str(pnpm))
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)
