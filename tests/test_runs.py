@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1901,14 +1902,23 @@ class Runs(Base):
                "--repo", str(self.repo))
         self.wait_item("fxe-code-1", lambda st: bool(st.get("session")) and runner.checked_out(store.Task("fxe-code-1")),
                        timeout=60)
-        run_wb("takeover", "fxe-code-1")                                  # Claude chose it, then
-        msg = Path(self.tmp.name) / "m.txt"
-        msg.write_text("carry on\n")
-        run_wb("feedback", "fxe-code-1", "--message", str(msg))           # handed it back
+        # takeover and hand-back with the run's driver held between them: a tick there reads the
+        # item as Claude's (TAKEN_OVER, #1471) and ends its stage, so on macOS's slower runners the
+        # run went to review unescalated (the nightly, 2026-11-27); this case is the hand-back first
+        driver = runs.Run("fxe").status["pid"]
+        os.kill(driver, signal.SIGSTOP)
+        try:
+            run_wb("takeover", "fxe-code-1")                              # Claude chose it, then
+            msg = Path(self.tmp.name) / "m.txt"
+            msg.write_text("carry on\n")
+            run_wb("feedback", "fxe-code-1", "--message", str(msg))       # handed it back
+        finally:
+            os.kill(driver, signal.SIGCONT)
         self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"), timeout=180)
         run = runs.Run("fxe")
         self.assertEqual([r["task"] for r in run.journal() if r.get("kind") == "item"
-                          and r.get("stage") == "code"], ["fxe-code-1", "fxe-code-2"])  # escalated past it
+                          and r.get("stage") == "code"], ["fxe-code-1", "fxe-code-2"],  # escalated past it
+                         (run.status, run.journal()[-8:]))
         self.assertTrue(store.Task("fxe-code-1").status.get("chosen_at"))
         self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
         out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
