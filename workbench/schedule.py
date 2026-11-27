@@ -632,16 +632,20 @@ def _env_key_skip(role: str, m) -> str | None:
     return f"{role} role: {why}"
 
 
-def spend_skip() -> str | None:
+def spend_skip(roles=None) -> str | None:
     """Why tonight's fire is skipped for money: an API role (routes.effective_via) that meter.refusal
     refuses: no day cap at all (meter.no_cap), today's spend at it, or no price; or whose key is
     an exported variable this fire's environment lacks (_env_key_skip, #1495). None when every
-    role is on the GPU, or each API role has room. routes.json unreadable is a skip too."""
+    role is on the GPU, or each API role has room. routes.json unreadable is a skip too.
+    ``roles``: the only roles to check (a flow's, runs.flow_roles, #1621); a backlog's headless
+    Claude may start any, so its fire checks every one."""
     try:
         doc = routes.read()
     except routes.RoutesError as e:
         return f"routes.json can't be read ({e})"
     for role in routes.ROLES:
+        if roles is not None and role not in roles:
+            continue
         mid = doc["roles"][role].get("api")
         if routes.effective_via(doc, role) != "api" or not mid:
             continue
@@ -726,7 +730,11 @@ def _fire_flow(name: str, s: dict, started: float) -> int:
         _row(name, {"ts": started, "outcome": "skipped", "why": why})
         print(f"{name}: skipped, {why}")
         return 0
-    if why := spend_skip():
+    try:  # only the roles its stages run on (#1621): wb run start says why for a flow it can't read
+        used = runs_.flow_roles(runs_.load_flow(s["flow"]))
+    except RuntimeError:
+        used = set()
+    if why := spend_skip(used):
         _row(name, {"ts": started, "outcome": "skipped", "why": why})
         print(f"{name}: skipped: {why}")
         return 0

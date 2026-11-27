@@ -797,6 +797,35 @@ class ScheduledFlows(Base):
         self.assertIn("wb run amend nightly-1 --budget-min N, then wb run resume nightly-1", schedule.held_why(r))
         self.assertNotIn("next fire starts", schedule.held_why(r))
 
+    def test_a_gpu_only_flows_fire_is_never_skipped_for_a_role_it_does_not_use(self):
+        # #1621 (2026-11-27): spend_skip checked every role on API, so significant on a provider
+        # with no day cap (or its key unset in the timer's environment, or the cap spent) skipped
+        # a trivial-only night on every fire
+        from workbench import schedule
+        tmp = Path(self.tmp.name)
+        gpu = {**self.NIGHT, "name": "gpunight",
+               "stages": [{"id": "triage", "card": "judge", "role": "trivial", "items": "{params.areas}"},
+                          {"id": "claude", "final": True, "from": "triage"}]}
+        esc = {**gpu, "name": "escnight", "stages": [  # a GPU stage escalating to significant uses it
+            {"id": "code", "kind": "code", "role": "trivial", "escalate": ["significant"], "items": "{params.areas}",
+             "prompt": "Fix {item}."}, {"id": "claude", "final": True, "from": "code"}]}
+        for f in (gpu, esc):
+            (tmp / "flows" / f"{f['name']}.json").write_text(json.dumps(f))
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"significant": {"via": "api", "api": "deepinfra/x"}}}))
+        for sched, flow, outcome in (("gpun", "gpunight", "started"), ("escn", "escnight", "skipped"),
+                                     ("sign", "night", "skipped")):
+            with self.subTest(flow=flow):
+                run_wb("schedule", "add", sched, "--flow", flow, "--repo", str(self.repo), "--at", "Sun 02:00",
+                       "--budget-usd", "0")
+                with redirect_stdout(io.StringIO()):
+                    schedule.fire(sched)
+                row = schedule.runs(sched)[-1]
+                self.assertEqual(row["outcome"], outcome, row)
+                if outcome == "skipped":
+                    self.assertIn("significant role", row["why"])
+                else:
+                    self.wait_ended(row["run"])
+
     def wait_ended(self, name):
         deadline = time.time() + 60
         while time.time() < deadline and runs.Run(name).status.get("phase") in runs.OPEN:

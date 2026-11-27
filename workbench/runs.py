@@ -1218,6 +1218,16 @@ def escalate_models(stage: dict) -> list:
             for k in range(1, len(stage.get("escalate") or []) + 1)]
 
 
+def flow_roles(flow: dict) -> set[str]:
+    """Every role a flow's items run on: each stage's and its escalate roles' (probed as
+    escalate_models probes them; a compare's or review's keeps stage_role, a refix its task's own
+    model). A scheduled flow's fire checks only these for money and a key: it checked every role on
+    API, so one the flow never used, without its key in the timer's environment or at the day cap,
+    skipped a GPU-only night on every fire (#1621, 2026-11-27)."""
+    return {item_role(s, Item(s["id"], "1" + (f"#e{k}" if k else ""))) for s in stages(flow)
+            if not (s.get("final") or s.get("claude")) for k in range(len(s.get("escalate") or []) + 1)}
+
+
 def role_cant_run(role: str) -> str:
     """wb start's own line for a role on API whose model can't be found (routes.resolve's: no
     API model, or one the catalog doesn't list, a missing key named), or "". Read fresh, not
