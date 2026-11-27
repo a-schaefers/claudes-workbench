@@ -51521,12 +51521,17 @@ class SettingsRoles(Base):
         self.set_role("all", "both")
         self.set_role("trivial", "--api", "deepseek/deepseek-v4-pro")    # stays gated: a new model to send to
         self.set_role("busy", "wait")
-        self.routes.write_text(json.dumps({"busy": "api", "day_usd": 5}))   # the opt-in, no API model yet
-        self.set_role("cap", "off")                                 # nothing can spend: allowed
+        self.routes.write_text(json.dumps({"busy": "api"}))         # the opt-in, no API model, no cap yet
         code, out, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash")
         self.assertEqual(code, 0, err)                              # a terminal: the suggested cap with it
         self.assertIn("cap $5/day", out)
         self.assertEqual(routes.read()["day_usd"], 5)
+        # the user's own `cap off` (#1624) is kept: a model added after it spends with no daily limit
+        self.set_role("cap", "off")
+        code, out, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-v4-pro")
+        self.assertEqual(code, 0, err)
+        self.assertIn("no day cap", out)
+        self.assertEqual((routes.read()["day_usd"], routes.read().get("no_cap")), (None, True))
 
 
 class BusyGpu(Base):
