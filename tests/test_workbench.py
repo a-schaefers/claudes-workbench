@@ -6327,6 +6327,39 @@ class AgentSetup(Base):
             cli.main(["doctor"])
         self.assertIn("--  agents get the handbook", buf.getvalue())
 
+    def test_the_sweep_lists_the_users_own_setup_and_a_global_opencode_skill_turns_off_for_agents_1463(self):
+        # #1463 P4: bring a user's own setup in once; each global OpenCode skill on by default
+        write_skill(self.oc / "skills" / "oc-skill", "oc-skill", "Use when OC.")
+        write_skill(self.home / ".claude" / "skills" / "mine", "mine", "Claude's own.")
+        (self.home / ".claude" / "agents").mkdir(parents=True)
+        (self.home / ".claude" / "agents" / "review.md").write_text("---\ndescription: Reviews a diff.\n---\nBe strict.\n")
+        (self.oc / "commands").mkdir()
+        (self.oc / "commands" / "ship-it.md").write_text("Ship $ARGUMENTS.\n")
+        found = {x["name"]: x for x in json.loads(run_wb("skill", "import", "--sweep", "--json"))}
+        self.assertEqual({n: x["kind"] for n, x in found.items()},
+                         {"oc-skill": "skill", "mine": "skill", "review": "agent", "ship-it": "command"})
+        self.assertEqual(found["review"]["description"], "Reviews a diff.")
+        self.assertEqual(found["review"]["twin"], "role card review")       # a shipped card's name
+        self.assertEqual(found["ship-it"]["description"], "Ship $ARGUMENTS.")
+        out = run_wb("skill", "import", "--sweep")
+        self.assertIn("agents (1; each as a role card", out)
+        self.assertIn("review  ~/.claude/agents/review.md: Reviews a diff. · has a twin here: role card review", out)
+        self.assertEqual(run_wb("skill", "opencode").strip(), "oc-skill: on (~/.config/opencode/skills/oc-skill)")
+        self.assertEqual(self.by()["skill oc-skill"]["state"], "reaches")
+        self.assertIn("oc-skill: off", run_wb("skill", "opencode", "oc-skill", "off"))
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["denied_skills"], ["oc-skill"])
+        self.assertEqual(self.by()["skill oc-skill"]["state"], "denied")
+        self.start("t-off", "ok")
+        task = store.Task("t-off")
+        self.assertEqual(task.spec["deny_skills"], ["oc-skill"])
+        wait_phase("t-off", ("review", "failed", "stuck"))
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertIn({"action": "skill", "resource": "oc-skill", "effect": "deny"}, layer["permissions"])
+        run_wb("skill", "opencode", "oc-skill", "on")
+        self.assertNotIn("denied_skills", json.loads(Path(os.environ["WB_COMMANDS"]).read_text()))
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("skill", "opencode", "nope", "off")
+
     def test_a_global_skill_or_agents_md_counts_in_the_fixed_prompt(self):
         # #1295 P1: a 32K window was judged without what the user's global OpenCode setup adds
         self.start("t-before", "ok")
