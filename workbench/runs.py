@@ -1603,8 +1603,14 @@ def _outside(st: dict) -> bool:
     a crash, a full disk, the repo gone, OpenCode unusable) end the item: its stage's on_failure,
     null by default, as #1278 has a failed item, and as wb resume --all leaves those for Claude's
     look (cli.INTERRUPTED, #544); held, each was resumed once and then woke Claude per item (the
-    third review of #1278, 2026-11-25)."""
+    third review of #1278, 2026-11-25). Claude's own `wb stop` never is, whatever `infra` it left:
+    one made while the task waited behind a told cap or Agents stop kept the wait's `spend`, and
+    the driver resumed the item Claude gave up on, past midnight or once the cap was raised, its
+    paid tokens unasked (#1588's waits, the bar loop, 2026-11-27); wb run stop's items are
+    _resumable's (_run_stopped)."""
     from . import cli
+    if st.get("last") == STOPPED_BY_CLAUDE:
+        return False
     return st.get("phase") in ("stuck", "failed") and (
         cli._interrupted(st.get("last")) or cli.stopped_outside(st) in held_infra())
 

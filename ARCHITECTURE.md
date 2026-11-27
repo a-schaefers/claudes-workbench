@@ -10226,7 +10226,8 @@ dead an item's notice is Claude's, a task's as any), refuses an item's open ask 
 its step whose cause passes or is the user's to lift (`_held`, `runs._outside`: `cli._interrupted`, a restart, a
 killed runner, a shutdown's signal, an update, or `cli.stopped_outside` in `runs.held_infra`: the day cap in a
 round, a provider's rate limit, outage or refusal, a repo made local-only, `wb stop --all`; `wb resume`, journal
-`resumed` `by: driver`). The rest of `cli.stopped_outside`'s, a model that failed, a setup, a crash, a full disk,
+`resumed` `by: driver`; never Claude's own `wb stop <item>`, `last` `runs.STOPPED_BY_CLAUDE`, whatever `infra`
+it left: one made while the item waited behind a told cap kept the wait's `spend`, and the driver resumed it, #1588's). The rest of `cli.stopped_outside`'s, a model that failed, a setup, a crash, a full disk,
 the repo gone, OpenCode unusable, end the item as its own failure (its stage's `on_failure`, `null` by default),
 as `wb resume --all` leaves them (`cli.INTERRUPTED`). A resume refused with exit 3
 (the cap, local-only, Agents on the GPU) holds the item (journal `held`) and pauses the run, or under

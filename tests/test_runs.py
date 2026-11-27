@@ -2120,6 +2120,27 @@ class RunsApi(Base):
         run.log(kind="resumed", task=task.name, by="resume", ok=True, why="")
         self.assertFalse(runs._resumable(run, task.name, task.status))   # Claude's next stop is Claude's
 
+    def test_claudes_own_stop_of_an_item_waiting_behind_a_told_cap_is_its_null_never_the_drivers_resume(self):
+        # #1588's waits (the bar loop, 2026-11-27): a wb stop while the item waited behind a told
+        # cap kept the wait's infra spend, so _outside held it and the driver resumed the item
+        # Claude gave up on, past midnight or once the cap was raised, spending paid tokens unasked
+        os.environ["FAKE_SLEEP"] = "600"
+        run, _ = self.start("gave", "--budget-usd", "1", "--overnight")
+        runs.tick(run)
+        task = self.wait_item("gave-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        task.set_status(phase="queued", infra=runner.SPEND, last="waiting: the day cap; t-told's stop has asked")
+        self.assertIn("stopped gave-find-1", run_wb("stop", task.name))
+        os.environ["FAKE_SLEEP"] = "0"
+        task.set_status(infra=runner.SPEND)  # what the runner's SIGTERM left: the wait's clear skipped
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st["infra"]), ("stuck", runs.STOPPED_BY_CLAUDE, runner.SPEND))
+        self.assertFalse(runs._outside(st))
+        self.assertFalse(runs._resumable(run, task.name, st))
+        self.roles(SPEND_FLASH, 50)                                      # the cap raised
+        runs.tick(run)
+        self.assertEqual([r["kind"] for r in run.journal() if r.get("task") == task.name], ["item", "null"])
+        self.assertEqual(task.status["phase"], "discarded")
+
     def test_a_start_that_timed_out_after_writing_its_task_is_the_items_never_a_null(self):
         run, _ = self.start("slow", "--budget-usd", "1")
         stage, it = runs.stages(run.flow)[0], runs.state(run)["find"][0]
