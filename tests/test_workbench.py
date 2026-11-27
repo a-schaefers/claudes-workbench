@@ -23539,6 +23539,23 @@ class ScheduledRuns(Base):
         self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
         self.assertTrue(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
 
+    def test_a_fires_claude_waits_a_whole_turn_long_inside_bash_timeouts_the_fire_sets_and_the_users_own_stay(self):
+        # #1602 (2026-11-27): driving.md's 100 s polls under Bash's 120 s default spent a paid turn
+        # each, and a long GPU night ran out of --max-turns before its reviews and summary
+        from workbench import schedule
+        os.environ.pop("BASH_DEFAULT_TIMEOUT_MS", None)
+        os.environ.pop("BASH_MAX_TIMEOUT_MS", None)
+        env = schedule._fire_env("night")
+        default_ms = int(env["BASH_DEFAULT_TIMEOUT_MS"])
+        self.assertGreaterEqual(default_ms, 290_000)
+        self.assertGreaterEqual(int(env["BASH_MAX_TIMEOUT_MS"]), default_ms)
+        driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
+        wait = int(re.search(r"`wb wait --backlog <batch> --timeout (\d+)`", driving).group(1))
+        self.assertTrue(200 <= wait <= 290 and wait * 1000 < default_ms, wait)
+        self.assertIn("the fire sets Bash's timeout to 5 minutes", driving)
+        os.environ["BASH_DEFAULT_TIMEOUT_MS"] = "400000"  # the user's own stays
+        self.assertEqual(schedule._fire_env("night")["BASH_DEFAULT_TIMEOUT_MS"], "400000")
+
     def test_wait_on_a_backlog_takes_its_tasks_alone(self):
         # headless Claude in the repo would otherwise take the daytime session's tasks there by
         # directory, and review them

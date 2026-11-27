@@ -1197,8 +1197,10 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   `backlog` = the batch) with their phases, the closed ones' API dollars (`savings.api_totals`),
   Claude's usage parsed as `wb bench self` parses it (`bench._self_result`, `_self_usage`).
 - **Headless Claude** gets no wakes (`mem.person` is false under `claude -p`): driving.md's
-  *Headless: a scheduled run* has it drive with `wb wait --backlog <batch> --timeout 100` loops
-  (under Bash's two minutes; its batch alone, never the repo's daytime tasks by directory), accept without `--merge`, leave hard calls as `wb note`, and end with `wb backlog` and
+  *Headless: a scheduled run* has it drive with `wb wait --backlog <batch> --timeout 280` loops
+  (`schedule._fire_env` sets `BASH_DEFAULT_TIMEOUT_MS` 300000 and `BASH_MAX_TIMEOUT_MS` 600000 unless the
+  user's are set, `schedule.BASH_TIMEOUT_MS`: one turn per 280 s idle inside the prompt cache, where 100 s
+  polls under Bash's two minutes ran a long GPU night out of `TURNS`, #1602; its batch alone, never the repo's daytime tasks by directory), accept without `--merge`, leave hard calls as `wb note`, and end with `wb backlog` and
   `wb chat reply --to user`. Every consent gate fails closed with no dialog to answer: no route
   change, no API `--model`, no patch send (`cli.start_gate`, route-ok.json, send-ok.json). The
   morning session claims the tasks by directory once headless Claude's process is gone (`cli._scope`).
@@ -11811,7 +11813,7 @@ doc needs its own `!/` line).
 ## Couplings: change one, change the other
 
 - **The README's bold opening line and the sentence after it** → the GitHub repository's About description, word for word, the Markdown (bold, backticks) aside (the owner, 2026-11-24, on #1357: keep the two in sync while iterating). `tests/test_docs.py` pins the README side; the About side is set by hand (`gh repo edit --description`).
-- **What a scheduled fire lets headless Claude use** (`schedule.TOOLS`, `ALLOWED`, `DENIED`, the permission mode) and `schedule.PROMPT`'s section names → driving.md's *Headless: a scheduled run* (a spec on stdin, `wb wait --backlog <batch> --timeout 100` loops), and `tests.test_workbench.ScheduledRuns`. The fire's batch name (`<name>-YYYY-MM-DD[-N]`, `schedule.batch_name`, N up to `SAME_DAY` 99) → `schedule.NAME_RE`'s 34 against `store.NAME_RE`'s 48 (#1204).
+- **What a scheduled fire lets headless Claude use** (`schedule.TOOLS`, `ALLOWED`, `DENIED`, the permission mode) and `schedule.PROMPT`'s section names → driving.md's *Headless: a scheduled run* (a spec on stdin, `wb wait --backlog <batch> --timeout 280` loops, inside `schedule.BASH_TIMEOUT_MS`), and `tests.test_workbench.ScheduledRuns`. The fire's batch name (`<name>-YYYY-MM-DD[-N]`, `schedule.batch_name`, N up to `SAME_DAY` 99) → `schedule.NAME_RE`'s 34 against `store.NAME_RE`'s 48 (#1204).
 - **`launchd/workbench.chat.plist`, in a release** → the release before's sha256 into `cli.SHIPPED_PLISTS`, or `wb setup` keeps a copy of it as the user's (#1406).
 - **SKILL.md or a reference file reworded** (`skill/workbench/`) → `opencode-plugin/skill.ts`'s
   `HOST_LINES`, which match Claude Code's exact wording (`skill.test.ts` names a rule that no longer
