@@ -177,8 +177,9 @@ export type TaskPart = {
 
 // ---- settings (workbench/settings.py, #1279)
 
-/** `needs`: the row whose value this choice needs first (a role's API, its api-<role>, #1558) */
-export type SettingChoice = { value: string; label: string; says?: string; needs?: string }
+/** `needs`: the row whose value this choice needs first (a role's API, its api-<role>, #1558);
+ * `group`: an API model's provider, or "In use" (settings.IN_USE), drawn as an <optgroup> (#1617) */
+export type SettingChoice = { value: string; label: string; says?: string; needs?: string; group?: string }
 /** one of settings.rows() (GET /api/settings, `wb settings --json`): `kind` choice, number (`value`
  * a float or null for off, `unit` usd or per_kwh), info (`text`), action (its choices buttons) or
  * note (one line for the whole group); `other`: any model id is taken; `group` a role's name for its

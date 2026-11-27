@@ -394,6 +394,7 @@ export async function check(page: any, ctx: E2eCtx) {
       const sel = row('api-writing').locator('select')
       const labels = await sel.locator('option').allTextContents()
       if (labels[labels.length - 1] !== 'Other model…') throw new Error(labels.join(' | '))
+      if (await row('api-writing').locator('input[data-filter]').count()) throw new Error('a filter box above one model')  // past 12 only (#1617)
       await sel.selectOption({ label: 'Other model…' })
       const input = row('api-writing').locator('input[data-other]')
       await input.fill('p/typed')
@@ -408,6 +409,52 @@ export async function check(page: any, ctx: E2eCtx) {
       if (JSON.stringify(sent) !== JSON.stringify({ key: 'api-writing', value: 'prov/typed-model-1' })) throw new Error(JSON.stringify(sent))
       await until(async () => (await toast()).includes('prov/typed-model-1'))
       await until(async () => (await sel.inputValue()) === 'prov/typed-model-1')
+    })
+
+    await ctx.check('an API model list holds every model, a group per provider after the ones in use, and a filter box narrows it by name, id or provider, the chosen one kept (#1617)', async () => {
+      // #1617 (2026-11-27): a cap of 12 showed the owner DeepSeek and 11 Claude models of 111
+      const m = (group: string, id: string, name: string) => ({ value: id, label: `${name} · ${group} (160K)`, says: `English writing uses ${id}.`, group })
+      const many: SettingChoice[] = [m('In use', 'deepinfra/ds', 'DS'),
+        ...'uvwxyz'.split('').map(c => m('Anthropic', `anthropic/c-${c}`, `Claude ${c}`)),
+        ...'abcdef'.split('').map(c => m('DeepInfra', `deepinfra/m-${c}`, `Model ${c}`)),
+        ...[2, 3, 4].map(n => m('xAI', `xai/grok-${n}`, `Grok ${n}`))]
+      let rows: SettingRow[] = MOCK_ROWS.map(r => r.key === 'api-writing' ? { ...r, value: 'deepinfra/ds', choices: many } : r)
+      let sent: any = null
+      unmock()
+      mock(async (method: string, body: any) => {
+        if (method !== 'POST') return answer(200, { rows, ts: 1 })
+        sent = body
+        rows = rows.map(x => x.key === body.key ? { ...x, value: body.value } : x)
+        return answer(200, { ok: true, said: `English writing: API ${body.value}`, rows })
+      })
+      await reshow()
+      await until(async () => (await row('api-writing').locator('select optgroup').count()) > 0)
+      const sel = row('api-writing').locator('select'), filter = row('api-writing').locator('input[data-filter]')
+      const groups = () => sel.locator('optgroup').evaluateAll((gs: HTMLOptGroupElement[]) => gs.map(g => `${g.label}:${g.children.length}`).join())
+      const listed = () => sel.locator('option:not([disabled])').evaluateAll((os: HTMLOptionElement[]) => os.map(o => o.value === '\u0000other' ? 'other' : o.value).join())
+      if (await groups() !== 'In use:1,Anthropic:6,DeepInfra:6,xAI:3') throw new Error(await groups())
+      if ((await listed()).split(',').length !== 17) throw new Error(await listed())   // all 16, then Other model…
+      if (await filter.count() !== 1) throw new Error('no filter box above 16 models')
+      await fits(page.viewportSize().width)
+      await filter.fill('grok')                            // by name: the chosen one stays, Other model… last
+      await until(async () => await listed() === 'deepinfra/ds,xai/grok-2,xai/grok-3,xai/grok-4,other').catch(async () => { throw new Error('grok: ' + await listed()) })
+      if (await groups() !== 'In use:1,xAI:3') throw new Error(await groups())
+      await filter.fill('deepinfra m-b')                   // by provider and id, every word
+      await until(async () => await listed() === 'deepinfra/ds,deepinfra/m-b,other').catch(async () => { throw new Error('m-b: ' + await listed()) })
+      await filter.fill('nothing like it')
+      await until(async () => (await sel.locator('option[disabled]').allTextContents()).includes('No model matches'))
+      if (await sel.inputValue() !== 'deepinfra/ds') throw new Error('the chosen one lost: ' + await sel.inputValue())
+      await filter.press('Escape')                         // the whole list back
+      await until(async () => (await listed()).split(',').length === 17).catch(async () => { throw new Error('Escape: ' + await listed()) })
+      await filter.fill('xai')
+      await page.evaluate(() => dispatchEvent(new Event('focus')))  // a redraw (the rows read again): the box and its list kept
+      await sleep(300)
+      if (await filter.inputValue() !== 'xai' || await listed() !== 'deepinfra/ds,xai/grok-2,xai/grok-3,xai/grok-4,other') throw new Error('after a redraw: ' + await listed())
+      await sel.selectOption('xai/grok-2')
+      await until(() => sent !== null)
+      if (JSON.stringify(sent) !== JSON.stringify({ key: 'api-writing', value: 'xai/grok-2' })) throw new Error(JSON.stringify(sent))
+      await until(async () => (await sel.inputValue()) === 'xai/grok-2')
+      if (await filter.inputValue() !== '' || (await listed()).split(',').length !== 17) throw new Error('the filter stayed after the pick: ' + await listed())
     })
 
     await ctx.check('a number row sends on Enter, and Off sends off; a choice needing the driver\'s help says it will offer to set it up', async () => {

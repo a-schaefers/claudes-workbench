@@ -4024,7 +4024,9 @@ SETTINGS_SET = "wb settings set <key> <value> changes one, on the user's clear a
 
 def settings_lines(rows: list[dict]) -> list[str]:
     """wb settings: each row by group, `key: label: value`, then its choices, `*` the current
-    one, each with its line (an API model's, its label alone); a read-only row says so."""
+    one, each with its line (an API model's, its label alone; of an API row's, the ones in use
+    alone); a read-only row says so."""
+    from . import settings  # it imports this module
     out: list[str] = []
     group = None
     for r in rows:
@@ -4050,11 +4052,19 @@ def settings_lines(rows: list[dict]) -> list[str]:
             out.append(f"  {r['key']}: {r['label']}: {r['value'] if r['value'] is not None else 'none'}")
             if r["value"] not in [c["value"] for c in choices] and r.get("says"):
                 out.append(f"      {r['says']}")
+        # an API row lists every catalog model now, a group per provider (#1617, 2026-11-27): here only
+        # the ones in use, as 111 models four times over was 444 lines for Claude to read
+        # never the row's own value: a pin outside In use kept its `*` line (#1617's review, 2026-11-27)
+        rest = [c for c in choices if r.get("other") and c["value"] != r["value"]
+                and c.get("group") not in (None, settings.IN_USE, "GPU")]
         for c in choices:  # an API model's line is its name, provider and price: its says only repeat them
+            if c in rest:
+                continue
             mark = "*" if kind == "choice" and c["value"] == r["value"] else " "
             out.append(f"    {mark} {c['value']}: {c['label']}" + ("" if r.get("other") else f". {c['says']}"))
         if r.get("other"):
-            out.append("      or any API model's exact provider/model id (wb models lists them)")
+            out.append(f"      or any of the {len(rest)} other API models' exact provider/model id (wb models lists them)"
+                       if rest else "      or any API model's exact provider/model id (wb models lists them)")
     out.append(SETTINGS_SET)
     return out
 

@@ -5,11 +5,12 @@ import json
 import os
 import textwrap
 import time
+import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-from workbench import context, models, routes, settings, store
+from workbench import cli, context, models, routes, settings, store
 from tests import test_workbench as tw  # the module: its test classes would run here too
 
 FREE_ID = "someprovider/a-model-no-menu-lists"
@@ -419,6 +420,66 @@ class Settings(Rows):
         self.assertNotIn("help", settings.apply("probe", "off"))
 
 
+def menu_model(provider: str, name: str, mid: str, price=None) -> dict:
+    """One of `wb models --json`'s `api` entries, as _api_stops reads it."""
+    return {"id": f"{provider}/{mid}", "name": name, "provider": provider, "window": 163840,
+            "provider_name": {"anthropic": "Anthropic", "deepinfra": "DeepInfra", "xai": "xAI"}[provider],
+            **({"price": {"input": price[0], "output": price[1]}} if price else {})}
+
+
+# #1617 (2026-11-27): the owner's 111 models showed as 12, DeepSeek then 11 of Anthropic's, as a cap
+# of 12 filled the list by provider name: DeepInfra's others and every xAI model never showed
+MENU = {"api": [*[menu_model("xai", f"Grok {n}", f"grok-{n}") for n in (4, 3, 2)],
+                *[menu_model("deepinfra", f"Model {c}", f"m-{c}") for c in "fedcba"],
+                menu_model("deepinfra", "DS", "ds", (0.1, 0.2)),
+                *[menu_model("anthropic", f"Claude {c}", f"c-{c}") for c in "zyxwvu"]],
+        "used": ["xai/grok-3", "gone/not-in-the-catalog"]}
+
+
+class ApiMenu(unittest.TestCase):
+    def test_an_api_row_lists_every_catalog_model_the_ones_in_use_first_then_a_group_per_provider_by_name_1617(self):
+        stops = settings._api_stops("Complex coding", MENU, "deepinfra/ds", ["anthropic/c-x"])
+        self.assertEqual(len(stops), len(MENU["api"]))  # every one: 16, past the old 12
+        self.assertEqual(len({s[0] for s in stops}), len(stops))  # each once: the ones in use not again in their group
+        groups = [g for i, (_, _, _, g) in enumerate(stops) if i == 0 or stops[i - 1][3] != g]
+        self.assertEqual(groups, [settings.IN_USE, "Anthropic", "DeepInfra", "xAI"])  # each group once, in order
+        self.assertEqual([s[0] for s in stops[:3]], ["deepinfra/ds", "anthropic/c-x", "xai/grok-3"])
+        self.assertEqual([s[0] for s in stops if s[3] == "xAI"], ["xai/grok-2", "xai/grok-4"])  # by name
+        self.assertEqual([s[0] for s in stops if s[3] == "DeepInfra"], [f"deepinfra/m-{c}" for c in "abcdef"])
+        self.assertEqual(stops[0][1:3], ("DS · DeepInfra (160K) · $0.1/$0.2 per M",  # the option's text as before
+                                        "Complex coding uses deepinfra/ds on API; your code goes to DeepInfra."))
+        row = settings._choice("api-significant", "significant", "API model", stops, "deepinfra/ds", other=True)
+        self.assertEqual(row["choices"][-1], {"value": "xai/grok-4", "label": "Grok 4 · xAI (160K)",
+                                              "says": "Complex coding uses xai/grok-4 on API; your code goes to xAI.",
+                                              "group": "xAI"})
+        self.assertNotIn("group", settings._choice("x", "shared", "X", [("a", "A", "says a")], "a")["choices"][0])
+
+    def test_wb_settings_lists_an_api_rows_models_in_use_and_counts_the_rest_1617(self):
+        # every model in the page's list is 4 rows x 111 lines in wb settings, Claude's to read
+        stops = settings._api_stops("Complex coding", MENU, "deepinfra/ds", [])
+        row = settings._choice("api-significant", "significant", "API model", stops, "deepinfra/ds", other=True)
+        lines = cli.settings_lines([row])
+        self.assertEqual(lines[1:5], ["  api-significant: API model: deepinfra/ds",
+                                      "    * deepinfra/ds: DS · DeepInfra (160K) · $0.1/$0.2 per M",
+                                      "      xai/grok-3: Grok 3 · xAI (160K)",
+                                      "      or any of the 14 other API models' exact provider/model id (wb models lists them)"])
+        # a value outside In use keeps its `*` line, and leaves the count (#1617's review, 2026-11-27)
+        lines = cli.settings_lines([{**row, "value": "xai/grok-4"}])
+        self.assertIn("    * xai/grok-4: Grok 4 · xAI (160K)", lines)
+        self.assertIn("      or any of the 13 other API models' exact provider/model id (wb models lists them)", lines)
+
+    def test_the_driver_rows_api_pin_and_the_roles_api_models_lead_its_list_and_wb_settings_marks_the_pin_1617(self):
+        # #1617's review (2026-11-27): the driver's list passed no model of its own, so a pin sank into
+        # its provider's group and wb settings, which lists only In use, printed no `*` line for it
+        r = {"driver": "anthropic/c-v", "roles": {"significant": {"api": "deepinfra/ds"}, "trivial": {}}}
+        with mock.patch.object(settings, "_opencode_path", lambda: True):
+            row = settings._driver_row(r, {**MENU, "gpu": [{"id": "gpu/a", "label": "A"}]})
+        lead = [(c["value"], c.get("group")) for c in row["choices"][:5]]
+        self.assertEqual(lead, [("session", None), ("gpu/a", "GPU"), ("anthropic/c-v", settings.IN_USE),
+                                ("deepinfra/ds", settings.IN_USE), ("xai/grok-3", settings.IN_USE)])
+        self.assertIn("    * anthropic/c-v: Claude v · Anthropic (160K)", cli.settings_lines([row]))
+
+
 class RunRows(Rows):
     """The workflows group (#1278's S12): a row per run not closed, with its Stop and its Summary."""
 
@@ -503,10 +564,16 @@ class ClaudeSets(Rows):
                     self.assertIn(f"  {r['text']}", lines)
                     continue
                 self.assertTrue(any(ln.startswith(f"  {r['key']}") for ln in lines), r["key"])
+                # an API row's models past those in use are counted, not listed (#1617)
+                rest = [c for c in r.get("choices") or [] if r.get("other") and c["value"] != r["value"]
+                        and c.get("group") not in (None, settings.IN_USE, "GPU")]
                 for c in r.get("choices") or []:
                     mark = "*" if r["kind"] == "choice" and c["value"] == r["value"] else " "
                     says = "" if r.get("other") else f". {c['says']}"
-                    self.assertIn(f"    {mark} {c['value']}: {c['label']}{says}", lines)
+                    (self.assertNotIn if c in rest else self.assertIn)(f"    {mark} {c['value']}: {c['label']}{says}", lines)
+                if rest:
+                    self.assertIn(f"      or any of the {len(rest)} other API models' exact provider/model id "
+                                  "(wb models lists them)", lines)
         self.assertIn("  coding: Claude coding: decide", lines)
         self.assertIn("  cap: API day cap: $5. API tasks stop for the day at $5 of spend. Takes a number, or off.", lines)
         self.assertEqual(lines[-1], "wb settings set <key> <value> changes one, on the user's clear ask and yes")

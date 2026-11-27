@@ -18,6 +18,7 @@
     ['experimental', 'Experimental']]
   const SEG_MAX = 4                     // a segmented control up to this many choices, a <select> past it
   const OTHER = '\u0000other'           // the select's "Other model…" (never a model id: a NUL)
+  const FILTER_AT = 12                  // a select of more choices gets a filter box above it (#1617)
   const UNITS: Record<string, string[]> = { usd: ['$', '/day'] }
   // the pane's toast, when a choice needs the driver's help: named as the state names it (#1355:
   // OpenCode's user read that Claude would offer), else the story's `any`
@@ -57,6 +58,7 @@
   const refused = new Map<string, { line: string; said: string }>()
   let focusGroup = ''                   // a group to bring into view at the next draw (the runs strip's tap)
   let picking = ''                      // the row whose choice opened its needed row's list under it (#1558)
+  const filters = new Map<string, string>()  // a filter box's text by its row, kept through a redraw (#1617)
   // Folded cards (the web app's review, 2026-11-26: Settings ran 6 to 8 phone screens, Notifications
   // and Spend today 4,000 px down): the power groups and Recent changes are <details> cards with a
   // one-line summary of their state, closed on a phone and open on a wider screen until the user
@@ -187,21 +189,60 @@
   // ---- the kinds ----
   // a <select> of ``row``'s choices (and "Other model…" where any id goes), ``pick`` given the value
   // chosen; ``at`` the row it is drawn in (its key on the typed id's box, so a redraw finds it again)
+  // Every API model, a group per provider (the choices' `group`, each an <optgroup>), the ones in use
+  // first, and past FILTER_AT a box above that narrows them by name, id or provider, the chosen one
+  // kept: a cap of 12 cut the user's 111 to Anthropic's (#1617, 2026-11-27). The box's text is kept
+  // by row (`filters`) through a redraw, until a pick
   function selectOf(row: SettingRow, value: unknown, at: string, pick: (v: string) => void, label = row.label) {
     const choices = Array.isArray(row.choices) ? row.choices : [], lit = choices.find(c => c.value === value)
     const sel = el('select', 'set-select')
     sel.setAttribute('aria-label', label)
-    if (!lit) {                        // none chosen (an API role with no model), or one off the list
-      const o = el('option', '', value == null || value === '' ? 'None' : value)
-      o.value = value == null ? '' : String(value)
-      o.disabled = value == null || value === ''
-      sel.append(o)
+    const fill = (q: string) => {
+      const words = q.toLowerCase().split(/\s+/).filter(Boolean)
+      const hit = (c: SettingChoice) => c.value === value ||
+        words.every(w => `${c.label} ${c.value} ${c.group || ''}`.toLowerCase().includes(w))
+      sel.replaceChildren()
+      if (!lit) {                      // none chosen (an API role with no model), or one off the list
+        const o = el('option', '', value == null || value === '' ? 'None' : value)
+        o.value = value == null ? '' : String(value)
+        o.disabled = value == null || value === ''
+        sel.append(o)
+      }
+      let box: HTMLSelectElement | HTMLOptGroupElement = sel, group: string | undefined
+      const shownNow = choices.filter(hit)
+      for (const c of shownNow) {
+        if (c.group !== group) {
+          group = c.group
+          if (group) { const g = el('optgroup'); g.label = group; sel.append(g); box = g } else box = sel
+        }
+        const o = el('option', '', c.label); o.value = c.value; box.append(o)
+      }
+      if (words.length && !shownNow.some(c => c.value !== value)) {
+        const o = el('option', '', 'No model matches'); o.disabled = true; o.value = '\u0000none'; sel.append(o)
+      }
+      if (row.other) { const o = el('option', '', 'Other model…'); o.value = OTHER; sel.append(o) }
+      sel.value = value == null ? '' : String(value)
     }
-    for (const c of choices) { const o = el('option', '', c.label); o.value = c.value; sel.append(o) }
-    if (row.other) { const o = el('option', '', 'Other model…'); o.value = OTHER; sel.append(o) }
-    sel.value = value == null ? '' : String(value)
+    let filter: HTMLInputElement | null = null
+    if (choices.length > FILTER_AT) {
+      filter = el('input', 'set-text set-filter')
+      filter.type = 'search'
+      filter.dataset.key = at
+      filter.dataset.filter = '1'
+      filter.placeholder = `Filter ${choices.length} models by name or provider`
+      filter.setAttribute('aria-label', `${label}: filter the list`)
+      filter.autocapitalize = 'off'; filter.autocomplete = 'off'; filter.spellcheck = false
+      filter.value = filters.get(at) || ''
+      const f = filter
+      f.addEventListener('input', () => { filters.set(at, f.value); fill(f.value) })
+      f.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && f.value) { e.preventDefault(); f.value = ''; filters.delete(at); fill('') }
+        else if (e.key === 'Enter') { e.preventDefault(); sel.focus() }  // on to the list it narrowed
+      })
+    }
+    fill(filter ? filter.value : '')
     sel.addEventListener('change', () => {
-      if (sel.value !== OTHER) { pick(sel.value); return }
+      if (sel.value !== OTHER) { filters.delete(at); pick(sel.value); return }
       const input = el('input', 'set-text')
       input.type = 'text'
       input.dataset.key = at
@@ -217,7 +258,10 @@
       sel.after(input)
       input.focus()
     })
-    return sel
+    if (!filter) return sel
+    const both = document.createDocumentFragment()
+    both.append(filter, sel)
+    return both
   }
   // A choice that needs another row's value first (`needs`: a role's API, its api-<role> with no
   // model): its tap opens that row's list under this one, and a pick sends it, then this choice.
@@ -444,7 +488,7 @@
     // an id being typed elsewhere survives the redraw: only the row it was sent for is drawn anew
     const a = document.activeElement as HTMLInputElement | null
     const typing = a && root.contains(a) && a.tagName === 'INPUT' && !pending(a.dataset.key)
-      ? { key: a.dataset.key, other: a.dataset.other, value: a.value, at: a.selectionStart } : null
+      ? { key: a.dataset.key, other: a.dataset.other, filter: a.dataset.filter, value: a.value, at: a.selectionStart } : null
     // and any other control keeps the focus, found again by its row and value: the redraw took it,
     // a choice made by keyboard left the focus on the page, and the next Tab began again at the
     // first row (#1409, 2026-11-25)
@@ -497,7 +541,7 @@
     drawing = true
     try { root.replaceChildren(out) } finally { drawing = false }
     if (typing && typing.key) {
-      let input = root.querySelector<HTMLInputElement>(`.set-row[data-key="${CSS.escape(typing.key)}"] input${typing.other ? '[data-other]' : ''}`)
+      let input = root.querySelector<HTMLInputElement>(`.set-row[data-key="${CSS.escape(typing.key)}"] input${typing.other ? '[data-other]' : typing.filter ? '[data-filter]' : ''}`)
       if (!input && typing.other) {
         const sel = root.querySelector<HTMLSelectElement>(`.set-row[data-key="${CSS.escape(typing.key)}"] select`)
         if (sel) { sel.value = OTHER; sel.dispatchEvent(new Event('change')); input = sel.nextElementSibling as HTMLInputElement | null }
