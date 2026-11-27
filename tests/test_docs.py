@@ -167,8 +167,8 @@ class DocsMatchTheCode(unittest.TestCase):
         readme = (ROOT / "README.md").read_text()
         low = ".".join(map(str, runner.OPENCODE_TESTED[0]))
         self.assertIn(f"[OpenCode](https://opencode.ai) {low} or newer", readme)
-        self.assertIn(f"{models.MIN_WINDOW // 1024}K at the least", readme)
-        self.assertIn("a 32K context window (16K at the least)", readme)
+        self.assertIn(f"at least {models.MIN_WINDOW // 1024}K", readme)
+        self.assertIn("a 32K context window (at least 16K)", " ".join(readme.split()))
 
     def test_the_pane_keeps_no_copy_of_a_setting_wb_owns(self):
         # the review of #857's off and on (2026-11-22) caught the pane's probe sentence copying
@@ -429,17 +429,29 @@ class DocsFor20(unittest.TestCase):
     says so; an API-only user read "A local model" as "not for me"."""
 
     def test_the_readme_pitch_names_the_api_and_the_gpu(self):
-        # #1357 (2.2): the pinned clause (the owner, 2026-11-23: agents, not subagents) stays word
-        # for word in the pitch, the README's first line after its title and the GitHub About text;
-        # the rewrite of 2026-11-27 (the owner's six findings) keeps it, and both hosts in the pitch
+        # #1357 (2.2): the pinned clause stays word for word in the pitch, the README's first line
+        # after its title and the GitHub About text, with both hosts; the owner, 2026-11-27, made it
+        # "orchestrator agent vs subagents throughout" (lifting 2026-11-23's "agents, not subagents")
         readme = (ROOT / "README.md").read_text()
         pitch = readme.split("\n# ", 1)[1].split("\n\n")[1]
-        self.assertIn("OpenCode agents via API or GPU write the code", pitch)
+        self.assertIn("An orchestrator agent plans and reviews the work", " ".join(pitch.split()))
+        self.assertIn("OpenCode subagents via API or GPU write the code", pitch)
         self.assertIn("OpenCode and Claude Code", pitch)
         self.assertLess(len(pitch), 200)                     # it is the About text too
-        self.assertIn("- A model for the agents: an API provider connected in `opencode` with `/connect`, or a local model", readme)
+        # the model for the coding agents: connected in OpenCode, or local (facts, not wording:
+        # the README's prose passes of 2026-11-27 rewrote the line twice)
+        need = " ".join(next(l for l in readme.split("\n- ") if l.startswith("A model for the")).split())
+        for fact in ("`/connect`", "a local model"):
+            self.assertIn(fact, need)
         self.assertNotIn("local LLM", readme)
-        self.assertNotIn("subagent", readme)
+        # every agent the README names is the orchestrator agent or a subagent (the owner,
+        # 2026-11-27: "clearly use orchestrator agent vs subagents throughout"); links and
+        # anchors (#what-the-agent-knows) aside
+        import re
+        prose = " ".join(re.sub(r"\]\([^)]*\)|<[^>]*>", "", readme).split())
+        bare = [m.group(0) for m in re.finditer(r"(?<!sub)(?<!orchestrator )\bagents?\b", prose, re.I)]
+        self.assertEqual(bare, [])
+        self.assertNotIn("orchestrator ", prose.replace("orchestrator agent", ""))
 
     def test_the_plugin_description_says_opencode_agents_not_local_ones(self):
         import json
@@ -493,9 +505,13 @@ class DocsForTheWebApp(unittest.TestCase):
     the settings' home, with Claude helping on a clear ask."""
 
     def test_the_readme_names_the_web_apps_settings_and_stats_and_its_phone_chat(self):
-        # #1288, and the rewrite of 2026-11-27: one line, the detail in *The web chat*
+        # #1288, and the rewrite of 2026-11-27: the web app's link and what it holds in *Using it*,
+        # its phone chat one line, the detail in *The web chat*
         readme = " ".join((ROOT / "README.md").read_text().split())
-        self.assertIn("A web app shows your settings and stats", readme)
+        using = readme[readme.index("## Using it"):readme.index("## Models and cost")]
+        self.assertIn("`http://localhost:1337/#token=…`", using)
+        for fact in ("stats", "settings"):
+            self.assertIn(fact, using)
         self.assertIn("(ARCHITECTURE.md#the-web-chat)", readme)
 
     def test_what_people_and_claude_read_names_no_pane_tab(self):
