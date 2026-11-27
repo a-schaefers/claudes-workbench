@@ -282,6 +282,12 @@
             box.append(el('p', 'small set-note', row.text || row.label));
             return box;
         }
+        // a role's GPU|API with no API provider: its sentence alone (the shared group's line says how to add one)
+        if (row.fixed) {
+            if (row.says)
+                box.append(el('p', 'small set-says', row.says));
+            return box;
+        }
         if (row.label && row.label !== title)
             box.append(el('div', 'set-label', row.label)); // a role's own row: its card's name
         if (row.kind === 'choice')
@@ -325,7 +331,8 @@
             const known = GROUPS.map(g => g[0]);
             const groups = [...GROUPS, ...[...new Set(rows.map(r => r.group))].filter(g => !known.includes(g)).map(g => [g, g])];
             for (const [g, title] of groups) {
-                const mine = rows.filter(r => r && r.group === g);
+                // `hidden`: a row that can do nothing yet (an API control with no provider), kept for `wb settings`
+                const mine = rows.filter(r => r && r.group === g && !r.hidden);
                 if (!mine.length)
                     continue;
                 const card = el('section', 'card set-card');

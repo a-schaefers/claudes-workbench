@@ -8,7 +8,9 @@ current value), with `other: true` where any model id goes (the role command che
 `number` its `value` (a float, or None for off) and `unit` (`usd`); an `info` its
 `text`; an `action` its `text` and its `choices`, which are buttons; a `note` one line for the group
 (NO_PROVIDER or CATALOG_FAILED, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows.
-`more: true`, a row the page draws under its card's More (a role's GPU and API model and thinking). A row may
+`more: true`, a row the page draws under its card's More (a role's GPU and API model and thinking);
+`hidden: true`, a row the page doesn't draw while it can do nothing (`wb settings` still lists it); `fixed:
+true`, a choice the page draws as its `says` alone (a role's GPU|API with no API provider). A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,
@@ -62,6 +64,11 @@ NO_PROVIDER = "No API provider connected: /connect in OpenCode adds one; every r
 # server that couldn't find OpenCode, whose keys were stored (#1342)
 CATALOG_FAILED = "OpenCode's catalog couldn't be read, so no API provider shows: {why}"
 NO_GPU = "No GPU model found (wb models)"
+# With no API provider, the one line that stands for every API control (the roles' API choice, Agents,
+# When the GPU is busy, the day cap), which the page then hides (`hidden`, `fixed`): six API controls
+# came before the line saying there was no provider, on the GPU-only path (the web app's review,
+# 2026-11-26). The rows stay, for `wb settings`. {who}: the driver to ask
+GPU_ONLY = "Every role runs on your GPU. To add an API model: /connect in OpenCode, or ask {who}."
 
 _WRITE = threading.Lock()  # one write at a time: two clicks never interleave their wb calls
 _READ = threading.Lock()  # one read of the rows at a time: the others wait for it, then share it
@@ -374,8 +381,8 @@ def _driver_row(r: dict, m: dict | None) -> dict:
     """The Driver row: an `other` choice (any OpenCode id, `#variant` allowed) of each session's
     own, the GPU models, then API models as the API rows list them; else, without the OpenCode
     plugin, an info row reading Claude Code (fixed)."""
-    if not _opencode_path():
-        return _info("driver", "shared", LABELS["driver"], DRIVER_CLAUDE)
+    if not _opencode_path():  # the page shows the line only under OpenCode, where it is a choice
+        return {**_info("driver", "shared", LABELS["driver"], DRIVER_CLAUDE), "hidden": True}
     pin = r.get("driver") or routes.DRIVER_SESSION
     stops = [DRIVER_SESSION]
     for g in (m or {}).get("gpu") or []:
@@ -489,13 +496,28 @@ def _build() -> dict:
     out: list[dict] = []
     roles = [(name, routes.LABELS[name], (r or {}).get("roles", {}).get(name) or {}) for name in routes.ROLES]
     api_name = {x.get("id"): x.get("name") for x in (m or {}).get("api") or [] if isinstance(x, dict)}
+    provs = (r or {}).get("providers") or {}
+    # a key that runs tasks: a stored one, Ollama cloud's login, Copilot's sign-in, which the
+    # keyhole holds as a key (#1191), or an exported one it can read (`runs`, #1189)
+    stored = any(p.get("key") in ("stored", "ollama", "copilot") or p.get("runs") is True
+                 for p in provs.values() if isinstance(p, dict))
+    any_api = any(row.get("api") for _, _, row in roles)
+    # no API provider (the api group's note alone): GPU_ONLY stands for every API control, which
+    # wait until they can do something; not when the catalog couldn't be read (CATALOG_FAILED says why)
+    gpu_only = r is not None and not stored and not any_api and not r.get("catalog_error")
+    quiet = {"hidden": True} if gpu_only else {}
 
-    # shared
+    # the roles, then the rows for every role (shared)
     if r is None:
         out.append(_note("roles-why", "shared", why or OLDER_WB))
     else:
-        out.append(_choice("agents", "shared", LABELS["agents"], AGENTS, r.get("use") or "both"))
-        out.append(_choice("busy", "shared", LABELS["busy"], BUSY, r.get("busy") or "wait"))
+        if gpu_only:
+            out.append(_note("gpu-only", "shared", GPU_ONLY.format(who="OpenCode" if _opencode_path() else "Claude")))
+        out.append({**_choice("agents", "shared", LABELS["agents"], AGENTS, r.get("use") or "both"), **quiet})
+        # only once a role has an API model: before it, "Use the role's API model" did nothing but
+        # set a cap (the web app's review, 2026-11-26)
+        out.append({**_choice("busy", "shared", LABELS["busy"], BUSY, r.get("busy") or "wait"),
+                    **({} if any_api else {"hidden": True})})
         for name, label, row in roles:
             c = _choice(f"role-{name}", name, label_of(f"role-{name}"),
                         _role_stops(label, row.get("api"), api_name.get(row.get("api"))), row.get("via") or "gpu")
@@ -504,6 +526,8 @@ def _build() -> dict:
             st = row.get("api_status")
             if row.get("via") == "api" and isinstance(st, dict) and st.get("available") is False:
                 c["says"] = f"{label} can't run on {row.get('api')}: {st.get('why') or 'wb route says why'}."
+            if gpu_only:
+                c["fixed"] = True  # its says alone: GPU_ONLY stands for its API choice
             out.append(c)
     if r is not None:
         out.append(_driver_row(r, m))
@@ -512,9 +536,9 @@ def _build() -> dict:
     out.extend(_run_rows())
     if r is not None:
         cap = r.get("day_usd")
-        out.append(_number("cap", "shared", LABELS["cap"], float(cap) if cap is not None else None, "usd",
-                           "Needed before an API role; $5 suggested." if cap is None else
-                           f"API tasks stop for the day at {routes.money(cap)} of spend."))
+        out.append({**_number("cap", "shared", LABELS["cap"], float(cap) if cap is not None else None, "usd",
+                              "Needed before an API role; $5 suggested." if cap is None else
+                              f"API tasks stop for the day at {routes.money(cap)} of spend."), **quiet})
     # Stats recording, Live view, Live refresh and the electricity price had rows here, as the
     # pane's Settings tab did until #1322 dropped them (recording always on; wb stats set and wb
     # savings --price keep the rest): a `recording` row read a key stats.settings() no longer has
@@ -553,12 +577,7 @@ def _build() -> dict:
     if r is None:
         out.append(_note("api-why", "api", why or OLDER_WB))
     else:
-        provs = r.get("providers") or {}
-        # a key that runs tasks: a stored one, Ollama cloud's login, Copilot's sign-in, which the
-        # keyhole holds as a key (#1191), or an exported one it can read (`runs`, #1189)
-        stored = any(p.get("key") in ("stored", "ollama", "copilot") or p.get("runs") is True
-                     for p in provs.values() if isinstance(p, dict))
-        if not stored and not any(row.get("api") for _, _, row in roles):
+        if not stored and not any_api:
             err = r.get("catalog_error")
             out.append(_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER))
         else:

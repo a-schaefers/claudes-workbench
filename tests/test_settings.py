@@ -120,6 +120,30 @@ class Settings(Rows):
             self.assertNotIn(f"review-{name}", keys)
             self.assertIn(f"api-{name}", keys)                     # its picker stays
 
+    def test_with_no_api_provider_one_line_stands_for_every_api_control_and_the_rows_stay_for_wb_settings(self):
+        # the web app's review (2026-11-26): on the GPU-only path six API controls came before the
+        # line saying there was no provider, and "Use the role's API model" quietly set a cap
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {}}))
+        r, _ = settings._read_json(["route", "--json"])
+        real = settings._read_json
+        with mock.patch.object(settings, "_read_json", lambda argv: ({**r, "providers": {}}, "") if argv == ["route", "--json"] else real(argv)):
+            by = {x["key"]: x for x in settings.rows(fresh=True)}
+        self.assertEqual((by["gpu-only"]["kind"], by["gpu-only"]["group"], by["gpu-only"]["text"]),
+                         ("note", "shared", "Every role runs on your GPU. To add an API model: /connect in OpenCode, or ask Claude."))
+        self.assertEqual([k for k in ("agents", "busy", "cap", "driver") if by[k].get("hidden")], ["agents", "busy", "cap", "driver"])
+        for name in routes.ROLES:
+            self.assertTrue(by[f"role-{name}"]["fixed"], name)
+            self.assertEqual(by[f"role-{name}"]["says"], f"{routes.LABELS[name]} runs on this machine's GPU.")
+        self.assertEqual(by["api-none"]["text"], settings.NO_PROVIDER)
+        # a provider connected: the controls are drawn, but When the GPU is busy waits for a role's API model
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {}}))
+        by = {x["key"]: x for x in settings.rows(fresh=True)}
+        self.assertNotIn("gpu-only", by)
+        self.assertEqual([k for k in ("agents", "busy", "cap") if by[k].get("hidden")], ["busy"])
+        self.assertFalse(any(by[f"role-{n}"].get("fixed") for n in routes.ROLES))
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"trivial": {"via": "gpu", "api": "deepseek/deepseek-flash"}}}))
+        self.assertFalse({x["key"]: x for x in settings.rows(fresh=True)}["busy"].get("hidden"))
+
     def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
         # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
         home = Path(self.tmp.name) / "home"

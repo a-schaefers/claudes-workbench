@@ -7636,7 +7636,8 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   `changed`), and the stamp (*The Settings view (settings.ts)*, who changed what).
 
 **A row** is JSON-safe: `key`, `group`, `label`, `kind`, `more` (true: drawn under its card's More, a role's
-GPU and API model and thinking, #1553) and by kind: `choice` (`value`, `choices`
+GPU and API model and thinking, #1553), `hidden` (true: the page doesn't draw it while it can do nothing; `wb
+settings` lists it still), `fixed` (true: a choice the page draws as its `says` alone) and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd`; `off`, `""` and null clear it); `info` (`text`); `action`
 (`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
@@ -7659,7 +7660,13 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`, both only for a role with an API model
   (thinking is an API model's alone: with none the switch did nothing, the web app's review, 2026-11-26) (these three
   with a provider connected or a role's API model, as the *api* group's rows).
-- *shared*: `agents` → `wb route all gpu|api|both`; `busy` → `wb route busy wait|api`; `driver`
+- *shared*: with no API provider (no stored key, no role's API model, the catalog read), first the
+  `gpu-only` note, `GPU_ONLY` ("Every role runs on your GPU. To add an API model: /connect in OpenCode, or ask
+  <Claude|OpenCode>."), which stands for every API control: the roles' GPU|API rows are `fixed`, and `agents`,
+  `busy` and `cap` `hidden` (six API controls came before the line saying there was no provider, on the GPU-only
+  path: the web app's review, 2026-11-26); `busy` is `hidden` too until some role has an API model (before it,
+  "Use the role's API model" did nothing but set a cap), and the Claude Code `driver` line always is (the
+  line shows only under OpenCode, where it is a choice). `agents` → `wb route all gpu|api|both`; `busy` → `wb route busy wait|api`; `driver`
   (#1316, after the roles' rows) → `wb route driver <id>|session`: with the OpenCode plugin
   installed (`ocplugin.installs`) a choice, `other` (any id), of `session` (each session's own
   `/models`), the GPU models, then the API models (`_api_stops`, each saying where the
@@ -7798,6 +7805,7 @@ alone, and a generic renderer: a new setting touches only Python.
   `details.set-more` "More" (kept open across redraws once opened); then `shared` "Agents and roles", `web` "Web app" (#1355), `gpu` "GPU", `api` "API", `setup` "What your agents get",
   `workflows` "Deep workflows", `terminal` "Terminal", `experimental` "Experimental"; a group the table adds later follows, under
   its key. The runs strip's tap (app.ts, a `wb-settings-group` event) brings the `workflows` card into view. A
+  `hidden` row isn't drawn, a `fixed` one is its `says` alone (a role's, with no API provider). A
   `note` row is a muted line in its place, and the group's other rows are drawn beside it (with the
   routes unreadable, the shared group's note sits over Claude coding and the rest); a group with no
   rows has no card.
@@ -11229,7 +11237,7 @@ real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's rout
 requests once the worker registers (#1223). The Settings
 view's (#1286): the groups in order, a card per role first, its role row unlabelled and the rest of the role under a
 closed More, then "Agents and roles" (#1553), above the device cards (the gear's old cards are
-`#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
+`#settings`'s alone); with no API provider a role's sentence alone and a `hidden` row not drawn; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the

@@ -397,6 +397,26 @@ export async function check(page: any, ctx: E2eCtx) {
       if (JSON.stringify(sent) !== JSON.stringify([{ key: 'cap', value: '7.5' }, { key: 'cap', value: null }, { key: 'probe', value: 'on' }])) throw new Error(JSON.stringify(sent))
     })
 
+    await ctx.check('with no API provider one line stands for the API controls: a role reads its sentence alone, a hidden row is not drawn', async () => {
+      // the web app's review (2026-11-26): six API controls came before the line saying there was no provider
+      const gpuOnly: SettingRow[] = [
+        { key: 'role-significant', group: 'significant', label: 'Complex coding', kind: 'choice', value: 'gpu', other: false, fixed: true,
+          says: 'Complex coding runs on this machine\'s GPU.', choices: [{ value: 'gpu', label: 'GPU' }, { value: 'api', label: 'API' }] },
+        { key: 'gpu-only', group: 'shared', label: '', kind: 'note', text: 'Every role runs on your GPU. To add an API model: /connect in OpenCode, or ask Claude.' },
+        { key: 'agents', group: 'shared', label: 'Agents', kind: 'choice', value: 'both', other: false, hidden: true, says: 'x',
+          choices: [{ value: 'gpu', label: 'GPU' }, { value: 'both', label: 'Both' }] },
+        ...MOCK_ROWS]
+      unmock()
+      mock(async (method: string) => method === 'POST' ? null : answer(200, { rows: gpuOnly, ts: 1 }))
+      await reshow()
+      await until(async () => (await row('gpu-only').count()) === 1)
+      const got = await page.evaluate(() => ({
+        role: document.querySelector('.set-row[data-key="role-significant"]')!.textContent,
+        controls: document.querySelectorAll('.set-row[data-key="role-significant"] button, .set-row[data-key="role-significant"] select').length,
+        agents: document.querySelectorAll('.set-row[data-key="agents"]').length }))
+      if (got.role !== "Complex coding runs on this machine's GPU." || got.controls || got.agents) throw new Error(JSON.stringify(got))
+    })
+
     await ctx.check(desktop ? 'the view lays out at 1280 px, two columns of cards, and at 390 px, one, nothing past its edge'
                             : 'the view lays out at the phone\'s width, one column of cards, nothing past its edge', async () => {
       unmock()
