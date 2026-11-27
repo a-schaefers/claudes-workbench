@@ -1180,7 +1180,7 @@
         reachable = true;
         if (!quiet)
             save(K.thread, (s.messages || []).slice(-50)); // a patch without messages: no rewrite (#755)
-        state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], runs: s.runs || [], dictate: !!s.dictate,
+        state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], runs: s.runs || [], commands: s.commands || [], dictate: !!s.dictate,
             driver: s.driver || null, settings: s.settings || null };
         drawTasks();
         drawRuns();
@@ -2310,7 +2310,21 @@
     const touch = matchMedia('(pointer: coarse)').matches;
     function grow() { input.style.height = ''; input.style.height = Math.min(input.scrollHeight, innerHeight * 0.38) + 'px'; }
     input.value = load(K.draft, '');
-    input.addEventListener('input', () => { grow(); armSend(); save(K.draft, input.value); });
+    // a flow's slash command (#1463 P5): `/` and its first letters list the flows' commands to
+    // tap; the message goes as typed, and the driver runs it as that command (SKILL.md)
+    const cmds = $('cmds');
+    function drawCmds() {
+        const m = /^\/([a-z0-9-]*)$/.exec(input.value);
+        const hits = m ? (state.commands || []).filter(c => c.command.startsWith(m[1])).slice(0, 6) : [];
+        cmds.replaceChildren(...hits.map(c => {
+            const b = Object.assign(document.createElement('button'), { type: 'button', className: 'cmd' });
+            b.append(Object.assign(document.createElement('b'), { textContent: `/${c.command}` }), ` ${c.hint} · ${c.description}`);
+            b.onclick = () => { input.value = `/${c.command} `; input.focus(); drawCmds(); grow(); armSend(); save(K.draft, input.value); };
+            return b;
+        }));
+        cmds.hidden = !hits.length;
+    }
+    input.addEventListener('input', () => { grow(); armSend(); save(K.draft, input.value); drawCmds(); });
     input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !touch && !e.isComposing) {
         e.preventDefault();
         send();

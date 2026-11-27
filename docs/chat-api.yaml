@@ -1100,6 +1100,18 @@ components:
             row, run-<run>
           items:
             $ref: "#/components/schemas/OpenRun"
+        commands:
+          type: array
+          description: >-
+            the flows' slash commands, {command, flow, description, hint}: a message /<command> <args>
+            is that flow's run, as the hosts' command is
+          items:
+            type: object
+            properties:
+              command: {type: string}
+              flow: {type: string}
+              description: {type: string}
+              hint: {type: string}
         dictate:
           type: boolean
           description: the computer has a listener for /transcribe

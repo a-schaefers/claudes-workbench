@@ -142,6 +142,7 @@ export type ApiWeek = ApiCost & { by_provider?: Record<string, ApiCost>; names?:
 /** chat.week_saved */
 export type Savings = { score?: { score: number; color: string } | null; saved: number; tasks?: number; wh?: number; cost?: number | null; api?: ApiWeek | null }
 export type Limits = { file: number; message: number; files: number }
+export type FlowCommandRow = { command: string; flow: string; description: string; hint: string }
 /** chat.driver_state (#1355): the driver's state line, in the story's words. `driver` the story's
  * name (claude-code, opencode, any); `waiting` the dialog up in the terminal; `grant` only for a
  * permission, the driver's way to run with permissions granted; `off` the chat switched off (#1526) */
@@ -155,6 +156,8 @@ export type SettingsRev = { ts: number; key: string; label: string; to?: unknown
 export type ChatState = {
   messages: ChatMsg[]; push: { key?: string; test?: number }; listener: Listener | null; savings?: Savings | null
   expire?: number; uploads?: Limits | null; tasks?: OpenTask[]; runs?: OpenRun[]; dictate?: boolean
+  /** chat.flow_commands (#1463 P5): the flows' slash commands, for the composer's /word */
+  commands?: FlowCommandRow[]
   driver?: DriverState | null; settings?: SettingsRev | null
   /** chat.API_VERSION */
   api?: number

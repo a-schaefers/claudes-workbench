@@ -390,7 +390,8 @@ class Flows(Base):
 
     def test_every_shipped_flow_holds_and_ends_with_claude(self):
         names = [n for n, where, _ in runs.flow_names() if where == "shipped"]
-        self.assertEqual(sorted(names), ["audit", "best-of", "build", "fix", "fix-escalate", "lenses", "triage"])
+        self.assertEqual(sorted(names), ["audit", "backlog", "bar", "best-of", "build", "docs", "fix", "fix-escalate",
+                                         "lenses", "triage"])  # bar, docs and backlog: #1463 P5
         for n in names:
             flow = runs.load_flow(n)
             self.assertTrue(runs.stages(flow)[-1]["final"], n)
@@ -590,6 +591,28 @@ class Customized(Base):
         code, _, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run", "--param", "style=x")
         self.assertEqual((code, err.strip()), (1, "wb: --param style: one of unit, prop, not 'x'"))
 
+    def test_the_bar_docs_and_backlog_flows_dry_run_with_the_seen_list_in_the_finders_spec_1463(self):
+        # #1463 P5: the bar round's seen file is a param, never machinery of its own
+        seen = Path(self.tmp.name) / "seen.txt"
+        seen.write_text("the export drops the last row\n")
+        code, out, err = wb("run", "start", "dry", "--flow", "bar", "--repo", str(self.repo), "--dry-run",
+                            "--param", "areas=src", "--param", f"seen={seen}")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Already found in earlier rounds (don't report these again, nor the same defect in other words):\n"
+                      "the export drops the last row", out)
+        self.assertIn("Report only what meets this bar: real users lose work", out)
+        code, out, err = wb("run", "start", "dry", "--flow", "bar", "--repo", str(self.repo), "--dry-run",
+                            "--param", "areas=src")
+        self.assertEqual(code, 0, err)                  # seen is optional: an empty list
+        code, out, err = wb("run", "start", "dry", "--flow", "backlog", "--repo", str(self.repo), "--dry-run",
+                            "--param", "issues=a,b")
+        self.assertEqual(code, 0, err)
+        self.assertIn("pick", out)
+        self.assertEqual(runs.validate(runs.load_flow("docs")), [])
+        self.assertIn("claim", json.loads((Path(runs.__file__).parent.parent / "agent/schemas/verdict.json")
+                                          .read_text())["properties"])
+        self.assertFalse(runs.run_dir("dry").exists())
+
     def test_a_json_param_that_holds_no_list_is_refused_as_items_and_the_dry_run_starts_nothing(self):
         # #1601 (2026-11-27): a value that is no list was split by list(), one task per character
         plan = Path(self.tmp.name) / "one.json"
@@ -657,6 +680,12 @@ class Customized(Base):
         self.assertIsNone({r["name"]: r for r in runs.flow_rows(self.repo)}["theirs"]["command"])
         code, out, _ = wb("run", "flows", "--repo", str(self.repo))
         self.assertIn("tests (yours) /tests-for: ", out)
+        # #1463 P5: the web composer's /word lists the same commands, the hint as the hosts' flowHint
+        from workbench import chat
+        chat._COMMANDS["at"] = -1e9
+        got = [c for c in chat.flow_commands() if c["flow"] == "tests"]
+        self.assertEqual([(c["command"], c["hint"]) for c in got], [("tests-for", "src=… style=… note=…")])
+        self.assertNotIn("theirs", [c["command"] for c in chat.flow_commands()])
 
     def test_a_shipped_card_or_flow_copied_is_yours_says_it_shadows_and_when_the_shipped_one_moved_and_reset_sets_it_aside(self):
         code, out, err = wb("card", "copy", "find")
