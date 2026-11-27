@@ -110,11 +110,14 @@ body.kb-open #tabbar { display: none; }
   .tab { flex: none; height: 64px; }
 }
 
-/* a short word from a view (WB.toast), over the nav */
-.toast { position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 5;
+/* a short word from a view (WB.toast), over the nav. Shown with .on; without it faded out and moved
+   down, never display:none, so it stays in the accessibility tree (the web app's review, 2026-11-26) */
+.toast { position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom)); transform: translate(-50%, 8px); z-index: 5;
   max-width: min(90vw, 420px); padding: 9px 14px; border-radius: 12px; background: var(--fg); color: var(--bg);
-  font: 14px/1.4 var(--sans); box-shadow: var(--shadow); animation: rise .2s ease-out; }
-.toast[hidden] { display: none; }
+  font: 14px/1.4 var(--sans); box-shadow: var(--shadow); opacity: 0; pointer-events: none;
+  transition: opacity .2s ease-out, transform .2s ease-out; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.toast:empty { padding: 0; }
 /* what a screen reader hears of the thread (#1408): there, never seen */
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; }

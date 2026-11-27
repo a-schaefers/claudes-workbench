@@ -77,7 +77,7 @@ export async function check(page: any, ctx: E2eCtx) {
   const { base, token, env, home, until, goTo, desktop } = ctx
   const view = () => page.locator('#settings-rows')
   const row = (key: string) => page.locator(`#settings-rows .set-row[data-key="${key}"]`)
-  const toast = () => page.evaluate(() => { const t = document.getElementById('toast')!; return t.hidden ? '' : t.textContent })
+  const toast = () => page.evaluate(() => { const t = document.getElementById('toast')!; return t.classList.contains('on') ? t.textContent : '' })
   // shown again, from nothing: the waits below see only what this showing's GET drew
   const reshow = async () => {
     await goTo('chat')
@@ -459,6 +459,27 @@ export async function check(page: any, ctx: E2eCtx) {
       if (JSON.stringify(posts) !== JSON.stringify([{ key: 'api-writing', value: 'prov/a' }, { key: 'role-writing', value: 'api' }])) throw new Error(JSON.stringify(posts))
       await until(async () => (await row('role-writing').locator('[aria-checked="true"]').getAttribute('data-value')) === 'api')
       if (await row('role-writing').locator('.set-pick').count()) throw new Error('the list stayed open')
+    })
+
+    await ctx.check('the toast hides by its look, never display:none, lasts 60 ms a character (3.5 s at least), and waits while hovered', async () => {
+      // the web app's review (2026-11-26): a live region that starts display:none is missed by some
+      // screen readers, and a 236-character refusal went in 3.5 s (#1563)
+      const got = await page.evaluate(async () => {
+        const t = document.getElementById('toast')!, wait = (ms: number) => new Promise(r => setTimeout(r, ms))
+        WB.toast('x'.repeat(100))                          // 6 s
+        await wait(4500)
+        const long = t.classList.contains('on')
+        await wait(2500)
+        const gone = !t.classList.contains('on') && getComputedStyle(t).display !== 'none' && getComputedStyle(t).visibility !== 'hidden'
+        WB.toast('Short.')
+        t.dispatchEvent(new MouseEvent('mouseenter'))
+        await wait(4000)
+        const held = t.classList.contains('on')
+        t.dispatchEvent(new MouseEvent('mouseleave'))
+        await wait(4000)
+        return { long, gone, held, after: t.classList.contains('on') }
+      })
+      if (JSON.stringify(got) !== JSON.stringify({ long: true, gone: true, held: true, after: false })) throw new Error(JSON.stringify(got))
     })
 
     await ctx.check(desktop ? 'the view lays out at 1280 px, two columns of cards, and at 390 px, one, nothing past its edge'

@@ -1696,7 +1696,7 @@ async function run(engine: string, device?: string) {
         WB.toast('Saved.')
         const t = document.getElementById('toast')!
         return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, timed: [q.status, JSON.stringify(await q.json())], cur: WB.current(), seen,
-          token: WB.token().length > 20, toast: !t.hidden && t.textContent }
+          token: WB.token().length > 20, toast: t.classList.contains('on') && t.textContent }
       })
       if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,ask,current,on,post,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
         cur: 'settings', seen: ['settings'], token: true, toast: 'Saved.' })) throw new Error(JSON.stringify(got))

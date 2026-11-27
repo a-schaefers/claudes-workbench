@@ -7453,7 +7453,9 @@ show(), hide()})` (`stats` gets `#stats-body`, `settings` `#settings-rows`; moun
 shown and hidden on each switch and on `visibilitychange`, and the view shown is shown again,
 `reshowView`, when the network comes back (`online`) or the stream does after a failure, #1412; a
 second registration is ignored),
-`toast(text)` (3.5 s), `ask(text)` (the Chat view with its box filled with `text` and focused, sent
+`toast(text)` (`#toast`, a live region shown with `.on` and hidden by its look, faded and moved down, never
+`display: none`, which some screen readers miss; up `max(3.5 s, 60 ms a character)`, `TOAST_MS`, `TOAST_CHAR_MS`:
+a 236-character refusal went in 3.5 s, #1563; held while hovered or focused: the web app's review, 2026-11-26), `ask(text)` (the Chat view with its box filled with `text` and focused, sent
 by the user, never by the call: Settings' Ask link), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
@@ -11272,7 +11274,8 @@ requests once the worker registers (#1223). The Settings
 view's (#1286): the groups in order, a card per role first, its role row unlabelled and the rest of the role under a
 closed More, then "Agents and roles" (#1553), above the device cards (the gear's old cards are
 `#settings`'s alone); the toasts in the page's words (`<label>: <choice>`, a refusal by the row's label, kept
-under the row past the toast, #1563); with no API provider a role's sentence alone, a `hidden` row not drawn, and the line's Ask link filling the chat's box; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
+under the row past the toast, #1563); the toast hidden by its look, never `display: none`, up 60 ms a character
+(3.5 s at least) and held while hovered; with no API provider a role's sentence alone, a `hidden` row not drawn, and the line's Ask link filling the chat's box; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the

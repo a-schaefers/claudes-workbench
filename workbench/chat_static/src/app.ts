@@ -1842,12 +1842,21 @@
   for (const b of tabs) b.addEventListener('click', () => go(b.dataset.view as string))
   addEventListener('hashchange', () => setView(location.hash.slice(1)))
   document.addEventListener('visibilitychange', () => { if (document.hidden) modHide(curView); else modShow(curView) })
-  let toastTimer = 0
+  // A short word from a view (WB.toast). Hidden by its look (`.toast` without `.on`: faded, moved
+  // down), never display:none: some screen readers miss a live region that starts out of the tree.
+  // Up for as long as its words need, 60 ms a character and 3.5 s at least (a 236-character refusal
+  // went in 3.5 s, #1563), and held while hovered or focused (the web app's review, 2026-11-26)
+  const TOAST_MS = 3500, TOAST_CHAR_MS = 60
+  let toastTimer = 0, toastHeld = false, toastFor = 0
+  const toastEl = $('toast')
+  const toastGo = () => { clearTimeout(toastTimer); if (!toastHeld) toastTimer = setTimeout(() => toastEl.classList.remove('on'), toastFor) }
   function toast(text: unknown) {
-    const t = $('toast')
-    t.textContent = String(text); t.hidden = false
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true }, 3500)
+    toastEl.textContent = String(text); toastEl.classList.add('on')
+    toastFor = Math.max(TOAST_MS, TOAST_CHAR_MS * toastEl.textContent.length)
+    toastGo()
   }
+  for (const [on, held] of [['mouseenter', true], ['mouseleave', false], ['focusin', true], ['focusout', false]] as const)
+    toastEl.addEventListener(on, () => { toastHeld = held; if (held) clearTimeout(toastTimer); else if (toastEl.classList.contains('on')) toastGo() })
   // The view-module API: stats.js and settings.js build against exactly this (#1284)
   window.WB = Object.freeze({
     token: () => token,
