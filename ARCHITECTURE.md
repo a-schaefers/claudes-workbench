@@ -4092,12 +4092,19 @@ in the task sheet's note, #1339): while away, the chat is all the user sees.
   size or mtime moved, in the session that listens (chat/listener.json) or any while none does (a claim stands as
   `listen` reads it, `claimStands`: a session ended in workbench mode leaves its claim), and
   takes each `by: "web"` row newer than `$.store`'s `settingsSeen` mark (every session's, so a
-  reload or a second session says it never again; no older than `OLDEST_WAKE_MS`). A row with
-  `help` (a setting on but not working yet, such as Agent code navigation with no probe) toasts
+  reload or a second session says it never again). A row with
+  `help` (a setting on but not working yet, such as Agent code navigation with no probe) is due
+  however old while it is its key's newest row, anyone's (#1557: the page promises the driver's
+  offer, and one made with no session up lapsed after the hour), and one older than `OLDEST_WAKE_MS`
+  only while `wb settings help <key> --json` still gives a note (`helpStill`; none: retired, marked
+  seen; wb failing: left for the next read), since probe set up or `tailscale serve` run outside the
+  offer made it untrue (#1557's review); it toasts
   `workbench: <label> changed on the web app: Claude will offer to set it up` and queues a
   `[workbench]` turn (`mem.queued`): `The user changed <label> from <from> to <to> on the web app.
   wb said: <said>`, the help, and `Offer to help with it, and install or change nothing without
-  their yes.` (`SETTING_HELP`, `settingSaid`). One without goes in as one quiet `[workbench]` row
+  their yes.` (`SETTING_HELP`, `settingSaid`), with the away note (`awayToo`) while the user is away
+  on the web chat (#1555: it was made in the terminal they had left). One without, no older than
+  `OLDEST_WAKE_MS`, goes in as one quiet `[workbench]` row
   (no turn); the roles, the busy row, the cap, Claude coding and Dynamic workflows (`SAID_ELSEWHERE`)
   are left out of it, as `unsaid` says them already (*The roles in the conversation*, *The rules
   said later*).
@@ -7668,7 +7675,7 @@ for a file missing or torn and an older wb writes fewer, with an `unknown` index
 notify.jsonl's `NoticeRow`, the chat's (`ChatMsg`, `ChatFile`, `About`, `Driver`, `ChatState`,
 `Snapshot`, `Patch`, `OpenTask`, `TaskPart`, `Savings`; chat/listener.json's `ListenerClaim` and the
 state's `Listener`; chat/open.json's `ChatOpen`; `wb chat url --json`'s `ChatLink`), settings.py's
-`SettingRow`, `SettingChoice` and `SettingsOffers` (`wb settings offers --json`), and `WatchLine`
+`SettingRow`, `SettingChoice`, `SettingsOffers` (`wb settings offers --json`) and `SettingsHelp` (`wb settings help --json`), and `WatchLine`
 (`wb watch --json`), `RouteJson` (`wb route --json`), `ModelsJson` and `MediaJson` (`wb models
 --json`). It lives in the mod because the mod is installed as its own directory (marketplace.json's
 `./mod`) and can import nothing outside it. Its readers: the web's `src/types.d.ts` (`import()` types,
@@ -7767,6 +7774,8 @@ while its setting is on but can't work yet, which `apply` also returns when that
 chosen (`HELP`: `probe` on with no probe set up, `PROBE_HELP` with wb's line, as the pane's
 `PROBE_SETUP_NOTE` said until #1283), for the server to record (#1280) and the mod to turn into a `[workbench]` turn
 in which Claude offers to set it up and installs nothing without a yes (#1283; #1279's addendum).
+`help_now(key)` gives the same note as the key stands now (`wb settings help`), which both hosts
+ask before an offer over an hour old (#1557's review): a key added to `HELP` needs its case there.
 
 **The rows** (the pane's choices and sentences, moved; each `→` its wb call):
 - *a role's card* (`significant`, `trivial`, `writing`, #1553: one role's settings were spread over three cards,
@@ -10248,7 +10257,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (opens with `runner.STEP_NOTE`: a `smaller` intervention after a progress check, else a `hint`; delivered, status `step_note`: no auto-fix or self-review until Claude's next wb feedback or wb next, #1300) | Queued/running/testing/asking with a live runner only. steer.jsonl, delivered when the run ends, before the tests; `--now` at once. |
 | `wb note <task> --text "…"` | | A `captain` event. |
 | `wb splash [on\|off]` | | `$WB_HOME/splash.json`: the pane's opening (#963). |
-| `wb settings [set KEY VALUE \| offers]` | `--json`; `set`: `--dry-run`, `--json`; `offers`: `--if-due`, `--json` | The web app's Settings rows (*The admin table (settings.py)*, *Claude's writes*, #1287): every row by group with its choices (`cli.settings_lines`); `set` runs `settings.apply(by="claude")` (a role's row gated as `wb route` is, the mod's dialog reading `--dry-run --json`), prints wb's line and the row's `help`, appends to settings-changes.jsonl; exit 2 no such key or value, 3 wb refused. `offers` (#1334, the OpenCode plugin's, *Background jobs on OpenCode*): `settings.offers`, the settings-changes.jsonl rows `by: "web"` newer than settings-offered.json's mark and under `OFFER_MAX_AGE_S` (an hour) old, `{"offers": [{ts, key, label, text, toast}], "notes": [{ts, key, text}]}` (a row with `help` an offer, `change_said` and its help; the rest notes, but `SAID_ELSEWHERE`'s keys), plain the texts; `--if-due` records the newest as said under its lock. |
+| `wb settings [set KEY VALUE \| offers \| help KEY]` | `--json`; `set`: `--dry-run`, `--json`; `offers`: `--if-due`, `--json`; `help`: `--json` | The web app's Settings rows (*The admin table (settings.py)*, *Claude's writes*, #1287): every row by group with its choices (`cli.settings_lines`); `set` runs `settings.apply(by="claude")` (a role's row gated as `wb route` is, the mod's dialog reading `--dry-run --json`), prints wb's line and the row's `help`, appends to settings-changes.jsonl; exit 2 no such key or value, 3 wb refused. `offers` (#1334, the OpenCode plugin's, *Background jobs on OpenCode*): `settings.offers`, the settings-changes.jsonl rows `by: "web"` newer than settings-offered.json's mark, a note under `OFFER_MAX_AGE_S` (an hour) old, an offer however old while it is its key's newest row (#1557) and, past the hour, while `settings.help_now` still gives its key a note (else retired, the mark past it), `{"offers": [{ts, key, label, text, toast}], "notes": [{ts, key, text}]}` (a row with `help` an offer, `change_said` and its help; the rest notes, but `SAID_ELSEWHERE`'s keys), plain the texts; `--if-due` records the newest as said under its lock. `help KEY` (#1557's review, the mod's `helpStill`): `settings.help_now`, the note `HELP` gives the key as it stands now (probe's row's `help`, from `wb experiment`'s line; reach's from chat.json and `tailscale serve`, as `wb chat reach` words it: `cli.not_served_line`, `cli.still_serves_line`), or nothing; `--json` `{"key", "help": note or null}`. |
 | `wb experiment [<name> [on\|off]]` | | *Experiments* (`cli.experiment_lines`, `context.EXPERIMENTS`, use over `USE_RECENT` 5 rows, `cli.use_recent`); sets `experiments.json` for later tasks; old probe levels `context.OLD_LEVELS` mean on; `; on is recommended` while `context.PROBE_RECOMMENDED`. |
 | `wb deepmode [on\|off]`, `wb workflows [on\|off]` | `--rule` (prints `runs.DEEPCODE_RULE`, the rule a host adds when the user types `deepcode`); `--moved` (once: a 2.1 `mode: on` written as deepmode off and the story's `moved.deepmode` printed, else nothing; the hosts' once a load, #1507) | *Dynamic workflows (deepmode)* (#1041, #1278): `$WB_HOME/workflows.json`; off by default. One command under two names. |
 | `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--args TEXT` (a flow's slash command's line as typed: `runs.parse_args`, its one param whole, else `k=v` words), `--dry-run`, `--repo DIR` (.: any directory in the repo, read from its top, and each item's `wb start --repo` is DIR, so its package is found, run.json `package_dir`, #1494), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE` (kept whole in run.json; past `runs.CUTS` 4,000 characters a line says each spec's `{context}` carries the first 4,000, and the spec says the cut, #1519), `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param (a `choices` one not among them; a `files` one matching nothing committed at the base, or over `runs.FILES_MAX` 1,000), a stage on an API role with no day cap (`meter.no_cap`), and with exit 3 `stage <id>: ` and wb start's own line for a stage (or escalate) role on API whose model can't be found (`runs.role_cant_run`: no API model, or one the catalog doesn't list, a missing key named, `models.unlisted_why`; read fresh, so a cold hosted.json never says a working API role is the GPU's, #1532), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `stop: wb run stop <run>` and that its notices wake the session as a task's (without the mod or the plugin, `wb wait <run>` in the background). `--dry-run` (#1295) stops after the cap check and the budget, before any file: a line per stage (its card or code, role and side, where its items come from, those `unless_exists` skips), each items stage's first spec cut at `runs.DRY_SPEC_CUT` 1,500 characters, and the estimate (`runs.dry_run`); exit 0, or 1 on a refusal (3 for a role that can't run). |
@@ -11776,7 +11785,7 @@ doc needs its own `!/` line).
   or `tasks.ts` fails `tests/test_kernel.py` (BOUNDARY.md's `replaces`, and a phase set: `kernel.phase_literals`).
   **`store.OPEN_ORDER`** → the pane's header order and the status line's (`openCounts`); `tasks.test.ts`'s headers.
   **Kernel.Notice's hour and minute** (`noticesDue`'s hour, `rewakePlan`'s minute and 12 hours) → the mod's
-  `OLDEST_WAKE_MS` (a web settings row that old is no news) and `REWAKE_MS` (a failed chat send or queued prompt
+  `OLDEST_WAKE_MS` (a web settings row without help that old is no news) and `REWAKE_MS` (a failed chat send or queued prompt
   tried again), kept equal by hand.
   **A kernel export** →
   its row in `kernel/BOUNDARY.md`'s `## Exports`, its golden file in `golden/index.ts`, a build; **a denied import** →
@@ -12055,7 +12064,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `tsconfig.sw.json`. **A shape the page reads** (chat.snapshot, chat.patch, `/api/task`'s parts, settings.py's
   rows) → `mod/types/wire.d.ts`, and `src/types.d.ts`'s alias of a new one. **Anything else wb writes that a
   TypeScript reader reads** (task.json's and status.json's keys, notify.jsonl's rows, chat/listener.json,
-  chat/open.json, `wb watch`, `route`, `models`, `chat url` and `settings offers --json`) → `mod/types/wire.d.ts`,
+  chat/open.json, `wb watch`, `route`, `models`, `chat url`, `settings offers --json` and `settings help --json`) → `mod/types/wire.d.ts`,
   then the three type checks (*wb's shapes in one module*). **`scripts/install-tsc.sh`'s `version`** → its four hashes, and a rebuild (the
   headers name it). **`tests/e2e_*.mts`' page probes** (`window.<x>` a check sets) → `tests/e2e_page.d.ts`;
   **chat.yml's `NODE_TYPES_VERSION`** → the Node line it runs. **`/api/state`'s asks or messages** → `sw.ts`. **A key of

@@ -6457,7 +6457,8 @@ test('#1283: Agent code navigation turned on in the web app without probe makes 
     'binary with `symbols`; install nothing without their yes.'
   const row = (ts: number, extra: Record<string, unknown> = {}) => JSON.stringify({ ts, key: 'probe', label: 'Agent code navigation',
     from: 'off', to: 'on', said: 'probe: on, but not set up: no probe with symbols on PATH', help, by: 'web', ...extra }) + '\n'
-  files['/wb/settings-changes.jsonl'] = row(ts0 - 7200) // two hours old: no news now
+  // two hours old and turned off since: no news now (the off a note that old, #1557)
+  files['/wb/settings-changes.jsonl'] = row(ts0 - 7200) + row(ts0 - 7100, { to: 'off', said: 'probe: off', help: undefined })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)
   expect(woken).toEqual([])
@@ -6481,6 +6482,85 @@ test('#1283: Agent code navigation turned on in the web app without probe makes 
   await clock.advance(31_000)
   await clock.advance(31_000)
   expect(offers()).toHaveLength(1)
+})
+
+test('#1557: a web change\'s offer made with no session up is still made by a session started hours later, once', async ($, on) => {
+  // the page promises "your driver will offer to set it up"; the offer lapsed after the hour, so a
+  // change made from the phone with no session up was never offered (2026-11-26)
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', stillHelps(files, 'Offer to set probe up.'))   // probe still not set up
+  const kept: Record<string, unknown> = {}
+  on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
+  on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  files['/wb/settings-changes.jsonl'] = JSON.stringify({ ts: ts0 - 3 * 3600, key: 'probe', label: 'Agent code navigation',
+    from: 'off', to: 'on', help: 'Offer to set probe up.', by: 'web' }) + '\n'
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('Agent code navigation'))).toHaveLength(1)
+  expect(kept.settingsSeen).toBe(ts0 - 3 * 3600)
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(31_000)
+  expect(woken.filter(t => t.includes('Agent code navigation'))).toHaveLength(1)
+})
+
+// chatWb, with `wb settings help <key> --json` answering ``help`` (null: the setting needs none now)
+const stillHelps = (files: Record<string, string>, help: string | null, runs: string[][] = []) => {
+  const wb = chatWb(files, () => ({ state: 'up', url: LINK }), runs)
+  return (h: any, e: any) => e.argv[1] === 'settings' && e.argv[2] === 'help'
+    ? (runs.push(e.argv), { value: { exitCode: 0, stdout: JSON.stringify({ key: e.argv[3], help }), stderr: '' } })
+    : wb(h, e)
+}
+
+test('#1557: an old web change\'s offer whose help no longer applies is never made, and is retired', async ($, on) => {
+  // review of #1557, 2026-11-26: a help row days old was offered after probe was set up outside
+  // the offer (from the other host, or by hand): "probe: on, but not set up", untrue, a paid turn
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  const runs: string[][] = []
+  on('process.run', stillHelps(files, null, runs))                // probe set up since: wb gives no note
+  const kept: Record<string, unknown> = {}
+  on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
+  on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  files['/wb/settings-changes.jsonl'] = JSON.stringify({ ts: ts0 - 3 * 86400, key: 'probe', label: 'Agent code navigation',
+    from: 'off', to: 'on', said: 'probe: on, but not set up', help: 'Offer to set probe up.', by: 'web' }) + '\n'
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  await clock.advance(31_000)
+  expect(runs.map(a => a.slice(1).join(' '))).toContain('settings help probe --json')          // asked wb, not the row
+  expect(woken.filter(t => t.includes('Agent code navigation'))).toEqual([])
+  expect(kept.settingsSeen).toBe(ts0 - 3 * 86400)                 // retired: never asked again
+})
+
+test('#1555: a web change\'s offer while the user is away on the web chat says to answer there', async ($, on) => {
+  // made from the phone, the offer went to the terminal they had left (2026-11-26)
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', chatWb(files, () => ({ state: 'up', url: LINK })))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
+  files['/wb/settings-changes.jsonl'] = JSON.stringify({ ts: ts0 + 5, key: 'probe', label: 'Agent code navigation',
+    from: 'off', to: 'on', help: 'Offer to set probe up.', by: 'web' }) + '\n'
+  mtimes['/wb/settings-changes.jsonl'] = 4
+  await clock.advance(31_000)
+  const [offer] = woken.filter(t => t.includes('Agent code navigation'))
+  expect(offer).toContain('Offer to set probe up.')
+  expect(offer).toContain('wb chat reply')
 })
 
 test('#1283: a closed session\'s claim on the listener leaves a web change\'s help to this session', async ($, on) => {

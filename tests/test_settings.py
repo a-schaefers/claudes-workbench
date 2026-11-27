@@ -9,7 +9,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-from workbench import models, routes, settings, store
+from workbench import context, models, routes, settings, store
 from tests import test_workbench as tw  # the module: its test classes would run here too
 
 FREE_ID = "someprovider/a-model-no-menu-lists"
@@ -708,6 +708,40 @@ class SettingsOffers(tw.Base):
         self.assertEqual([n["key"] for n in self.offers()["notes"]], ["splash"])
         # without --if-due nothing is spent
         self.assertEqual([n["key"] for n in self.offers("--if-due")["notes"]], ["splash"])
+
+    def test_an_offer_made_with_no_driver_up_waits_past_the_hour_until_its_setting_changes_again(self):
+        # #1557 (2026-11-26): the page promises "your driver will offer to set it up", and an
+        # offer over OFFER_MAX_AGE_S old was dropped, so a driver started later never offered
+        now = store.now()
+        context.set_experiment("probe", "on")            # and still not set up: no probe on PATH
+        self.change("probe", now - 3700, help="Offer to set probe up.", label="Agent code navigation")
+        self.change("reach", now - 9000, help="Offer to run tailscale serve.")
+        self.change("reach", now - 8000, by="terminal")  # changed again since: that offer is retired
+        self.change("splash", now - 3700)                # a note that old is still no news
+        empty = Path(self.tmp.name) / "no-probe"
+        empty.mkdir()
+        with mock.patch.dict(os.environ, {"PATH": str(empty)}):
+            got = self.offers("--if-due")
+            self.assertEqual([o["key"] for o in got["offers"]], ["probe"])
+            self.assertEqual(got["notes"], [])
+            self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})  # once
+
+    def test_an_old_offer_whose_help_no_longer_applies_is_never_made(self):
+        # #1557's review (2026-11-26): probe set up outside the offer (from the other host, or by
+        # hand), and days later a driver's first start still offered "probe: on, but not set up",
+        # an untrue offer that starts a paid turn
+        now = store.now()
+        context.set_experiment("probe", "on")
+        with mock.patch.dict(os.environ):
+            tw.fake_probe(Path(self.tmp.name))           # working: `probe --help` lists `symbols`
+            self.assertIsNone(settings.help_now("probe"))
+            self.change("probe", now - 3 * 86400, help="Offer to set probe up.", label="Agent code navigation",
+                        said="probe: on, but not set up")
+            self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})
+            # inside the block: leaving it takes the fake probe off PATH (#1557's CI, 2026-11-26)
+            self.assertEqual(json.loads(tw.run_wb("settings", "help", "probe", "--json")), {"key": "probe", "help": None})
+        # retired: with probe gone again it is still never said (a new change would be)
+        self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})
 
     def test_with_nothing_changed_there_is_nothing_to_offer(self):
         self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})

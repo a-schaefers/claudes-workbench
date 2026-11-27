@@ -188,6 +188,26 @@ def _reach_help(value, said: str) -> str | None:
 HELP = {"probe": _probe_help, "reach": _reach_help}
 
 
+def help_now(key: str) -> str | None:
+    """The note HELP gives ``key`` as it stands now (its value and wb's line for it now), else None:
+    an offer older than OFFER_MAX_AGE_S is made only while this still says one (#1557's review,
+    2026-11-26: a help row days old was offered after probe was set up, or `tailscale serve` run,
+    outside the offer, an untrue offer that started a paid turn). `wb settings help` prints it for
+    the mod. A key added to HELP needs its own case here, or its old offers are never made."""
+    try:
+        if key == "probe":
+            return _probe_row().get("help")
+        if key == "reach":
+            value, port = chat.reach(), chat.port()
+            if value == "tailnet" and not chat.https_served(port):  # as `wb chat reach tailnet` says it
+                return _reach_help(value, cli.not_served_line(port))
+            if value == "local" and (still := cli.still_served(port)):
+                return _reach_help(value, cli.still_serves_line(still))
+    except (chat.ConfigError, OSError, ValueError):
+        return None
+    return None
+
+
 BY = ("web", "claude")  # apply()'s writers: the web app's click, Claude's `wb settings set`
 
 # Each row's label, as the web app shows it and settings-changes.jsonl records it: the fixed ones
@@ -1066,7 +1086,7 @@ def rev() -> dict | None:
 # and words in register.tsx with its mark in its own store, so each host offers a row once.
 OFFERED = "settings-offered.json"  # under $WB_HOME: {ts}, the newest row `wb settings offers --if-due` gave
 OFFER_TAIL = 64 << 10  # the mod's SETTINGS_TAIL
-OFFER_MAX_AGE_S = 3600  # the mod's OLDEST_WAKE_MS: a row older is no news
+OFFER_MAX_AGE_S = 3600  # the mod's OLDEST_WAKE_MS: a row without help older is no news
 SAID_ELSEWHERE = re.compile(r"(?:agents|busy|cap|coding|workflows|(?:role|gpu|api|think)-[a-z]+)")
 
 
@@ -1089,23 +1109,35 @@ def change_said(r: dict) -> str:
 def offers(spend: bool, now: float | None = None) -> dict:
     """The web changes due a word (`wb settings offers`): {"offers": [{ts, key, label, text,
     toast}], "notes": [{ts, key, text}]}, from settings-changes.jsonl's rows `by: "web"` newer
-    than settings-offered.json's mark and under OFFER_MAX_AGE_S old. ``spend`` (--if-due) moves
-    the mark past them under its lock, so one host's servers say each once."""
+    than settings-offered.json's mark: a note under OFFER_MAX_AGE_S old, an offer however old
+    while it is its setting's newest row (#1557, 2026-11-26: the page promises "your driver will
+    offer to set it up", and a change made with no driver up lapsed after the hour; a later change
+    of the same setting, anyone's, retires it), one older than the hour only while help_now still
+    gives a note (else it is retired too). ``spend`` (--if-due) moves the mark past them under its
+    lock, so one host's servers say each once."""
     now = store.now() if now is None else now
     mark_path = store.home() / OFFERED
     with store.locked(store.home() / "locks" / "settings-offered.lock"):
         mark = float((store.read_json(mark_path, {}) or {}).get("ts") or 0)
         got: dict = {"offers": [], "notes": []}
         newest = mark
-        for r in store.read_jsonl_tail(chat.changes_path(), OFFER_TAIL):
-            if not isinstance(r, dict) or r.get("by") != "web":
+        rows = [r for r in store.read_jsonl_tail(chat.changes_path(), OFFER_TAIL)
+                if isinstance(r, dict) and isinstance(r.get("ts"), (int, float))]
+        latest: dict[str, float] = {}  # each setting's newest row, by anyone
+        for r in rows:
+            k = _one(r.get("key"), 80)
+            latest[k] = max(latest.get(k, 0.0), float(r["ts"]))
+        for r in rows:
+            ts = r["ts"]
+            if r.get("by") != "web" or ts <= mark:
                 continue
-            ts = r.get("ts")
-            if not isinstance(ts, (int, float)) or ts <= mark or ts < now - OFFER_MAX_AGE_S:
-                continue
-            newest = max(newest, float(ts))
             key, label = _one(r.get("key"), 80), _one(r.get("label"), 80) or _one(r.get("key"), 80)
             help = r.get("help").strip() if isinstance(r.get("help"), str) else ""
+            if (ts < latest[key]) if help else (ts < now - OFFER_MAX_AGE_S):
+                continue
+            newest = max(newest, float(ts))
+            if help and ts < now - OFFER_MAX_AGE_S and not help_now(key):
+                continue  # what it asked for is done, or moot: retired, said never (#1557's review)
             if help:
                 got["offers"].append({
                     "ts": ts, "key": key, "label": label,
