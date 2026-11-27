@@ -486,8 +486,9 @@ and API model and thinking); `hidden: true`, a row the page doesn't show while i
 choice shown as its `says` alone; `ask`, a row with a problem or a request the page offers to hand to the driver
 (true, or a string: the request); `brief`, what a folded card's summary says of it; `phone` (the `reach` row's),
 the web app's address on the tailnet, with no token, `""` while reach isn't the tailnet; `kind` one
-of `choice` (`value`, `choices: [{value, label, says, needs?}]` (`needs`: the row whose value that choice needs
-first, a role's API its `api-<role>`), `says`, `other`: any id is taken),
+of `choice` (`value`, `choices: [{value, label, says, needs?, group?}]` (`needs`: the row whose value that choice needs
+first, a role's API its `api-<role>`; `group`: an API model's provider, or `In use` for the role's own and the
+others' in use, the page's `<optgroup>`s: an API row lists every catalog model, #1617), `says`, `other`: any id is taken),
 `number` (`value`: a number or null for off, `unit`: `usd`, `says`), `info`
 (`text`), `action` (`text`, `choices` as buttons) or `note` (`text`, standing where its group's
 rows would be). A row may carry `help` (*POST /api/settings*), and `changed: {ts, by}`, its newest

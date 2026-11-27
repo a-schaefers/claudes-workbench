@@ -5,11 +5,12 @@ import json
 import os
 import textwrap
 import time
+import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-from workbench import context, models, routes, settings, store
+from workbench import cli, context, models, routes, settings, store
 from tests import test_workbench as tw  # the module: its test classes would run here too
 
 FREE_ID = "someprovider/a-model-no-menu-lists"
@@ -417,6 +418,51 @@ class Settings(Rows):
         self.assertEqual((row["value"], row["help"]), ("on", got["help"].replace(
             "; tasks already started keep theirs", "")))
         self.assertNotIn("help", settings.apply("probe", "off"))
+
+
+def menu_model(provider: str, name: str, mid: str, price=None) -> dict:
+    """One of `wb models --json`'s `api` entries, as _api_stops reads it."""
+    return {"id": f"{provider}/{mid}", "name": name, "provider": provider, "window": 163840,
+            "provider_name": {"anthropic": "Anthropic", "deepinfra": "DeepInfra", "xai": "xAI"}[provider],
+            **({"price": {"input": price[0], "output": price[1]}} if price else {})}
+
+
+# #1617 (2026-11-27): the owner's 111 models showed as 12, DeepSeek then 11 of Anthropic's, as a cap
+# of 12 filled the list by provider name: DeepInfra's others and every xAI model never showed
+MENU = {"api": [*[menu_model("xai", f"Grok {n}", f"grok-{n}") for n in (4, 3, 2)],
+                *[menu_model("deepinfra", f"Model {c}", f"m-{c}") for c in "fedcba"],
+                menu_model("deepinfra", "DS", "ds", (0.1, 0.2)),
+                *[menu_model("anthropic", f"Claude {c}", f"c-{c}") for c in "zyxwvu"]],
+        "used": ["xai/grok-3", "gone/not-in-the-catalog"]}
+
+
+class ApiMenu(unittest.TestCase):
+    def test_an_api_row_lists_every_catalog_model_the_ones_in_use_first_then_a_group_per_provider_by_name_1617(self):
+        stops = settings._api_stops("Complex coding", MENU, "deepinfra/ds", ["anthropic/c-x"])
+        self.assertEqual(len(stops), len(MENU["api"]))  # every one: 16, past the old 12
+        self.assertEqual(len({s[0] for s in stops}), len(stops))  # each once: the ones in use not again in their group
+        groups = [g for i, (_, _, _, g) in enumerate(stops) if i == 0 or stops[i - 1][3] != g]
+        self.assertEqual(groups, [settings.IN_USE, "Anthropic", "DeepInfra", "xAI"])  # each group once, in order
+        self.assertEqual([s[0] for s in stops[:3]], ["deepinfra/ds", "anthropic/c-x", "xai/grok-3"])
+        self.assertEqual([s[0] for s in stops if s[3] == "xAI"], ["xai/grok-2", "xai/grok-4"])  # by name
+        self.assertEqual([s[0] for s in stops if s[3] == "DeepInfra"], [f"deepinfra/m-{c}" for c in "abcdef"])
+        self.assertEqual(stops[0][1:3], ("DS · DeepInfra (160K) · $0.1/$0.2 per M",  # the option's text as before
+                                        "Complex coding uses deepinfra/ds on API; your code goes to DeepInfra."))
+        row = settings._choice("api-significant", "significant", "API model", stops, "deepinfra/ds", other=True)
+        self.assertEqual(row["choices"][-1], {"value": "xai/grok-4", "label": "Grok 4 · xAI (160K)",
+                                              "says": "Complex coding uses xai/grok-4 on API; your code goes to xAI.",
+                                              "group": "xAI"})
+        self.assertNotIn("group", settings._choice("x", "shared", "X", [("a", "A", "says a")], "a")["choices"][0])
+
+    def test_wb_settings_lists_an_api_rows_models_in_use_and_counts_the_rest_1617(self):
+        # every model in the page's list is 4 rows x 111 lines in wb settings, Claude's to read
+        stops = settings._api_stops("Complex coding", MENU, "deepinfra/ds", [])
+        row = settings._choice("api-significant", "significant", "API model", stops, "deepinfra/ds", other=True)
+        lines = cli.settings_lines([row])
+        self.assertEqual(lines[1:5], ["  api-significant: API model: deepinfra/ds",
+                                      "    * deepinfra/ds: DS · DeepInfra (160K) · $0.1/$0.2 per M",
+                                      "      xai/grok-3: Grok 3 · xAI (160K)",
+                                      "      or any of the 14 other API models' exact provider/model id (wb models lists them)"])
 
 
 class RunRows(Rows):

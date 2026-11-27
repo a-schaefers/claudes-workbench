@@ -20,6 +20,8 @@
   border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--fg); font: inherit; font-size: 16px; }
 .set-select { display: block; width: 100%; margin: 0 0 6px; text-overflow: ellipsis; }
 .set-row > .set-text { display: block; width: 100%; margin: 0 0 6px; }
+/* the filter box above a long model list (#1617): a search field drawn as the other text boxes */
+.set-text.set-filter { display: block; width: 100%; margin: 0 0 6px; -webkit-appearance: none; appearance: none; }
 .set-num { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
 .set-num .set-text { width: 9em; flex: 0 1 9em; }
 .set-unit { color: var(--dim); font-size: 14.5px; }

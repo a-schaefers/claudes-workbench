@@ -3,7 +3,8 @@ makes, in one table the chat server renders the web app's Settings from. A new s
 this file.
 
 A row is a JSON-safe dict: `key` (the pane's name), `group` (GROUPS), `label`, `kind` (KINDS), and
-by kind: a `choice` its `value`, `choices` [{value, label, says}] and `says` (the sentence for the
+by kind: a `choice` its `value`, `choices` [{value, label, says, group?}] (`group`: an API model's provider,
+or IN_USE, drawn as an <optgroup>) and `says` (the sentence for the
 current value), with `other: true` where any model id goes (the role command checks it); a
 `number` its `value` (a float, or None for off) and `unit` (`usd`); an `info` its
 `text`; an `action` its `text` and its `choices`, which are buttons; a `note` one line for the group
@@ -63,7 +64,7 @@ ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
 READ_TIMEOUT_S = 15  # wb route --json, wb models --json (the pane's 15 s)
 WRITE_TIMEOUT_S = 60
 WB = Path(__file__).resolve().parent.parent / "bin" / "wb"  # the clone's launcher; tests swap it
-API_MENU = 12  # an API row lists at most this many models, the ones in use first (the pane's)
+IN_USE = "In use"  # an API row's first group: the role's own model, the other roles', those used (#1617)
 
 OLDER_WB = "wb is older than the mod: wb update"
 NO_PROVIDER = "No API provider connected: /connect in OpenCode adds one; every role runs on the GPU."
@@ -280,7 +281,9 @@ def _read_json(argv: list[str]) -> tuple[dict | None, str]:
 
 
 def _choice(key, group, label, stops, value, **extra) -> dict:
-    choices = [{"value": v, "label": lab, "says": says} for v, lab, says in stops]
+    # a stop is (value, label, says) or (value, label, says, group): an API model's provider, which
+    # the page draws as the select's <optgroup> (#1617)
+    choices = [{"value": v, "label": lab, "says": says, **({"group": g[0]} if g else {})} for v, lab, says, *g in stops]
     chosen = next((c for c in choices if c["value"] == value), choices[-1] if choices else None)
     return {"key": key, "group": group, "label": label, "kind": "choice", "value": value,
             "choices": choices, "says": chosen["says"] if chosen else "", "other": False, **extra}
@@ -324,32 +327,33 @@ def _gpu_stops(label: str, gpu: list, pinned: str) -> list:
 
 
 def _api_stops(label: str, m: dict | None, current: str, others: list[str]) -> list:
-    """The pane's apiStops: the role's own model, the other roles', those used before, then the
-    catalog by provider, API_MENU at most past the ones in use; any other id goes (`other`)."""
+    """Every API model of `wb models --json`'s `api`, each (value, label, says, group): the role's own
+    model, the other roles' and those used before first (IN_USE), then one group per provider, by
+    its name, its models by name; any other id goes (`other`). A cap of 12 cut the rest (#1617,
+    2026-11-27): with 111 models Anthropic's 18 filled the list, and DeepInfra's others and every
+    xAI model never showed."""
     listed = {x["id"]: x for x in (m or {}).get("api") or [] if isinstance(x, dict) and x.get("id")}
 
-    def line(mid: str) -> tuple:
+    def who(x: dict) -> str:
+        return str(x.get("provider_name") or x.get("provider") or x["id"].split("/", 1)[0])
+
+    def line(mid: str, group: str) -> tuple:
         x = listed.get(mid)
         if not x:
-            return mid, mid, f"{label} uses {mid}."
+            return mid, mid, f"{label} uses {mid}.", group
         p = x.get("price") or {}
         price = f" · ${p['input']}/${p['output']} per M" \
             if all(isinstance(p.get(k), (int, float)) for k in ("input", "output")) else ""
         free = f" · {(m or {}).get('free_line') or 'free'}" if x.get("free") else ""
-        return (mid, f"{x.get('name') or mid} · {x.get('provider_name') or x.get('provider')}"
-                     f"{_window(x.get('window'))}{price}{free}",
-                f"{label} uses {mid} on API; your code goes to {x.get('provider_name') or x.get('provider')}.")
+        return (mid, f"{x.get('name') or mid} · {who(x)}{_window(x.get('window'))}{price}{free}",
+                f"{label} uses {mid} on API; your code goes to {who(x)}.", group)
     ids: list[str] = []
     for mid in [current, *others, *[u for u in (m or {}).get("used") or [] if u in listed]]:
         if mid and mid not in ids:
             ids.append(mid)
-    rest = sorted(listed.values(), key=lambda x: (str(x.get("provider_name")), str(x.get("name"))))
-    for x in rest:
-        if len(ids) >= API_MENU:
-            break
-        if x["id"] not in ids:
-            ids.append(x["id"])
-    return [line(mid) for mid in ids]
+    rest = sorted((x for x in listed.values() if x["id"] not in ids),
+                  key=lambda x: (who(x).casefold(), str(x.get("name") or x["id"]).casefold(), x["id"]))
+    return [line(mid, IN_USE) for mid in ids] + [line(x["id"], who(x)) for x in rest]
 
 
 def _think_stops(row: dict) -> list:
@@ -434,14 +438,14 @@ def _driver_row(r: dict, m: dict | None) -> dict:
     stops = [DRIVER_SESSION]
     for g in (m or {}).get("gpu") or []:
         stops.append((g["id"], f"{g.get('label') or g['id']}{_window(g.get('window'))} · GPU",
-                      f"/workbench in OpenCode switches its session to {g['id']}, on this machine's GPU."))
+                      f"/workbench in OpenCode switches its session to {g['id']}, on this machine's GPU.", "GPU"))
     api = {x["id"]: x for x in (m or {}).get("api") or [] if isinstance(x, dict) and x.get("id")}
-    for mid, label, _ in _api_stops("The driver", m, "", []):
+    for mid, label, _, group in _api_stops("The driver", m, "", []):
         x = api.get(mid) or {}
         who = x.get("provider_name") or x.get("provider") or mid.split("/", 1)[0]
         stops.append((mid, label, f"/workbench in OpenCode switches its session to {mid}; that "
-                                  f"conversation, your code in it, goes to {who}."))
-    if pin not in {v for v, _, _ in stops}:
+                                  f"conversation, your code in it, goes to {who}.", group))
+    if pin not in {s[0] for s in stops}:
         stops.append((pin, pin, f"/workbench in OpenCode switches its session to {pin}."))
     return _choice("driver", "shared", LABELS["driver"], stops, pin, other=True)
 

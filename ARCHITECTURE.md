@@ -7935,8 +7935,10 @@ ask before an offer over an hour old (#1557's review): a key added to `HELP` nee
   its API model 2,000 px below the choice that needed it): `role-<role>` → `wb route <role> gpu|api` (a role on
   API whose `api_status` says it can't run says `<Label> can't run on <id>: <why>.`, #1529; with no API model its
   API choice, "API (pick its model)", `needs` `api-<role>`, #1558); then, `more`:
-  `gpu-<role>` → `wb route <role> --gpu <id>|auto` (with GPU models); `api-<role>` (the role's model, the
-  others', those used, then the catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`,
+  `gpu-<role>` → `wb route <role> --gpu <id>|auto` (with GPU models); `api-<role>` (`_api_stops`: every model of
+  `wb models --json`'s `api`, each choice with its `group`: the role's model, the others', those used first, `IN_USE`
+  "In use", then one group per provider, its `provider_name`, by name, its models by name; a cap of 12 had shown the
+  owner's 111 as DeepSeek and 11 Claude models, no xAI, #1617) → `wb route <role> --api <id>`,
   `think-<role>` (the pane's `thinkStops`) → `wb route <role> --thinking on|off` and `review-<role>`
   (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`, both only for a role with an API model
   (thinking is an API model's alone: with none the switch did nothing, the web app's review, 2026-11-26) (these three
@@ -7950,8 +7952,8 @@ ask before an offer over an hour old (#1557's review): a key added to `HELP` nee
   line shows only under OpenCode, where it is a choice). `agents` → `wb route all gpu|api|both`; `busy` → `wb route busy wait|api`; `driver`
   (#1316, after the roles' rows) → `wb route driver <id>|session`: with the OpenCode plugin
   installed (`ocplugin.installs`) a choice, `other` (any id), of `session` (each session's own
-  `/models`), the GPU models, then the API models (`_api_stops`, each saying where the
-  conversation goes), the pin added when not listed; without it an info row, `Claude Code
+  `/models`), the GPU models (group `GPU`), then the API models (`_api_stops`, grouped as an API row's, each
+  saying where the conversation goes), the pin added when not listed; without it an info row, `Claude Code
   (fixed)` (`settings.DRIVER_CLAUDE`); `coding` → `wb coding
   only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`, its note today's spend once a role is
   on API or any is spent (`_spent_today`: `API tasks stop for the day at $5 of spend: ≈$0.12 so far today.`, #1339;
@@ -8005,7 +8007,9 @@ gated as Claude's. `tests/test_settings.py` covers it.
 **Claude's writes** (#1287; the owner, 2026-11-24: "claude is an interactive assistant to the web
 panel, in case a user gets confused about the options", then "We trust Claude"). `wb settings`
 lists every row (`cli.settings_lines`: by group, `key: label: value`, each choice with its line and
-`*` on the current one, an API model's by its label alone; `--json`, the rows). `wb settings set
+`*` on the current one, an API model's by its label alone, of an API row only those in use (`In use`, and the
+driver's GPU ones) and a count of the rest, which `wb models` lists: every model four times was 444 lines, #1617;
+`--json`, the rows). `wb settings set
 <key> <value>` (`cli.cmd_settings`) runs `settings.apply(key, value, by="claude")`, the one writer
 the web app uses too, and prints wb's line and the row's `help` when it came back; its child logs
 the change (*One log writer*: `by` `claude` under `CLAUDECODE=1`, `opencode` from an
@@ -8117,7 +8121,11 @@ alone, and a generic renderer: a new setting touches only Python.
 - **Each kind** (`.set-row[data-key][data-kind]`, its `label` over the control, the current value's
   `says` under it):
   - `choice`: a segmented control (`.seg.set-seg`, radios, one column per choice) up to `SEG_MAX` 4
-    choices, a `<select>` past it or with `other`. Such a select ends with "Other model…", which opens
+    choices, a `<select>` past it or with `other`, its choices with a `group` drawn as `<optgroup>`s (an API row's
+    providers after "In use", #1617). Past `FILTER_AT` 12 choices a filter box (`input[data-filter]`) sits above
+    it: each word typed must be in an option's label, id or group, the chosen one always kept, "No model
+    matches" when nothing else is; Escape clears it, Enter goes on to the select; its text is kept by row
+    (`filters`) through a redraw, until a pick. Such a select ends with "Other model…", which opens
     a text input (`input[data-other]`); Enter sends the typed id, Escape closes the input and the
     select shows the row's value again. A value off the list (none, for an API role without a model)
     is the select's first option. A segmented control is one Tab stop (the checked radio, else the first,
@@ -11433,6 +11441,7 @@ and the savings' "Claude tokens" aside, read by `ts_strings` outside comments an
 each choice applied running its row's `wb` call through a fake `wb`, a role changed from the web stamped `by: "web"`,
 a click under `CLAUDECODE` still written ungated while Claude's own `WB_ACTOR=web` stays gated, `KeyError` for an
 unknown key and `ValueError` for a value off the choices, an API row taking a free id and leaving it to `wb route`,
+an API row listing every catalog model, in use first then a group per provider, and `wb settings` only the ones in use (#1617),
 wb's refusal passed back, turning probe on without `probe` returning the note that asks Claude's help, the `setup`
 group read-only (#1295); and `ClaudeSets`,
 #1287's `wb settings`: every row listed with its choices, `wb settings set coding ask` applied and recorded `by: "claude"`,
@@ -11675,7 +11684,9 @@ on a lit and an unlit choice at 3:1 or more against what is under it (`ringContr
 folded with a line of their state, closed on a phone and open wider, each one's state kept (the checks before
 open them all through `wb-settings-open`); a radio group one Tab
 stop, its arrows moving the focus and picking nothing; a role's API choice with
-no model opening its API model list under the row, a pick sending the model, then the role's API (#1558); "Other model…": Escape closes
+no model opening its API model list under the row, a pick sending the model, then the role's API (#1558); an API model
+list of 16 in four groups, its filter box narrowing it by name and by provider and id, the chosen one kept, through a
+redraw, cleared by Escape and by a pick (#1617), and none over one model; "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
 group; a row's `` `…` `` drawn as `<code>`; on a desktop with reach the tailnet, Open on your phone's link with the page's
 token and Copy, no QR where the server has none, and with reach local its one line (none of it on a phone); a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
