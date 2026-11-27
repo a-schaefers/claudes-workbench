@@ -136,17 +136,15 @@ too](ARCHITECTURE.md#running-your-own-server), even one on another machine.
 
 Any provider you have connected in OpenCode with an API key works for the subagents, as does a
 GitHub Copilot sign-in. Their paid API usage counts against one daily [spending
-cap](ARCHITECTURE.md#spend-what-an-api-task-costs) in dollars, across all providers; a plan such as
-Copilot uses its own quota instead. At the cap, running API tasks stop and queued ones wait.
+cap](ARCHITECTURE.md#spend-what-an-api-task-costs) in dollars, across all providers.
 
 ## Safety and privacy
 
 The subagents never touch your checkout, and their work is merged only after you accept it. Each
 subagent runs in a [sandbox](ARCHITECTURE.md#what-the-agent-knows) that confines its writes to its
 copy of the project and never lets it see your API key. It can run only listed commands, and git
-only to read. The sandbox uses Landlock on Linux and Seatbelt on macOS; on a kernel without
-Landlock, only OpenCode's permission rules apply. Workbench's code enforces these limits and the
-spending cap.
+only to read. The sandbox uses Landlock on Linux and Seatbelt on macOS. Workbench's code enforces
+these limits and the spending cap.
 
 Subagents on your own GPU don't send your code to any provider. A subagent on an API model sends
 what it reads to that model's provider. The orchestrator agent sends what it reads to its own
