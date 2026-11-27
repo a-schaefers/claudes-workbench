@@ -12260,6 +12260,24 @@ class SkillLibrary(Base):
                 "paths", "Use when drawing.", f"Read {path} first.\n")), "-m", "warned")
             self.assertIn("outside the repo", out, path)
 
+    def test_a_skills_paths_are_read_as_a_line_or_a_list_and_one_outside_the_repo_is_refused(self):
+        # #1463 (P3): `paths:` globs, written either way public skills write them; an absolute or
+        # `..` glob never matches a task's repo-relative files, so it is refused, not kept silently
+        from workbench import skills
+        one = write_skill(Path(self.tmp.name) / "drafts" / "one", "one",
+                          "Use when styling.\npaths: \"src/**/*.css, *.scss\"")
+        many = write_skill(Path(self.tmp.name) / "drafts" / "many", "many",
+                           "Use when styling.\npaths:\n  - web/*.css\n  - \"docs/\"")
+        self.assertEqual(skills.parse(one / "SKILL.md")["paths"], ["src/**/*.css", "*.scss"])
+        self.assertEqual(skills.parse(many / "SKILL.md")["paths"], ["web/*.css", "docs/"])
+        self.assertTrue(skills.path_hits(["src/**/*.css"], {"src/a/b/c.css"}))
+        self.assertTrue(skills.path_hits(["*.scss"], {"deep/in/x.scss"}))     # a name glob, any directory
+        self.assertTrue(skills.path_hits(["docs/"], {"docs/guide/a.md"}))
+        self.assertFalse(skills.path_hits(["web/*.css"], {"web/sub/x.css"}))  # `*` stays in one directory
+        for bad in ("/etc/*.conf", "../other/*.py", "~/x/*.md"):
+            d = write_skill(Path(self.tmp.name) / "drafts" / "bad", "bad", f"Use when x.\npaths: {bad}")
+            self.assertIn("isn't a path in the repo", " ".join(skills.check(d / "SKILL.md", "bad")[0]), bad)
+
     def test_two_skill_changes_at_once_each_commit_only_their_own_skill(self):
         # #822: B's `git add` landed between A's add and its path-less commit, so A committed both
         # under its message and B's own message, source and review record never reached the history
@@ -36729,6 +36747,21 @@ class SkillLearning(Base):
         wait_phase("t-dead", {"review"})
         run_wb("discard", "t-dead", "--reason", "wrong approach")
         self.assertEqual([x for x in lessons.survey() if x["kind"] == "agent"], [])
+
+    def test_start_names_a_library_skill_whose_paths_match_a_file_the_spec_names(self):
+        # #1463 (P3): a skill scoped by `paths:` globs is offered when the spec names a matching
+        # file, with no word in common; a spec naming none of its files doesn't get it
+        write_skill(Path(self.tmp.name) / "drafts" / "sql-migrations", "sql-migrations",
+                    "Use when changing the schema.\npaths:\n  - \"db/migrations/*.sql\"\n  - alembic/**")
+        run_wb("skill", "add", "sql-migrations", "--from", str(Path(self.tmp.name) / "drafts" / "sql-migrations"),
+               "-m", "scoped")
+        self.spec.write_text("Add a column for the totals in `db/migrations/0042_totals.sql`.\n")
+        out = self.start("t-path", "ok", "--queue")
+        self.assertIn("library skills that may fit: sql-migrations (wb skill hand t-path <name>)", out)
+        self.spec.write_text("Rename the totals column in src/report.py.\n")
+        self.assertNotIn("may fit", self.start("t-path0", "ok", "--queue"))
+        for t in ("t-path", "t-path0"):
+            wait_phase(t, {"review"})
 
     def test_start_names_the_library_skills_a_spec_seems_to_need(self):
         run_wb("skill", "add", "svg-charts", "--from", str(self.draft(

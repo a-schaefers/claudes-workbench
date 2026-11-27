@@ -45,7 +45,9 @@ with the project; the agents there always see it. Never `~/.claude/skills`, the 
 A good skill: front matter `name` (the directory's) and a `description` that says when to use it
 ("Use when drawing charts as SVG ...": it is all the agent sees before it decides to load it); then
 20–60 lines of imperative steps, the pitfall with the right and wrong form, and how to check the
-result. No paths outside the repo (agents go looking for them), no model names.
+result. No paths outside the repo (agents go looking for them), no model names. A skill about
+certain files can add `paths:` globs, relative to the repo (`paths: "db/migrations/*.sql, *.prisma"`):
+`wb start` then suggests it whenever the spec names a matching file.
 
 **Hand out** 0–2 skills per task, only ones that fit this task: `wb start … --skill <name>`; a
 new step gets its own set with `wb next … --skill <name>`. The agent is told which it holds.
