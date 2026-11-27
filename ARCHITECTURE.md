@@ -10194,7 +10194,7 @@ incomplete and no escalate role's attempt starts beside it, unless the driver's 
 `--overnight` ended the run in the pass that held it (#1581). A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
 Claude's, its work kept; while the run isn't `running` the item waits for `wb run resume`. It takes each report item that ended (`_take`: its object to `outputs/`,
 through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fix` list, at most `max`, the review
-`superseded`; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
+`superseded`, held as a start is, *Budgets*; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
 `cause: item`, as an `on_failure` report item's: it holds only that item, and while it is open the driver still starts
 and resumes the others, `runs._going`, though it never finishes the run or pauses it; a second item's null then is
 raised after `wb run resume`, journalled `notice` only once raised; a `claude` stage's checkpoint waits for the resume, never replacing it, #1510),
@@ -10227,8 +10227,11 @@ still checks every start. Before each API start `meter.run_total` (one pass over
 plus `meter.request_floor` past the budget pauses the run (`run_paused`); plan and free models count $0. GPU
 minutes: `--budget-min`, the items' `active_s`. `--overnight` (needs `--budget-usd`) keeps trying past the day
 cap's midnight instead of pausing. A stage on an API role with no cap refuses the start (`meter.no_cap`).
-The run's budgets are checked before each start only: items already running finish their rounds, so a run can
-end past `--budget-usd` by what they spend (the day cap still stops every one).
+The run's budgets are checked before each start only, and a review's refix counts as one (`runs._take`: past the
+budget it pauses the run as a start does, and while the run isn't going, `runs._going`, the review waits, retaken
+each pass, so the first pass after `wb run amend --budget-usd N` and `wb run resume` sends it; sent at once, each
+refix paid a coding round past the budget, while the run read `paused`, #1586): items already running finish
+their rounds, so a run can end past `--budget-usd` by what they spend (the day cap still stops every one).
 The estimate: each card's `est` × `meter.price` for the stages whose items are known (`runs.estimate`).
 
 **Notices** (`runs.Run.notify`; *Waking Claude, exactly once*): `run_checkpoint`, `run_done`, `run_paused`,

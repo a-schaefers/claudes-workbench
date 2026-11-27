@@ -1710,6 +1710,48 @@ class RunsApi(Base):
         (told,) = self.notices("bud")
         self.assertTrue(told["text"].startswith("[workbench] Run `bud` is paused: paused at the run's budget"))
 
+    def test_a_review_at_the_runs_budget_holds_its_refix_until_amend_and_resume(self):
+        # #1586 (bar loop #1030, 2026-11-26): _take sent the refix, a new paid coding round, with no
+        # budget check, past --budget-usd and while the run said it was paused at it
+        seq = Path(self.tmp.name) / "seq.json"
+        seq.write_text(json.dumps([
+            {"verdict": "changes", "must_fix": ["name the answer file in the README"], "nits": [], "summary": "close"},
+            {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_SEQ=str(seq))
+        with mock.patch.object(runs, "spawn", return_value=0):
+            code, _, err = wb("run", "start", "bgr", "--flow", "build", "--param", "request=Write answer.txt.",
+                              "--repo", str(self.repo), "--budget-usd", "1")
+        self.assertEqual(code, 0, err)
+        run = runs.Run("bgr")
+        runs.tick(run)
+        self.wait_item("bgr-code-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        runs.tick(run)
+        self.wait_item("bgr-review-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.spent(1.0, "bgr-code-1")                                    # the run's budget, all spent
+        runs.tick(run)
+        coder = store.Task("bgr-code-1")
+        self.assertEqual(coder.status["round"], 1)
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "refix"])
+        self.assertEqual(run.status["phase"], "paused")
+        self.assertIn("the run's budget: $", run.status["why"])
+        (told,) = self.notices("bgr")
+        self.assertIn("wb run amend bgr --budget-usd N, then wb run resume bgr", told["text"])
+        runs.tick(run)                                                   # paused: still held, said once
+        self.assertEqual((coder.status["round"], len(self.notices("bgr"))), (1, 1))
+        self.assertEqual(wb("run", "amend", "bgr", "--budget-usd", "5")[0], 0)
+        runs.tick(run)                                                   # room now, but paused: no refix
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "refix"])
+        with mock.patch.object(runs, "spawn", return_value=0):
+            self.assertEqual(wb("run", "resume", "bgr")[0], 0)
+        runs.tick(run)
+        self.assertEqual([r["src"] for r in run.journal() if r.get("kind") == "refix"], ["1"])
+        self.assertIn("refix 1 sent to bgr-code-1",
+                      [r.get("why") for r in run.journal() if r.get("kind") == "output"])
+        self.wait_item("bgr-code-1", lambda st: (st.get("round") or 0) >= 2)
+        self.wait_item("bgr-code-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
+        run_wb("discard", "bgr-code-1")
+
     def test_the_day_cap_pauses_the_run_and_an_overnight_run_tries_again_with_no_wake(self):
         self.spent(5.03)                                                 # today at the $5 cap
         run, out = self.start("capr", "--budget-usd", "1")

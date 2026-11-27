@@ -1527,6 +1527,14 @@ def _take(run: Run, stage: dict, it: Item) -> None:
                         + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(asks))
                         + "\nApply each, and answer each in your summary: done, or declined with why.")
                 was = code.status.get("round") or 0  # the round reviewed: the next review is after it
+                # a refix is a new paid round the driver starts: held as a start is, the review
+                # retaken each pass until wb run resume (and amend --budget-usd) let it go; sent
+                # past the run's budget, and while the run said it was paused there (#1586, 2026-11-26)
+                if not _going(run.status):
+                    return
+                if over := _budget_stop(run, src_stage, stage_model(src_stage, src_item)):
+                    _pause_at_budget(run, over)
+                    return
                 r = _wb(["feedback", src_item.task, "--text", text], run)
                 if r.returncode == 0:
                     run.log(kind="refix", stage=stage["id"], src=it.src, task=src_item.task,
@@ -1755,6 +1763,14 @@ def _budget_stop(run: Run, stage: dict, m) -> str | None:
     return None
 
 
+def _pause_at_budget(run: Run, why: str) -> None:
+    """The run paused at ``why``, _budget_stop's, and said once: a start's, or a refix's (_take)."""
+    if run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
+        run.notify("run_paused", f"paused at {why}. Done work is kept: wb run report "
+                                 f"{run.name}; wb run amend {run.name} --budget-usd N, then "
+                                 f"wb run resume {run.name}")
+
+
 def tick(run: Run) -> bool:
     """One pass: take the items that ended, start what is ready and has room, raise a checkpoint or
     the end. False once the driver is done."""
@@ -1817,10 +1833,7 @@ def tick(run: Run) -> bool:
                 if _room(run, s, st, m):
                     break
                 if why := _budget_stop(run, s, m):
-                    if run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
-                        run.notify("run_paused", f"paused at {why}. Done work is kept: wb run report "
-                                                 f"{run.name}; wb run amend {run.name} --budget-usd N, then "
-                                                 f"wb run resume {run.name}")
+                    _pause_at_budget(run, why)
                     break
                 n = 1 + max([r.get("n") or 0 for r in run.journal() if r.get("kind") == "item"
                              and r.get("stage") == s["id"]] or [0])
