@@ -931,12 +931,14 @@ def nested_line(repos: list[str]) -> str:
             "never committed: have its .git removed, or gitignore it")
 
 
-def changed(worktree: Path) -> str:
+def changed(worktree: Path, skip=()) -> str:
+    """git status's lines, but for the paths in ``skip`` (the run caches commit_all leaves out)."""
     if not Path(worktree).is_dir():  # removed under us (an accept, a discard)
         return ""
     # porcelain: the `XY path` lines whatever the user's status.branch or colours say (a
     # status.branch=true put "## delegate/<task>" in every round's changed files: the audit)
-    return git(worktree, "status", "--porcelain", "--untracked-files=all").rstrip()
+    return git(worktree, "status", "--porcelain", "--untracked-files=all",
+               *(["--", ".", *(":(exclude,literal)" + p for p in skip)] if skip else [])).rstrip()
 
 
 # A changed-file list goes into every report and check-in Claude reads: whole, a build/ the
@@ -945,6 +947,43 @@ CHANGED_SHOWN = 40  # lines listed as they are; the rest are counted by top-leve
 BUILD_FILES = 50    # new files in one new top-level directory: likely build output
 NEW_FILES_MAX = 300  # wb accept and wb next commit no more new files than this without --include
 BINARY_MAX = 1 << 20  # nor a new binary file this big
+
+# A run's caches, which wb accept and wb next leave out of the commit unless someone wrote them:
+# Claude runs the tests in the worktree (SKILL.md), bytecode on, and in a repo that ignores no
+# __pycache__ the commit took a test run's .pyc that neither the review diff nor the accept line
+# showed (#1580, 2026-11-26). runner.PREP_CACHES's and cli.CACHE_DIRS's caches, not an editor's
+# .idea or .vscode, which a project may commit; a name matches any part of the path.
+RUN_CACHES = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis",
+                        ".tox", ".nox", ".cache", ".vite", ".turbo", ".parcel-cache", ".nyc_output",
+                        ".eslintcache"})
+RUN_CACHE_SUFFIXES = (".pyc", ".pyo")
+
+
+def run_caches(worktree: Path, written=()) -> list[str]:
+    """The new files (untracked, not ignored) that are a run's caches, not anyone's work: under or
+    named one of RUN_CACHES, or bytecode, and none of ``written`` (commit_all's: the agent's or
+    Claude's own files are committed whatever their name)."""
+    mine, out = set(written), []
+    for f in git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
+        p = os.fsdecode(f)
+        if (p and not p.endswith("/") and p not in mine
+                and (p.endswith(RUN_CACHE_SUFFIXES) or not RUN_CACHES.isdisjoint(p.split("/")))):
+            out.append(p)
+    return sorted(out)
+
+
+def run_caches_line(paths: list[str]) -> str:
+    """The note for the run caches a commit left out (run_caches), each cache directory once with
+    its count: an accept line that named only the commit hid them (#1580)."""
+    def where(p: str) -> str:
+        parts = p.split("/")
+        i = next((i for i, c in enumerate(parts) if c in RUN_CACHES), len(parts) - 1)
+        return "/".join(parts[:i + 1]) + ("/" if i < len(parts) - 1 else "")
+    groups = Counter(where(p) for p in paths)
+    named = [f"{d} ({n:,} file{'s' if n != 1 else ''})" if d.endswith("/") else d
+             for d, n in sorted(groups.items())]
+    return ("note: the commit leaves out a run's caches, which nobody wrote: "
+            + ", ".join(brief(named)))
 
 
 def shown(path) -> str:
@@ -1025,13 +1064,14 @@ def _binary(worktree: Path, path: bytes) -> bool | None:
         return False
 
 
-def _bulk(worktree: Path) -> str | None:
+def _bulk(worktree: Path, skip=()) -> str | None:
     """Why the worktree's new files shouldn't be committed without --include, or None: more than
     NEW_FILES_MAX of them, a new binary of BINARY_MAX or more. Counted from the file system
     before anything is hashed: checked on a snapshot, every file the check then refused was
     already in the user's object store (#431, the audit of 1.8). Paths are bytes: a name that
-    isn't UTF-8 is checked too."""
-    added = _new_files(worktree)
+    isn't UTF-8 is checked too. Not ``skip``: the run caches the commit leaves out (#1580)."""
+    skip = {os.fsencode(p) for p in skip}
+    added = [(f, n) for f, n in _new_files(worktree) if f not in skip]
     top = os.fsencode(os.path.abspath(worktree))
     for f in git_bytes(worktree, "diff", "--cached", "--name-only", "--no-renames",
                        "--diff-filter=A", "-z", "HEAD").split(b"\0"):  # staged, not at HEAD
@@ -2001,7 +2041,7 @@ def ignored_line(paths: list[str], who: str = "the agent wrote") -> str:
 
 
 def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True,
-               written=(), left=()) -> str:
+               written=(), left=(), dropped: list[str] | None = None) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
     a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
@@ -2009,7 +2049,9 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     Refuses, unless ``include``, which adds them, any of ``written`` (the files the agent wrote,
     and Claude's, #1179) that git ignores: `add -A` left a module under Python.gitignore's lib/
     out of the commit, and it was deleted with the worktree while main imported it (audit round 2
-    of 1.91). A refusal names ``left`` too (left_out_line: what the commit leaves out, #1179's review)."""
+    of 1.91). A refusal names ``left`` too (left_out_line: what the commit leaves out, #1179's review).
+    Leaves out, --include or not, the run caches that are none of ``written`` (run_caches: a
+    test run's .pyc was committed unshown, #1580), and adds them to ``dropped``, for the note."""
     ignored = ignored_files(worktree, written)
     if ignored and not include:
         rest = sorted(set(left) - set(ignored))
@@ -2020,11 +2062,15 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
                        "remove its .git or gitignore it, then try again")
     if edits := submodule_edits(worktree):  # they would vanish with the worktree (#419)
         raise GitError("not committed: " + "; ".join(edits))
-    if not include and (why := _bulk(worktree)):
+    caches = run_caches(worktree, written)
+    if not include and (why := _bulk(worktree, caches)):
         raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
                        f"{worktree}, or --include to commit it anyway")
     record_case_renames(worktree)
-    add_all(worktree, pre=NO_HOOKS)
+    add_all(worktree, *(["--", ".", *(":(exclude,literal)" + p for p in caches)] if caches else []),
+            pre=NO_HOOKS)
+    if dropped is not None:
+        dropped.extend(caches)
     if ignored:
         git(worktree, *NO_HOOKS, "add", "-f", "--", *(":(literal)" + p for p in ignored))
     if not git(worktree, "diff", "--cached", "--name-only").strip():
@@ -2092,7 +2138,8 @@ def _rmtree(path: Path) -> None:
 
 def remove_worktree(repo: Path, worktree: Path) -> str:
     """Remove a task's worktree and its registration; a warning when git couldn't, else "".
-    Always --force: after accept's commit only ignored files are left, which git deletes anyway,
+    Always --force: after accept's commit only ignored files and run caches (run_caches) are
+    left, which git deletes anyway,
     and without it git runs `status` in the worktree. When git fails (a read-only directory, an
     embedded repo, a repo moved or deleted), a task's own worktree is deleted by hand: accept and
     discard once wedged there for good (the 2026-11-16 audit)."""

@@ -687,7 +687,8 @@ not what your rerun of the task's `--test` or setup writes, nor another build yo
 your edit tools or a command that names them, not with a script that doesn't.
 `note: git ignores N more files … leaves out as build or test output` names the rest you or the
 agent changed there: `wb next`'s stay in the worktree (`git -C <worktree> add -f <file>` keeps one), `wb
-accept`'s are copied to the task's `left-out/` before the worktree goes.
+accept`'s are copied to the task's `left-out/` before the worktree goes. `note: the commit leaves
+out a run's caches` names the `__pycache__/`, `.pytest_cache/`… your test run left that git doesn't ignore.
 When a command says the repo `moved or was deleted`, ask the user where it is now, then
 `wb relocate <name> --repo <dir>`; a removed linked worktree needs nothing (its main one is used).
 

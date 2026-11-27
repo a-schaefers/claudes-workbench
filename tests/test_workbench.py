@@ -3707,6 +3707,31 @@ class Lifecycle(Base):
         self.assertNotIn("note: git ignores", out)
         self.assertFalse((t.dir / "left-out").exists())
 
+    def test_accept_leaves_out_the_bytecode_of_a_test_run_in_the_worktree(self):
+        # #1580 (2026-11-26): in a repo that ignores no __pycache__, Claude's `python3 -m
+        # unittest` in the worktree before wb accept had the commit take the run's .pyc, which
+        # neither the review diff ("1 file changed") nor the accept line showed
+        (self.repo / "helper.py").write_text("N = 42\n")
+        (self.repo / "test_a.py").write_text(
+            "import unittest\nimport helper\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_n(self):\n        self.assertEqual(helper.N, 42)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "helper"], check=True)
+        self.start("t-run-pyc", "ok", "--test", TEST_CMD)
+        wait_phase("t-run-pyc", {"review"})
+        t = store.Task("t-run-pyc")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+        subprocess.run([sys.executable, "-m", "unittest", "-q"], cwd=t.worktree, env=env,
+                       check=True, capture_output=True)
+        self.assertTrue(list((t.worktree / "__pycache__").glob("*.pyc")))
+        out = run_wb("accept", "t-run-pyc", "-m", "feat: one")
+        self.assertIn("accepted t-run-pyc", out)
+        self.assertIn("note: the commit leaves out a run's caches, which nobody wrote: "
+                      "__pycache__/ (2 files)", out)
+        files = subprocess.run(["git", "-C", str(self.repo), "show", "--name-only", "--format=",
+                                "delegate/t-run-pyc"], check=True, capture_output=True, text=True)
+        self.assertEqual(files.stdout.split(), ["answer.txt"])
+
     def test_wb_next_names_an_ignored_file_its_step_commit_leaves_out(self):
         # #1179's review (2026-11-24): wb next's commit dropped what hand_written's filters took
         # for a test run's without a word; it stays in the worktree, and the note says so
