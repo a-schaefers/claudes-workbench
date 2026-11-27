@@ -1681,7 +1681,7 @@ async function run(engine: string, device?: string) {
       await page.evaluate(() => document.getElementById('input')!.blur())
       await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
     })
-    await check('window.WB gives the views the key, the API, the view and its changes, the state and a toast', async () => {
+    await check('window.WB gives the views the key, the API, the view and its changes, the state, a toast and the chat\'s box', async () => {
       const got = await page.evaluate(async () => {
         const seen: string[] = []
         window._states = 0
@@ -1698,7 +1698,7 @@ async function run(engine: string, device?: string) {
         return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, timed: [q.status, JSON.stringify(await q.json())], cur: WB.current(), seen,
           token: WB.token().length > 20, toast: !t.hidden && t.textContent }
       })
-      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,current,on,post,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
+      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,ask,current,on,post,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
         cur: 'settings', seen: ['settings'], token: true, toast: 'Saved.' })) throw new Error(JSON.stringify(got))
       const was = await page.evaluate(() => window._states)
       wb('chat', 'reply', '--text', 'A state for the views.')

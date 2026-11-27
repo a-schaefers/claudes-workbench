@@ -25,6 +25,18 @@
     // OpenCode's user read that Claude would offer), else the story's `any`
     let who = 'your driver';
     const helpSaid = () => `${who.charAt(0).toUpperCase()}${who.slice(1)} will offer to set it up.`;
+    // A row with a problem or a request (a note, `help`, `ask`): a link that hands it to the driver in
+    // the chat's box, the fix being a terminal's that a phone can't run (the web app's review,
+    // 2026-11-26: five findings asked for it). `ask` a string is the request itself
+    const askLink = (row, title, line) => {
+        if (!(row.ask || row.help || row.kind === 'note'))
+            return null;
+        const a = el('button', 'set-ask', `Ask ${who}`);
+        a.type = 'button';
+        const text = typeof row.ask === 'string' && row.ask ? row.ask : `Help me with Settings › ${title}: ${line}`;
+        a.addEventListener('click', () => WB.ask(text));
+        return a;
+    };
     let root = null;
     let rows = null; // the last rows the server sent
     let why = ''; // the last read's failure, shown while there are no rows
@@ -272,15 +284,17 @@
         const box = el('div', 'set-row');
         box.dataset.key = row.key;
         box.dataset.kind = row.kind;
+        const ask = (line) => { const a = askLink(row, title, line); if (a)
+            box.append(a); return box; };
         if (row.kind === 'info') {
             box.append(el('p', 'small set-info', row.text || row.label));
-            return box;
+            return ask(row.text || row.label);
         }
         // a line in its place, the group's other rows drawn too: with the routes unreadable the shared
         // group's note sits beside Claude coding and the rest, still the owner's to change (#1286's review)
         if (row.kind === 'note') {
             box.append(el('p', 'small set-note', row.text || row.label));
-            return box;
+            return ask(row.text || row.label);
         }
         // a role's GPU|API with no API provider: its sentence alone (the shared group's line says how to add one)
         if (row.fixed) {
@@ -300,7 +314,7 @@
             box.append(el('p', 'small', row.text));
         if (row.changed)
             box.append(el('p', 'small set-changed', `Changed by ${byWord(row.changed.by)} · ${ago(row.changed.ts)}`));
-        return box;
+        return ask(`${row.label}: ${row.says || row.text || ''}`);
     }
     let refocus = null; // a control the last redraw couldn't focus (disabled while it waits)
     function draw() {

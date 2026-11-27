@@ -2627,6 +2627,18 @@
                 modShow(name);
         },
         toast,
+        // a request for the driver, from a Settings row with a problem (its Ask link): the chat's box
+        // filled and focused, sent by the user; it waits like any message, so no listener is needed.
+        // The words carry what it is about ("Help me with Settings › API: …"): an `about` names a
+        // task or a take, which the server checks, and Settings is neither
+        ask: (text) => {
+            go('chat');
+            input.value = String(text);
+            save(K.draft, input.value);
+            grow();
+            armSend();
+            input.focus();
+        },
         on: (event, fn) => { if (handlers[event] && typeof fn === 'function')
             handlers[event].add(fn); },
         current: () => curView || 'chat',

@@ -415,6 +415,15 @@ export async function check(page: any, ctx: E2eCtx) {
         controls: document.querySelectorAll('.set-row[data-key="role-significant"] button, .set-row[data-key="role-significant"] select').length,
         agents: document.querySelectorAll('.set-row[data-key="agents"]').length }))
       if (got.role !== "Complex coding runs on this machine's GPU." || got.controls || got.agents) throw new Error(JSON.stringify(got))
+      // the line's Ask link: the chat's box filled with what it is about, sent by the user, not by the tap
+      const link = await row('gpu-only').locator('.set-ask').textContent()
+      if (!/^Ask (Claude|OpenCode|your driver)$/.test(link)) throw new Error('link: ' + link)
+      await row('gpu-only').locator('.set-ask').click()
+      await until(() => page.evaluate(() => document.body.dataset.view === 'chat'))
+      const box = await page.locator('#input').inputValue()
+      if (!box.startsWith('Help me with Settings › Agents and roles: Every role runs on your GPU.')) throw new Error('box: ' + box)
+      if (!(await page.evaluate(() => document.activeElement === document.getElementById('input')))) throw new Error('the box not focused')
+      await page.locator('#input').fill('')
     })
 
     await ctx.check(desktop ? 'the view lays out at 1280 px, two columns of cards, and at 390 px, one, nothing past its edge'

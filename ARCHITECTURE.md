@@ -7453,7 +7453,8 @@ show(), hide()})` (`stats` gets `#stats-body`, `settings` `#settings-rows`; moun
 shown and hidden on each switch and on `visibilitychange`, and the view shown is shown again,
 `reshowView`, when the network comes back (`online`) or the stream does after a failure, #1412; a
 second registration is ignored),
-`toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
+`toast(text)` (3.5 s), `ask(text)` (the Chat view with its box filled with `text` and focused, sent
+by the user, never by the call: Settings' Ask link), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
 **The Stats view** (#1285; `stats.ts`, `stats.css`; it took over the pane's Stats tab, *Seeing
@@ -7637,7 +7638,9 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 
 **A row** is JSON-safe: `key`, `group`, `label`, `kind`, `more` (true: drawn under its card's More, a role's
 GPU and API model and thinking, #1553), `hidden` (true: the page doesn't draw it while it can do nothing; `wb
-settings` lists it still), `fixed` (true: a choice the page draws as its `says` alone) and by kind: `choice` (`value`, `choices`
+settings` lists it still), `fixed` (true: a choice the page draws as its `says` alone), `ask` (a row with a
+problem or a request: true, or a string, the request itself; the page gives it an Ask link: a role that can't
+run, `api-connected` with a provider that has no key it can run on, `flows`) and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd`; `off`, `""` and null clear it); `info` (`text`); `action`
 (`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
@@ -7824,6 +7827,12 @@ alone, and a generic renderer: a new setting touches only Python.
   - `action`: its `text`, then a button per choice, disabled while its click waits; an answer's `detail`
     (a run's Summary) under it as text alone (`pre.set-detail`, agent-written results among it), kept until a reload.
   - `info`: its `text` as a muted line.
+  - **Ask <driver>** (`.set-ask`, the web app's review, 2026-11-26: Settings' only fixes were terminal
+    commands a phone can't run): on a `note`, a row with `help` or one with `ask`, a link (a 44 px button,
+    named as the state's `driver.who` names it) that calls `WB.ask`: the Chat view, its box filled with `ask`
+    when a string, else `Help me with Settings › <its card>: <its line>`, for the user to send; it waits like
+    any message, so no listener is needed. The words say what it is about: an `about` names a task or a take,
+    which the server checks.
 - **The owner's click is the yes** (the owner, 2026-11-24: "We trust Claude"; the server runs wb as
   the user, ungated, as at the terminal). No confirm step, no warning. A click sends even the value
   lit, and Off even when off: what's shown may be stale, and a click to put back a value changed at
@@ -11237,7 +11246,7 @@ real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's rout
 requests once the worker registers (#1223). The Settings
 view's (#1286): the groups in order, a card per role first, its role row unlabelled and the rest of the role under a
 closed More, then "Agents and roles" (#1553), above the device cards (the gear's old cards are
-`#settings`'s alone); with no API provider a role's sentence alone and a `hidden` row not drawn; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
+`#settings`'s alone); with no API provider a role's sentence alone, a `hidden` row not drawn, and the line's Ask link filling the chat's box; Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the

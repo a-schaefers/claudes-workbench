@@ -10,7 +10,10 @@ current value), with `other: true` where any model id goes (the role command che
 (NO_PROVIDER or CATALOG_FAILED, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows.
 `more: true`, a row the page draws under its card's More (a role's GPU and API model and thinking);
 `hidden: true`, a row the page doesn't draw while it can do nothing (`wb settings` still lists it); `fixed:
-true`, a choice the page draws as its `says` alone (a role's GPU|API with no API provider). A row may
+true`, a choice the page draws as its `says` alone (a role's GPU|API with no API provider); `ask`, a row
+that carries a problem or a request, which the page gives an "Ask <driver>" link filling the chat's box
+(true: "Help me with Settings › <its card>: <its line>"; a string: that request); a note, or a row with
+`help`, gets the link without it. A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,
@@ -483,7 +486,7 @@ def _run_rows() -> list[dict]:
     except (OSError, ValueError):
         names = []
     if names:
-        out.append(_info("flows", "workflows", "Flows", f"Flows: {', '.join(names)}. {FLOWS_SAY}"))
+        out.append({**_info("flows", "workflows", "Flows", f"Flows: {', '.join(names)}. {FLOWS_SAY}"), "ask": True})
     return out
 
 
@@ -526,6 +529,7 @@ def _build() -> dict:
             st = row.get("api_status")
             if row.get("via") == "api" and isinstance(st, dict) and st.get("available") is False:
                 c["says"] = f"{label} can't run on {row.get('api')}: {st.get('why') or 'wb route says why'}."
+                c["ask"] = True  # the fix is a terminal's: the page's Ask link hands it to the driver
             if gpu_only:
                 c["fixed"] = True  # its says alone: GPU_ONLY stands for its API choice
             out.append(c)
@@ -582,7 +586,11 @@ def _build() -> dict:
             out.append(_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER))
         else:
             if provs:
-                out.append(_info("api-connected", "api", "Connected", _connected_line(r)))
+                c = _info("api-connected", "api", "Connected", _connected_line(r))
+                if any(isinstance(p, dict) and p.get("key") not in ("stored", "ollama", "copilot") and p.get("runs") is not True
+                       for p in provs.values()):
+                    c["ask"] = True  # a provider with no key it can run on
+                out.append(c)
             for name, label, row in roles:
                 others = [x.get("api") for n, _, x in roles if n != name and x.get("api")]
                 api = row.get("api") or ""

@@ -327,6 +327,8 @@ class Settings(Rows):
             with mock.patch.object(settings, "_read_json", lambda argv: (doc, "") if argv == ["route", "--json"] else real(argv)):
                 row = next(x for x in settings.rows(fresh=True) if x["key"] == "role-significant")
             self.assertEqual(row["says"], says, status)
+            # its fix is a terminal's: the page's Ask link hands it to the driver (the web app's review, 2026-11-26)
+            self.assertEqual(bool(row.get("ask")), status["available"] is False, status)
 
     def test_turning_probe_on_without_probe_returns_the_note_for_claude(self):
         # #1279's addendum (the owner, 2026-11-24): the terminal still offers to help

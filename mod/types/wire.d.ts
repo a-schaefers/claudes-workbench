@@ -179,10 +179,12 @@ export type SettingChoice = { value: string; label: string; says?: string }
  * a float or null for off, `unit` usd or per_kwh), info (`text`), action (its choices buttons) or
  * note (one line for the whole group); `other`: any model id is taken; `group` a role's name for its
  * card (#1553), `more` a row drawn under that card's More; `hidden` a row the page doesn't draw while it
- * can do nothing, `fixed` a choice drawn as its `says` alone */
+ * can do nothing, `fixed` a choice drawn as its `says` alone; `ask` a row with a problem or a request, given
+ * an "Ask <driver>" link (true: the page words it; a string: that request) */
 export type SettingRow = {
   key: string; group: string; kind: string; label: string; value?: string | number | null; text?: string
   says?: string; choices?: SettingChoice[]; other?: boolean; unit?: string; more?: boolean; hidden?: boolean; fixed?: boolean
+  ask?: boolean | string; help?: string
   /** its newest change within a week (settings.changed, #1355): when, and who (web, claude, opencode, terminal, agent) */
   changed?: { ts: number; by: string }
 }
