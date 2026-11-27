@@ -243,7 +243,7 @@ then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`,
    the rest, so they count as not chosen, not as the model's failures), then `wb run close <run>`. Findings you keep are
    fixed through the `fix` flow (`--param findings=<the list as JSON>`), not by hand one by one.
 5. The user's "stop" is `wb run stop <run>`, "go on" `wb run resume`, "skip the judge" or "max
-   $2" `wb run amend <run> --skip <stage>` / `--budget-usd 2`. Done work is kept.
+   $2" `wb run amend <run> --skip <stage>` (its items at work stop) / `--budget-usd 2`. Done work is kept.
 Never pick a model for a stage: each runs on its role's. No OpenCode `subagent` for run work.
 With `ultracode` and `deepcode` in one prompt, follow each in its own scope: the flow's agents do
 the work, and your own Workflow (ultracode's) only reviews what the run returns, never redoes it.

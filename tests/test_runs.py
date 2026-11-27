@@ -1490,6 +1490,25 @@ class Runs(Base):
         self.assertIn("escalate is a list of 1 to 3 distinct roles", self.errs(stages=st) if hasattr(self, "errs") else
                       "; ".join(runs.validate({"v": 1, "name": "x", "stages": st})))
 
+    def test_skipping_a_stage_stops_its_running_items_and_says_how_many(self):
+        # #1577 (2026-11-26): a skip stopped nothing: the item ran on, paid, read as `skipped`, the
+        # run done under it, its result dropped and its review notice Claude's
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
+        os.environ["FAKE_SLEEP"] = "600"
+        run_wb("run", "start", "sks", "--plan", self.plan({**AUDIT, "name": "sks"}), "--param", "areas=a",
+               "--repo", str(self.repo))
+        self.wait_item("sks-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        self.assertIn("amended sks: skip find; stopped 1 running item(s): sks-find-1",
+                      run_wb("run", "amend", "sks", "--skip", "find"))
+        st = store.Task("sks-find-1").status
+        self.assertEqual((st["phase"], st["last"]), ("stuck", runs.STOPPED_BY_CLAUDE))
+        run = runs.Run("sks")
+        self.assertEqual([r.get("skip") for r in run.journal() if r.get("kind") == "stopped"], ["find"])
+        self.assertEqual(self.wait_run("sks", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        self.assertEqual(runs.report_of("sks")["not_run"], [{"key": "find:1", "why": runs.SKIP_STOPPED}])
+        self.assertFalse(runs._resumable(run, "sks-find-1", st))  # skipped: never taken up again
+        self.assertEqual([r for r in store.notices() if r["task"] == "sks-find-1"], [])
+
     def test_a_skipped_stage_and_items_past_max_items_are_not_run_and_named(self):
         flow = {"v": 1, "name": "cap", "params": {"areas": "list"}, "stages": [
             {"id": "find", "card": "find", "items": "{params.areas}", "max_items": 2},

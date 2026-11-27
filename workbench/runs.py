@@ -1017,8 +1017,10 @@ def state(run: Run) -> dict:
                     it.output = (store.read_json(run.output_file(sid, it.n), {}) or {}).get("result")
             elif hit in there:
                 it.state, it.why = "not_run", f"exists at base: {hit}"
-            elif sid in skipped:
+            elif sid in skipped and not row:
                 it.state, it.why = "not_run", "skipped (wb run amend --skip)"
+            elif sid in skipped and it.task and _stopped_at_skip(it.task):
+                it.state, it.why = "not_run", SKIP_STOPPED
             elif s.get("compare") and len(it.members or ()) < 2:
                 it.state, it.why = "not_run", (f"{len(it.members or ())} of its attempts reached review: "
                                                "nothing to compare (wb run report names the rest)")
@@ -1043,6 +1045,37 @@ def state(run: Run) -> dict:
 
 
 TAKEN_OVER = "taken over by Claude (wb takeover): Claude's to finish, not the run's"
+SKIP_STOPPED = "stopped mid-run (wb run amend --skip)"
+
+
+def _stopped_at_skip(name: str) -> bool:
+    """Whether a started item of a skipped stage is stopped (wb stop's, or from outside): not_run,
+    never _take's null (discarded, an on_failure checkpoint) nor _held's resume. A started item
+    read as `skipped` whatever its task did: it ran on, paid, its result dropped, the run done
+    under it and its review notice Claude's (#1577, 2026-11-26)."""
+    t = store.Task(name)
+    st = t.status if t.exists else {}
+    return st.get("phase") in ("stuck", "failed") and (st.get("last") == STOPPED_BY_CLAUDE or _outside(st))
+
+
+def _stop_skipped(run: Run) -> list[str]:
+    """Stop the items of the run's skipped stages still at work (wb stop, journalled `stopped`
+    with `skip`, as stop's), their names. wb run amend --skip's, and each tick's, for an item a
+    pass that read the stages before the amend started anyway (#1577). One at a time (the lock):
+    the amend's line counts what it stopped, never the driver's at once."""
+    skip = set(run.spec.get("skip") or ())
+    if not skip:
+        return []
+    out = []
+    with store.locked(store.task_lock(run.name, "skip")):
+        for r in run.journal():
+            if r.get("kind") != "item" or r.get("stage") not in skip or not r.get("task"):
+                continue
+            t = store.Task(r["task"])
+            if t.exists and t.status.get("phase") in store.ACTIVE and _wb(["stop", t.name], run).returncode == 0:
+                run.log(kind="stopped", task=t.name, skip=r["stage"])
+                out.append(t.name)
+    return out
 
 
 def _live(stage: dict, it: Item, driven: bool = False) -> tuple[str, str, object]:
@@ -1577,6 +1610,9 @@ def _run_stopped(run: Run, name: str) -> bool:
 def _resumable(run: Run, name: str, st: dict) -> bool:
     """Whether wb run resume takes item ``name`` up where it stopped: a stop from outside its step
     (_outside), or wb run stop's."""
+    stage = next((r.get("stage") for r in run.journal() if r.get("kind") == "item" and r.get("task") == name), None)
+    if stage in (run.spec.get("skip") or ()):
+        return False  # the user skipped its stage: it stays stopped (#1577)
     return _outside(st) or (st.get("last") == STOPPED_BY_CLAUDE and _run_stopped(run, name))
 
 
@@ -1719,6 +1755,7 @@ def tick(run: Run) -> bool:
     _ack_items(run)
     flow = run.flow
     from . import cli
+    _stop_skipped(run)  # one a pass started after the user's skip, at its last read of the stages
     st = state(run)
     held = set()  # items interrupted from outside: resumed, or waiting for wb run resume
     for s in stages(flow):  # the ends first: a report's object, a failed one's null
@@ -1763,6 +1800,8 @@ def tick(run: Run) -> bool:
             for it in st.get(s["id"]) or ():
                 if it.state != "pending" or not _going(run.status):
                     continue
+                if s["id"] in (run.spec.get("skip") or ()):
+                    break  # skipped since this pass read the stages (#1577): never started
                 m = stage_model(s, it)
                 if it.task and store.Task(it.task).exists:  # started, its runner not up yet
                     continue
@@ -2515,6 +2554,12 @@ def cmd_amend(a) -> None:
     run.amend(**fields)
     run.set_status(budget_usd=run.spec.get("budget_usd"), budget_min=run.spec.get("budget_min"))
     run.log(kind="amend", **fields)
+    if a.skip:
+        # the skipped stage's items at work stop: they ran on, paid, their results dropped and
+        # their notices Claude's once the run ended under them (#1577, 2026-11-26)
+        gone = _stop_skipped(run)
+        said[-1] += (f"; stopped {len(gone)} running item(s): {', '.join(gone)}" if gone
+                     else "; none of its items running")
     print(f"amended {run.name}: {'; '.join(said)}"
           + (f". It is {run.status.get('phase')}: wb run resume {run.name} goes on"
              if run.status.get("phase") in ("paused", "checkpoint", "stopped") else ""))
