@@ -3699,7 +3699,8 @@ compacted for a task (2026-11-16 audit: a task closing compacted every session).
 open tasks from `wb status --repo <its directory> --session <id>…`. An OpenCode driver gets the
 same from the plugin (`upkeep.ts`, *The OpenCode plugin*): the blocks as session instruction
 entries OpenCode sends again after each compaction, KEEP_ON_COMPACT through the `compaction` hook,
-and the boundary compaction at `WB_COMPACT_AT` of the way to OpenCode's own (#1315).
+and the boundary compaction at `WB_COMPACT_AT` of the way to OpenCode's own (#1315), measured past
+the session's fixed prompt (#1569).
 
 **What Claude learns about the user** (`wb notes`): cross-project preferences, `wb notes add "…"`
 (at most 300 characters, 20 notes) in `$WB_HOME/notes.md` (`- ` lines, `notes.lock`), handed to
@@ -9354,7 +9355,7 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
     session hooks `prompt`, `context` and `compaction`, and follows the events `EVENTS`
     (`session.agent.selected`, `session.execution.*`, `session.step.ended`,
     `session.compaction.ended`) for the sessions those hooks named; `Upkeep` holds each session's
-    agent, directory, open tasks, compactPlan's mark, busy, last prompt size and model.
+    agent, directory, open tasks, compactPlan's mark, busy, last prompt size, floor and model.
     - **The rules are session instruction entries** (`session.instructions.entry` `list`, `put`,
       `remove`: OpenCode's experimental API, `core/src/session/instruction-entry.ts`), one per
       block, keyed by the mod's block names (`KEYS`: `workbench-mode`, `claude-coding`,
@@ -9413,9 +9414,12 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
       compaction point for it (`autoCeiling`: `calculateCeiling` with no `buffer`, 15% of the window
       kept free, at least 16K from a 32K window) and the last step's prompt (`session.step.ended`'s
       tokens: input, cache reads and writes, `promptTokens`), and calls `session.compact` once the
-      prompt reaches `WB_COMPACT_AT` percent (unset half; 0 never) of the way there. A window
-      OpenCode doesn't list is never compacted early. OpenCode's own automatic compaction stays on
-      as it is.
+      prompt reaches `WB_COMPACT_AT` percent (unset half; 0 never) of the way there, both measured
+      past the session's floor (`floor`: the first step's prompt, and the first's after each
+      `session.compaction.ended`), the part a compaction can remove (#1569: a 64K driver's fixed
+      prompt, about 28K, was over half of its 49.5K point, so every task close compacted and freed
+      about 2K). A floor at or over the point (#1487's band) is never compacted early; neither is
+      a window OpenCode doesn't list. OpenCode's own automatic compaction stays on as it is.
   - `commands.ts` (#1315): the user's commands as server commands (`command.transform`,
     `registerCommands`; `definitions(host, deps)`), so the TUI, Desktop and the web app list them,
     each running wb as the session in its directory (`sessionRunner`: the options' wb and `WB_*`,
@@ -9600,7 +9604,8 @@ session `dir` is the other source, which the plugin's beats carry since #1316: #
   says so (asked as the session, only with a time in chat/away.json, never for a session out of the mode with nothing
   open) and removed once back, before the turn of a prompt the user typed; `workbench-wake` with the `wake` option off, in the mode or with a task open; without the entries API the blocks
   in the session's own requests' system prompt; a task closing compacts at half of OpenCode's own
-  point, not below it, once; `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
+  point, not below it, once, measured from the first step's prompt (a 64K driver's fixed 28K
+  never alone, nor a floor over the point) and again from the first after a compaction (#1569); `WB_COMPACT_AT=1` and `0`, a task waiting, out of the mode and a window
   OpenCode doesn't list; KEEP_ON_COMPACT once, only for a session that delegated with a task open or in the boundary compaction after the last one closed;
   which tasks are the session's; the setup's three hooks),
   `opencode-plugin/test/commands.test.ts` (#1315: each command's wb argv as the session in its
