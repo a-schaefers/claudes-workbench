@@ -32645,6 +32645,27 @@ class WebChat(Base):
         self.assertEqual(sorted(t["name"] for t in self.chat.open_tasks()), ["t-queued", "t-review"])
         self.assertEqual(sorted(t["name"] for t in self.chat.snapshot()["tasks"]), ["t-queued", "t-review"])
 
+    def test_the_chats_task_strip_names_each_model_once_as_stats_does_a_gpu_label_or_an_api_catalog_name(self):
+        # #1339 (2026-11-26): the strip sent the raw id, and the page drew `API deepseek-flash
+        # (DeepSeek)` where Stats said the label: the web app's one name is a GPU model's label
+        # (task.json `model_label`) and an API model's catalog name, from hosted.json as it is
+        from workbench import models
+        store.write_json(models.hosted_path(), {"v": 1, "providers": {"deepinfra": {"name": "DeepInfra"}},
+                                                "models": {"deepinfra/v/flash": {"name": "flash", "title": "V Flash"}}})
+
+        def task(name, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase="running", round=1)
+        task("t-gpu", model="qwen-27b", model_label="Qwen 27B")
+        task("t-api", model="deepinfra/v/flash", model_label="deepinfra/v/flash (DeepInfra, API)", via="api",
+             provider_name="DeepInfra")
+        task("t-unlisted", model="deepinfra/v/gone", via="api", provider_name="DeepInfra")
+        got = {t["name"]: t["label"] for t in self.chat.open_tasks()}
+        self.assertEqual(got, {"t-gpu": "Qwen 27B", "t-api": "V Flash", "t-unlisted": ""})
+        self.assertEqual(self.chat.task_summary(store.Task("t-api"))["label"], "V Flash")
+
     # ---- the task sheet (#1201) ----
 
     def _sheet_task(self, name="fix-auth", phase="review", **status):

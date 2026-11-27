@@ -4027,8 +4027,9 @@ a GPU task's as before), `wb status`'s `via` column, `wb watch`'s `routed:` line
 an API task's `API <id> (<provider>) · <role> role · thinking off` from task.json,
 else task.json `route`, the router's why), the pane's row (`API DeepSeek  deepseek-flash`: the place and the model, tasks.ts's `placeOf`, #1048)
 and its `routed` line under the task line, and the web chat's strip over the thread (`Running:
-fix-auth · API deepseek-flash (DeepSeek)`, from `chat.open_tasks`): while away, the chat is all the
-user sees.
+fix-auth · API · DeepSeek V4.1 Flash`, from `chat.open_tasks`; the web app's one name for a model,
+`chat.model_label`: a GPU model's label as Stats names it, an API model's catalog name, the provider
+in the task sheet's note, #1339): while away, the chat is all the user sees.
 
 - **The terminal is primary; the web chat is a second lane** (the owner, 2026-11-24: "the terminal
   stays the primary method of doing things with claude, the chat app only a secondary lane. the
@@ -7288,9 +7289,14 @@ address (#534).
   savings (`chat.week_saved`: `wb savings --json` over 7 days, no `period`; its `api` adds each
   provider's name, `names`, #1022), uploads (`{file,
   message, files}`), build, expire (`MESSAGE_EXPIRE` in seconds), tasks (`chat.open_tasks`, #1016: `[{name,
-  phase, model, via, provider_name}]` for each open task, no bench replay and none parked (`store.parked`,
-  as `wb status`, #1097); the page's strip over the thread, `Running: fix-auth · API deepseek-flash
-  (DeepSeek)`, hidden for none or an older server; more than one kind or `TASKS_SHOWN` 3 counts them
+  phase, model, label, via, provider_name}]` for each open task, no bench replay and none parked (`store.parked`,
+  as `wb status`, #1097); `label` is `chat.model_label`, the web app's one name for the model (#1339:
+  task.json `model_label` for a GPU model, the label Stats and `wb top` give it; an API model's
+  catalog name, `models.catalog_title`, from hosted.json as it is, never rebuilt; "" for none, and
+  the page shows the id's last part); the page's strip over the thread, `Running: fix-auth · API ·
+  DeepSeek V4.1 Flash` (`taskOn`: `GPU <label>` or `API · <label>`, the provider only in the task
+  sheet's note, `taskNote`; every open task on one model names it once, at the end),
+  hidden for none or an older server; more than one kind or `TASKS_SHOWN` 3 counts them
   apart, `2 running, 1 waiting on Claude, 22 queued: …` (the driver's name, `driverName`, #1355), names the running first (`running`,
   `testing`), then those waiting on Claude (`asking` among them, `store.NEEDS_CLAUDE`: counted
   running, a task blocked on its question read as nothing needing Claude, the #1097 review), then
@@ -7315,7 +7321,7 @@ address (#534).
   task sheet, only a name `chat.open_task` finds among `open_tasks` (none parked, no bench replay;
   else 404 "no such open task"), read in-process from the task's files, never through `wb watch
   --json`, which can start OpenCode. `summary` (`chat.task_summary`): phase, round, step, last,
-  `created_at`/`updated_at`, model, via, provider_name, the round's report (`store.Task.report`, as
+  `created_at`/`updated_at`, model, label (`chat.model_label`), via, provider_name, the round's report (`store.Task.report`, as
   `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`).
   `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), with the
   ignored files `--include` commits (`force=runner.ignored_to_commit`, as `wb diff`: #1548), `stat`

@@ -614,7 +614,7 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('After the update.'))
     } finally { utimesSync(css, was.atime, was.mtime) }
   })
-  await check('the strip over the thread names each open task\'s model, GPU or API and whose (#1016)', async () => {
+  await check('the strip over the thread names each open task\'s model, GPU or API, by the web app\'s one name for it (#1016, #1339)', async () => {
     const t = join(home, 'state/tasks/fix-auth')
     mkdirSync(t, { recursive: true })
     writeFileSync(join(t, 'task.json'), JSON.stringify({ name: 'fix-auth', model: 'deepseek/deepseek-flash', via: 'api',
@@ -622,7 +622,8 @@ async function run(engine: string, device?: string) {
     writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'running', round: 1, updated_at: Date.now() / 1000 }))
     try {
       wb('chat', 'reply', '--text', 'Started fix-auth.')  // a chat change wakes the stream
-      await until(async () => (await page.textContent('#tasks')) === 'Running: fix-auth · API deepseek-flash (DeepSeek)')
+      // #1339: no catalog here names it, so the id's last part; the provider is the sheet's note
+      await until(async () => (await page.textContent('#tasks')) === 'Running: fix-auth · API · deepseek-flash')
       if (await page.locator('#tasks').isHidden()) throw new Error('the strip is hidden')
       const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
       if (!width) throw new Error('the page scrolls sideways')
@@ -669,7 +670,7 @@ async function run(engine: string, device?: string) {
     const base = git('rev-parse', 'HEAD').trim()
     mkdirSync(t, { recursive: true }); git('worktree', 'add', '-q', '-b', 'wb/fix-sheet', join(t, 'worktree'), base)
     writeFileSync(join(t, 'worktree/README.md'), 'hello\nworld <img src=x onerror="window.pwned=1">\n')
-    writeFileSync(join(t, 'task.json'), JSON.stringify({ name: 'fix-sheet', model: 'qwen3-coder-30b', repo, base,
+    writeFileSync(join(t, 'task.json'), JSON.stringify({ name: 'fix-sheet', model: 'qwen3-coder-30b', model_label: 'Qwen3 Coder 30B', repo, base,
       branch: 'wb/fix-sheet', created_at: Date.now() / 1000 - 300 }))
     writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'review', round: 1, last: 'tests pass', updated_at: Date.now() / 1000 - 60 }))
     mkdirSync(join(t, 'rounds/1'), { recursive: true })
@@ -684,7 +685,7 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.textContent('#ts-body')).includes('Changed the README. <b id="bold">not bold</b>'))
       if (await page.locator('#bold').count()) throw new Error('the report was drawn as markup')
       const sum = await page.textContent('#ts-body')
-      if (!sum.includes('review · round 1 · GPU qwen3-coder-30b') || !sum.includes('tests pass') || !sum.includes('started 5m ago'))
+      if (!sum.includes('review · round 1 · GPU Qwen3 Coder 30B') || !sum.includes('tests pass') || !sum.includes('started 5m ago'))
         throw new Error('the summary says: ' + sum)
       await page.click('#ts-tabs [data-part="diff"]')
       await until(async () => (await page.textContent('#ts-body')).includes('README.md | 1 +'))

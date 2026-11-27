@@ -130,7 +130,7 @@ export type ChatOpen = { messages?: Record<string, ChatMsg> }
 export type ChatLink = { state: 'up' | 'started' | 'off' | 'blocked' | 'failed'; url?: string; why?: string }
 
 /** chat.open_tasks: the strip's and the task sheet's */
-export type OpenTask = { name: string; phase: string; model?: string; via?: string; provider_name?: string }
+export type OpenTask = { name: string; phase: string; model?: string; label?: string; via?: string; provider_name?: string }
 /** chat.open_runs: the runs strip's (runs.snapshot's rows, #1278): each stage's counts by state */
 export type OpenRun = {
   run: string; flow?: string | null; phase?: string | null; why?: string
@@ -165,7 +165,7 @@ export type Patch = Omit<Snapshot, 'messages'> & { messages?: { put?: ChatMsg[];
 
 /** GET /api/task: one open task's summary, diff or log (chat.task_summary, task_diff, task_log) */
 export type TaskPart = {
-  error?: string; task?: string; phase?: string; round?: number; step?: number; model?: string; via?: string
+  error?: string; task?: string; phase?: string; round?: number; step?: number; model?: string; label?: string; via?: string
   provider_name?: string; now: number; created_at?: number; updated_at?: number; last?: string; report?: string
   report_cut?: boolean; verify?: string[]; base?: string; note?: string; stat?: string; cut?: boolean; diff: string
   lines_cut?: number; files: { path: string; added: number | null; deleted?: number }[]

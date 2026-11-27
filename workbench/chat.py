@@ -1048,7 +1048,7 @@ def snapshot() -> dict:
 def open_tasks() -> list[dict]:
     """The open tasks for the page's strip over the thread (#1016): while away, the chat is all
     the user sees, and it named no model (robustness minor 8). From task.json and status.json:
-    `{name, phase, model, via, provider_name}`; a bench replay is no one's task, and a parked one
+    `{name, phase, model, label, via, provider_name}`; a bench replay is no one's task, and a parked one
     (`wb stop --all`) is left out as `wb status` leaves it: the quit's tasks filled the strip for
     good (#1097, 2026-11-23)."""
     out = []
@@ -1057,8 +1057,21 @@ def open_tasks() -> list[dict]:
         if not sp.get("name") or sp.get("bench") or phase in store.CLOSED or store.parked(t.status):
             continue
         out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
-                    "via": sp.get("via") or "gpu", "provider_name": sp.get("provider_name") or ""})
+                    "label": model_label(sp), "via": sp.get("via") or "gpu",
+                    "provider_name": sp.get("provider_name") or ""})
     return out
+
+
+def model_label(sp: dict) -> str:
+    """The web app's one name for a task's model (#1339, 2026-11-26): a GPU model's label, the
+    one Stats and wb top give it (task.json `model_label`), an API model's catalog name
+    (models.catalog_title, hosted.json as it is); "" when there is none, and the page shows the
+    id. The raw ids were most of what pushed the phone's strip to three lines. wb's own lines
+    keep `model_label`'s id-first form: Claude reads those."""
+    if (sp.get("via") or "gpu") == "api":
+        from . import models
+        return models.catalog_title(str(sp.get("model") or ""))
+    return str(sp.get("model_label") or "")
 
 
 RUN_FIELDS = ("run", "flow", "phase", "why", "stages", "spent_usd", "budget_usd", "budget_min", "gpu_min")
@@ -1123,7 +1136,8 @@ def task_summary(t: store.Task) -> dict:
         checks = []
     return {"phase": st.get("phase") or "queued", "round": n, "step": st.get("steps", 1),
             "last": transcript.plain(str(st.get("last") or "")), "created_at": sp.get("created_at"),
-            "updated_at": st.get("updated_at"), "model": sp.get("model") or "", "via": sp.get("via") or "gpu",
+            "updated_at": st.get("updated_at"), "model": sp.get("model") or "", "label": model_label(sp),
+            "via": sp.get("via") or "gpu",
             "provider_name": sp.get("provider_name") or "", "report": report[:TASK_REPORT_CHARS],
             "report_cut": len(report) > TASK_REPORT_CHARS, "verify": checks}
 

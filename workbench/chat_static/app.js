@@ -474,21 +474,24 @@
     const rank = (t) => RUNNING.includes(t.phase) ? 0 : t.phase === 'queued' ? 2 : 1;
     const ranked = (tasks) => Array.isArray(tasks) ? [...tasks].sort((a, b) => rank(a) - rank(b)) : [];
     const taskOn = (t) => {
-        const short = String(t.model || '').split('/').pop();
-        return t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`;
+        const name = t.label || String(t.model || '').split('/').pop();
+        return t.via === 'api' ? `API · ${name}` : `GPU ${name}`;
     };
+    const taskNote = (t) => taskOn(t) + (t.via === 'api' && t.provider_name ? ` · ${t.provider_name}` : '');
     function tasksLine(tasks) {
         const all = ranked(tasks);
         if (!all.length)
             return '';
-        const named = all.slice(0, TASKS_SHOWN).map(t => `${t.name}${RUNNING.includes(t.phase) ? '' : ` (${t.phase})`} · ${taskOn(t)}`);
+        // every open task on one model: said once, at the end, not after each name
+        const one = all.every(t => t.via === all[0].via && t.model === all[0].model);
+        const named = all.slice(0, TASKS_SHOWN).map(t => `${t.name}${RUNNING.includes(t.phase) ? '' : ` (${t.phase})`}${one ? '' : ` · ${taskOn(t)}`}`);
         if (all.length > TASKS_SHOWN)
             named.push(`+${all.length - TASKS_SHOWN} more`);
         const n = (r) => all.filter(t => rank(t) === r).length;
         const counts = [[n(0), 'running'], [n(1), `waiting on ${driverName()}`], [n(2), 'queued']].filter(([c]) => c);
         const head = counts.length === 1 && n(0) && all.length <= TASKS_SHOWN ? 'Running'
             : counts.map(([c, what]) => `${c} ${what}`).join(', ');
-        return head + ': ' + named.join('; ');
+        return head + ': ' + named.join('; ') + (one ? ` · ${taskOn(all[0])}` : '');
     }
     function drawTasks() {
         const el = $('tasks'), text = tasksLine(state.tasks);
@@ -583,7 +586,7 @@
             return loadPart({ quiet });
         $('ts-list').replaceChildren(...ranked(state.tasks).map(t => {
             const row = btn('ts-row', null, () => { tsTask = t.name; tsPart = 'summary'; tsDiff = null; drawTaskSheet(); });
-            row.append(mk('b', '', t.name), mk('span', 'ts-phase', ' · ' + t.phase), mk('small', '', taskOn(t)));
+            row.append(mk('b', '', t.name), mk('span', 'ts-phase', ' · ' + t.phase), mk('small', '', taskNote(t)));
             return row;
         }));
     }
@@ -619,7 +622,7 @@
         tsBody.replaceChildren(...(tsPart === 'summary' ? drawSummary(j) : tsPart === 'diff' ? drawDiff(j) : drawLog(j)));
     }
     function drawSummary(j) {
-        const out = [mk('p', '', `${j.phase} · round ${j.round}${j.step > 1 ? ` · step ${j.step}` : ''} · ${taskOn(j)}`)];
+        const out = [mk('p', '', `${j.phase} · round ${j.round}${j.step > 1 ? ` · step ${j.step}` : ''} · ${taskNote(j)}`)];
         const times = [j.created_at && `started ${agoSecs(j.now - j.created_at)} ago`, j.updated_at && `last change ${agoSecs(j.now - j.updated_at)} ago`].filter(Boolean);
         if (times.length)
             out.push(mk('p', 'ts-dim', times.join(' · ')));

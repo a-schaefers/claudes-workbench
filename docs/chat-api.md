@@ -311,8 +311,9 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
   provider's, and `names`: each provider's name), never part of the score.
 - `uploads`: `{file, message, files}`: bytes per file, bytes per message, files per message.
 - `build`: the page files' stamp (a page whose stamp differs reloads).
-- `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",
-  provider_name}]` (none accepted, discarded or parked by `wb stop --all`).
+- `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, label, via: "gpu"|"api",
+  provider_name}]` (none accepted, discarded or parked by `wb stop --all`); `label` is the model's
+  name (a GPU model's label, an API model's name in OpenCode's catalog, `""` for none).
 - `runs`: the deep workflows not closed (`wb run`), for the runs strip: `[{run, flow, phase, why,
   stages: {<stage>: {done, running, null, filtered, not_run}}, spent_usd, budget_usd,
   budget_min, gpu_min}]`, by their start. `phase` is `running`, `checkpoint`, `paused`, `stopped`,
@@ -426,8 +427,9 @@ Read only, from the task's files and its worktree; it never starts OpenCode. Onl
 `tasks` strip lists (open, not parked, not a bench replay); any other is `404 {"error": "no such
 open task"}`. Every answer is `{task, part, …, now}`:
 - `summary` (the default): `phase`, `round`, `step` (above 1 after `wb next`), `last`,
-  `created_at` and `updated_at` (seconds; age and idle are `now` minus them), `model`, `via`,
-  `provider_name`, `report` (the round's summary.md, or what stands instead, cut at 64 KB with
+  `created_at` and `updated_at` (seconds; age and idle are `now` minus them), `model`, `label`
+  (the model's name: a GPU model's label, an API model's name in OpenCode's catalog, `""` for
+  none), `via`, `provider_name`, `report` (the round's summary.md, or what stands instead, cut at 64 KB with
   `report_cut: true`) and `verify` (the regression check's lines, `[]` for none).
 - `diff`: against `base` (the task's base commit, or `HEAD` after `wb next`: the current step,
   as `wb diff`, the gitignored files the agent wrote included): `stat` (`wb diff --stat`) and `files` (`[{path, added, deleted}]`, null counts
