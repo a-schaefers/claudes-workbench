@@ -413,10 +413,12 @@ def fallback_pick(doc: dict, role: str, size: str, stack, name: str | None, prim
     row = doc["roles"][role]
     if fb == FALLBACK_GPU:
         if row["gpu"] != AUTO:
-            try:
-                m = models.resolve(row["gpu"])
-            except KeyError:
-                return f"the {role} role's GPU fallback, its GPU model {row['gpu']}, isn't found"
+            # by its exact id, as resolve finds the primary pin (#1214): models.resolve's fragment
+            # match ran a retired pin's fallback on another model, said as the pin (#1573, 2026-11-26)
+            m = models.discover().get(row["gpu"])
+            if m is None:
+                return (f"the {role} role's GPU fallback, its GPU model {row['gpu']}, isn't found "
+                        "(not in OpenCode's config now)")
             why = f"the {role} role's GPU model (wb route)"
         else:
             top, why = router.choose(size, stack, name, role=role)

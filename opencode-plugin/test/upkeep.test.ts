@@ -339,6 +339,31 @@ test('after a compaction the boundary is measured from the first step that follo
   expect(compacted).toEqual([])
 })
 
+// #1578 (2026-11-26): the TUI opens on Build, so a session's first step was often Build's 10K
+// prompt, and #1569's floor stayed there after /workbench: the boundary compaction came about
+// 10K early and freed about 2K
+test('a session that began on Build is measured from its first Workbench step (#1578)', async () => {
+  const fromBuild = async (last: number) => {
+    const w = world({})
+    task(w.files, 't1', RUNNING)
+    const { host, compacted } = entriesHost()
+    const u = new Upkeep(core, host, w.io, HOME)
+    const step = async (agent: string, input: number) => {
+      await u.context({ sessionID: 's1', agent, model: { providerID: 'p', id: 'm64' }, system: [] })
+      await u.event({ type: 'session.execution.started', data: { sessionID: 's1' } })
+      await u.event({ type: 'session.step.ended', data: { sessionID: 's1', tokens: { input } } })
+      await u.event({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
+    }
+    await step('build', 10_300)
+    await step('workbench', 28_100)
+    task(w.files, 't1', CLOSED)
+    await step('workbench', last)
+    return { compacted, floor: u.sess('s1').floor }
+  }
+  expect(await fromBuild(30_200)).toEqual({ compacted: [], floor: 28_100 })
+  expect((await fromBuild(28_100 + 0.5 * (autoCeiling(65_536) - 28_100) + 1)).compacted).toEqual(['s1'])
+})
+
 test('the boundary compaction follows WB_COMPACT_AT, waits for every task waiting on the driver, and is the mode\'s alone', async () => {
   expect((await boundary(2_000, { env: { WB_COMPACT_AT: '1' } })).first).toEqual(['s1'])
   expect((await boundary(80_000, { env: { WB_COMPACT_AT: '0' } })).compacted).toEqual([])

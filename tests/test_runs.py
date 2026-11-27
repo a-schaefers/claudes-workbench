@@ -915,6 +915,42 @@ class Runs(Base):
         run.set_status(phase="stopped")
         run_wb("discard", "bld-code-1")
 
+    def test_the_hand_back_names_a_best_of_runs_attempts_as_alternatives_and_offers_no_accept_for_its_report_items(self):
+        # #1576 (bar loop #1030, 2026-11-26): `wb takeover --all` said each attempt apart, each with
+        # "wb accept <name> (it commits)", so a hand-back had Claude finish and merge all three
+        # attempts at one change, and told it to accept the reviewer's report, which commits nothing
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"bo5-review-1": "hang"})
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Pick the best attempt": {"best": "a1", "ranking": ["a1", "a2", "a3"], "why": "a1"}})
+        run_wb("run", "start", "bo5", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        code = ["bo5-code-1", "bo5-code-2"]  # the third may queue behind the reviewer, which holds the GPU
+        deadline = time.time() + 60
+        while not (all(store.Task(n).exists and store.Task(n).status.get("phase") == "review" for n in code)
+                   and store.Task("bo5-review-1").exists and store.Task("bo5-review-1").status.get("session")):
+            self.assertLess(time.time(), deadline, f"never two at review with the reviewer going: {runs.Run('bo5').journal()}")
+            time.sleep(0.2)
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        lines = out.splitlines()
+        (alts,) = [ln for ln in lines if "alternatives" in ln]
+        self.assertTrue(alts.startswith("took over bo5-code-1, bo5-code-2"), alts)  # the hosts' turn keys on it
+        self.assertIn("the attempts at item 1 of stage code in run bo5", alts)
+        self.assertIn("bo5-code-3", alts)  # taken over too, or still queued ("with bo5-code-3"): one of them
+        self.assertIn("wb accept only that one", alts)
+        self.assertIn("wb discard the rest (they count as not chosen)", alts)
+        for n in code:
+            self.assertNotIn(f"wb accept {n} ", out)
+            self.assertNotIn(f"took over {n}: the agent is stopped", out)
+            self.assertEqual(store.Task(n).status.get("taken_over"), True, n)
+        (rev,) = [ln for ln in lines if ln.startswith("took over bo5-review-1")]
+        self.assertIn("A report item, nothing to commit", rev)
+        self.assertIn("wb discard bo5-review-1 drops it (wb run close bo5 does that)", rev)
+        self.assertNotIn("(it commits)", rev)
+        self.assertNotIn("wb accept bo5-review-1", rev)  # it wrote no result to keep
+        for n in runs.run_tasks(runs.Run("bo5")):  # one the journal names may not exist yet
+            if store.Task(n).exists:
+                run_wb("discard", n)
+
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
         seq.write_text(json.dumps([
@@ -1395,6 +1431,26 @@ class Runs(Base):
         self.assertEqual([(c["key"], c["task"]) for c in rep["code"] if c.get("phase") == "review"], [("code:1#e1", "esc-code-2")])
         run_wb("discard", "esc-code-2")
 
+    def test_a_code_items_self_review_stopped_on_a_tree_it_broke_is_done_on_the_green_tree_not_escalated(self):
+        # #1572 (bar loop #1030 round 2, M1, 2026-11-26): its stop mid-check was stuck, the
+        # item null, and escalate redid the passing change from the base on the next role
+        flow = {"v": 1, "name": "srx", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "role": "trivial", "escalate": ["significant"], "items": ["the answer"],
+             "prompt": "Write the answer to answer.txt.", "test": test_workbench.TEST_CMD},
+            {"id": "claude", "final": True, "from": "code"}]}
+        os.environ.update(FAKE_SCENARIO="selfreads", FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
+        store.home().joinpath("tuning.json").write_text('{"self_review": 1}')  # Base pins it off
+        run_wb("run", "start", "srx", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("srx", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        st = store.Task("srx-code-1").status
+        self.assertEqual((st["phase"], st["round"], st["tests"]["ok"]), ("review", 2, True), st.get("last"))
+        self.assertIn("2s", st["review_trees"])
+        run = runs.Run("srx")
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "escalated"])
+        self.assertEqual([(c["key"], c["task"]) for c in runs.report_of("srx")["code"] if c.get("phase") == "review"],
+                         [("code:1", "srx-code-1")])
+        run_wb("discard", "srx-code-1")
+
     def test_a_crashed_code_item_checkpoints_claude_once_while_the_runs_other_items_go_on_to_review(self):
         # #1510: one crashed item's checkpoint stopped every other start until wb run resume, so a
         # scheduled fix or build flow sat idle all night and skipped each later night's fire
@@ -1489,6 +1545,25 @@ class Runs(Base):
         st[0]["escalate"] = ["significant", "significant"]
         self.assertIn("escalate is a list of 1 to 3 distinct roles", self.errs(stages=st) if hasattr(self, "errs") else
                       "; ".join(runs.validate({"v": 1, "name": "x", "stages": st})))
+
+    def test_skipping_a_stage_stops_its_running_items_and_says_how_many(self):
+        # #1577 (2026-11-26): a skip stopped nothing: the item ran on, paid, read as `skipped`, the
+        # run done under it, its result dropped and its review notice Claude's
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
+        os.environ["FAKE_SLEEP"] = "600"
+        run_wb("run", "start", "sks", "--plan", self.plan({**AUDIT, "name": "sks"}), "--param", "areas=a",
+               "--repo", str(self.repo))
+        self.wait_item("sks-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        self.assertIn("amended sks: skip find; stopped 1 running item(s): sks-find-1",
+                      run_wb("run", "amend", "sks", "--skip", "find"))
+        st = store.Task("sks-find-1").status
+        self.assertEqual((st["phase"], st["last"]), ("stuck", runs.STOPPED_BY_CLAUDE))
+        run = runs.Run("sks")
+        self.assertEqual([r.get("skip") for r in run.journal() if r.get("kind") == "stopped"], ["find"])
+        self.assertEqual(self.wait_run("sks", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        self.assertEqual(runs.report_of("sks")["not_run"], [{"key": "find:1", "why": runs.SKIP_STOPPED}])
+        self.assertFalse(runs._resumable(run, "sks-find-1", st))  # skipped: never taken up again
+        self.assertEqual([r for r in store.notices() if r["task"] == "sks-find-1"], [])
 
     def test_a_skipped_stage_and_items_past_max_items_are_not_run_and_named(self):
         flow = {"v": 1, "name": "cap", "params": {"areas": "list"}, "stages": [

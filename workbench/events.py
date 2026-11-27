@@ -321,6 +321,12 @@ def _message(err) -> str:
     return str(err.get("message") if isinstance(err, dict) and err.get("message") else err)[:400]
 
 
+# The block lengths the repeat guard also counts: A B A B …, A B C A B C …, and 4 for an edit
+# flipping a line back and forth with a test after each (A->B, test, B->A, test), which ran 500
+# cycles with no stop: each edit a real change, a block no 2 or 3 sees (#1575, 2026-11-26)
+CYCLE = (2, 3, 4)
+
+
 class StuckDetector:
     """Says why a run should be stopped, or None.
 
@@ -335,6 +341,10 @@ class StuckDetector:
         # a relative path is OpenCode's directory's, the package in a monorepo (#1148)
         self.workdir = os.path.realpath(workdir) if workdir else self.worktree
         self.recent = deque(maxlen=repeat)
+        # The last calls (signature, what it was), for a block of CYCLE calls repeated `repeat`
+        # times; and each path's last write, for a write of the text it already had (#1575)
+        self.calls = deque(maxlen=max(CYCLE) * repeat)
+        self.wrote = {}
         self.errors = 0
         self.since_edit = 0
         self.guard = None
@@ -343,14 +353,26 @@ class StuckDetector:
         if row.get("kind") != "tool":
             return None
         self.recent.append(row["sig"])
+        self.calls.append((row["sig"], f"{row['tool']} {row['brief']}".strip()))
         self.errors = 0 if row["ok"] else self.errors + 1
         changed = row["tool"] in EDIT_TOOLS and row["ok"] and any(
-            self._ours(p) for p in written(row) or [None])
+            self._ours(p) and self.wrote.get(self._key(p)) != row["sig"] for p in written(row) or [None])
+        if row["tool"] in EDIT_TOOLS and row["ok"]:
+            self.wrote.update((self._key(p), row["sig"]) for p in written(row))
         self.since_edit = 0 if changed else self.since_edit + 1
         # .guard names the one that fired, for the Stats tab's "what stops agents" (#404)
         if len(self.recent) == self.repeat and len(set(self.recent)) == 1:
             self.guard = "repeat"
             return f"the same call {self.repeat} times in a row: {row['tool']} {row['brief']}"
+        # A loop of two calls, the same text written to answer.txt then the same failing test,
+        # passed every guard: each write reset the explore count and no one call came 4 times in
+        # a row, so 800 calls a round ran to its 40-minute wall, three rounds (#1575, 2026-11-26)
+        for k in CYCLE:
+            last = [sig for sig, _ in list(self.calls)[-k * self.repeat:]]
+            if len(last) == k * self.repeat and last == last[-k:] * self.repeat and len(set(last)) > 1:
+                self.guard = "repeat"
+                what = "; ".join(label for _, label in list(self.calls)[-k:])
+                return f"the same {k} calls {self.repeat} times in a row: {what}"
         if self.errors >= self.error_streak:
             self.guard = "errors"
             return f"{self.errors} failing tool calls in a row (last: {row.get('error', '')[:120]})"
@@ -358,6 +380,9 @@ class StuckDetector:
             self.guard = "no_edit"
             return f"{self.since_edit} tool calls without changing a file in the task"
         return None
+
+    def _key(self, path) -> str:
+        return os.path.realpath(os.path.join(self.workdir or "", path)) if path else ""
 
     def _ours(self, path) -> bool:
         """Whether an edit was to the task's files. Scratch files elsewhere aren't progress: an

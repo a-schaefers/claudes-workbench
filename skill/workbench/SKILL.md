@@ -243,7 +243,7 @@ then a verifier per finding, only the confirmed kept), `fix-escalate`, `lenses`,
    the rest, so they count as not chosen, not as the model's failures), then `wb run close <run>`. Findings you keep are
    fixed through the `fix` flow (`--param findings=<the list as JSON>`), not by hand one by one.
 5. The user's "stop" is `wb run stop <run>`, "go on" `wb run resume`, "skip the judge" or "max
-   $2" `wb run amend <run> --skip <stage>` / `--budget-usd 2`. Done work is kept.
+   $2" `wb run amend <run> --skip <stage>` (its items at work stop) / `--budget-usd 2`. Done work is kept.
 Never pick a model for a stage: each runs on its role's. No OpenCode `subagent` for run work.
 With `ultracode` and `deepcode` in one prompt, follow each in its own scope: the flow's agents do
 the work, and your own Workflow (ultracode's) only reviews what the run returns, never redoes it.
@@ -523,7 +523,8 @@ workbench mode; the mod runs them, closes the pane and tells you what it did:
 - **`/workbench-quit-and-hand-back-claude`**: take over. This session's agents are already stopped
   (`wb takeover --all --user --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave workbench mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
-  `wb accept`, then carry on with the rest of the request directly, without delegating.
+  `wb accept` (a run's attempts, named together as alternatives: the best one only, `wb discard` the
+  rest; a report item commits nothing), then carry on with the rest of the request directly, without delegating.
 - **`/workbench-quit`**: stop. This session's delegated agents are already stopped (`wb stop
   --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Work directly from now on. Don't finish, restart or clean up anything
   unless asked; worktrees are kept.
@@ -655,7 +656,8 @@ When a later round made things worse, `wb rewind <name> <round>` puts the files 
 reviewed round of this step (the round its review notice named), then accept or send feedback
 from there; it prints that round's test verdict, and the next feedback starts a fresh session.
 Edits made by hand since the last review are kept: its line names the `wb rewind <name> <N>h`
-that brings them back.
+that brings them back. A self-review stopped mid-check with its tests failing is set aside the
+same way (`wb rewind <name> <N>s`): the review is of the tree its tests passed on.
 Files it names as `left as they are` or `not as round N's files` are not that round's: check them
 before you accept.
 **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree

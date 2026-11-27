@@ -60,7 +60,10 @@ DRIVERS: dict[str, dict[str, str]] = {
 # OpenCode plugin's skill.ts swaps for OpenCode's text from the same module), and `tasks.pickup`
 # (the open-tasks context block's last line, both hosts' word for word: it named `wb watch`, which
 # follows a task until it closes, so a driver on one at review waited out its shell's timeout,
-# #1515, 2026-11-26; `wb wait` ends when the task needs the driver).
+# #1515, 2026-11-26; `wb wait` ends when the task needs the driver), and `firstrun.note` (what a
+# fresh install's /workbench alone sends after the procedure, both hosts' word for word: the mod's
+# FIRSTRUN_NOTE, #1190, and the OpenCode plugin's, which sent nothing, #1574, 2026-11-26; SKILL.md's
+# *First task* reads its `[workbench-firstrun]` tag by name).
 TEXTS: dict[str, str] = {
     "purpose": "Message {who} from anywhere: most work can run from here. A prompt {who} raises waits in "
                "its terminal (`ssh` + `tmux`); run {who} with permissions granted to skip those. "
@@ -102,6 +105,9 @@ TEXTS: dict[str, str] = {
                       "/deepmode on turns it on.",
     "tasks.pickup": "Pick them up from here: `wb report <name>` for one (`wb run report <name>` for a run), "
                     "`wb wait <name>` to follow it until it needs you.",
+    "firstrun.note": "[workbench-firstrun] A fresh install: no task has run here yet and no role is on API. "
+                     "Run the skill's *First run* now, from its step 1, each install or download on the user's yes; "
+                     "don't wait for a first request.",
     "refusal.question": "The user is away: ask in the web chat ({reply}) and end your turn.",
     "refusal.plan": "Post the plan in the web chat and end your turn; approval is at the terminal.",
     "refusal.consent": "{Who} is waiting on a workbench dialog in the terminal: answer it there.",
@@ -124,12 +130,12 @@ TEXTS: dict[str, str] = {
 HOSTS = ("claude-code", "opencode")
 ONLY: dict[str, tuple[str, ...]] = {"next.grant": HOSTS, "refusal.question": HOSTS, "refusal.plan": ("claude-code",),
                                     "refusal.consent": HOSTS, "skill.rule": HOSTS, "skill.prompts": HOSTS,
-                                    "tasks.pickup": HOSTS}
+                                    "tasks.pickup": HOSTS, "firstrun.note": HOSTS}
 
 # What the hosts' generated mod/hooks/story.ts carries, filled for each host a key is said for:
 # the mod (register.tsx) and the OpenCode plugin (chat.ts, skill.ts) import it.
 HOST: tuple[str, ...] = ("refusal.question", "refusal.plan", "refusal.consent", "skill.rule", "skill.prompts",
-                         "tasks.pickup")
+                         "tasks.pickup", "firstrun.note")
 
 # What the web app's generated story.ts carries: the keys its page reads (`data-story`, app.ts).
 PAGE: tuple[str, ...] = ("purpose", "rule.terminal", "rule.settings", "receipt.blocked", "lane")

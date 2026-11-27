@@ -8173,13 +8173,36 @@ class Context(Base):
         self.assertTrue(st["tests"]["ok"])
         self.assertNotIn("errors", st.get("guards") or {})
 
-    def test_a_self_review_that_reruns_a_command_on_a_changed_tree_is_still_stopped_by_the_repeat_guard(self):
-        # #1250's finish, like #1168's, is for the green tree: one left changed is stopped
+    def assert_set_aside(self, name, st, said):
+        """A self-review stopped on a tree it changed, its tests failing there: the green tree
+        put back and tested, the unfinished files kept as review tree `2s`, a review (#1572)."""
+        t = store.Task(name)
+        self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "42\n")
+        self.assertEqual((st["tests"]["ok"], st["tests"]["round"]), (True, 2))   # the tree it is left on
+        self.assertEqual(st["last"], "tests passed: Claude reviews next")
+        trees = st["review_trees"]
+        self.assertEqual(trees["2s"]["reviewed"], False)
+        self.assertTrue(trees["1"]["green"])                     # kept as the self-review began
+        self.assertEqual(trees["1"]["tree"], trees["2"]["tree"])   # the tree under review
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == name]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn(f"self-review stopped mid-check ({said}", rows[0]["text"])
+        self.assertIn(f"wb rewind {name} 2s brings them back", rows[0]["text"])
+        self.assertIn("tests: PASS", rows[0]["text"])
+        from workbench import results
+        self.assertFalse(results.step(t, landed=False)["stuck"])  # the router's
+        run_wb("rewind", name, "2s")
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "43\n")   # the unfinished edit
+
+    def test_a_self_review_stopped_by_the_repeat_guard_on_a_tree_it_broke_is_set_aside_for_the_green_tree(self):
+        # #1572 (bar loop #1030 round 2, M1, 2026-11-26): a 9B's self-review copied a broken
+        # copy back mid-check and the repeat guard stopped it there: stuck, a stale tests:ok,
+        # the green tree only fingerprinted, so nothing to rewind to
         os.environ.update(FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
         self.start("t-srx", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srx", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
-        self.assertIn("the same call 4 times in a row", st["last"])
+        self.assert_set_aside("t-srx", st, "the same call 4 times in a row")
 
     def test_a_self_review_whose_opencode_exits_on_its_servers_error_on_the_green_tree_goes_to_review(self):
         # #1270 (bar loop round 7, 2026-11-24): a GPU server's 500 in the self-review (Ollama's
@@ -8195,14 +8218,13 @@ class Context(Base):
         self.assertIn("self-review: opencode exited 1, the tree its tests passed on: stopped as its finish",
                       run_wb("watch", "t-src", "--once", "--no-color"))
 
-    def test_a_self_review_whose_opencode_exits_on_a_changed_tree_still_fails(self):
-        # #1270's finish is for the green tree, as every settle is: one left changed failed mid-edit
+    def test_a_self_review_whose_opencode_exits_on_a_tree_it_broke_is_set_aside_for_the_green_tree(self):
+        # #1270's exit on a changed tree failed the task mid-check, a green change lost to a
+        # check left broken: its tests run, and failing there it is set aside (#1572)
         os.environ.update(FAKE_SELF_CRASH="1", FAKE_READS="1", FAKE_SELF_KEEP="1")
         self.start("t-srck", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srck", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"], st["last"]), ("failed", 2, "opencode exited 1"))
-        self.assertFalse([e for e in store.read_jsonl(store.Task("t-srck").dir / "events.jsonl")[0]
-                          if e["kind"] == "settled"])
+        self.assert_set_aside("t-srck", st, "opencode exited 1")
 
     def quiet_self_review(self, name, *flags, **env):
         """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
@@ -8255,13 +8277,12 @@ class Context(Base):
                             rounds=(3, "steer"))                # the nudge wakes no one (#1322)
         self.assertEqual(st["nudges"], 1)
 
-    def test_a_self_review_silent_on_a_changed_tree_is_still_stopped_as_stuck(self):
-        # #1261's finish, like #1168's, is for the green tree: one left changed is stopped
+    def test_a_self_review_silent_on_a_tree_it_broke_is_set_aside_for_the_green_tree(self):
+        # #1261's finish is for the green tree; a silence stop on one left changed was stuck,
+        # and is set aside since its tests fail there (#1572)
         st, rows = self.quiet_self_review("t-sqk", "--silence-timeout", "4", "--think-timeout", "120",
                                           FAKE_SELF_KEEP="1")
-        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
-        self.assertIn("no output for 0 minutes", st["last"])
-        self.assertEqual([r["kind"] for r in rows], ["stuck"])
+        self.assert_set_aside("t-sqk", st, "no output for 0 minutes")
 
     def test_every_guards_stop_settles_on_a_self_reviews_green_tree_and_only_there(self):
         # #1261: one mechanism for any guard (the provider's, the spend cap's, drive's handover
@@ -8281,13 +8302,18 @@ class Context(Base):
         self.assertEqual(out["settled"], "no tool call or word for 7 minutes")
         self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green))  # nothing stopped
         t.set_status(self_review_tree="another tree")
+        # another tree: a nudge stays the guard's; a stop settles to the tests, mid-check (#1572)
+        self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green, "a nudge", stopped=False))
         out = {"stuck": "silence's stop", "guard": "silence"}
-        self.assertFalse(runner.settle(t, 2, out, green))
-        self.assertEqual(out, {"stuck": "silence's stop", "guard": "silence"})
+        self.assertTrue(runner.settle(t, 2, out, green))
+        self.assertEqual(out, {"stuck": None, "guard": None, "settled": "silence's stop",
+                               "mid_check": "another tree"})
+        out = {"stuck": "silence's stop", "guard": "silence"}
         t.set_status(round_for="feedback", self_review_tree=green)
         self.assertFalse(runner.settle(t, 2, out, green))
+        self.assertEqual(out, {"stuck": "silence's stop", "guard": "silence"})
         settled = [e for e in store.read_jsonl(t.dir / "events.jsonl")[0] if e.get("kind") == "settled"]
-        self.assertEqual(len(settled), 7)
+        self.assertEqual(len(settled), 8)
 
     def test_a_self_review_handed_over_past_the_limit_on_its_green_tree_goes_to_review(self):
         # #1261's review (2026-11-24): drive's HANDOVER_MAX stop goes through runner.settle, which
@@ -35657,6 +35683,67 @@ class Detector(unittest.TestCase):
         self.assertIsNone(d.feed(tool(same)))
         self.assertEqual(d.feed(tool(same)), "the same call 4 times in a row: write /w/src/eval.c")
 
+    def test_the_same_two_calls_over_and_over_stop_the_round_as_a_repeat(self):
+        # #1575 (2026-11-26): the same text written to answer.txt, then the same failing test,
+        # 800 calls a round: no one call 4 times in a row, so every round ran to its wall
+        tool = lambda name, inp, ok=True: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": name, "state": {"status": "completed" if ok else "error", "input": inp}}}, 1)
+        write = tool("write", {"filePath": "/w/answer.txt", "content": "41\n"})
+        test = tool("bash", {"command": "grep -qx 42 answer.txt"})
+        d = events.StuckDetector(worktree="/w")
+        whys = [d.feed(row) for row in [write, test] * 4]
+        self.assertEqual(whys[:-1], [None] * 7)
+        self.assertEqual(whys[-1], "the same 2 calls 4 times in a row: write /w/answer.txt; "
+                                   "bash grep -qx 42 answer.txt")
+        self.assertEqual(d.guard, "repeat")
+        # an edit flipping a line back and forth (A->B, B->A): each a real change, a block of 2
+        flip = lambda a, b: tool("edit", {"filePath": "/w/a.py", "oldString": a, "newString": b})  # noqa: E731
+        d = events.StuckDetector(worktree="/w")
+        whys = [d.feed(row) for row in [flip("x", "y"), flip("y", "x")] * 4]
+        self.assertEqual(whys[-1], "the same 2 calls 4 times in a row: edit /w/a.py; edit /w/a.py")
+        # the same flip with the tests run after each edit: a block of 4 (#1575's 500 cycles)
+        run = tool("bash", {"command": "python3 -m unittest"})
+        d = events.StuckDetector(worktree="/w")
+        whys = [d.feed(row) for row in [flip("x", "y"), run, flip("y", "x"), run] * 4]
+        self.assertEqual(whys[:-1], [None] * 15)
+        self.assertEqual(whys[-1], "the same 4 calls 4 times in a row: edit /w/a.py; "
+                                   "bash python3 -m unittest; edit /w/a.py; bash python3 -m unittest")
+        # and two writes of different text with the tests between them
+        d = events.StuckDetector(worktree="/w")
+        other = tool("write", {"filePath": "/w/answer.txt", "content": "43\n"})
+        whys = [d.feed(row) for row in [write, run, other, run] * 4]
+        self.assertTrue(whys[-1].startswith("the same 4 calls 4 times in a row: write /w/answer.txt;"))
+        # three calls in a loop: a block of 3
+        d = events.StuckDetector(worktree="/w")
+        read = tool("read", {"filePath": "/w/a.py"})
+        whys = [d.feed(row) for row in [read, write, test] * 4]
+        self.assertEqual(whys[:-1], [None] * 11)
+        self.assertTrue(whys[-1].startswith("the same 3 calls 4 times in a row: read /w/a.py;"))
+        # the same two calls 3 times, then progress: no stop
+        d = events.StuckDetector(worktree="/w")
+        rows = [write, test] * 3 + [tool("write", {"filePath": "/w/answer.txt", "content": "42\n"}), test]
+        self.assertEqual([d.feed(row) for row in rows], [None] * 8)
+
+    def test_a_write_of_the_text_a_file_already_had_is_no_edit(self):
+        # #1575 (2026-11-26): every ok write reset the explore count, so rewriting one file with
+        # the same text kept a stuck agent "editing"; the same path written again with new text
+        # still is an edit, and so is writing the old text back after it
+        tool = lambda inp: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": "write", "state": {"status": "completed", "input": inp}}}, 1)
+        same = tool({"filePath": "/w/answer.txt", "content": "41\n"})
+        other = tool({"filePath": "/w/answer.txt", "content": "42\n"})
+        d = events.StuckDetector(no_edit=40, worktree="/w", workdir="/w")
+        d.feed(same)
+        self.assertEqual(d.since_edit, 0)
+        d.feed(same)
+        self.assertEqual(d.since_edit, 1)                        # the text it already had
+        d.feed(other)
+        self.assertEqual(d.since_edit, 0)                        # new text: an edit
+        d.feed(same)
+        self.assertEqual(d.since_edit, 0)                        # the old text back: a change too
+        d.feed(tool({"filePath": "/w/b.txt", "content": "41\n"}))
+        self.assertEqual(d.since_edit, 0)                        # another file
+
     def test_a_suspend_is_neither_silence_nor_the_rounds_time(self):
         # On the wall clock a laptop shut for 20 minutes woke to a round stopped for silence
         # (the 2026-11-16 audit). The monotonic clock skips a suspend; a frozen pass is cut out.
@@ -51329,6 +51416,26 @@ class Fallbacks(Base):
         self.assertIn("note: the trivial role's fallback ", out)
         self.assertIn(" can't take it: the GPU is in use by other: ", out)
         self.assertNotIn(routes.FALLBACK_LINE, out)
+
+    def test_a_gpu_fallbacks_pin_gone_from_the_config_never_runs_a_model_its_id_is_a_fragment_of(self):
+        # #1573 (2026-11-26): #1214's exact-id lookup was resolve's only; fallback_pick's fragment
+        # match ran a retired pin's fallback on ollama/qwen3.8-27b, said as the user's pin
+        self.on_api("gpu")
+        self.set_role("trivial", "--gpu", "qwen")
+        path = Path(os.environ["WB_ROUTES"])
+        doc = json.loads(path.read_text())
+        doc["roles"]["trivial"]["gpu"] = "ollama/qwen3.8"      # only a fragment of ollama/qwen3.8-27b
+        path.write_text(json.dumps(doc))
+        gone = ("the trivial role's GPU fallback, its GPU model ollama/qwen3.8, isn't found (not in "
+                "OpenCode's config now)")
+        got = routes.fallback_pick(routes.read(), "trivial", "trivial", [], "t-x",
+                                   runner.models.lookup("deepseek/deepseek-flash"))
+        self.assertEqual(got, gone)                                       # the runner's path too
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-x", "--role", "trivial")
+        self.assertEqual(code, 3)                                         # as with no fallback
+        self.assertIn(f"note: {gone}", out + err)
+        self.assertFalse(store.Task("t-x").dir.exists())
 
     def test_out_of_credit_onto_a_busy_gpu_fallback_queues_saying_it_was_the_fallback(self):
         # the third review of #1196 (2026-11-24): exit 4 named a GPU model Claude never picked, and
