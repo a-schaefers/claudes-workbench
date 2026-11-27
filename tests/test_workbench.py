@@ -36417,7 +36417,7 @@ class SkillLearning(Base):
         lessons.path().write_text("".join(json.dumps(r) + "\n" for r in rows))
         began = time.monotonic()
         got = lessons.survey()
-        self.assertLess(time.monotonic() - began, 8)                  # 1.6 s here; 30 s before
+        self.assertLess(time.monotonic() - began, 15)  # 1.6 s here, 8.9 on CI's WSL; 30 s before
         self.assertEqual(len(got), 5002)
         by = {x["id"]: x for x in got}
         self.assertEqual((by["aaaa0001"]["again"], by["aaaa0002"]["again"]), ([("t-y", "")], [("t-x", "")]))
