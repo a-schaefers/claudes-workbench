@@ -1591,6 +1591,25 @@ async function run(engine: string, device?: string) {
       writeFileSync(join(home, 'state/chat/listener.json'), '{}')
     }
   })
+  await check('jump-to-newest goes at once for a reader who prefers less motion (#1339)', async () => {
+    // #1339 (2026-11-26): the one motion the stylesheet's reduce block can't reach, a smooth
+    // scroll of 2.5 s over a long thread
+    for (let i = 0; i < 30; i++) wb('chat', 'reply', '--text', `Line ${i} of a long thread.\n\nAnd its second paragraph.`)
+    const rc = await browser.newContext({ ...ctxFor(device), reducedMotion: 'reduce', serviceWorkers: 'block' })
+    const p = await rc.newPage()
+    try {
+      await p.goto(base + '#token=' + token)
+      await until(async () => (await p.locator('.row.claude .bubble').last().textContent()).includes('Line 29'))
+      await p.evaluate(() => { const m = document.getElementById('scroll')!; m.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); m.scrollTop = 0 })
+      await until(async () => await p.locator('#jump').isVisible())
+      const end = await p.evaluate(() => new Promise(r => {
+        const m = document.getElementById('scroll')!
+        document.getElementById('jump')!.click()
+        requestAnimationFrame(() => r(m.scrollHeight - m.scrollTop - m.clientHeight))
+      }))
+      if (Number(end) > 2) throw new Error(`still ${end} px from the end a frame after the tap`)
+    } finally { await rc.close() }
+  })
   await finish()
 
   async function finish() {

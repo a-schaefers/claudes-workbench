@@ -133,7 +133,9 @@
     if (curView && curView !== 'chat') { if (force) follow = true; return }
     if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; follow = true; jump.hidden = true }
   }
-  jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }))
+  // at once for a reader who prefers less motion: the one motion the stylesheet's reduce block
+  // can't reach, 2.5 s over a long thread (#1339, 2026-11-26)
+  jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: reduced.matches ? 'auto' : 'smooth' }))
 
   // ---- text → DOM, never HTML from the thread ----
   function inline(parent: HTMLElement, text: string) {

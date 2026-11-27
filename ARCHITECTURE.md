@@ -7406,7 +7406,8 @@ ids, else Claude Code's), and the header (`OpenCode · listening in …`), `Not 
 session`/`an OpenCode session` and `… is on it` by the listener's `driver` (an
 OpenCode claim's `tool`), with none listening by the newest reply or waiting line that names one, else `Claude`;
 `sw.ts` titles a push by the row's `driver`, else `/api/latest`'s `listener`, else `Claude`. The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
-releases it; a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
+releases it, and `#jump` brings it back, smoothly unless the reader prefers less motion (`reduced`: at once,
+#1339, the one motion the stylesheet's reduce block can't reach); a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
 after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). A screen reader
 hears the thread through `#say` (`role=log`, `.sr-only`), outside it: each new message from Claude and each waiting line once,
 whole (`say`, after the reveal), and "Claude is on it" (the driver's name) once; the thread was the live region, and every update read
@@ -11279,7 +11280,8 @@ the click still runs the real wb. What the chat is for (#1341): the empty state'
 thread the hint shows, hides while the state line shows and once a message is sent (#1339), dismisses, and stays
 dismissed after a reload, and where every storage call throws it still shows and dismisses with no page error; a
 phone's strip is one line of counts and names, and a 844×390 window has a short header and, with the keyboard up,
-no rail column (#1339). The starter chips and the hint's ✕ are 44 px, and a tap 5 px past the state line's Copy lands on it (#1339). Sends land exactly once through
+no rail column (#1339). The starter chips and the hint's ✕ are 44 px, and a tap 5 px past the state line's Copy lands on it (#1339). With
+`reducedMotion: 'reduce'`, `#jump` is at the end a frame after the tap (#1339). Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
 `/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
 `computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
