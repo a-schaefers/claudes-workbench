@@ -62,8 +62,8 @@ claude plugin marketplace add a-schaefers/workbench
 claude plugin install workbench@workbench
 ```
 
-Open Claude Code in your project and type `/workbench`. If it isn't listed, run `/reload-skills`
-first. Claude is the orchestrator. Run `/workbench-update` to update the plugin.
+Open Claude Code in your project, choose the strongest Claude model with `/model`, and type
+`/workbench`.
 
 ## Your first task
 
