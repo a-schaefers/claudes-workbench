@@ -3902,7 +3902,7 @@ def handbook_for(task: store.Task) -> Path:
     """The handbook this task's agent gets, as rules/<task>/HANDBOOK.md whichever it is (so the
     instruction path and fixed_prompt's "the handbook" hold): the writing role's prose rules
     (agent/WRITING.md), else the coding ones (#1025)."""
-    return WRITING if task.spec.get("role") == "writing" else HANDBOOK
+    return WRITING if "writing" in (task.spec.get("role"), task.spec.get("like")) else HANDBOOK  # a custom role's like (#1625)
 
 
 # A report task with no card (#1278): HANDBOOK's coding rules (edit, test, leave it uncommitted)

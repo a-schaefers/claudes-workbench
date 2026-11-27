@@ -5712,7 +5712,12 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
   await clock.advance(31_000)
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
   // JSON that wb's normalize refuses reads the same (routesValid), never as ordinary roles
-  for (const bad of [{ roles: { trivail: {} } }, { roles: { trivial: { via: 'api' } } }, { day_usd: -1 }]) {
+  // a role of the user's own reads (#1625); one without wb route add's shape is a typo, refused
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { tests: { via: 'gpu', custom: true, label: 'Tests', like: 'trivial' } } })
+  await clock.advance(31_000)
+  expect(rows.at(-1)).toContain('tests (the user\'s own, "Tests", works as trivial) GPU (the router picks)')
+  for (const bad of [{ roles: { trivail: {} } }, { roles: { trivial: { via: 'api' } } }, { day_usd: -1 },
+    { roles: { tests: { custom: true, label: 'Tests', like: 'nope' } } }]) {
     files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: {} })
     await clock.advance(31_000)
     expect(rows.at(-1)).toContain('The roles changed: significant GPU (the router picks)')
@@ -5888,6 +5893,10 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
     writing: { via: 'gpu', gpu: 'ollama/x', api: 'anthropic/claude-haiku-5-5', thinking: 'on' } } }))
     .toBe('significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off; writing GPU ollama/x, ' +
       'API kept: anthropic/claude-haiku-5-5, thinking on')
+  // #1625: a role of the user's own, after the built-ins, by its label, like and what it is for
+  expect(routesSummary({ roles: { 'docs-fr': { via: 'gpu', custom: true, label: 'French docs', like: 'writing', about: 'translations' } } }))
+    .toBe('significant GPU (the router picks); trivial GPU (the router picks); writing GPU (the router picks); ' +
+      'docs-fr (the user\'s own, "French docs", works as writing: translations) GPU (the router picks)')
 })
 
 test('#1059: a role whose self-review alone thinks reads "thinking: review only", as routes.summary says it', () => {

@@ -1044,8 +1044,12 @@ export function thinkingSaid(row: Row): string {
 // The roles in one line, as routes.summary says it (Couplings: the two read alike)
 export function routesSummary(doc: Row): string {
   const rows = (doc.roles ?? {}) as Record<string, Row>
-  const roles = ROLES.map(r => {
+  // the built-ins, then the user's own in the file's order (#1625: routes.roles_of)
+  const names = [...ROLES, ...Object.keys(rows).filter(r => !(ROLES as readonly string[]).includes(r) && rows[r]?.custom === true)]
+  const roles = names.map(r => {
     const row = rows[r] ?? {}
+    // a role of the user's own: its label, its like and what it is for (routes.summary's `own`)
+    const own = row.custom === true ? ` (the user's own, "${row.label}", works as ${row.like}${row.about ? `: ${row.about}` : ''})` : ''
     const gpu = typeof row.gpu === 'string' && row.gpu ? row.gpu : 'auto'
     const thinking = row.thinking === 'on' ? 'on' : 'off'
     // an OpenRouter role's backends (routes.json `order`): where its code goes, so a change of them
@@ -1053,8 +1057,8 @@ export function routesSummary(doc: Row): string {
     const backends = row.api && Array.isArray(row.order) && row.order.length ? `, backends ${row.order.join(', ')}` : ''
     // the role's fallback (routes.json `fallback`, #1196): where its code may go too, so a change of it alone is a row
     const fallback = typeof row.fallback === 'string' && row.fallback ? `, fallback ${row.fallback === 'gpu' ? 'GPU' : row.fallback}` : ''
-    if (row.via === 'api') return `${r} API ${row.api}${backends}, ${thinkingSaid(row)}${fallback}`
-    let text = `${r} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
+    if (row.via === 'api') return `${r}${own} API ${row.api}${backends}, ${thinkingSaid(row)}${fallback}`
+    let text = `${r}${own} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
     if (row.api) text += `, API kept: ${row.api}${backends}`
     if (thinking === 'on') text += ', thinking on'
     else if (row.thinking_review === 'on') text += `, ${REVIEW_ONLY}`
@@ -1078,7 +1082,10 @@ function routesValid(doc: unknown): doc is Row {
   if (![undefined, 'wait', 'api'].includes(d.busy)) return false
   if (d.roles === undefined) return true
   if (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles)) return false
-  return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
+  // a role of the user's own (#1625): `custom`, its name and label and like as routes.custom_why reads them
+  const own = (r: string, row: any) => row?.custom === true && /^[a-z][a-z0-9-]{1,23}$/.test(r) &&
+    typeof row.label === 'string' && !!row.label.trim() && (ROLES as readonly string[]).includes(row.like)
+  return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => ((ROLES as readonly string[]).includes(r) || own(r, row)) &&
     row && typeof row === 'object' && [undefined, 'gpu', 'api'].includes(row.via) &&
     [undefined, 'off', 'on'].includes(row.thinking) && [undefined, 'off', 'on'].includes(row.thinking_review) &&
     (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)) &&

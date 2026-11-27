@@ -297,8 +297,8 @@ def validate(flow) -> list[str]:
         if c is not None and s.get("kind") == "code" and c.report:
             errs.append(f"{where}: kind code with a report card ({c.name})")
         code = is_code(s)
-        if s.get("role") is not None and s["role"] not in routes.ROLES:
-            errs.append(f"{where}: role is one of {', '.join(routes.ROLES)}")
+        if s.get("role") is not None and s["role"] not in (roles := routes.all_roles()):  # #1625: the user's own too
+            errs.append(f"{where}: role is one of {', '.join(roles)}")
         if s.get("flow", "pipeline") not in ("pipeline", "barrier"):
             errs.append(f"{where}: flow is pipeline or barrier")
         for k, top in (("batch", 50), ("attempts", ATTEMPTS_MAX), ("max_items", MAX_ITEMS)):
@@ -341,9 +341,9 @@ def validate(flow) -> list[str]:
             errs.append(f"{where}: a compare stage takes each item's attempts whole: no split, batch, attempts or refix")
         esc = s.get("escalate")
         if esc is not None:
-            if not (isinstance(esc, list) and 1 <= len(esc) <= ESCALATE_MAX and all(r in routes.ROLES for r in esc)
+            if not (isinstance(esc, list) and 1 <= len(esc) <= ESCALATE_MAX and all(r in routes.all_roles() for r in esc)
                     and len(set(esc)) == len(esc)):
-                errs.append(f"{where}: escalate is a list of 1 to {ESCALATE_MAX} distinct roles ({', '.join(routes.ROLES)})")
+                errs.append(f"{where}: escalate is a list of 1 to {ESCALATE_MAX} distinct roles ({', '.join(routes.all_roles())})")
             elif not code or s.get("claude"):
                 errs.append(f"{where}: escalate goes on a code stage")
         refix = s.get("refix")
@@ -1171,7 +1171,7 @@ def item_role(stage: dict, it: "Item | None" = None) -> str:
     """The role an item runs on: its stage's, or for an escalation its escalate role."""
     k = escalation(it.key) if it is not None else 0
     esc = stage.get("escalate") or []
-    return esc[k - 1] if 0 < k <= len(esc) and esc[k - 1] in routes.ROLES else stage_role(stage)
+    return esc[k - 1] if 0 < k <= len(esc) and esc[k - 1] in routes.all_roles() else stage_role(stage)
 
 
 def stage_model(stage: dict, it: "Item | None" = None):
@@ -1249,7 +1249,7 @@ def stage_role(stage: dict) -> str:
             role = cards.load(stage["card"]).role
         except RuntimeError:
             role = None
-    return role if role in routes.ROLES else "significant"
+    return role if role in routes.all_roles() else "significant"
 
 
 def run_tasks(run: Run) -> list[str]:

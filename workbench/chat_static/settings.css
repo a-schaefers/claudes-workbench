@@ -76,3 +76,7 @@
 .set-fold[open] > summary { margin-bottom: 2px; }
 .set-fold[open] > summary .set-sum { display: none; }
 .set-fold > summary + .set-row { padding-top: 4px; }
+/* Add a role (#1625): its fields stacked on a phone, in a row wider */
+.set-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.set-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 140px; }
+.set-field .set-text, .set-field .set-select { width: 100%; box-sizing: border-box; }

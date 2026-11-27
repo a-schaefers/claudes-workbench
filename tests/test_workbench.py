@@ -50209,6 +50209,53 @@ class RoleResolution(Base):
                        "provider_name": "DeepSeek"}, [{k: t.get(k) for k in keys} for t in chat.snapshot()["tasks"]])
         self.assertEqual(self.begin("t-api2", "--role", "trivial")[0], 0)
 
+    def test_a_role_of_the_users_own_is_added_routed_started_on_and_removed_1625(self):
+        # #1625 (the owner, 2026-11-27): "unable to create my own new roles, locked to only having
+        # the three default ones"
+        code, out, err = self.wb("route", "add", "docs-fr", "--label", "French docs", "--like", "writing",
+                                 "--about", "French translations of the docs")
+        self.assertEqual(code, 0, err)
+        self.assertIn("docs-fr: added, French docs, working as writing, on the GPU", out)
+        row = routes.read()["roles"]["docs-fr"]
+        self.assertEqual({k: row[k] for k in ("custom", "label", "like", "about", "via", "gpu")},
+                         {"custom": True, "label": "French docs", "like": "writing",
+                          "about": "French translations of the docs", "via": "gpu", "gpu": routes.AUTO})
+        self.assertEqual(routes.roles_of(routes.read()), (*routes.ROLES, "docs-fr"))
+        self.assertIn('docs-fr (the user\'s own, "French docs", works as writing: French translations of the docs) GPU',
+                      routes.summary(routes.read()))
+        # taken names, reserved words and a bad like are refused, nothing written
+        for argv, said in ((("docs-fr", "--label", "x", "--like", "trivial"), "is a role already"),
+                           (("trivial", "--label", "x", "--like", "trivial"), "is a role already"),
+                           (("busy", "--label", "x", "--like", "trivial"), "is taken"),
+                           (("Bad_Name", "--label", "x", "--like", "trivial"), "lowercase letters")):
+            code, _, err = self.wb("route", "add", *argv)
+            self.assertEqual(code, 3, argv)
+            self.assertIn(said, err)
+        # routed and started as a built-in is, working as its like: the writing prompt and handbook
+        self.set_role("docs-fr", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(routes.read()["roles"]["docs-fr"]["via"], "api")
+        code, out, err = self.begin("t-fr", "--role", "docs-fr")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-fr").spec
+        self.assertEqual((sp["role"], sp["like"], sp["via"], sp["size"]), ("docs-fr", "writing", "api", "significant"))
+        self.assertEqual(cli.protocol_for(sp), cli.WRITING_PROTOCOL)
+        self.assertEqual(context.handbook_for(store.Task("t-fr")), context.WRITING)
+        from workbench import tuning
+        self.assertEqual(tuning.work({"role": "docs-fr", "like": "writing", "size": "significant"}), "writing")
+        self.assertEqual(self.begin("t-no", "--role", "nope")[0], 2)
+        # removed whole; a built-in never
+        code, out, err = self.wb("route", "remove", "docs-fr")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("docs-fr", routes.read()["roles"])
+        code, _, err = self.wb("route", "remove", "trivial")
+        self.assertEqual(code, 3)
+        self.assertIn("built-in role", err)
+        # a hand edit's unknown role is still refused by name: only wb route add's shape is a role
+        self.routes.write_text(json.dumps({"roles": {"trivail": {"via": "gpu"}}}))
+        with self.assertRaises(routes.RoutesError) as e:
+            routes.read()
+        self.assertIn("unknown role 'trivail'", str(e.exception))
+
     def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):
         # #1237 (2026-11-24): an Anthropic adaptive model with no `none` runs on its bare id,
         # thinking as its default, but the dialog, the start line, task.json's route and wb watch's

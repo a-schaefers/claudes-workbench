@@ -358,6 +358,50 @@
     if (row.says) box.append(para('small set-says', row.says))
   }
 
+  // Add a role (#1625): its fields, sent as one JSON string by Add; a field left wrong says why
+  // under the form, nothing sent
+  function form(row: SettingRow, box: HTMLElement) {
+    if (row.text) box.append(para('small set-says', row.text))
+    const got: Record<string, () => string> = {}
+    const line = el('div', 'set-form')
+    for (const f of row.fields ?? []) {
+      const lab = el('label', 'set-field')
+      lab.append(el('span', 'small', f.label + (f.optional ? ' (optional)' : '')))
+      if (f.kind === 'select') {
+        const sel = el('select', 'set-select')
+        for (const c of f.choices ?? []) { const o = el('option', '', c.label); o.value = c.value; if (c.says) o.title = c.says; sel.append(o) }
+        sel.dataset.field = f.name
+        lab.append(sel)
+        got[f.name] = () => sel.value
+      } else {
+        const input = el('input', 'set-text')
+        input.type = 'text'
+        input.dataset.field = f.name
+        if (f.max) input.maxLength = f.max
+        if (f.hint) input.placeholder = f.hint
+        lab.append(input)
+        got[f.name] = () => input.value.trim()
+      }
+      line.append(lab)
+    }
+    const why = el('p', 'small set-note')
+    why.hidden = true
+    const b = el('button', 'plain', (row.choices ?? [])[0]?.label ?? 'Add')
+    b.type = 'button'
+    b.disabled = !!pending(row.key)
+    b.addEventListener('click', () => {
+      const v: Record<string, string> = {}
+      for (const f of row.fields ?? []) v[f.name] = got[f.name]!()
+      const bad = (row.fields ?? []).find(f => !f.optional && !v[f.name]
+        || f.pattern && v[f.name] && !new RegExp(f.pattern).test(v[f.name]!))
+      why.hidden = !bad
+      if (bad) { why.textContent = `${bad.label}: ${bad.hint ? `${bad.hint}.` : 'needed.'}`; return }
+      send(row.key, JSON.stringify(v))
+    })
+    line.append(b)
+    box.append(line, why)
+  }
+
   function action(row: SettingRow, box: HTMLElement) {
     if (row.text) box.append(para('small set-says', row.text))
     const line = el('div', 'set-actions')
@@ -390,6 +434,7 @@
     if (row.kind === 'choice') choice(row, box)
     else if (row.kind === 'number') number(row, box)
     else if (row.kind === 'action') action(row, box)
+    else if (row.kind === 'form') form(row, box)
     else if (row.text) box.append(para('small', row.text))
     if (row.changed) box.append(el('p', 'small set-changed', `Changed by ${byWord(row.changed.by)} · ${ago(row.changed.ts)}`))
     const no = refused.get(row.key)
@@ -450,8 +495,12 @@
         out.append(c)
       }
     } else {
-      const known = GROUPS.map(g => g[0])
-      const groups = [...GROUPS, ...[...new Set(rows.map(r => r.group))].filter(g => !known.includes(g)).map(g => [g, g])]
+      const known = GROUPS.map(g => g[0]), all = rows
+      const extra = [...new Set(all.map(r => r.group))].filter(g => !known.includes(g))
+      // a role of the user's own (#1625): its card after the built-ins', titled by its label
+      const titled = (g: string) => all.find(r => r.group === g && r.card)?.card
+      const own = extra.filter(g => titled(g)).map(g => [g, titled(g) as string])
+      const groups = [...GROUPS.slice(0, 3), ...own, ...GROUPS.slice(3), ...extra.filter(g => !titled(g)).map(g => [g, g])]
       for (const [g, title] of groups) {
         // `hidden`: a row that can do nothing yet (an API control with no provider), kept for `wb settings`
         const mine = rows.filter(r => r && r.group === g && !r.hidden)

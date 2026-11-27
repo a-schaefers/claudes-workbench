@@ -83,7 +83,7 @@ export const START_INPUT = object({
   spec: STR('the spec, its whole text (sent on stdin: --spec -)'),
   spec_file: STR('the spec as a file instead of `spec` (--spec <file>)'),
   repo: STR('the repository (or the package in it) the agent works in (--repo; default: this session\'s directory)'),
-  role: { type: 'string', enum: ['significant', 'trivial', 'writing'], description: 'the kind of work, whose model the user set (--role)' },
+  role: { type: 'string', description: 'significant, trivial, writing, or a role of the user\'s own (wb route lists them, #1625): the kind of work, whose model the user set (--role)' },
   size: { type: 'string', enum: ['significant', 'trivial'], description: 'the slice and the GPU router\'s size (--size)' },
   test: STR('the acceptance command, run in the worktree after every round (--test)'),
   model: STR('a model id or a fragment of one (--model): a GPU model only when the user names one or the record argues for it; an API model only the one the user named, and they are asked first'),

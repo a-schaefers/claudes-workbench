@@ -258,6 +258,7 @@ A flow you write (`--plan FILE`) and the role cards: `reference/deep.md`.
 | `--role significant` | new feature, multi-file change, refactor, non-obvious bug, design judgment, >~50 lines |
 | `--role trivial` | rename, string/config tweak, a test for existing code, small single-function change, boilerplate |
 | `--role writing` | prose: docs, a README, release notes, messages (it slices like significant) |
+| `--role <the user's own>` | a role the user added (`wb route` lists it with what it is for): use it when the request names it or fits what it is for |
 
 Pick `--role` as you would `--size` (`--size trivial|significant` alone still works: its role is
 the size's name; both given, the role picks the model and the size the slice). The role runs

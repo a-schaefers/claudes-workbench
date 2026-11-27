@@ -9,7 +9,7 @@ entry (runner.rules_env), so the layer's denies still come last (#1290).
 
 Frontmatter keys: `description`, `tools` (read, none or code; `readonly` is read), `schema` (a
 name in schema_path's places, or a file), `steps`, `skills`, `ask` (questions; 0 for reports),
-`role` (routes.ROLES), `est` ({in, out, min}: one item's tokens and minutes, the run's estimate).
+`role` (routes.all_roles: the built-ins or the user's own, #1625), `est` ({in, out, min}: one item's tokens and minutes, the run's estimate).
 `permissions` and `model` are dropped and said: a card never lifts a deny nor picks a model.
 """
 import json
@@ -165,8 +165,8 @@ def load(name: str) -> Card:
         raise RuntimeError(f"{path}: the card's text is {len(body.encode()):,} bytes, over {BODY_MAX:,}: "
                            "it is in every prompt of its role; move the rest to a skill")
     role = front.get("role")
-    if role is not None and role not in routes.ROLES:
-        raise RuntimeError(f"{path}: role is one of {', '.join(routes.ROLES)}, not {role!r}")
+    if role is not None and role not in (roles := routes.all_roles()):  # the user's own too (#1625)
+        raise RuntimeError(f"{path}: role is one of {', '.join(roles)}, not {role!r}")
     steps, ask = front.get("steps"), front.get("ask")
     for k, v in (("steps", steps), ("ask", ask)):
         if v is not None and not (isinstance(v, int) and not isinstance(v, bool) and v >= 0):

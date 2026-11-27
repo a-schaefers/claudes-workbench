@@ -479,7 +479,8 @@ sent for it (to every device, or with `endpoint` to that one) → `{}`.
 
 ### `GET /api/settings` (user only)
 The web app's Settings: `{"rows": [...], "changes": [...], "ts": <seconds>}`. Each row is `{key, group, label, kind,
-…}`: `group` one of `significant`, `trivial`, `writing` (a card per role, #1553), `shared`, `gpu`, `api`, `setup`,
+…}`: `group` one of `significant`, `trivial`, `writing` (a card per role, #1553), a role of the user's own by its
+name (its card after those, titled by its role row's `card`, #1625), `shared`, `gpu`, `api`, `setup`,
 `workflows`, `terminal`, `experimental` (in that order); `more: true`, a row shown under its card's More (a role's model
 for the side it isn't on, and thinking); `hidden: true`, a row the page doesn't show while it can do nothing; `fixed: true`, a
 choice shown as its `says` alone; `ask`, a row with a problem or a request the page offers to hand to the driver
@@ -488,7 +489,9 @@ of `choice` (`value`, `choices: [{value, label, says, needs?, group?}]` (`needs`
 first, a role's API its `api-<role>`; `group`: an API model's provider, or `In use` for the role's own and the
 others' in use, the page's `<optgroup>`s: an API row lists every catalog model, #1617), `says`, `other`: any id is taken),
 `number` (`value`: a number or null for off, `unit`: `usd`, `says`), `info`
-(`text`), `action` (`text`, `choices` as buttons) or `note` (`text`, standing where its group's
+(`text`), `action` (`text`, `choices` as buttons), `form` (`add-role`, #1625: `text`, `fields: [{name, label,
+kind: text|select, pattern?, max?, hint?, optional?, choices?}]`, `choices` its one button; its value is the fields
+as one JSON string, `{name, label, like, about?}`) or `note` (`text`, standing where its group's
 rows would be). A row may carry `help` (*POST /api/settings*), and `changed: {ts, by}`, its newest
 recorded change within 7 days (#1355). `changes`: the newest 10 recorded changes, newest first,
 `{ts, key, label, from, to, by}`. Read afresh on each request, so a change made at the terminal

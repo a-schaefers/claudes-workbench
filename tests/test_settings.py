@@ -24,6 +24,8 @@ def expected(key: str, value) -> list[str]:
              "progress": ["progress", value], "splash": ["splash", value],
              "probe": ["experiment", "probe", value], "optimize": ["optimize", "start"],
              "cap": ["route", "cap", value], "driver": ["route", "driver", value]}
+    if head == "remove":  # a role of the user's own (#1625)
+        return ["route", "remove", rest]
     if key in fixed:
         return fixed[key]
     return {"role": ["route", rest, value], "gpu": ["route", rest, "--gpu", value],
@@ -108,6 +110,39 @@ class Settings(Rows):
                            {"day": time.strftime("%Y-%m-%d"), "kind": "step", "provider": "deepseek", "usd": 0.12})
         self.assertEqual(says(), "API tasks stop for the day at $5 of spend: ≈$0.12 so far today.")
         self.assertNotIn("api-spend", [r["key"] for r in settings.rows(fresh=True)])
+
+    def test_a_role_of_the_users_own_has_a_card_by_its_label_a_remove_and_agents_and_roles_adds_one_1625(self):
+        doc = json.loads(self.routes.read_text())
+        doc["roles"]["docs-fr"] = {"via": "gpu", "custom": True, "label": "French docs", "like": "writing",
+                                   "about": "French translations"}
+        self.routes.write_text(json.dumps(doc))
+        rows = settings.rows(fresh=True)
+        mine = [r for r in rows if r["group"] == "docs-fr"]
+        self.assertEqual(mine[0]["key"], "role-docs-fr")
+        self.assertEqual((mine[0]["card"], mine[0]["label"], mine[0]["text"]),
+                         ("French docs", "French docs", "French translations"))
+        self.assertIn("gpu-docs-fr", [r["key"] for r in mine])
+        self.assertEqual(settings.label_of("gpu-docs-fr"), "French docs GPU model")
+        rm = next(r for r in mine if r["key"] == "remove-docs-fr")
+        self.assertTrue(rm["more"])
+        self.assertEqual(settings._argv(rm, "remove"), ["route", "remove", "docs-fr"])
+        groups = list(dict.fromkeys(r["group"] for r in rows))
+        self.assertEqual(groups.index("docs-fr"), groups.index("writing") + 1)   # after the built-ins' cards
+        add = next(r for r in rows if r["key"] == "add-role")
+        self.assertEqual((add["group"], add["kind"]), ("shared", "form"))
+        self.assertEqual(settings._argv(add, json.dumps({"name": "tests", "label": "Tests", "like": "trivial"})),
+                         ["route", "add", "tests", "--label", "Tests", "--like", "trivial"])
+        with self.assertRaises(ValueError):
+            settings._argv(add, json.dumps({"name": "Bad Name", "label": "x", "like": "trivial"}))
+        self.assertEqual(settings.key_for(["route", "add", "tests", "--label", "Tests", "--like", "trivial"]),
+                         ("add-role", "tests"))
+        self.assertEqual(settings.key_for(["route", "remove", "docs-fr"]), ("remove-docs-fr", "remove"))
+        self.assertEqual(settings.key_for(["route", "docs-fr", "api"]), ("role-docs-fr", "api"))
+        got = settings.apply("add-role", json.dumps({"name": "tests", "label": "Tests", "like": "trivial"}))
+        self.assertTrue(got["ok"], got)
+        self.assertEqual(json.loads(self.routes.read_text())["roles"]["tests"]["label"], "Tests")
+        self.assertTrue(any(ln.startswith("  add-role: Add a role: wb route add <name> --label TEXT")
+                            for ln in cli.settings_lines(settings.rows(fresh=True))))
 
     def test_each_role_has_a_card_its_own_sides_model_on_it_the_other_and_thinking_under_more_1553_1626(self):
         # #1553 (2026-11-26): a role's GPU|API, GPU model, API model and thinking were in three
@@ -573,7 +608,8 @@ class ClaudeSets(Rows):
                 # an API row's models past those in use are counted, not listed (#1617)
                 rest = [c for c in r.get("choices") or [] if r.get("other") and c["value"] != r["value"]
                         and c.get("group") not in (None, settings.IN_USE, "GPU")]
-                for c in r.get("choices") or []:
+                # a form's one button is its fields' submit, not a value to list (#1625)
+                for c in (r.get("choices") or []) if r["kind"] != "form" else []:
                     mark = "*" if r["kind"] == "choice" and c["value"] == r["value"] else " "
                     says = "" if r.get("other") else f". {c['says']}"
                     (self.assertNotIn if c in rest else self.assertIn)(f"    {mark} {c['value']}: {c['label']}{says}", lines)
@@ -694,6 +730,8 @@ class OneWriter(Rows):
         rows = [r for r in settings.rows() if r["kind"] not in ("info", "note")]
         self.assertGreater(len(rows), 15)
         for r in rows:
+            if r["kind"] == "form":  # its value is its fields as JSON: ..._agents_and_roles_adds_one_1625
+                continue
             values = ["6"] if r["kind"] == "number" else [c["value"] for c in r["choices"]]
             for v in values:
                 with self.subTest(key=r["key"], value=v):

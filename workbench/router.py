@@ -208,7 +208,8 @@ def record_role(role: str | None) -> str | None:
     writing's own (#1025), else None, its size's, as before roles. #1016 writes a role for every
     task, and a coding one read as its role timed a `--size` other than its role's on the wrong
     record (wave 2's merge)."""
-    return role if role == "writing" else None
+    from . import routes  # routes imports this module's callers
+    return "writing" if routes.kind_of(role) == "writing" else None  # a custom role's like too (#1625)
 
 
 def of_role(row: dict, role: str) -> bool:

@@ -56,7 +56,7 @@ from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savi
 # GPU or API, then its GPU model, API model and thinking under More (`more`), where one role's
 # settings were spread over three cards, its API model 2,000 px below its GPU|API choice
 GROUPS = (*routes.ROLES, "shared", "gpu", "api", "setup", "workflows", "terminal", "experimental")
-KINDS = ("choice", "number", "info", "action", "note")
+KINDS = ("choice", "number", "info", "action", "note", "form")  # form: Add a role's fields, #1625
 ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_apply)
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
 READ_TIMEOUT_S = 15  # wb route --json, wb models --json (the pane's 15 s)
@@ -171,6 +171,7 @@ BY = ("web", "claude")  # apply()'s writers: the web app's click, Claude's `wb s
 # Each row's label, as the web app shows it and settings-changes.jsonl records it: the fixed ones
 # here, a role's from routes.LABELS (label_of), a model's tasks row from its id
 LABELS = {"agents": "Agents", "busy": "When the GPU is busy", "driver": "Driver", "coding": "Claude coding",
+          "add-role": "Add a role",
           "workflows": "Dynamic workflows", "cap": "API day cap", "progress": "Progress checks",
           "splash": "Opening animation", "probe": "Agent code navigation",
           "optimize": "Optimize"}
@@ -185,6 +186,10 @@ def label_of(key: str) -> str:
         return LABELS[key]
     if head in ROLE_LABELS and rest in routes.LABELS:
         return ROLE_LABELS[head].format(routes.LABELS[rest])
+    if head in ROLE_LABELS and rest in routes.all_roles():  # the user's own, by its label (#1625)
+        return ROLE_LABELS[head].format(routes.label(rest))
+    if head == "remove" and rest in routes.all_roles():
+        return f"Remove {routes.label(rest)}"
     if head == "size":
         return f"{rest} tasks"
     if head == "media":
@@ -413,7 +418,7 @@ def _driver_row(r: dict, m: dict | None) -> dict:
     # every catalog model listed a pin sank into its provider's group, and wb settings lost its
     # `*` line (#1617's review, 2026-11-27)
     own = pin if pin != routes.DRIVER_SESSION and pin not in {s[0] for s in stops} else ""
-    roles_api = [x.get("api") for x in ((r.get("roles") or {}).get(n) or {} for n in routes.ROLES)
+    roles_api = [x.get("api") for x in (r.get("roles") or {}).values()  # the user's own too (#1625)
                  if isinstance(x, dict) and x.get("api")]
     for mid, label, _, group in _api_stops("The driver", m, own, roles_api):
         x = api.get(mid) or {}
@@ -477,6 +482,35 @@ def _optimize_row(m: dict) -> dict:
                          "says": "Measures this machine for its models (wb optimize start)."}]}
 
 
+ADD_ROLE_LIKE = [("significant", "Complex coding", "Prompts, slices and the router's record as complex coding's."),
+                 ("trivial", "Trivial coding", "Small slices, as trivial coding's."),
+                 ("writing", "English writing", "The writing role's prompt and handbook: prose, not code.")]
+
+
+def _add_role_row() -> dict:
+    """Agents and roles' Add a role (#1625): a form of a name, a label, the built-in it works as and
+    what it is for, posted as one JSON string, `wb route add`; the role then has a card of its own."""
+    return {"key": "add-role", "group": "shared", "label": LABELS["add-role"], "kind": "form",
+            "text": "A role of your own: tasks for it go to the model you give it, GPU or API. It starts on "
+                    "the GPU, and the orchestrator agent picks it by name or by what it is for.",
+            "fields": [{"name": "name", "label": "Name", "kind": "text", "pattern": routes.CUSTOM_RE.pattern,
+                        "hint": "lowercase, as tests or docs-fr"},
+                       {"name": "label", "label": "Label", "kind": "text", "max": routes.LABEL_MAX},
+                       {"name": "like", "label": "Works as", "kind": "select",
+                        "choices": [{"value": v, "label": lab, "says": says} for v, lab, says in ADD_ROLE_LIKE]},
+                       {"name": "about", "label": "What it's for", "kind": "text", "max": routes.ABOUT_MAX,
+                        "optional": True}],
+            "choices": [{"value": "add", "label": "Add", "says": "Adds the role (wb route add)."}]}
+
+
+def _remove_row(name: str, label: str) -> dict:
+    """A role of the user's own's Remove, under its card's More (#1625): `wb route remove`."""
+    return {"key": f"remove-{name}", "group": name, "label": f"Remove {label}", "kind": "action", "more": True,
+            "text": f"Remove {label}: a role of your own.",
+            "choices": [{"value": "remove", "label": "Remove role",
+                         "says": "Removes the role; tasks already started keep their model (wb route remove)."}]}
+
+
 def run_text(r: dict) -> str:
     """A run's line as its row says it (runs.snapshot's row): flow, phase, each stage's counts,
     spend against the budget, and why it isn't running."""
@@ -522,7 +556,11 @@ def _build() -> dict:
         m, mwhy = None, OLDER_WB
     r = r if r is not None and isinstance(r.get("roles"), dict) else None
     out: list[dict] = []
-    roles = [(name, routes.LABELS[name], (r or {}).get("roles", {}).get(name) or {}) for name in routes.ROLES]
+    # the built-ins, then the user's own in routes.json's order (#1625), each by its label
+    got = (r or {}).get("roles") or {}
+    roles = [(name, routes.LABELS[name], got.get(name) or {}) for name in routes.ROLES] + \
+        [(name, str(row.get("label") or name), row) for name, row in got.items()
+         if name not in routes.ROLES and isinstance(row, dict) and row.get("custom")]
     api_name = {x.get("id"): x.get("name") for x in (m or {}).get("api") or [] if isinstance(x, dict)}
     provs = (r or {}).get("providers") or {}
     # a key that runs tasks: a stored one, Ollama cloud's login, Copilot's sign-in, which the
@@ -564,7 +602,12 @@ def _build() -> dict:
                 # and then the role's API, where the tap was refused and the list was 2,000 px away,
                 # under another card (the web app's review, 2026-11-26; #1558)
                 c["choices"][1]["needs"] = f"api-{name}"
+            if row.get("custom"):  # the user's own: its card is titled by its label, under the built-ins'
+                c["card"] = label
+                if row.get("about"):
+                    c["text"] = row["about"]
             out.append(c)
+        out.append(_add_role_row())
     if r is not None:
         out.append(_driver_row(r, m))
     out.append(_choice("coding", "shared", LABELS["coding"], CODING, cli.coding_mode()))
@@ -642,12 +685,14 @@ def _build() -> dict:
                 if row.get("api"):
                     out.append(_choice(f"review-{name}", name, label_of(f"review-{name}"), REVIEW,
                                        row.get("thinking_review") or "off", more=True))
+            out += [_remove_row(name, label) for name, label, row in roles if row.get("custom")]
 
     out += setup_rows()
     out.append(_choice("splash", "terminal", LABELS["splash"], SPLASH, "on" if cli.splash_on() else "off"))
     out.append(_probe_row())
     order = {g: i for i, g in enumerate(GROUPS)}
-    out.sort(key=lambda x: order[x["group"]])  # stable: each group's rows keep their order
+    # a role of the user's own (#1625): its card after the built-ins', before Agents and roles
+    out.sort(key=lambda x: order.get(x["group"], len(routes.ROLES) - 0.5))  # stable: each group's rows keep their order
     return {"at": time.monotonic(), "rows": out, "routes": r, "models": m}
 
 
@@ -730,6 +775,19 @@ def _argv(row: dict, value) -> list[str]:
     key, kind = row["key"], row["kind"]
     if kind in ("info", "note"):
         raise ValueError(f"{key} is read-only")
+    if kind == "form":  # Add a role (#1625): its fields as one JSON string
+        try:
+            got = json.loads(value) if isinstance(value, str) else None
+        except ValueError:
+            got = None
+        if not isinstance(got, dict) or not all(isinstance(got.get(k), str) and got[k].strip()
+                                                for k in ("name", "label", "like")):
+            raise ValueError("a role needs a name, a label and what it works as")
+        if why := routes.custom_why(got["name"].strip(), got["label"], got["like"], got.get("about") or None):
+            raise ValueError(why)
+        about = str(got.get("about") or "").strip()
+        return ["route", "add", got["name"].strip(), "--label", got["label"].strip(), "--like", got["like"],
+                *(["--about", about] if about else [])]
     if kind == "number":
         v = _number_value(value)
         amount = "off" if v is None else f"{v:g}"
@@ -756,6 +814,8 @@ def _argv(row: dict, value) -> list[str]:
         return ["route", "driver", value]
     if head == "run":
         return ["run", "stop" if value == "stop" else "report", rest]
+    if head == "remove":
+        return ["route", "remove", rest]
     if head == "role":
         return ["route", rest, value]
     if head == "gpu":
@@ -902,18 +962,22 @@ def key_for(argv: list[str]) -> tuple[str, str] | None:
         if x.startswith("--") and "=" in x:
             a[i:i + 1] = x.split("=", 1)
             break
+    if a[:2] == ["route", "add"] and len(a) > 2 and "--dry-run" not in a and "--json" not in a:
+        return "add-role", a[2]  # Add a role's form (#1625): its flags are its fields
     if not a or any(x.startswith("-") and x not in (*ROUTE_FLAGS, "--default", "--port") for x in a):
         return None  # a dry run, --json, a flag no row's command takes
     cmd, rest = a[0], a[1:]
+    if cmd == "route" and len(rest) == 2 and rest[0] == "remove":
+        return f"remove-{rest[1]}", "remove"
     if cmd == "route":
         if len(rest) == 2 and not rest[1].startswith("-"):
             if rest[0] in ("all", "busy"):
                 return ("agents" if rest[0] == "all" else "busy"), rest[1]
             if rest[0] in ("cap", "driver"):
                 return rest[0], rest[1]
-            if rest[0] in routes.ROLES and rest[1] in ("gpu", "api"):
+            if rest[0] in routes.all_roles() and rest[1] in ("gpu", "api"):
                 return f"role-{rest[0]}", rest[1]
-        if len(rest) == 3 and rest[0] in routes.ROLES and rest[1] in ROUTE_FLAGS and not rest[2].startswith("-"):
+        if len(rest) == 3 and rest[0] in routes.all_roles() and rest[1] in ROUTE_FLAGS and not rest[2].startswith("-"):
             return f"{ROUTE_FLAGS[rest[1]]}-{rest[0]}", rest[2]
         return None
     if cmd in ("coding", "workflows", "progress", "splash") and len(rest) == 1 and not rest[0].startswith("-"):
@@ -947,7 +1011,11 @@ def current(key: str):
     each write); None for none, an action, or a file that can't be read."""
     head, _, rest = key.partition("-")
     try:
-        if key in ("agents", "busy", "cap", "driver") or (head in ROLE_LABELS and rest in routes.ROLES):
+        if key == "add-role":  # the user's own roles as they stand (#1625): an add moves it
+            return ", ".join(r for r in routes.all_roles() if r not in routes.ROLES) or "none"
+        if head == "remove":
+            return "kept" if rest in routes.all_roles() else "removed"
+        if key in ("agents", "busy", "cap", "driver") or (head in ROLE_LABELS and rest in routes.all_roles()):
             doc = routes.read()
             if key == "agents":
                 return doc.get("use") or "both"
