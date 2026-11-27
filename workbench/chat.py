@@ -2656,7 +2656,7 @@ def settings_rev() -> dict | None:
 
 def admin_set(key, value) -> tuple[int, dict]:
     """POST /api/settings: (status, body). 200 {ok, said, rows, changes, help?, detail?}; 400 for no such row
-    or a value it doesn't take (nothing runs); 409 {ok: false, error, rows} when wb refused. A
+    or a value it doesn't take (nothing runs); 409 {ok: false, error, page?, rows} when wb refused. A
     change that went through is {ts, key, label, from, to, said, help?, by: "web"} in CHANGES, which
     the row's wb child logs (cli.main, settings.logged: one writer for every caller, #1355)."""
     from . import settings as admin
@@ -2671,8 +2671,8 @@ def admin_set(key, value) -> tuple[int, dict]:
     except ValueError:
         return 400, {"error": "not one of its choices"}
     rows = admin.rows()
-    if not done["ok"]:
-        return 409, {"ok": False, "error": done["said"], "rows": rows}
+    if not done["ok"]:  # `page`: the refusal in the page's words (settings.page_line, #1558)
+        return 409, {"ok": False, "error": done["said"], "rows": rows, **({"page": done["page"]} if done.get("page") else {})}
     helps = {"help": done["help"]} if done.get("help") else {}
     detail = {"detail": done["detail"]} if done.get("detail") else {}  # a run's Summary (#1278's S12)
     return 200, {"ok": True, "said": done["said"], "rows": rows, "changes": admin.changes(), **helps, **detail}

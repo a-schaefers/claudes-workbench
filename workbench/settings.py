@@ -10,7 +10,9 @@ current value), with `other: true` where any model id goes (the role command che
 (NO_PROVIDER or CATALOG_FAILED, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows.
 `more: true`, a row the page draws under its card's More (a role's GPU and API model and thinking);
 `hidden: true`, a row the page doesn't draw while it can do nothing (`wb settings` still lists it); `fixed:
-true`, a choice the page draws as its `says` alone (a role's GPU|API with no API provider); `ask`, a row
+true`, a choice the page draws as its `says` alone (a role's GPU|API with no API provider); a choice's
+`needs`, the row whose value it needs first (a role's API, its `api-<role>`: the page opens that row's
+list under it instead of sending); `ask`, a row
 that carries a problem or a request, which the page gives an "Ask <driver>" link filling the chat's box
 (true: "Help me with Settings › <its card>: <its line>"; a string: that request); a note, or a row with
 `help`, gets the link without it. A row may
@@ -280,8 +282,8 @@ def _role_stops(label: str, api: str | None, name: str | None, no_gpu: bool = Fa
     """A role's GPU|API; ``no_gpu``: discover() finds no model, so a task on the GPU can't start."""
     return [("gpu", "GPU", f"{label} runs on the GPU, which has no model yet: its tasks can't start."
              if no_gpu else f"{label} runs on this machine's GPU."),
-            ("api", f"API ({name or api})" if api else "API (set its model under API first)",
-             f"{label} runs on {api}; your code goes to its provider." if api else "Pick its API model under API first.")]
+            ("api", f"API ({name or api})" if api else "API (pick its model)",
+             f"{label} runs on {api}; your code goes to its provider." if api else "Pick its API model first.")]
 
 
 def _gpu_stops(label: str, gpu: list, pinned: str) -> list:
@@ -540,6 +542,11 @@ def _build() -> dict:
                 c["ask"] = True  # the fix is a terminal's: the page's Ask link hands it to the driver
             if gpu_only:
                 c["fixed"] = True  # its says alone: GPU_ONLY stands for its API choice
+            elif not row.get("api"):
+                # API with no model: the page opens api-<role>'s list under the row, a pick sends it
+                # and then the role's API, where the tap was refused and the list was 2,000 px away,
+                # under another card (the web app's review, 2026-11-26; #1558)
+                c["choices"][1]["needs"] = f"api-{name}"
             out.append(c)
     if r is not None:
         out.append(_driver_row(r, m))
@@ -764,7 +771,8 @@ def _row(key: str) -> dict:
 
 
 def apply(key: str, value, by: str = "web") -> dict:
-    """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?, "detail"?}
+    """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?, "detail"?, "page"?}
+    (`page`: a refusal in the page's words, page_line)
     (`detail`: a run's Summary, its report, cut at RUN_DETAIL_CHARS). KeyError for no
     such row, ValueError for a value it doesn't take (nothing runs for either); `ok` false is wb's
     refusal, `said` its line. `help`, when the value chosen needs Claude's help to work (HELP).
@@ -778,6 +786,8 @@ def apply(key: str, value, by: str = "web") -> dict:
         finally:
             drop()
     result = {"ok": ok, "said": _said(argv, ok, out, err)}
+    if not ok and (line := page_line(key, result["said"])):
+        result["page"] = line
     if ok and argv[:2] == ["run", "report"]:  # a run's Summary: its report, drawn under the row
         text = out.strip()
         result["said"] = text.splitlines()[0] if text else "nothing in yet"
@@ -786,6 +796,17 @@ def apply(key: str, value, by: str = "web") -> dict:
     if ok and key in HELP and (note := HELP[key](argv[-1], result["said"])):
         result["help"] = note
     return result
+
+
+def page_line(key: str, said: str) -> str:
+    """A refusal as the web app says it: in the page's words, by the row's label, with no `wb:` and
+    no command (wb's whole line stays `said`, for the driver, which reads it); "" for none known.
+    A role put on API before it had a model was told `wb route trivial <provider/model>`, a terminal
+    command naming the key the row calls Trivial coding (#1558, 2026-11-26)."""
+    head, _, rest = key.partition("-")
+    if head == "role" and rest in routes.LABELS and "has no API model" in said:
+        return f"Pick {routes.LABELS[rest]}'s API model first: tap API, or under More."
+    return ""
 
 
 def dry_run(key: str, value) -> tuple[int, str, str]:

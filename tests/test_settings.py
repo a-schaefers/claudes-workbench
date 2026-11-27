@@ -159,6 +159,20 @@ class Settings(Rows):
         self.assertEqual({x["key"]: x for x in settings.rows(fresh=True)}["role-significant"]["says"],
                          "Complex coding runs on this machine's GPU.")      # with a model: as before
 
+    def test_a_role_put_on_api_before_it_has_a_model_is_told_to_pick_one_by_its_label_1558(self):
+        # #1558 (2026-11-26): the refusal the page toasted was `wb: trivial has no API model yet:
+        # wb route trivial <provider/model>`, a gated terminal command naming the role's key
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {}}))
+        by = {x["key"]: x for x in settings.rows(fresh=True)}
+        api = next(c for c in by["role-trivial"]["choices"] if c["value"] == "api")
+        self.assertEqual((api["label"], api["needs"]), ("API (pick its model)", "api-trivial"))   # the page opens its list
+        got = settings.apply("role-trivial", "api")
+        self.assertFalse(got["ok"])
+        self.assertEqual(got["page"], "Pick Trivial coding's API model first: tap API, or under More.")
+        self.assertNotIn("wb route", got["page"])
+        self.assertIn("wb route trivial", got["said"])                    # wb's whole line, for the driver
+        self.assertNotIn("page", settings.apply("coding", "ask"))
+
     def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
         # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
         home = Path(self.tmp.name) / "home"

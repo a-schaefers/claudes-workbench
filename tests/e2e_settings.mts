@@ -30,7 +30,7 @@ else:
     else:
         rows = settings.rows(fresh=True)
         out = (200, {"ok": True, "said": r["said"], "rows": rows, **({"help": r["help"]} if r.get("help") else {})}) \\
-            if r["ok"] else (409, {"ok": False, "error": r["said"], "rows": rows})
+            if r["ok"] else (409, {"ok": False, "error": r["said"], "rows": rows, **({"page": r["page"]} if r.get("page") else {})})
 print(json.dumps(out))
 `
 const standIn = (env: E2eCtx['env'], req: unknown) => new Promise<[number, unknown]>((resolve, reject) =>
@@ -424,6 +424,35 @@ export async function check(page: any, ctx: E2eCtx) {
       if (!box.startsWith('Help me with Settings › Agents and roles: Every role runs on your GPU.')) throw new Error('box: ' + box)
       if (!(await page.evaluate(() => document.activeElement === document.getElementById('input')))) throw new Error('the box not focused')
       await page.locator('#input').fill('')
+    })
+
+    await ctx.check('a role\'s API choice with no model opens its API model list under the row; a pick sends the model, then the role\'s API (#1558)', async () => {
+      // #1558 (2026-11-26): the tap was refused with a terminal command, the list 2,000 px away under another card
+      let roles: SettingRow[] = [
+        { key: 'role-writing', group: 'writing', label: 'English writing', kind: 'choice', value: 'gpu', other: false, says: 'On the GPU.',
+          choices: [{ value: 'gpu', label: 'GPU', says: 'On the GPU.' }, { value: 'api', label: 'API (pick its model)', says: 'Pick its API model first.', needs: 'api-writing' }] },
+        ...MOCK_ROWS.map(r => r.key === 'api-writing' ? { ...r, group: 'writing', more: true } : r)]
+      const posts: any[] = []
+      unmock()
+      mock(async (method: string, body: any) => {
+        if (method !== 'POST') return answer(200, { rows: roles, ts: 1 })
+        posts.push(body)
+        roles = roles.map(x => x.key === body.key ? { ...x, value: body.value } : x)
+        return answer(200, { ok: true, said: `${body.key}: ${body.value}`, rows: roles })
+      })
+      await reshow()
+      await until(async () => (await row('role-writing').count()) === 1)
+      await row('role-writing').locator('[data-value="api"]').click()
+      const pick = row('role-writing').locator('.set-pick select')
+      await until(async () => (await pick.count()) === 1).catch(() => { throw new Error('no list under the row') })
+      if (posts.length) throw new Error('sent on the tap: ' + JSON.stringify(posts))
+      const labels = await pick.locator('option').allTextContents()
+      if (labels[labels.length - 1] !== 'Other model…' || !labels.some((l: string) => l.startsWith('A model whose name runs long'))) throw new Error(labels.join(' | '))
+      await pick.selectOption('prov/a')
+      await until(() => posts.length === 2)
+      if (JSON.stringify(posts) !== JSON.stringify([{ key: 'api-writing', value: 'prov/a' }, { key: 'role-writing', value: 'api' }])) throw new Error(JSON.stringify(posts))
+      await until(async () => (await row('role-writing').locator('[aria-checked="true"]').getAttribute('data-value')) === 'api')
+      if (await row('role-writing').locator('.set-pick').count()) throw new Error('the list stayed open')
     })
 
     await ctx.check(desktop ? 'the view lays out at 1280 px, two columns of cards, and at 390 px, one, nothing past its edge'

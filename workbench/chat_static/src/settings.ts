@@ -40,7 +40,10 @@
   let why = ''                          // the last read's failure, shown while there are no rows
   let reads = 0                         // each GET's number: one that left before a write ends is dropped
   let wrote = 0                         // the GET number current when the last write finished
-  const queue: { key: string; value: string | null }[] = []  // [{key, value}] waiting; queue[0] is in flight while busy
+  // [{key, value, then?}] waiting; queue[0] is in flight while busy. `then`, a change sent once this
+  // one went through: a role's API after the API model picked for it (#1558)
+  interface Change { key: string; value: string | null; then?: { key: string; value: string } }
+  const queue: Change[] = []
   let busy = false
   let drawing = false                   // a redraw takes the focused input away: its blur sends nothing
   let changes: SettingChange[] = []     // the newest changes, newest first (GET /api/settings's `changes`)
@@ -49,6 +52,7 @@
   // agent-written results among it, so text alone, never markup
   const details = new Map<string, string>()
   let focusGroup = ''                   // a group to bring into view at the next draw (the runs strip's tap)
+  let picking = ''                      // the row whose choice opened its needed row's list under it (#1558)
   const opened = new Set<string>()      // the role cards whose More is open: a redraw keeps it so
   // who made a change, as settings-changes.jsonl's `by` says (store.caller_kind, or the web's click)
   const BY: Record<string, string> = { web: 'the web app', claude: 'Claude', opencode: 'OpenCode', terminal: 'the terminal', agent: 'an agent' }
@@ -82,18 +86,18 @@
     draw()
   }
 
-  function send(key: string, value: string | null) {
+  function send(key: string, value: string | null, then?: Change['then']) {
     const waiting = queue.findIndex((q, i) => q.key === key && (i > 0 || !busy))
-    if (waiting >= 0) queue[waiting].value = value  // the same row clicked again while it waits: its newest
-    else queue.push({ key, value })
+    if (waiting >= 0) { queue[waiting].value = value; queue[waiting].then = then }  // the same row clicked again while it waits: its newest
+    else queue.push({ key, value, then })
     draw()
     pump()
   }
   async function pump() {
     if (busy || !queue.length) return
     busy = true
-    const { key, value } = queue[0]
-    let said = '', lost = false
+    const { key, value, then } = queue[0]
+    let said = '', lost = false, went = false
     try {
       // given up after the page's POST_MS, into the lost path below: with no deadline a POST that
       // hung kept its value lit as applied and every later click queued behind it (#1391)
@@ -102,20 +106,78 @@
       if (Array.isArray(body.rows)) rows = body.rows
       if (Array.isArray(body.changes)) changes = body.changes
       if (r.ok && body.ok && typeof body.detail === 'string') details.set(key, body.detail)
-      said = r.ok && body.ok ? body.said || 'Done.' : body.error || body.said || `the server said ${r.status}`
+      went = r.ok && !!body.ok
+      // a refusal in the page's words when the server has them (`page`, settings.page_line, #1558)
+      said = r.ok && body.ok ? body.said || 'Done.' : body.page || body.error || body.said || `the server said ${r.status}`
       if (r.ok && body.ok && body.help) said = `${/[.!?]$/.test(said) ? said : said + '.'} ${helpSaid()}`
     } catch { said = "The computer didn't answer: Settings shows what it says now."; lost = true }
     wrote = reads + 1
     lastWrite = Date.now()
     queue.shift()
     busy = false
-    WB.toast(said)
+    if (went && then) send(then.key, then.value)  // its toast is the next answer's
+    else WB.toast(said)
     draw()                              // from the answer's rows: a refusal reverts the control
     if (lost && !queue.length) load()   // the change may have landed all the same: ask
     pump()
   }
 
   // ---- the kinds ----
+  // a <select> of ``row``'s choices (and "Other model…" where any id goes), ``pick`` given the value
+  // chosen; ``at`` the row it is drawn in (its key on the typed id's box, so a redraw finds it again)
+  function selectOf(row: SettingRow, value: unknown, at: string, pick: (v: string) => void, label = row.label) {
+    const choices = Array.isArray(row.choices) ? row.choices : [], lit = choices.find(c => c.value === value)
+    const sel = el('select', 'set-select')
+    sel.setAttribute('aria-label', label)
+    if (!lit) {                        // none chosen (an API role with no model), or one off the list
+      const o = el('option', '', value == null || value === '' ? 'None' : value)
+      o.value = value == null ? '' : String(value)
+      o.disabled = value == null || value === ''
+      sel.append(o)
+    }
+    for (const c of choices) { const o = el('option', '', c.label); o.value = c.value; sel.append(o) }
+    if (row.other) { const o = el('option', '', 'Other model…'); o.value = OTHER; sel.append(o) }
+    sel.value = value == null ? '' : String(value)
+    sel.addEventListener('change', () => {
+      if (sel.value !== OTHER) { pick(sel.value); return }
+      const input = el('input', 'set-text')
+      input.type = 'text'
+      input.dataset.key = at
+      input.dataset.other = '1'
+      input.placeholder = 'provider/model-id, then Enter'
+      input.setAttribute('aria-label', `${label}: another model's id`)
+      input.autocapitalize = 'off'; input.autocomplete = 'off'; input.spellcheck = false
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); const v = input.value.trim(); if (v) pick(v) }
+        // blurred first: draw() keeps a focused input's text and would open it again
+        else if (e.key === 'Escape') { e.preventDefault(); input.blur(); draw() }
+      })
+      sel.after(input)
+      input.focus()
+    })
+    return sel
+  }
+  // A choice that needs another row's value first (`needs`: a role's API, its api-<role> with no
+  // model): its tap opens that row's list under this one, and a pick sends it, then this choice.
+  // The tap was refused with a terminal command, the list 2,000 px away under another card (#1558);
+  // with the list not in the rows, its row (under More) is opened and focused instead
+  function needed(row: SettingRow, c: SettingChoice) {
+    const want = c.needs && rows && rows.find(r => r.key === c.needs)
+    if (!c.needs) return false
+    if (!want) return false                              // no such row here: sent, and the server says why
+    if (want.value != null && want.value !== '') return false
+    if (!Array.isArray(want.choices) || (!want.choices.length && !want.other)) {
+      opened.add(want.group); draw()
+      const at = root && root.querySelector<HTMLElement>(`.set-row[data-key="${CSS.escape(want.key)}"]`)
+      if (at) { at.scrollIntoView({ block: 'center' }); const f = at.querySelector<HTMLElement>('select, input, button'); if (f) f.focus() }
+      return true
+    }
+    picking = picking === row.key ? '' : row.key
+    draw()
+    const sel = root && root.querySelector<HTMLSelectElement>(`.set-row[data-key="${CSS.escape(row.key)}"] .set-pick select`)
+    if (sel) sel.focus()
+    return true
+  }
   function choice(row: SettingRow, box: HTMLElement) {
     const value = shown(row), choices = Array.isArray(row.choices) ? row.choices : []
     const lit = choices.find(c => c.value === value)
@@ -132,40 +194,20 @@
         b.setAttribute('aria-checked', String(c.value === value))
         // sent even when lit: what's shown may be stale (a change made at the terminal), and a
         // click to put it back sent nothing while the setting stayed changed (#1392, 2026-11-25)
-        b.addEventListener('click', () => send(row.key, c.value))
+        b.addEventListener('click', () => { if (!needed(row, c)) { if (picking === row.key) picking = ''; send(row.key, c.value) } })
+        if (c.needs) b.setAttribute('aria-expanded', String(picking === row.key))
         seg.append(b)
       }
       box.append(seg)
-    } else if (choices.length || row.other) {
-      const sel = el('select', 'set-select')
-      sel.setAttribute('aria-label', row.label)
-      if (!lit) {                        // none chosen (an API role with no model), or one off the list
-        const o = el('option', '', value == null || value === '' ? 'None' : value)
-        o.value = value == null ? '' : String(value)
-        o.disabled = value == null || value === ''
-        sel.append(o)
+      const c = picking === row.key && choices.find(x => x.needs)
+      const want = c && rows && rows.find(r => r.key === c.needs)
+      if (c && want) {                   // the needed row's list, under this one (#1558)
+        const pick = el('div', 'set-pick')
+        pick.append(selectOf(want, shown(want), row.key, v => { picking = ''; send(want.key, v, { key: row.key, value: c.value }) }, want.label))
+        box.append(pick)
       }
-      for (const c of choices) { const o = el('option', '', c.label); o.value = c.value; sel.append(o) }
-      if (row.other) { const o = el('option', '', 'Other model…'); o.value = OTHER; sel.append(o) }
-      sel.value = value == null ? '' : String(value)
-      sel.addEventListener('change', () => {
-        if (sel.value !== OTHER) { send(row.key, sel.value); return }
-        const input = el('input', 'set-text')
-        input.type = 'text'
-        input.dataset.key = row.key
-        input.dataset.other = '1'
-        input.placeholder = 'provider/model-id, then Enter'
-        input.setAttribute('aria-label', `${row.label}: another model's id`)
-        input.autocapitalize = 'off'; input.autocomplete = 'off'; input.spellcheck = false
-        input.addEventListener('keydown', e => {
-          if (e.key === 'Enter') { e.preventDefault(); const v = input.value.trim(); if (v) send(row.key, v) }
-          // blurred first: draw() keeps a focused input's text and would open it again
-          else if (e.key === 'Escape') { e.preventDefault(); input.blur(); draw() }
-        })
-        sel.after(input)
-        input.focus()
-      })
-      box.append(sel)
+    } else if (choices.length || row.other) {
+      box.append(selectOf(row, value, row.key, v => send(row.key, v)))
     }
     const says = lit && pending(row.key) ? lit.says : row.says
     if (says) box.append(el('p', 'small set-says', says))

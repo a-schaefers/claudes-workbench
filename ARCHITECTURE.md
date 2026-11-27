@@ -7600,7 +7600,10 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 - `rows(fresh=False) -> list[dict]`: every row, kept `ROWS_CACHE_S` 10 s (`fresh` reads again);
   `reads(fresh=False)`, the same cache's `{routes, models}` (`wb route --json`, `wb models --json`,
   or None); `drop()` forgets it.
-- `apply(key, value, by="web") -> {ok, said, help?, detail?}`: `KeyError` for no such row, `ValueError` for
+- `apply(key, value, by="web") -> {ok, said, help?, detail?, page?}` (`page`: a refusal in the page's words,
+  `page_line(key, said)`, by the row's label with no `wb:` and no command: a role put on API with no model was
+  told `wb route trivial <provider/model>`, a gated command naming the key the row calls Trivial coding,
+  #1558; wb's whole line stays `said`, for the driver): `KeyError` for no such row, `ValueError` for
   a value it doesn't take (a read-only row, a value off its choices, a number not positive; nothing
   runs), or a `by` not in `BY` (`web`, `claude`). `said` is the child's last non-empty stdout line,
   or its stderr's on failure; a run's Summary's is its report's first line, and `detail` the report,
@@ -7660,7 +7663,8 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
 **The rows** (the pane's choices and sentences, moved; each `→` its wb call):
 - *a role's card* (`significant`, `trivial`, `writing`, #1553: one role's settings were spread over three cards,
   its API model 2,000 px below the choice that needed it): `role-<role>` → `wb route <role> gpu|api` (a role on
-  API whose `api_status` says it can't run says `<Label> can't run on <id>: <why>.`, #1529); then, `more`:
+  API whose `api_status` says it can't run says `<Label> can't run on <id>: <why>.`, #1529; with no API model its
+  API choice, "API (pick its model)", `needs` `api-<role>`, #1558); then, `more`:
   `gpu-<role>` → `wb route <role> --gpu <id>|auto` (with GPU models); `api-<role>` (the role's model, the
   others', those used, then the catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`,
   `think-<role>` (the pane's `thinkStops`) → `wb route <role> --thinking on|off` and `review-<role>`
@@ -7754,7 +7758,7 @@ The chat server's side of the web app's Stats and Settings views, the user's tok
   string, a number or null; JSON only, 415 otherwise) → `chat.admin_set` → `settings.apply`: 200
   `{ok: true, said, rows, changes, help?}`; 400 `no such setting` (a `KeyError`) or `not one of its choices`
   (a `ValueError`, or a value neither string, number nor null); 409 `{ok: false, error: <wb's line>,
-  rows}` when wb refused. `rows` are read again after the write (apply dropped the cache).
+  page?: <the refusal in the page's words, settings.page_line>, rows}` when wb refused. `rows` are read again after the write (apply dropped the cache).
 - **The record.** A change that went through is `{ts, key, label, from (the row's value
   before), to (its value after), said, help?, by: "web"}` in `$WB_HOME/settings-changes.jsonl`
   (`chat.CHANGES`, `chat.changes_path`, `store.append_jsonl`), which the row's wb child logs
@@ -7822,7 +7826,12 @@ alone, and a generic renderer: a new setting touches only Python.
     choices, a `<select>` past it or with `other`. Such a select ends with "Other model…", which opens
     a text input (`input[data-other]`); Enter sends the typed id, Escape closes the input and the
     select shows the row's value again. A value off the list (none, for an API role without a model)
-    is the select's first option. The focus ring (choices, selects, text boxes; the nav's tabs too)
+    is the select's first option. A choice with `needs` (a role's API with no model, `api-<role>`, #1558)
+    sends nothing while that row has no value: its tap opens that row's list (`.set-pick`, the same
+    choices and "Other model…") under the row, and a pick sends that row's value, then the choice
+    (`queue`'s `then`, sent only once the first went through); the tap had been refused with a terminal
+    command, the list 2,000 px away under another card. A list with no choices opens the card's More
+    and focuses that row instead. The focus ring (choices, selects, text boxes; the nav's tabs too)
     is the text's colour, `--fg`, and on a lit choice `--accent-fg`: the accent was unseen on the lit
     choice's own fill and under 3:1 on the panel (#1410).
   - `number`: a text input (`inputmode=decimal`) with its unit (`usd` `$` … `/day`) and an Off
@@ -11256,7 +11265,8 @@ the window's `focus`, and a click on the value shown still sent (#1392); a POST 
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the
 computer out of reach, Try again shown and the rows drawn once the stream gets through, with no tab switch (#1412); a choice
 made with Space keeping the focus on its radio, and a number sent with Enter on its box (#1409); the focus ring
-on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); "Other model…": Escape closes
+on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); a role's API choice with
+no model opening its API model list under the row, a pick sending the model, then the role's API (#1558); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
 group; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
 (two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side

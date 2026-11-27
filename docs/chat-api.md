@@ -473,7 +473,8 @@ The web app's Settings: `{"rows": [...], "changes": [...], "ts": <seconds>}`. Ea
 and API model and thinking); `hidden: true`, a row the page doesn't show while it can do nothing; `fixed: true`, a
 choice shown as its `says` alone; `ask`, a row with a problem or a request the page offers to hand to the driver
 (true, or a string: the request); `kind` one
-of `choice` (`value`, `choices: [{value, label, says}]`, `says`, `other`: any id is taken),
+of `choice` (`value`, `choices: [{value, label, says, needs?}]` (`needs`: the row whose value that choice needs
+first, a role's API its `api-<role>`), `says`, `other`: any id is taken),
 `number` (`value`: a number or null for off, `unit`: `usd`, `says`), `info`
 (`text`), `action` (`text`, `choices` as buttons) or `note` (`text`, standing where its group's
 rows would be). A row may carry `help` (*POST /api/settings*), and `changed: {ts, by}`, its newest
@@ -494,7 +495,8 @@ closed (its `text` the run's flow, phase, stage counts and spend; its choices `s
   (show it as text, never markup); `said` is its first line.
 - 400 `{"error": "no such setting"}` for an unknown `key`; 400 `{"error": "not one of its
   choices"}` for a value the row doesn't take (nothing runs for either).
-- 409 `{"ok": false, "error": <wb's line>, "rows": [...]}` when wb refused.
+- 409 `{"ok": false, "error": <wb's line>, "page"?: <the refusal in the page's words>, "rows": [...]}` when wb
+  refused (`page`: by the row's label, with no `wb:` and no command, where the server has the words).
 
 A change that went through is recorded (`settings-changes.jsonl` in the state directory: `{ts,
 key, label, from, to, said, help?, by: "web"}`), so the driver in the terminal hears of it; a
