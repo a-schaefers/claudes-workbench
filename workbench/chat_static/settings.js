@@ -173,6 +173,9 @@
     // 'tailnet': the web app's review, 2026-11-26), the raw value for a row not drawn
     const changeWords = (c) => {
         const row = rows ? rows.find(x => x.key === c.key) : undefined;
+        // an action pressed (Optimize) has no value it changed from: 'Optimize: started'
+        if (c.from === null || c.from === undefined)
+            return `${c.label || c.key}: started`;
         return `${c.label || c.key}: ${valueLabel(row, c.from)} → ${valueLabel(row, c.to)}`;
     };
     async function pump() {

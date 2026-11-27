@@ -7736,8 +7736,9 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 - `record(before, key, value, done, by)`: the change's row of `settings-changes.jsonl`, and
   chat/settings-rev.json's stamp of it; None, nothing written, for a `choice` or `number` set to
   the value it had (#1355), or a key in `NOT_RECORDED` (`run-`: a run's Stop or Summary changes no
-  setting; its Stop is a notice, and `key_for` names no run command; `optimize`: Measure now is a button,
-  logged `Optimize: off → start` from a value that never was, the web app's review, 2026-11-26). Its one caller is `logged` (*One log writer*, below).
+  setting; its Stop is a notice, and `key_for` names no run command). An `action` row (Optimize's Measure now)
+  is logged with `from` null, as pressed, and Recent changes draws it `Optimize: started` (it was logged
+  `Optimize: off → start` from a value that never was, the web app's review, 2026-11-26). Its one caller is `logged` (*One log writer*, below).
 - **One log writer** (#1355): `cli.main` runs a Settings row's own command line inside
   `cli._SettingWrite`, whoever runs it (the web app's child, `wb settings set`'s child, an OpenCode
   driver's shell, the user's terminal): `key_for(argv) -> (key, value) | None`, `_argv`'s inverse

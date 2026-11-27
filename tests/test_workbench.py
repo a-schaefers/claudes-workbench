@@ -49576,8 +49576,10 @@ class RoleResolution(Base):
                       self.wb("watch", "t-api", "--once", "--no-color")[1])
         # the chat's snapshot: the open task, its model and provider
         from workbench import chat
+        # the fields it names (the rows carry more since #1339: label, updated_at)
+        keys = ("name", "phase", "model", "via", "provider_name")
         self.assertIn({"name": "t-api", "phase": "queued", "model": "deepseek/deepseek-flash", "via": "api",
-                       "provider_name": "DeepSeek"}, chat.snapshot()["tasks"])
+                       "provider_name": "DeepSeek"}, [{k: t.get(k) for k in keys} for t in chat.snapshot()["tasks"]])
         self.assertEqual(self.begin("t-api2", "--role", "trivial")[0], 0)
 
     def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):

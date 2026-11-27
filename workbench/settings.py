@@ -109,7 +109,7 @@ RUN_DETAIL_CHARS = 16_000  # the Summary's text past this is cut: wb run report 
 # key prefixes whose action changes no setting (record): a run's Stop or Summary, and Optimize's
 # Measure now, a button logged "Optimize: off → start", from a value that never was (the web app's
 # review, 2026-11-26)
-NOT_RECORDED = ("run-", "optimize")
+NOT_RECORDED = ("run-",)
 FLOWS_SAY = "Ask for one by name, or put deepcode in a message with your request."
 PROGRESS_OFF = ("off", "Off (default)", "No progress checks: each one wakes Claude, which spends its tokens.")
 THINK = [("off", "Off (default)", "Faster and cheaper; for tasks started after this."),
@@ -905,9 +905,12 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
     written, for a choice or a number set to the value it had: no change to tell anyone of."""
     if before.get("kind") in ("choice", "number") and _same(before.get("value"), value):
         return None
-    if key.startswith(NOT_RECORDED):  # a run's Stop or Summary, Optimize: no setting changed (a run's stop is a notice)
+    if key.startswith(NOT_RECORDED):  # a run's Stop or Summary: no setting changed (a run's stop is a notice)
         return None
-    entry = {"ts": store.now(), "key": key, "label": before.get("label") or key, "from": before.get("value"),
+    # an action (Optimize's Measure now) is pressed, never changed from a value: logged with no
+    # `from`, drawn "Optimize: started", never "off → start" (the web app's review, 2026-11-26)
+    was = None if before.get("kind") == "action" else before.get("value")
+    entry = {"ts": store.now(), "key": key, "label": before.get("label") or key, "from": was,
              "to": value, "said": done["said"], **({"help": done["help"]} if done.get("help") else {}), "by": by}
     store.append_jsonl(chat.changes_path(), entry)
     store.write_json(chat.chat_dir() / REV, {k: entry[k] for k in ("ts", "key", "label", "to", "by")})
