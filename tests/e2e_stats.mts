@@ -97,8 +97,6 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
       // one name per role, Settings' (routes.LABELS), not the pane's `complex` (#1339)
       if (of('By size') !== 'Complex coding 1 (100%) · Trivial coding 2 (50%)') throw new Error(say())
       if (of('What stopped agents') !== 'the API day cap 1') throw new Error(say())
-      // a mean of one round is `1 round` (#1339)
-      if (!got.some((r: any) => / · 1 round · 3 min$/.test(r.text))) throw new Error(say())
       for (let i = 1; i < got.length; i++) if (rank(got[i].label) < rank(got[i - 1].label)) throw new Error('out of order: ' + say())
       // #1322: no score, saving, streak or 30 days (the feed has none of them)
       if (got.some((r: any) => /^(Streak|Last 30 days|Bests|Milestone|Questions)$/.test(r.label)) || /score|estimate/.test(say())) throw new Error(say())

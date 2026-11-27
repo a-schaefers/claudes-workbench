@@ -500,11 +500,14 @@ async function run(engine: string, device?: string) {
     const week = () => page.evaluate(() => [...document.querySelectorAll('#stats-body .st-row')]
       .filter(r => r.querySelector('dt')!.textContent === 'This week').map(r => r.querySelector('dd')!.textContent).join(''))
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepseek',
-        model: 'deepseek/deepseek-flash', api: { cost: 0.42, source: 'opencode' } }) + '\n')
+        model: 'deepseek/deepseek-flash', rounds: 1, api: { cost: 0.42, source: 'opencode' } }) + '\n')
     await page.reload()
     await goTo('stats')
     // one provider: no split, which said the total twice (#1339)
     await until(async () => /API ≈\$0\.42$/.test(await week())).catch(async () => { throw new Error(await week()) })
+    // its model line: a mean of one round is `1 round`, never `1 rounds` (#1339)
+    const lines = await page.evaluate(() => [...document.querySelectorAll('#stats-body .st-row dd')].map(d => d.textContent).join(' | '))
+    if (!/1 task · 100% landed · 1 round · /.test(lines) || /\b1 rounds\b/.test(lines)) throw new Error(lines)
     // #1135: at the catalog's prices a figure is an estimate (≈); at the user's own (wb model price) it isn't
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepinfra',
         model: 'deepinfra/acme-flash', api: { cost: 0.1, source: 'metered', prices: 'yours' } }) + '\n')
