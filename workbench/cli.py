@@ -35,6 +35,7 @@ from . import runner
 from . import keyhole
 from . import meter
 from . import privacy
+from . import qr
 from . import schedule
 from .runner import PKG_ROOT
 
@@ -7596,6 +7597,8 @@ def cmd_chat(a):
             die(f"wb chat url: {got['why']}")
         else:
             print(got["url"])  # the token is the key: keep it private
+            if sys.stdout.isatty():  # a person's terminal, never the mod's or a script's read (#1552)
+                chat_qr(a.port, got["url"])
     elif a.action == "on":  # the switch, kept: the link shows and a session listens
         # a failure puts the switch back as it was: turned on and left on when this died, the
         # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an
@@ -7784,6 +7787,18 @@ def chat_reach(to: str | None, port: int) -> None:
     else:  # settings.REACH_HELP's cue: `not served`
         print(f"https: not served: notifications and the home-screen app need it; `tailscale serve --bg {port}` "
               "serves it on your tailnet only")
+
+
+def chat_qr(port: int, shown: str) -> None:
+    """`wb chat url` at a terminal: the phone link (chat.phone_url) as a QR code under the link, so
+    a phone's camera opens it instead of a 40-character token typed by hand (#1552, 2026-11-26);
+    the link above it first when it isn't the one already printed. Nothing while there is none."""
+    link = chat.phone_url(port)
+    if not link:
+        return
+    if link != shown:
+        print(f"on your phone: {link}")
+    print(qr.half_blocks(link))
 
 
 def chat_token(what: str | None, name: str | None) -> None:

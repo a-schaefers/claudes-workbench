@@ -229,7 +229,7 @@ An agent's token reads only its own conversation:
   someone else stored is `409 {"error": "that upload id is another sender's"}`, and a send can
   attach only its own uploads.
 - **403:** every path outside the allow-list (*Base URL and auth*): `/api/latest`, `/api/shot`, `/api/audio`, `/api/task`, the admin endpoints (`/api/settings`, `/api/stats`,
-  `/api/top`), and the user's `POST`s (`/api/transcribe/<id>` among them).
+  `/api/top`), `/api/phone-qr.svg` (the user's token is in it), and the user's `POST`s (`/api/transcribe/<id>` among them).
 - **`/api/health`** and the `listener` are as for the user.
 
 The user's own token reads everything, as below.
@@ -311,8 +311,9 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
   provider's, and `names`: each provider's name), never part of the score.
 - `uploads`: `{file, message, files}`: bytes per file, bytes per message, files per message.
 - `build`: the page files' stamp (a page whose stamp differs reloads).
-- `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",
-  provider_name}]` (none accepted, discarded or parked by `wb stop --all`).
+- `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, label, via: "gpu"|"api",
+  provider_name}]` (none accepted, discarded or parked by `wb stop --all`); `label` is the model's
+  name (a GPU model's label, an API model's name in OpenCode's catalog, `""` for none).
 - `runs`: the deep workflows not closed (`wb run`), for the runs strip: `[{run, flow, phase, why,
   stages: {<stage>: {done, running, null, filtered, not_run}}, spent_usd, budget_usd,
   budget_min, gpu_min}]`, by their start. `phase` is `running`, `checkpoint`, `paused`, `stopped`,
@@ -426,9 +427,17 @@ Read only, from the task's files and its worktree; it never starts OpenCode. Onl
 `tasks` strip lists (open, not parked, not a bench replay); any other is `404 {"error": "no such
 open task"}`. Every answer is `{task, part, …, now}`:
 - `summary` (the default): `phase`, `round`, `step` (above 1 after `wb next`), `last`,
-  `created_at` and `updated_at` (seconds; age and idle are `now` minus them), `model`, `via`,
-  `provider_name`, `report` (the round's summary.md, or what stands instead, cut at 64 KB with
-  `report_cut: true`) and `verify` (the regression check's lines, `[]` for none).
+  `created_at` and `updated_at` (seconds; age and idle are `now` minus them), `model`, `label`
+  (the model's name: a GPU model's label, an API model's name in OpenCode's catalog, `""` for
+  none), `via`, `provider_name`, `report` (the round's summary.md, or what stands instead, cut at 64 KB with
+  `report_cut: true`) and `verify` (the regression check's lines, `[]` for none). Read from the
+  report: `agent_summary` (the agent's final words, null with no report), `changed` (the paths of
+  the files it changed, `[]` for none, null with no report), `tests` (`tests: PASS (…)` or
+  `tests: FAIL (…)`, `""` for none) and, for a failed or stuck task, `happened`: one plain line of
+  what happened (`The agent stopped before writing anything (OpenCode exited).`; with no report,
+  `The task stopped partway (…): what the agent changed so far is in the worktree.` when the
+  worktree has changes, `The task stopped before the agent ran (…).` for a stop before the agent,
+  else `The task stopped (…).`; `""` otherwise).
 - `diff`: against `base` (the task's base commit, or `HEAD` after `wb next`: the current step,
   as `wb diff`, the gitignored files the agent wrote included): `stat` (`wb diff --stat`) and `files` (`[{path, added, deleted}]`, null counts
   for a binary file). With `full=1`, `diff` instead of the stat: the whole diff, or with
@@ -438,6 +447,9 @@ open task"}`. Every answer is `{task, part, …, now}`:
 - `log`: `rows`, the last `n` (1 to 200, default 50) of `wb log -v`'s rows, each `{ts, round,
   kind, text}` (`wb log`'s words after the time, cut at 2,000 characters; `ok` for a tool call),
   and `more: true` when older ones were left out.
+
+A path inside the task's worktree, in the summary's `report`, `last` and `verify` and in each log
+row, is written relative to it (`read src/f0.py`; the worktree itself is `.`).
 
 400 for another `part` or a bad `n`. All of it is text the agent wrote: show it as text.
 
@@ -503,7 +515,8 @@ terminal is `by: "terminal"`). Each recorded change moves the state's `settings`
 
 ### `GET /api/stats` (user only)
 The Stats view's history: `{"feed": <wb stats --json>, "routes": <wb route --json, or null>,
-"models": <wb models --json, or null>}`. `routes` and `models` name the models; both come from
+"models": <wb models --json, or null>}`. `routes` and `models` name the models (and `routes`'
+`spend_today` and `day_usd` give Now's `API today` line); both come from
 the Settings rows' cache (10 s), null when wb couldn't read them.
 
 ### `GET /api/top` (user only)
@@ -519,6 +532,14 @@ not `EventSource`):
 
 One `wb top` runs per server, whoever watches; it stops 15 s after the last viewer leaves. At most
 4 streams are open: a 5th is `503 {"error": "too many live views open"}`.
+
+### `GET /api/phone-qr.svg` (user only)
+The phone link as a QR code, `image/svg+xml`: the link `wb chat url` draws at a terminal, the
+web app's address on the user's tailnet with the token in its fragment (`https://<name>/#token=…`
+while `tailscale serve` serves the port, else `http://<tailnet name>:<port>/#token=…` with reach
+`tailnet`). `404 {"error": "no phone link: the web app opens on this machine only (wb chat reach
+tailnet)"}` while there is none. It carries the user's token: never cached (`no-store`), and an
+agent token gets 403. An `<img src>` sends no bearer header, so fetch it and show the blob.
 
 ### The page itself (no token)
 `GET /` (or `/index.html`) and the page's files (`/app.js`, `/app.css`, `/sw.js`, icons,
@@ -570,6 +591,9 @@ A **message** (`messages`, `replies`, `message`):
   that holds a body's last bytes until more come (WebKit, past 8 KB) hands the event over.
 - `: ping` (a comment) after 15 s with nothing to send.
 
+A patch comes when the thread, the listener or the driver's state changes, and when an open task's
+status does (its phase, or the step it is on: each `tasks` row's `updated_at`), within a moment.
+
 ## Versions
 
 `api` in `/api/state` and `/api/health` is this API's version. A change that breaks a client
@@ -580,4 +604,5 @@ bumps it; adding a field or an endpoint doesn't (the admin endpoints, `/api/sett
   endpoints left it (#1350): the driver's dialogs are answered in the terminal. Added since, in
   the same version (workbench 2.1): the `/api/v1/` paths, `code` on every error (`error` kept as
   the text), a revoked token's own code, `410 expired` from `/api/wait`, and `Idempotency-Key`;
-  (workbench 2.2) `driver` on `/api/health`, the listener and each reply (*The driver*).
+  (workbench 2.2) `driver` on `/api/health`, the listener and each reply (*The driver*), and
+  `/api/phone-qr.svg`.

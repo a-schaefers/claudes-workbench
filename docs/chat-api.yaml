@@ -576,6 +576,30 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "503":
           $ref: "#/components/responses/Busy"
+  /api/v1/phone-qr.svg:
+    get:
+      operationId: phoneQr
+      tags: [user]
+      x-user-only: true
+      summary: The phone link as a QR code (the tailnet link with the user's token).
+      description: >-
+        The link `wb chat url` draws at a terminal: https at `tailscale serve`'s name while it
+        serves the port, else this machine's tailnet name with reach tailnet. It carries the
+        user's token, so it is never cached; an img sends no bearer header, so fetch it.
+      responses:
+        "200":
+          description: the QR code, black on white with a 4-module quiet zone
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+                contentMediaType: image/svg+xml
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/transcribe/{id}:
     parameters:
       - $ref: "#/components/parameters/UploadId"

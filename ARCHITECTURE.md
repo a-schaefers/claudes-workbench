@@ -59,7 +59,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   `agent/schemas/`; *Deep workflows*): `wb run`, a flow's items as wb tasks on the user's roles,
   started by a detached driver that wakes Claude only at checkpoints and the end.
 - **The web chat** (`chat.py`, `chat_static/`, `webpush.py`): the same session from a phone;
-  `settings.py`, the admin table its Settings are drawn from (*The admin table (settings.py)*).
+  `settings.py`, the admin table its Settings are drawn from (*The admin table (settings.py)*);
+  `qr.py`, the phone link's QR code (*Phone reach*).
   Its scripts are TypeScript (`chat_static/src/`), built by `scripts/web.py` into the committed
   plain scripts the page loads (*The page's TypeScript*); users need no Node or compiler.
   `story.py` holds every sentence it and the docs tell of the driver, `scripts/gen_story.py`
@@ -631,8 +632,8 @@ sentence "I used about 62% less Claude than if Claude had done this work alone",
 amount" or "about 20% more" (both score 1); else `NO_SCORE`. Energy and price stay out. The text
 output never prints it (the percent again, #1322): `--json` carries `{score, color, pct,
 sentence}`; the web app's Stats view shows the badge's number with one line under it, `~3K Claude
-tokens saved this week`, and the GPU's energy and the API line in the paragraph below (the
-saving there only when there is no badge); `wb savings --card FILE.svg` (`savings.card`) writes an
+tokens saved this week`, and the GPU's energy in the paragraph below (the saving there only when
+there is no badge; no API line since #1339: History's This week says the week's API money); `wb savings --card FILE.svg` (`savings.card`) writes an
 SVG (`CARD_COLORS`, each past 4.5:1) holding no name, path, host or account, its footer `Last 7
 days · 3 tasks · estimated`.
 
@@ -658,7 +659,7 @@ written at accept or discard; `claude`/`self_est`
 side by side through `_compare`, of_row's comparison of any kind). Dollars are OpenCode's unit
 (`Money.USD`), printed with `$` by one formatter, `meter.usd` (savings imports it): `$0.42`,
 `$5.00`, `<$0.01` under a cent, a free model's `$0`, `unknown` for None; `meter.money` puts `≈`
-in front of a catalog estimate. The mod's `usd` and the chat's `apiSaved` follow the same rule
+in front of a catalog estimate. The mod's `usd` and the Stats view's `usd` follow the same rule
 (#1322: `$5` from meter and `$5.00` from savings said one cap two ways); the electricity's cost
 keeps none (#609, #845). A task with no known cost counts as `N with no known cost`, whatever the
 cause (`unknown_parts`; a provider's `unknown`, `unpriced`, #1106, one wording since #1322), never
@@ -668,8 +669,8 @@ line: `· paid ≈$0.12` (plain at the user's prices or the provider's figure, *
 prices*), `· paid: unknown` or `· plan usage (opencode-go)`; "" for a GPU task. `wb savings` adds,
 when the period has API rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43) + 1
 with no known cost · claude 210K · writing it yourself ~520K` (`api_summary`); `--json` gains
-`api` (api_totals), which the web app's Stats view reads (`apiSaved`; the pane's footer went
-with #1283). **`wb savings --api`**
+`api` (api_totals), in the chat's state (`savings.api`); the web app shows the week's API money in
+Stats' This week (`apiPeriod`) alone (`apiSaved` went with #1339; the pane's footer with #1283). **`wb savings --api`**
 (`api_report`, with `--week`/`--month`/`--all`) reports the day ledger only (`savings.spent(since)`:
 spend-api.jsonl's `step` and `reconcile` rows since then, open tasks and bench replays in, each on
 its own `day`; `today` is `meter.today()`, the pane's): `api, the last 7 days: ≈$1.57 (≈$0.73
@@ -879,7 +880,7 @@ Status `api.prices`, `meter.today()`'s `basis`, results `api.prices`, `bench.pai
 `spent`'s and the roles' JSON `spend_today.prices` carry it to the start line (` · today ≈$0.42 of
 $5.00`: today's rows' basis, `meter.today()`, no ledger scan for the model's next figures, #1322),
 `wb accept`'s `paid`, the round report, `wb savings`, `wb stats` (and `paid` `≈$0.12`; no footnote under the table, #1322), `wb top`, scout, the stop texts, the pane
-(`isEst`; a narrow Tasks row drops the `≈` before its place) and the chat (`apiSaved`).
+(`isEst`; a narrow Tasks row drops the `≈` before its place) and the chat's Stats view (`estUsd`).
 `wb models --json` gives `prices` (`meter.model_basis`). The day cap counts the figure shown: a catalog that runs high
 stops tasks early (the safe side); one that runs low lets real spend pass the cap, which the opt-in
 tightens.
@@ -4027,8 +4028,9 @@ a GPU task's as before), `wb status`'s `via` column, `wb watch`'s `routed:` line
 an API task's `API <id> (<provider>) · <role> role · thinking off` from task.json,
 else task.json `route`, the router's why), the pane's row (`API DeepSeek  deepseek-flash`: the place and the model, tasks.ts's `placeOf`, #1048)
 and its `routed` line under the task line, and the web chat's strip over the thread (`Running:
-fix-auth · API deepseek-flash (DeepSeek)`, from `chat.open_tasks`): while away, the chat is all the
-user sees.
+fix-auth · API · DeepSeek V4.1 Flash`, from `chat.open_tasks`; the web app's one name for a model,
+`chat.model_label`: a GPU model's label as Stats names it, an API model's catalog name, the provider
+in the task sheet's note, #1339): while away, the chat is all the user sees.
 
 - **The terminal is primary; the web chat is a second lane** (the owner, 2026-11-24: "the terminal
   stays the primary method of doing things with claude, the chat app only a secondary lane. the
@@ -6680,10 +6682,13 @@ why it is down (*Seeing what the agent does*).
 **What it's for** (#1341; the owner, 2026-11-24): message the driver from anywhere, and most work
 can run from here; a prompt the driver raises waits in its terminal (ssh + tmux) unless the driver
 runs with permissions granted, and the settings live here too. The empty state (`#intro`) says so,
-and over a thread the same words are a hint (`#hint`) until dismissed on that device
+and over a thread the same words are a hint (`#hint`) until dismissed on that device, or the
+first message is sent from it (`send`; #1339: what the chat is for is known by then)
 (`localStorage` `wb-chat-hint`, read and written in try/catch: a storage that throws shows it on
-each open). Both are the story's `purpose` (*The story*), naming the driver that listens (else the
-last that wrote, else "your driver").
+each open); it hides while the state line shows (`drawHint`: the two said the same) and under
+`body.kb-open` (#1339). Both are the story's `purpose` (*The story*), naming the driver that listens (else the
+last that wrote, else both, "Claude or OpenCode": the story's `any`, never "your driver" beside the
+box's "Message Claude", #1339), and the box's placeholder says the same name (`Message <who>`, `drawStory`).
 
 ### The story
 
@@ -6693,7 +6698,8 @@ the driver lives and a prompt it raises is answered there; most work can still r
 more so with permissions granted; the web app's Settings are the source of truth). They had
 drifted: the page said "Run Claude" to an OpenCode user, and the docs called the chat off by
 default after 2.0 turned it on.
-- **`workbench/story.py`**: `DRIVERS` (`claude-code`, `opencode`, `any`: each one's `who`, `app`,
+- **`workbench/story.py`**: `DRIVERS` (`claude-code`, `opencode`, `any`, no driver known, naming both:
+  `Claude or OpenCode`, `Claude Code or OpenCode`, #1339; each one's `who`, `app`,
   `listen`, `grant`, `reply`: how it answers in the chat, `prompts`: the prompts it raises), `TEXTS`
   (each sentence once, a template: `{field}` from the driver and the
   caller, `{Field}` capitalized), `ONLY` (the drivers a key is said for: `next.grant` names a
@@ -6775,7 +6781,8 @@ for macOS's system tools, #1305; it retries even
 exit 78; unchecked on a Mac, #449). Messages name the OS's service (`chat.service_name`,
 `service_hint`, #756). `wb setup` installs the service (*Up by default*, below); without one,
 `chat.ensure` starts a server of wb's own. `wb chat url` prints `http://localhost:<port>/#token=…` (the port from `chat/port.json`,
-else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server and drops its pid, else 1337; `--port`, #349; the fragment never leaves the browser).
+else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server and drops its pid, else 1337; `--port`, #349; the fragment never leaves the browser),
+and at a terminal (stdout a tty: never the mod's read, a pipe or `--json`) the phone link's QR code under it (`cli.chat_qr`, *Phone reach*, #1552).
 
 - **The path of a message.** The page posts it to `chat/messages.jsonl`; the listening session's
   mod submits `[web chat] <the user's words>` and nothing more (plus `(about <task>, step <s>,
@@ -6849,7 +6856,7 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   `failed` (`why`: serve.log's last line). A unit that doesn't answer is followed by `chat.start`
   once (#1343: one that exits 78, stopped for good, left the app down, as only the unit was ever
   started again): `started` with `why` naming the unit, or `failed`. One at a time
-  (`chat/ensure.lock`). `wb chat url` runs it and prints the link alone (the mod reads it whole);
+  (`chat/ensure.lock`). `wb chat url` runs it and prints the link alone (the mod reads it whole; only at a terminal the phone link's QR code follows, #1552);
   `wb chat url --json` prints the dict, exit 0, for the mod. **`wb setup`** installs the service
   (`cli.install_service`; `--no-service` skips it): on Linux, where `systemctl --user
   show-environment` answers with this HOME, it links `systemd/wb-chat.service` into
@@ -7255,7 +7262,14 @@ the key. https, which push and the home-screen app need, is `tailscale serve`'s:
 `chat.https_served(port)` reads `tailscale serve status --json` (`chat.served_site`: the `Web` site,
 `<name>:<https port>`, with a handler proxying to the port: True when there is one; None when it can't tell;
 `chat.tailscale_cli(windows=True)`, so Windows' serve under WSL counts, #1524), and with none wb prints the `tailscale serve --bg <port>`
-line, which the row's `REACH_HELP` has the driver offer, run only on a yes. Every `RELOAD_EVERY` 10 s it stamps its
+line, which the row's `REACH_HELP` has the driver offer, run only on a yes.
+**The phone link** (#1552): `chat.phone_url(port)`, the token in its fragment, is
+`https://<serve's name>[:<its port>]/#token=…` while `served_site` names a site for the port, else, with reach
+`tailnet`, `http://<the tailnet name, else its IP>:<port>/#token=…`, else "" (reach local or custom, Tailscale down). A phone's camera
+opens it from a QR code (`qr.py`, standard library only: ISO/IEC 18004 byte mode, level M, versions 1 to 40, the mask
+of the lowest penalty; `qr.encode`, `qr.svg`, `qr.half_blocks`), so no 40-character token is typed by hand: `wb chat url` at a
+terminal prints `on your phone: <link>` (when it isn't the link above) and the code in half blocks, black on bright white
+whatever the terminal's theme (`cli.chat_qr`); `GET /api/phone-qr.svg` serves it as an SVG (*The admin endpoints*). Every `RELOAD_EVERY` 10 s it stamps its
 `*.py` (`code_stamp`, `watch_code`); changed and then still for a look, it re-execs
 `sys.orig_argv` in the same process (an old server served the new page for a day and a half,
 2026-11-18). That holds for an update in place (a clone, Claude Code's marketplace clone); on
@@ -7288,16 +7302,30 @@ address (#534).
   savings (`chat.week_saved`: `wb savings --json` over 7 days, no `period`; its `api` adds each
   provider's name, `names`, #1022), uploads (`{file,
   message, files}`), build, expire (`MESSAGE_EXPIRE` in seconds), tasks (`chat.open_tasks`, #1016: `[{name,
-  phase, model, via, provider_name}]` for each open task, no bench replay and none parked (`store.parked`,
-  as `wb status`, #1097); the page's strip over the thread, `Running: fix-auth · API deepseek-flash
-  (DeepSeek)`, hidden for none or an older server; more than one kind or `TASKS_SHOWN` 3 counts them
+  phase, model, label, via, provider_name, updated_at}]` for each open task, no bench replay and none parked (`store.parked`,
+  as `wb status`, #1097); `label` is `chat.model_label`, the web app's one name for the model (#1339:
+  task.json `model_label` for a GPU model, the label Stats and `wb top` give it; an API model's
+  catalog name, `models.catalog_title`, from hosted.json as it is, never rebuilt; "" for none, and
+  the page shows the id's last part); the page's strip over the thread, `Running: fix-auth · API ·
+  DeepSeek V4.1 Flash` (`taskOn`: `GPU <label>` or `API · <label>`, the provider only in the task
+  sheet's note, `taskNote`; every open task on one model names it once, at the end),
+  hidden for none or an older server; more than one kind or `TASKS_SHOWN` 3 counts them
   apart, `2 running, 1 waiting on Claude, 22 queued: …` (the driver's name, `driverName`, #1355), names the running first (`running`,
   `testing`), then those waiting on Claude (`asking` among them, `store.NEEDS_CLAUDE`: counted
   running, a task blocked on its question read as nothing needing Claude, the #1097 review), then
   the queued, three at most, then `+N more`, and `.tasks` is clamped to three lines: a
-  25-task backlog took the screen from the thread on a phone, the queued read as running (#1097); the
-  stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
-  task's own status write; a tap on the strip opens the task sheet, `GET /api/task` below), runs
+  25-task backlog took the screen from the thread on a phone, the queued read as running (#1097).
+  On a phone and below 500 px of height (`narrow`, `(max-width: 600px), (max-height: 500px)`) and
+  under `body.kb-open` it is one line instead (`tasksShort`, `.tasks.short`: the counts and the
+  names, `4 need Claude: fix-parser, add-login, rename-flag +1`, the models left to the sheet, its
+  ▾ outside the ellipsis): three lines left the thread 26 to 34% of a portrait phone, and none in
+  landscape with the keyboard up (#1339); the
+  stream sends it when the hub wakes it: a chat file, or a task's own status or spec (`TASK_NEWS`:
+  `status.json`, `task.json`, or a task's directory made or gone; never `events.jsonl`, written on each
+  step), else at the hub's idle bump (`IDLE_BUMP_S`, 60 s, counted from the last wake) (#1559: a
+  task's phase reached the page up to 60 s late); each row's `updated_at` (its status's last write)
+  is the page's mark to fetch an open task's Log again; a tap on the strip opens the task sheet,
+  `GET /api/task` below), runs
   (`chat.open_runs`, #1278's S12: `runs.snapshot(live=False)`'s rows without `session`, `cwd` or `alive`, a
   `ps` each on macOS on every state built, `[{run, flow, phase, why, stages: {id: {done, running, null,
   filtered, not_run}}, spent_usd, budget_usd, budget_min, gpu_min}]`
@@ -7315,8 +7343,19 @@ address (#534).
   task sheet, only a name `chat.open_task` finds among `open_tasks` (none parked, no bench replay;
   else 404 "no such open task"), read in-process from the task's files, never through `wb watch
   --json`, which can start OpenCode. `summary` (`chat.task_summary`): phase, round, step, last,
-  `created_at`/`updated_at`, model, via, provider_name, the round's report (`store.Task.report`, as
-  `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`).
+  `created_at`/`updated_at`, model, label (`chat.model_label`), via, provider_name, the round's report (`store.Task.report`, as
+  `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`),
+  and what the sheet leads with (`chat.report_lead`, #1339), read from the report `runner.summary_text`
+  writes: `agent_summary`, `changed` (the files' paths, `[]` for `(none)`, null with no report),
+  `tests` (its `tests: PASS|FAIL …` line) and, for a failed or stuck task, `happened`: one plain line
+  (`The agent stopped before writing anything (OpenCode exited).`, `The agent was stopped partway:
+  what it changed so far is in the worktree (<the STOPPED reason>).`, and with no report for the
+  round `The task stopped partway (<last>): what the agent changed so far is in the worktree.` when
+  `gitops.changed` lists any, else `The task stopped before the agent ran (<last>).` for status
+  `infra` setup, repo or model, else `The task stopped (<last>).`; the cause cut at `LEAD_CAUSE_CHARS`
+  160). A reaped runner (a restart, a dead runner) or a round failing after an earlier round's work
+  leaves no report either: the sheet said the agent never ran, under 'Discard it'. Never runner.log's tail: OpenCode's
+  raw stderr, which Claude reads when asked.
   `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), with the
   ignored files `--include` commits (`force=runner.ignored_to_commit`, as `wb diff`: #1548), `stat`
   and `files` (numstat); `full=1` the diff instead (`path=` one of `files`, `:(literal)`, else 404 "no
@@ -7324,17 +7363,23 @@ address (#534).
   and `cut` past `TASK_DIFF_CHARS` 256 KB (`gitops.diff`'s `limit`: never held whole); no worktree or
   a git failure, a `note`. `log` (`chat.task_log`): the last `n` (`TASK_LOG_ROWS` 50, at most
   `TASK_LOG_MAX` 200) of the `transcript.LOG_KINDS` rows in events.jsonl's last `TASK_LOG_BYTES` 1 MiB,
-  `{ts, round, kind, text: transcript.log_body(…, verbose)}`, `more`. 400 for another part or `n`.
+  `{ts, round, kind, text: transcript.log_body(…, verbose)}`, `more`. The summary's report, `last`
+  and `verify`, and each log row, name the worktree's paths relative to it (`chat.in_tree`: `read
+  src/f0.py`, the worktree itself `.`, as given or resolved; #1339: the 70-character prefix wrapped
+  each row to two lines on a phone). 400 for another part or `n`.
 - `GET /api/stream`: SSE: `event: state` at once, then `event: patch` (`chat.patch` against what
   this stream sent: `messages` as `{put, drop}`, every other field whole so a stale busy flag
   can't stick; #755), each event followed `NUDGE_AFTER` (50 ms) later by a blank line of its own
   (WebKit hands a streamed body over only to the first 8 KB of a read until more bytes come: a state
   past 8 KB waited 15 s for the ping, the #1284 review), `: ping` after 15 s idle. `MAX_STREAMS` 16: the oldest gives way (`evicted`),
   the new one waits 5 s (503), since phones drop streams silently. Linux: `TCP_USER_TIMEOUT`
-  `UNACKED_MS` 45 s. One `Hub` thread watches `chat/` and a pidfd on the listener and wakes every
-  stream; without inotify it wakes them only for a change, the listener's pid failing `kill 0`, or
-  `IDLE_BUMP_S` 60 s (#841). A `_watch` failure restarts a second later. It keeps its `chat/`
-  (`Hub.dir`) and stops at `close()` (#134), which ends every stream before another snapshot: one
+  `UNACKED_MS` 45 s. One `Hub` thread watches `chat/`, `tasks/` and each open task's directory
+  (`TASK_SKIP`: nothing below one, no closed task's, as `wb events`) and a pidfd on the listener, and
+  wakes every stream for a chat file, a task's `TASK_NEWS` (`status.json`, `task.json`, a task's
+  directory made or gone: `Hub._news`; never `events.jsonl`, #1559) or the listener's end; without
+  inotify it wakes them only for those, the listener's pid failing `kill 0`, or `IDLE_BUMP_S` 60 s
+  (#841), counted from the last wake. A `_watch` failure restarts a second later. It keeps its `chat/`
+  and `tasks/` (`Hub.dir`, `Hub.tasks`, made at its start, never by its thread) and stops at `close()` (#134), which ends every stream before another snapshot: one
   woken by a test's close made it in the next test's `WB_HOME` (nightly run 45577067512).
 - `POST /api/send`: JSON (415), ≤ 32 KB (413), `{text: ≤ 8000 (empty with files), cid?: ≤ 64,
   about?: {task, n} | {audio, n} | {task}, files?: ≤ 10 ids}` (400 "no such screenshots", "no such take",
@@ -7381,14 +7426,20 @@ ids, else Claude Code's), and the header (`OpenCode · listening in …`), `Not 
 session`/`an OpenCode session` and `… is on it` by the listener's `driver` (an
 OpenCode claim's `tool`), with none listening by the newest reply or waiting line that names one, else `Claude`;
 `sw.ts` titles a push by the row's `driver`, else `/api/latest`'s `listener`, else `Claude`. The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
-releases it; a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
+releases it, and `#jump` brings it back, smoothly unless the reader prefers less motion (`reduced`: at once,
+#1339, the one motion the stylesheet's reduce block can't reach); a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
 after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). A screen reader
 hears the thread through `#say` (`role=log`, `.sr-only`), outside it: each new message from Claude and each waiting line once,
 whole (`say`, after the reveal), and "Claude is on it" (the driver's name) once; the thread was the live region, and every update read
 each row's time and `copy` out again, a reply in its reveal's fragments (#1408). A row's `.meta` is made anew only
 when its words change (`dataset.said`), so its buttons keep the focus (#1409), or once the copy a pressed
-*send again* sent (its `data-cid`) has left the outbox, landed or deleted, so the button is pressable again. The message box, focused, has a
-2 px ring, the accent toward `--fg` (3:1 on the page in light; the border's tint alone was 1.6:1, #1411). Claude's words are built as DOM, never HTML (`rich`): code fences,
+*send again* sent (its `data-cid`) has left the outbox, landed or deleted, so the button is pressable again. Each row
+is a `role=group` named whose and when (`rowName`: `You, 5:05 PM`, `Claude, 5:05 PM`, an agent's name), its copy
+button `Copy this reply`, its ✓/✓✓ `aria-hidden` (`tick`; #1339: 'copy copy copy', and the user's messages were
+never named theirs). The message box, focused, has a
+2 px ring, the accent toward `--fg` (3:1 on the page in light; the border's tint alone was 1.6:1, #1411). The common
+tap targets are 44 px (#1339): the starter and next-step chips (`.chip`), the hint's ✕, and `#jump` and the state
+line's Copy by a hit area past their edge (`::after`, as `.meta`'s buttons pad theirs), so neither grows. Claude's words are built as DOM, never HTML (`rich`): code fences,
 `code`, `**bold**`, links, and in each block every run of bullet lines a list, every run of other lines a paragraph
 (a lead-in line, then bullets with no blank line between, was one paragraph of '- ' lines, #1416). Use counts (`reportActive`, #959): on screen or a
 `pointerdown`/`keydown`, only while `!document.hidden` and `document.hasFocus()`, on the Chat view
@@ -7406,8 +7457,7 @@ waiting for their words in `wb-chat-dictate`, bytes in IndexedDB beside the draf
 so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts
 (`receipt.blocked` while the driver waits on a prompt), the state line (`drawState`, *The driver's state line*: a notice is no thread row since
 #1355, and no dialog cards since #1350) and the Settings and Stats cards (*How the chat works*: the story's `rule.*`; `#away-when` states the away rule
-above, `#away-prompts` (the story's `prompts`) that prompts are answered in the terminal and the line at the top says one waits; *This chat*, `lane`; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
-models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43).`, or that alone, #1022, #1135; the saving is the badge's
+above, `#away-prompts` (the story's `prompts`) that prompts are answered in the terminal and the line at the top says one waits; *This chat*, `lane`; `drawSaved` shows no currency sign, as `wb savings`, #845, and no API dollars, #1339 (History's This week has them); the saving is the badge's
 one line, `~3K Claude tokens saved this week`, #1322) are in `app.ts`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
 
@@ -7417,10 +7467,14 @@ views, `<section id="view-chat">` (the strip `#tasks`, `#hint`, `main#scroll`, `
 `#chat`, `#stats`, `#settings`, anything else (none too) the chat; `hashchange` switches (`setView`;
 a tab's press sets the hash, `go`), so Back walks them and a reload keeps its view. `<nav
 id="tabbar" aria-label="Primary">` holds three `button.tab[data-view]`, each a 24 px stroke icon
-over an 11 px `.tab-lbl`; the current one has `aria-current="true"`, colour and a 1 px lift. On a
+over an 11 px `.tab-lbl`; the current one has `aria-current="page"`, colour and a 1 px lift, and the
+page's title names the view (`drawTitle`: `Chat · Workbench`, `Stats · Workbench`, `Settings · Workbench`,
+after the unread count, `(1) Chat · Workbench`), each view with a hidden `<h1>` of its name (#1339: a screen
+reader user couldn't tell which view they were in). On a
 phone (≤600 px) it is the body's last flex child, under the composer, `56px` plus the safe area
 tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidden under
-`body.kb-open` so the composer sits on the keyboard (`fit`: the visual viewport 120 px short of
+`body.kb-open` so the composer sits on the keyboard (with the hint and the strip's extra lines;
+from 601 px the grid's rail column goes to 0 px, #1339) (`fit`: the visual viewport 120 px short of
 the layout one, as on iOS, or, while typing on a touch screen, of the tallest the page has been at
 this width, `full`, since Android's Chrome shrinks both under `interactive-widget=resizes-content`,
 #1414), `user-select:
@@ -7428,7 +7482,8 @@ none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail (an
 inset beside it, which the header, the thread, the composer and the views then don't pad for: inside
 76 px an iPhone held sideways had 16 px tabs and labels cut to 'C.', #1413), the header, banner and
 view beside it; the chat a 760 px column, Stats and Settings `.view-in` 1040 px of `.card`s, two
-columns (`.cards`) from 1100 px. The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
+columns (`.cards`) from 1100 px. Below 420 px of height (a phone held sideways) the header is shorter,
+its name and state on one line (#1339). The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
 to `.view-in`, never `.view`: `#view-chat` is a `.view` too, and its rows and the
 intro's `<code>` keep the chat's sizes. The Chat tab's `.tab-badge` counts Claude's messages and notices
 for the user newer than when the thread was left (`leftAt`, the server's clock; a
@@ -7454,7 +7509,10 @@ shown and hidden on each switch and on `visibilitychange`, and the view shown is
 `reshowView`, when the network comes back (`online`) or the stream does after a failure, #1412; a
 second registration is ignored),
 `toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
-`current()`. Each view's files are its own, so the two are built apart.
+`current()`. Beside it, a window event: `wb:open-task` with `detail: {task}` (#1339; `types.d.ts`'s
+`WindowEventMap`) shows the Chat view with the task sheet open on that task (`openTask`, as a tap on the
+strip and its row; focus on `#ts-back`), which Stats' Running rows dispatch. Each view's files are its own,
+so the two are built apart.
 
 **The Stats view** (#1285; `stats.ts`, `stats.css`; it took over the pane's Stats tab, *Seeing
 what the agent does*). `WB.view('stats', …)`: `mount` puts two sections in `#stats-body`, Now
@@ -7470,21 +7528,27 @@ stream that ended or was refused with no tick says why and dials again after `TO
 doubling to 60 s), one that ticked after 5 s. `hide` (the shell calls it on leaving the view and
 when the page is hidden) aborts both fetches and cancels the stream's reader, so the server stops
 `wb top`, and forgets the tick and the samples: shown again it says `Reading this machine…`, never
-the old tick (#552). With `live` off (`wb stats set live off`; no Settings row since #1322) Now isn't shown and no stream opens. **Now** is `liveLines`
+the old tick (#552). With `live` off (`wb stats set live off`; no Settings row since #1322) Now isn't shown and no stream opens. **Now** opens,
+once a role is on API (`routes.effective_via`'s rule) or any is spent, with one line of today's spend against the cap
+(`apiToday`, `.st-today`: `API today ≈$0.60 of $5`, or `· no day cap`; `routes`' `spend_today` and `day_usd`, #1339), then is `liveLines`
 as cards (`nowCards`): a card per GPU and for RAM (`GPU 0 <card's name>`, `cardName`; a memory bar
 and a busy bar, toned at 80 and 95 % as the pane's, watts, `GPU may wire`) with an
 SVG sparkline of the last `BUSY_KEEP` 60 busy samples, kept here per GPU (`busyKey`: the RAM row
 keeps none); Running (`▶ <task> <model> · phase · round · secs · tok/s · context% · $spend`, an API
-task's model by `modelWord`, `apiParts`: `$spend`, or `plan usage` on a plan, #1522, or `Nothing running.`); Models, the rack, the idle, can't-run
+task's model by `modelWord`, `apiParts`: `$spend`, or `plan usage` on a plan, #1522, or `Nothing running.`;
+each row a button, `openTask`, its look the row's, that dispatches `wb:open-task` (a `CustomEvent` on `window`,
+`detail: {task}`) for the shell to open the task sheet on it, #1339); Models, the rack, the idle, can't-run
 and remote ones folded past `RACK_FOLD_MIN` 2 into `+N more (wb top)` (#1322; no `another machine:
 no telemetry`); Queue. **The history** is `statsLines` ported label for label and in its order
 (`statsRows`): This week and All time (tasks, landed, the API dollars: `apiPeriod`, `API no known
-cost` or `API plan usage` with none known, no `(catalog prices)` note, the `≈` alone says it), the
-model lines capped at `STATS_SHOWN` 3 (each one's write trend an SVG sparkline), Other models, By
-size (`ROLE_WORDS`), What stopped agents (`GUARD_WORDS`;
+cost` or `API plan usage` with none known, no `(catalog prices)` note, the `≈` alone says it, the
+per-provider split only with two or more, #1339), the model lines capped at `STATS_SHOWN` 3 (tasks, landed,
+the mean rounds, `1 round` or `2.5 rounds`, minutes; each one's write trend an SVG sparkline), Other models, By
+size (each role by `wb route --json`'s `label`, `routes.LABELS`, Settings' names; `ROLE_LABELS`, a copy, while unread, #1339), What stopped agents (`GUARD_WORDS`;
 `spend` is `the API day cap`), What helps, Bench, Optimized; with no section, `No finished tasks
 yet: delegate one with /workbench, and how it went shows here.` The names follow the pane's
-`Names` (`modelWord`, `providerWord`, `usd`, `apiPeriod`): GPU labels from `models.gpu` and
+`Names` (`modelWord`, `providerWord`, `usd`, `apiPeriod`; an API model `API <id's last part> (<provider>)`, as the
+task strip's `taskOn` says it, #1339): GPU labels from `models.gpu` and
 `wb top`'s rack and running rows, provider names from `routes.providers` and `models.api`'s
 `provider_name`; `usd` is `meter.usd`'s rule. No score, saving, spec-gap discards, energy, streak,
 work absorbed, questions, Claude's tokens a task, 30 days' bars, bests or milestone: #1322 took
@@ -7496,15 +7560,34 @@ light and dark. What it saved (`#saved-card`) stays below, drawn by `app.ts`.
 **The task sheet** (#1201, `app.ts`'s `showTaskSheet`): away, the strip's one line was all the
 user saw of the work, and "is it on track?" cost a message to Claude. A tap (or Enter) on `#tasks`
 opens `#task-sheet` under it in `#view-chat` (closed by Esc, a tap outside, a strip gone empty or
-another view shown): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
+another view shown); from 1100 px (`docked`) it is a `--dock` 400 px column at the view's right instead,
+the chat padded for it (`body.ts-open`, `#jump` moved left of it), and a tap in the chat leaves it open
+(#1554: over the chat it covered the thread, the screen empty on both sides): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
 Diff and Log tabs fetch `GET /api/task` when opened (the diff's stat first, "Show the whole diff",
-one file at a time when it is `cut`). Nothing polls: a change in the stream's `tasks` (`sheetNews`)
-re-fetches only the open view, quietly, and Refresh asks again; a task gone says it is no longer
+one file at a time when it is `cut`; the Log scrolled to its newest row, and kept there by a quiet
+refetch unless the reader scrolled up, #1339; a quiet redraw keeps each box's scroll, the Log's, the
+diff's and the report's, and an opened 'Full report': the new boxes started at the top, a reader up the
+Log thrown to its oldest row on each step, #1559's review). Nothing polls: a change in the stream's `tasks` (`sheetNews`;
+for an open task, its own row's alone, `sheetKey`, whose `updated_at` counts only with the Log open: it
+re-ran git diff and redrew the Summary, the Diff and the list's focused row on each tool call) re-fetches only the open view, quietly, and Refresh
+asks again; the stream wakes on a task's own status write (`TASK_NEWS`, #1559), so the strip and the
+open sheet follow a task as it moves, and a running task's Log its steps; the focus stays where the user is
+(#1561): the Summary, Diff and Log tabs are one Tab stop (`tabIndex` 0 on the shown one), the arrows,
+Home and End moving between them and showing each (#1339, as Settings' radio groups); opening a row focuses `#ts-back`, Back the row of the task just left (`focusOn`), a quiet
+redraw of the list the row that had it (`dataset.task`), a redraw inside `#ts-body` the button of the
+same words or its first, and Escape from inside the sheet `#tasks` (it fell to `<body>`, and a screen
+reader said nothing); a task gone says it is no longer
 open. Its report, diff and log are agent-written, drawn with `textContent` and `<pre>` alone, never
 markup: the page holds the user's token, which changes their Settings, so markup an agent wrote
-would be a way to both. "Reply about this task" sets `about: {task}` (`setAbout`), so the next message
-reaches Claude as `[web chat] (about task <task>) …`; steering stays Claude's (`wb steer`), and the
-page never steers, edits or accepts.
+would be a way to both. The Summary leads with the phase, a failed or stuck task's `happened` line
+(the status's `last` after it only when it says more: never `opencode exited …` again), then the report's own lines (the agent's summary, `Files changed: …`, the tests' line), and the rest
+under a `Full report` `<details>` (open when the report has none of those lines) (#1339: it showed
+only `opencode exited 1 (see <path>/runner.log)`). "Reply about this task" is pinned to the
+sheet's foot (`.ts-foot`, sticky) and sets `about: {task}` (`setAbout`), so the next message
+reaches Claude as `[web chat] (about task <task>) …`; under it the next steps of the task's phase
+(`NEXT`, `drawNext`: `Why did it fail?`, `Try it again`, `Discard it` for a failed or stuck task,
+`Review it` for one in review) each fill the box, tagged with the task, for the user to send.
+Steering stays Claude's (`wb steer`), and the page never steers, edits or accepts.
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.ts` removes its link
 over http: localhost counts as secure and one computer got two apps); there the Settings card says how to get
 https, its `tailscale serve --bg 1337` drawn as code (`paraCode`: a line's backticked part as a `<code>`, #1323). The `badge` is
@@ -7657,7 +7740,9 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   (fixed)` (`settings.DRIVER_CLAUDE`);
   `role-<significant|trivial|writing>` → `wb route <role> gpu|api` (a role on API whose `api_status` says
   it can't run says `<Label> can't run on <id>: <why>.`, #1529); `coding` → `wb coding
-  only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`;
+  only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`, its note today's spend once a role is
+  on API or any is spent (`_spent_today`: `API tasks stop for the day at $5 of spend: ≈$0.12 so far today.`, #1339;
+  no `api-spend` row of its own since);
   `progress` → `wb progress on|off` (On names an `--after` threshold). *web* (the web app's own, "Web
   app" on the page and in `wb settings`, #1355): `reach` ("Web app reach", phone reach) → `wb chat reach local|tailnet` (`REACH`; a bind of the user's own reads
   `custom`, `REACH_CUSTOM`, a choice only then; chat.json that can't be read is a `reach-why`
@@ -7677,7 +7762,7 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   `api-connected` (info); `api-<role>` (the role's model, the others', those used, then the
   catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`; `think-<role>` (the
   pane's `thinkStops`) → `wb route <role> --thinking on|off`; `review-<role>`, only for a role with an
-  API model (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`; `api-spend` (info).
+  API model (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`.
 - *setup*, "What your agents get" (#1295 P1, `setup_rows`): read-only `info` rows from
   `context.agent_setup()` and `setup_said`: `setup-instructions`, `setup-skills` (with the
   library's line), `setup-plugins` (each plugin and its tools: allowed, the user's own),
@@ -7747,6 +7832,11 @@ The chat server's side of the web app's Stats and Settings views, the user's tok
 - `GET /api/stats`: `{feed: stats.feed() (wb stats --json, in-process), routes, models}`, the last two
   `settings.reads()` (the rows' cache of the two `--json` reads, or null), so the page names models
   as the pane's `namesNow` did.
+- `GET /api/phone-qr.svg`: the phone link (`chat.phone_url` of the server's port, *Phone reach*) as a QR code,
+  `image/svg+xml` (`qr.svg`: a 4-module quiet zone, black on white), `no-store` as every answer; 404 `no phone link: …
+  (wb chat reach tailnet)` while there is none. It carries the user's token, so an agent's token gets 403 (`AGENT_CANT`:
+  `read the user's phone link`); the page fetches it with the bearer header and shows it as a blob, since an `<img>`
+  sends none (#1552).
 - `GET /api/top`, server-sent events (`Handler._top`): `event: top` with one `wb top --json` line
   verbatim (the newest at once on connect), `event: down` `{why, retry}` (the child's last stderr
   line or `wb top ended (exit N)`, and the seconds until it is tried again), the 50 ms blank line
@@ -10139,7 +10229,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--default NAME`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. `--default NAME` (no prompt) sets images.json's `"default"` (*The default engines*). |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back\|reach]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy] [--waiting <json>]` (`chat.hold`, `waiting` the dialog up in its terminal, `{kind, tool, since, what?}`, #1355, exit 1 for another shape: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands, or exit 1 `the web chat is off: …` while it is, nothing written, #1480), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (the story's `note.waiting`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and ends with the page's state line word for word (`chat.driver_state`'s `line`: `Claude is listening in ~/p.`, `OpenCode is waiting for you in the terminal: a permission for bash.`, `No session is listening: messages wait.`, #1355); `reach [local\|tailnet]` (*Phone reach*: none prints `web app reach: local\|tailnet\|custom (…)`; `tailnet` refused, exit 1, nothing written, while Tailscale isn't up here or its address is on none of this machine's interfaces (`tailscale serve --bg <port>` named, #1499), else `web app reach: tailnet: http://<name>:<port>/ with the link's #token=… (`wb chat url`), within 30 s` and `https: served at https://<name>/ …` or `https: not served: … `tailscale serve --bg <port>` serves it on your tailnet only`; `local` drops the bind, its line naming a `tailscale serve` that still serves the tailnet and the command that stops it, #1512) | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690), and ends `--  ` + the story's `link.reach` while it opens on this machine alone and this OS has its own tailscale CLI (`cli.reach_hint`, #1355; never under WSL with Tailscale on Windows alone, which `reach tailnet` refuses, #1524); `off` stops only a server `on` started. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended\|listener\|away\|back\|reach]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `url` at a terminal adds the phone link's QR code under the link, `on your phone: <link>` before it when that isn't the link printed (`cli.chat_qr`, `chat.phone_url`, #1552; nothing without a phone link, never in `--json` or a pipe); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end); the OpenCode plugin's (#1319, *The web chat on OpenCode*): `listener <session> --pid <server pid> [--busy] [--waiting <json>]` (`chat.hold`, `waiting` the dialog up in its terminal, `{kind, tool, since, what?}`, #1355, exit 1 for another shape: `listening`, or exit 1 `standing by: <claude\|opencode> listens in <cwd>` while another live claim stands, or exit 1 `the web chat is off: …` while it is, nothing written, #1480), `listener --drop --pid` (`chat.drop`: `dropped`, or `not this server's`), a bare `listener` (the live claim as JSON, or `none`), `ack … --away` (and `chat/away.json` from now, `chat.went_away`), `away` (`away` or `here`, `chat.away` for `OPENCODE_SESSION_ID`'s session), `back` (`chat.back`: away.json `{at: 0}`); `notice` from an OpenCode session says `OpenCode is waiting for you in the terminal.` (the story's `note.waiting`, a row `driver: {tool: "opencode"}`, a reply's shape); `log` labels an OpenCode row `OpenCode` and ends with the page's state line word for word (`chat.driver_state`'s `line`: `Claude is listening in ~/p.`, `OpenCode is waiting for you in the terminal: a permission for bash.`, `No session is listening: messages wait.`, #1355); `reach [local\|tailnet]` (*Phone reach*: none prints `web app reach: local\|tailnet\|custom (…)`; `tailnet` refused, exit 1, nothing written, while Tailscale isn't up here or its address is on none of this machine's interfaces (`tailscale serve --bg <port>` named, #1499), else `web app reach: tailnet: http://<name>:<port>/ with the link's #token=… (`wb chat url`), within 30 s` and `https: served at https://<name>/ …` or `https: not served: … `tailscale serve --bg <port>` serves it on your tailnet only`; `local` drops the bind, its line naming a `tailscale serve` that still serves the tailnet and the command that stops it, #1512) | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690), and ends `--  ` + the story's `link.reach` while it opens on this machine alone and this OS has its own tailscale CLI (`cli.reach_hint`, #1355; never under WSL with Tailscale on Windows alone, which `reach tailnet` refuses, #1524); `off` stops only a server `on` started. |
 | `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one), `--queue` (accepted, a no-op: the sample queues behind the GPU's holders as any start does, #1251, #1322), `--force` (passed to wb start: the sample waits for a model whose server isn't up yet, else exit 3 with wb start's can't-run refusal, whose `--force` advice wb try once rejected as an unknown argument, #1297) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016) and `--no-sign`, set up by `wb init --no-sign` (a locked key failed it or hung it on a prompt, #1226), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) says so in wb start's model line (#1322: its own line went). |
 | `wb chat reply --turn-answer` | `--text`, `--to <id>` (again for more), `--if-owed` (the OpenCode plugin's: only the `--to` messages its session still owes, `chat.owed`; none: `not owed: the session replied`, exit 0; a post says `sent to the web chat: <ids>`; without `--turn-answer` and `--to`, exit 1) | The mod's: a turn's own answer for a web message it didn't reply to (*The web chat listener*, #1352): an `auto` row, cut to `chat.TURN_ANSWER_MAX` 4,000 characters (`chat.turn_answer`). The OpenCode plugin's the same, with `--if-owed` (*The web chat on OpenCode*). |
 | `wb init <dir>` | `--no-sign` (its commits unsigned, whatever `commit.gpgsign` says; else signed as accept's, `UNLOCK` at once for a locked key, #1226) | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`), no hooks run (#1254). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
@@ -10962,7 +11052,13 @@ said with no help; refused with nothing written while Tailscale is stopped or mi
 of the user's own `custom`; `local` with `tailscale serve` still in front naming its https and the
 command that stops it, with `REACH_LOCAL_HELP` (#1512); under WSL with only a `tailscale.exe`, `tailnet` refused naming
 `tailscale.exe serve --bg`, Windows' serve seen and no `reach_hint` (#1524); the `reach` row and its call; `cli.reach_hint`
-only while it opens here alone, with a tailscale CLI);
+only while it opens here alone, with a tailscale CLI; the phone link, serve's https before the tailnet name and none while
+local or down, `wb chat url`'s QR code at a terminal only, and `GET /api/phone-qr.svg` that link's SVG, 404 without one,
+401 and an agent's 403, #1552);
+`test_qr.py` (`qr.py`, #1552: Reed-Solomon, format and version bits from the standard's examples, every version's blocks
+filling its codewords, byte capacities, alignment positions, a version 1 symbol under each mask and a version 7 module for module as
+qrencode 4.1.1 made them, `tests/fixtures/qr-qrencode.json`; the smallest version, 2,332 bytes refused, the SVG's and the
+half blocks' modules and colours);
 `test_story.py` (*The story*: `gen_story.py --check` clean, a one-byte edit to either `story.ts`, README.md's block or a
 skill block failing it, the hosts' refusals byte for byte as each said them and imported from `mod/hooks/story.ts`, the
 skill blocks Claude Code's with OpenCode's in the module,
@@ -11235,8 +11331,12 @@ group; a number's Enter and Off; `help`'s toast; the layout at the phone's width
 WebKit sends such a page's fetches past Playwright's routes. While the server answers that path 404, a stand-in
 answers from `settings.rows()` and `settings.apply()` on the run's `WB_HOME`, with #1280's shapes and statuses, so
 the click still runs the real wb. What the chat is for (#1341): the empty state's words and no hint over it; over a
-thread the hint shows, dismisses, and stays dismissed after a reload, and where every storage call throws it still
-shows and dismisses with no page error. Sends land exactly once through
+thread the hint shows, hides while the state line shows and once a message is sent (#1339), dismisses, and stays
+dismissed after a reload, and where every storage call throws it still shows and dismisses with no page error; a
+phone's strip is one line of counts and names, and a 844×390 window has a short header and, with the keyboard up,
+no rail column (#1339). The starter chips and the hint's ✕ are 44 px, and a tap 5 px past the state line's Copy lands on it (#1339). With
+`reducedMotion: 'reduce'`, `#jump` is at the end a frame after the tap (#1339). At 1280×800 the open sheet is a column
+beside the thread and the box, and a tap in the chat leaves it open (#1554). Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
 `/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
 `computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
@@ -11804,13 +11904,14 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **Stats folds**: `top.FOLD`, `stats.STATS_MODEL_LINES`, `model_lines`' `more`/`older`/`variants`, `wb stats
   --json`'s and `wb top --json`'s keys → the web app's `stats.ts` (`RACK_FOLD`, `STATS_SHOWN`, its `statsLines`;
   *The Stats view*), and `cli.cmd_stats`.
+- **`routes.LABELS`** → `stats.ts`' `ROLE_LABELS` (By size's names while `wb route --json` is unread, #1339).
 - **`cli.CODING`** → the mod's `CODING_RULES`, the skill's *Claude coding* bullet.
 - **`savings.totals`' keys** → `drawSaved` (the web app); the cost's label (no currency sign) → `wb savings`,
   `drawSaved`.
 - **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share and badge
   GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, the web app's
-  `apiMoney`, `apiPeriod` (`stats.ts`), the chat's `apiSaved`; `meter.usd` → the mod's `usd`, `apiSaved`'s, `stats.ts`' `usd`; `meter.basis`' values
-  (`meter.BASES`: `catalog`, `yours`, `provider`) → the mod's `isEst`, tasks.ts' `est`, `apiSaved`'s `est`
+  `apiMoney`, `apiPeriod` (`stats.ts`); `meter.usd` → the mod's `usd`, `stats.ts`' `usd`; `meter.basis`' values
+  (`meter.BASES`: `catalog`, `yours`, `provider`) → the mod's `isEst`, tasks.ts' `est`, `stats.ts`' `isEst`
   (#1135); the `kind` default (`gpu`) →
   `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`). `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
   table and the round report's `agent tokens` (an API task's) together.

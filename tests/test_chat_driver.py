@@ -26,9 +26,9 @@ class DriverState(Base):
 
     def test_no_live_listener_is_none_named_by_the_last_driver_that_wrote_else_any(self):
         got = chat.driver_state(None, [])
-        self.assertEqual((got["state"], got["driver"], got["who"]), ("none", "any", "your driver"))
+        self.assertEqual((got["state"], got["driver"], got["who"]), ("none", "any", "Claude or OpenCode"))  # never "your driver" (#1339)
         self.assertEqual(got["line"], "No session is listening: messages wait.")
-        self.assertEqual(got["next"], "Start your driver in a terminal and run /workbench: it answers here.")
+        self.assertEqual(got["next"], "Start Claude Code or OpenCode in a terminal and run /workbench: it answers here.")
         rows = [{"id": "1", "from": "claude", "text": "hi", "ts": 1, "driver": {"tool": "opencode"}}]
         got = chat.driver_state(None, rows)
         self.assertEqual((got["state"], got["who"]), ("none", "OpenCode"))

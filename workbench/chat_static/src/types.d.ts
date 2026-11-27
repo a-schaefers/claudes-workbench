@@ -56,7 +56,11 @@ declare var WB: WbApi
 // ---- what lib.dom lacks that the page reads ----
 interface Navigator { readonly standalone?: boolean }  // iOS Safari: opened from the home screen
 interface BeforeInstallPromptEvent extends Event { prompt(): Promise<void>; readonly userChoice: Promise<unknown> }
-interface WindowEventMap { beforeinstallprompt: BeforeInstallPromptEvent; appinstalled: Event }
+interface WindowEventMap {
+  beforeinstallprompt: BeforeInstallPromptEvent; appinstalled: Event
+  // another view asks the chat to open a task's sheet (app.ts's openTask; stats.ts's Running rows, #1339)
+  'wb:open-task': CustomEvent<{ task: string }>
+}
 // a thumbnail waiting to come near the view, with what loads it (app.ts's whenNear)
 interface Near extends HTMLElement { wbLoad(): unknown }
 

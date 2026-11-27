@@ -20,7 +20,7 @@
     const UNITS = { usd: ['$', '/day'] };
     // the pane's toast, when a choice needs the driver's help: named as the state names it (#1355:
     // OpenCode's user read that Claude would offer), else the story's `any`
-    let who = 'your driver';
+    let who = STORY_DRIVERS['any'].who; // the story's `any`: both named, never "your driver" (#1339)
     const helpSaid = () => `${who.charAt(0).toUpperCase()}${who.slice(1)} will offer to set it up.`;
     let root = null;
     let rows = null; // the last rows the server sent

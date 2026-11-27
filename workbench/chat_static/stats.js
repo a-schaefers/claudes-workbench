@@ -16,7 +16,9 @@
     const SVG = 'http://www.w3.org/2000/svg';
     const NB = ' ';
     // ---- words: the pane's (its Names), so the terminal and the page agree ----
-    const ROLE_WORDS = { significant: 'complex', trivial: 'trivial', writing: 'writing' };
+    // a role's name, Settings' and the task sheet's: `wb route --json`'s `label` (routes.LABELS), this
+    // copy while it can't be read; the pane's `complex` was a second name for one role (#1339)
+    const ROLE_LABELS = { significant: 'Complex coding', trivial: 'Trivial coding', writing: 'English writing' };
     const GUARD_WORDS = {
         repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
         round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
@@ -54,14 +56,15 @@
         return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no known cost';
     }
     // The words one model or provider goes by (the pane's Names): a GPU model by its label, an API
-    // model as `API <provider's name> <the id's last part>`, a provider by its name; an id nothing
-    // named stays the id. From the roles and models /api/stats carries, and wb top's rack.
+    // model as `API <the id's last part> (<provider's name>)`, as the task strip says it (taskOn:
+    // Stats said `API deepinfra Fast-Coder-1` of the strip's `API Fast-Coder-1 (DeepInfra)`, #1339),
+    // a provider by its name; an id nothing named stays the id. From the roles and models /api/stats carries, and wb top's rack.
     const providerWord = (id, n) => n.providers[id] || id;
     function modelWord(id, api, n) {
         if (!api)
             return n.models[id] || id;
         const cut = id.indexOf('/'); // the provider ends at the first /
-        return cut > 0 ? `API ${providerWord(id.slice(0, cut), n)} ${id.split('/').pop()}` : `API ${id}`;
+        return cut > 0 ? `API ${id.split('/').pop()} (${providerWord(id.slice(0, cut), n)})` : `API ${id}`;
     }
     function apiPeriod(a, n) {
         const money = apiMoney(a);
@@ -69,8 +72,21 @@
             return '';
         const provs = Object.entries(a.by_provider ?? {}).filter(([, v]) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
             .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${providerWord(p, n)} ${estUsd(v.cost, v.prices)}`);
-        const inside = provs.join(' · ');
+        const inside = provs.length > 1 ? provs.join(' · ') : ''; // one provider's split said the total twice (#1339)
         return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no known cost' ? ` + ${a.unknown} with no known cost` : ''}`;
+    }
+    // Today's API spend against the day cap, the ledger's (`wb route --json`'s spend_today and
+    // day_usd): `API today ≈$0.60 of $5`. It decides whether API tasks stop, and sat 3.4k px down
+    // Settings (#1339's UX review, 2026-11-26). '' with no role on API and nothing spent.
+    const capMoney = (v) => (Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`); // routes.money
+    function apiToday(r) {
+        if (!r || typeof r.roles !== 'object' || !r.roles)
+            return '';
+        const spent = typeof r.spend_today?.usd === 'number' ? r.spend_today.usd : 0;
+        const use = r.use === 'gpu' || r.use === 'api' ? r.use : ''; // routes.effective_via
+        if (!spent && !Object.values(r.roles).some(x => (use || x?.via) === 'api'))
+            return '';
+        return `API today ${estUsd(spent, r.spend_today?.prices)}` + (typeof r.day_usd === 'number' ? ` of ${capMoney(r.day_usd)}` : ' · no day cap');
     }
     function apiParts(r) {
         if (r.via !== 'api')
@@ -83,11 +99,11 @@
     // row is its text. The score, the savings estimate, spec-gap discards, the energy and its cost,
     // the streak, the work absorbed, the questions, Claude's tokens a task, the 30 days, the bests and
     // the milestones were here too, as on the pane: precision nobody acted on, gone from the feed (#1322).
-    function statsRows(f, why, n) {
+    function statsRows(f, why, n, roles = ROLE_LABELS) {
         if (!f)
             return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…', retry: !!why }];
         if (why)
-            return [{ label: '', text: `Not updated: ${why} (wb stats --json)`, stale: true, retry: true }, ...statsRows(f, '', n)];
+            return [{ label: '', text: `Not updated: ${why} (wb stats --json)`, stale: true, retry: true }, ...statsRows(f, '', n, roles)];
         if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
             return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.', empty: true }];
         const out = [];
@@ -117,9 +133,10 @@
             const change = typeof m.write_change_pct === 'number' && m.write_change_pct
                 ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : '';
             const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w) => `${Math.round(w / 1024)}K`).join(', ')})` : '';
+            // rounds is a mean, said `1 round`: `1 rounds` read wrong (#1339's UX review, 2026-11-26)
             out.push({ label: word(model) + windows, trend: trend.length > 1 && Math.max(...trend) > 0 ? trend : null,
                 text: `${plural(m.tasks, 'task')} · ${m.accepted_pct}% landed` +
-                    (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
+                    (m.rounds != null ? ` · ${m.rounds} round${m.rounds === 1 ? '' : 's'}` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
                     speed + change });
         }
         const older = f.model_lines?.older;
@@ -139,7 +156,7 @@
             ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`;
         const sized = Object.entries(f.sizes ?? {});
         if (sized.length)
-            out.push({ label: 'By size', text: sized.map(([k, v]) => `${ROLE_WORDS[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') });
+            out.push({ label: 'By size', text: sized.map(([k, v]) => `${roles[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') });
         const guards = Object.entries(f.guards ?? {});
         if (guards.length)
             out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
@@ -200,6 +217,18 @@
         track.setAttribute('aria-valuenow', String(Math.round(frac * 100)));
         return el('div', 'st-meter', el('span', 'st-meter-l', label), track, el('span', 'st-meter-n', said));
     }
+    // A Running row is a button that opens the task sheet on its task: its ▶ read as a disclosure
+    // and did nothing, so a task was 3 taps from Stats, not 1 (#1339's UX review, 2026-11-26). It
+    // says so to the shell (`wb:open-task`, {task}), which opens the sheet as the strip's tap does.
+    // Its look stays the row's: stats.css is as it was, so the button's own face is undone here
+    function openTask(task, ...kids) {
+        const b = el('button', 'st-open', ...kids);
+        b.type = 'button';
+        Object.assign(b.style, { font: 'inherit', color: 'inherit', background: 'none', border: '0', padding: '0', margin: '0',
+            display: 'block', textAlign: 'left', textIndent: 'inherit', width: '100%', cursor: 'pointer' });
+        b.addEventListener('click', () => dispatchEvent(new CustomEvent('wb:open-task', { detail: { task } })));
+        return b;
+    }
     // a GPU's samples by its index; the RAM row has none, and kept under GPU 0's it drew GPU 0's line
     const busyKey = (g) => (g.ram ? 'ram' : String(g.index ?? 0));
     const card = (cls, title, ...kids) => el('div', `card ${cls}`, title ? el('h3', '', title) : null, ...kids);
@@ -239,7 +268,7 @@
                 typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
                 typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : '', ...apiParts(r)].filter(Boolean);
             const model = r.via === 'api' ? modelWord(String(r.model ?? ''), true, n) : r.label || r.model;
-            return el('li', 'st-run', el('span', 'st-mark claude', '▶'), el('b', '', String(r.task ?? '')), el('span', 'st-dim', ` ${model} · ${parts.join(' · ')}`));
+            return el('li', 'st-run', openTask(String(r.task ?? ''), el('span', 'st-mark claude', '▶'), el('b', '', String(r.task ?? '')), el('span', 'st-dim', ` ${model} · ${parts.join(' · ')}`)));
         })) : el('p', 'small', 'Nothing running.')));
         const rack = t.rack ?? [];
         const folds = rack.filter((m) => RACK_FOLD.has(m.state) && !(m.tasks ?? []).length);
@@ -328,13 +357,18 @@
         if (!nowBox)
             return;
         nowBox.hidden = !live();
-        nowBox.replaceChildren(...(live() ? [el('h2', 'st-h', 'Now'),
+        const today = apiToday(routes);
+        nowBox.replaceChildren(...(live() ? [el('h2', 'st-h', 'Now'), ...(today ? [el('p', 'small st-today', today)] : []),
             el('div', 'cards st-now', ...nowCards(snap && { ...snap, busy }, topWhy, names()))] : []));
     }
     function drawHistory() {
         if (!histBox)
             return;
-        histBox.replaceChildren(el('h2', 'st-h', 'History'), el('div', 'cards st-hist', ...historyCards(statsRows(feed, statsWhy, names()))));
+        const roles = { ...ROLE_LABELS };
+        for (const [k, r] of Object.entries((routes && routes.roles) || {}))
+            if (r && typeof r.label === 'string' && r.label)
+                roles[k] = r.label;
+        histBox.replaceChildren(el('h2', 'st-h', 'History'), el('div', 'cards st-hist', ...historyCards(statsRows(feed, statsWhy, names(), roles))));
     }
     function draw() { drawNow(); drawHistory(); }
     async function loadStats() {
