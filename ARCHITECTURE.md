@@ -10172,7 +10172,9 @@ item at review read as a report, discarded with its branch (#1470).
 an object of `runs.PARAM_KEYS` `{type, description, default, choices, optional}` as Goose's recipe parameters,
 #1295: a param left out takes its `default`, or stays absent when `optional`; `choices` for a string or int),
 `command` (below), `from` (a copy's), stages
-`items` or `from` (+ `split`), `keep`, `flow` pipeline|barrier, `batch`, `attempts`, `refix`, `on_failure`,
+`items` (a list, or `{params.<k>}` of a `runs.LIST_PARAMS` type, list, files, runs or json, a json one's value
+checked at the start by `runs._items_of`: a string or file param passed and was split into one task per
+character, #1601) or `from` (+ `split`), `keep`, `flow` pipeline|barrier, `batch`, `attempts`, `refix`, `on_failure`,
 `max_items` (`MAX_ITEMS` 200 distinct items, the rest `not_run`, named; a refix's reviews of one change, `1`,
 `1~r1`, …, count once, and an item started is never cut: #1484), `claude`, `final`, and `prompt` (the item's spec, by
 default `{item}`; `runs.render` only substitutes, an object as fenced JSON, each place cut at `runs.CUTS`, said).

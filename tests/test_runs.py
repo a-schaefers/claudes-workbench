@@ -484,6 +484,15 @@ class Flows(Base):
         self.assertIn("characters cut]", out)
         self.assertTrue(out.endswith(" {literal} P r/s"))
 
+    def test_a_stages_items_from_a_string_or_file_param_are_refused_by_the_params_name(self):
+        # #1601 (2026-11-27): items "{params.task}" over a string param passed, and list() made one
+        # task of each character of "Fix the login bug": 17 tasks, each a paid one on an API role
+        for t in ("string", "file", "int"):
+            self.assertIn(f"stage find: items {{params.areas}} is a {t} param: items need a list",
+                          self.errs(params={"areas": t, "focus": "string"}))
+        for t in runs.LIST_PARAMS:
+            self.assertEqual(self.errs(params={"areas": t, "focus": "string"}), "", t)
+
     def test_params_are_read_by_their_declared_type(self):
         self.assertEqual(runs.parse_params(AUDIT, ["areas=a, b"]), {"areas": ["a", "b"]})
         self.assertEqual(runs.parse_params(AUDIT, ['areas=["a"]']), {"areas": ["a"]})
@@ -580,6 +589,18 @@ class Customized(Base):
         self.assertEqual(store.all_tasks(), [])
         code, _, err = wb("run", "start", "dry", "--plan", str(plan), "--repo", str(self.repo), "--dry-run", "--param", "style=x")
         self.assertEqual((code, err.strip()), (1, "wb: --param style: one of unit, prop, not 'x'"))
+
+    def test_a_json_param_that_holds_no_list_is_refused_as_items_and_the_dry_run_starts_nothing(self):
+        # #1601 (2026-11-27): a value that is no list was split by list(), one task per character
+        plan = Path(self.tmp.name) / "one.json"
+        plan.write_text(json.dumps({"v": 1, "name": "one", "params": {"task": "json"}, "stages": [
+            {"id": "code", "kind": "code", "items": "{params.task}"}, {"id": "claude", "final": True, "from": "code"}]}))
+        for dry in (("--dry-run",), ()):
+            code, out, err = wb("run", "start", "one1", "--plan", str(plan), "--repo", str(self.repo), *dry,
+                                "--param", 'task="Fix the login bug"')
+            self.assertEqual((code, err.strip()), (1, "wb: stage code: items {params.task} holds a str, not a list"))
+            self.assertFalse(runs.run_dir("one1").exists())
+            self.assertEqual(store.all_tasks(), [])
 
     def test_a_run_started_in_a_subdirectory_reads_the_repo_from_its_top_and_starts_each_item_in_its_package(self):
         # #1494 (2026-11-26): from repo/src every flow command and deepcode was refused "is no git

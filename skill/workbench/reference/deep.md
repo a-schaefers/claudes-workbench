@@ -17,7 +17,8 @@ not on a repo's flow), `stages`. Each stage:
 - `card` (a role card) or `"kind": "code"`; `role` overrides the card's (significant, trivial,
   writing). A report stage returns one object to `schema` (the card's unless given) with `tools`
   read or none; a code stage changes code in its own worktree (`test`, `setup`, `ask`).
-- Its inputs: `items` (a list, or `"{params.<a list param>}"`), or `from` an earlier stage,
+- Its inputs: `items` (a list, or `"{params.<k>}"` of a list, files, runs or json param, never a
+  string or file one: refused), or `from` an earlier stage,
   `split` a key of each earlier output that holds a list (one item per entry).
 - `prompt`: the item's spec. Placeholders only substitute: `{item}`, `{item.<key>}`,
   `{params.<key>}`, `{context}`, `{diff}` (the code stage's change) and `{report}` (its coder's

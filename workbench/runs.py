@@ -48,6 +48,10 @@ STAGE_KEYS = ("id", "card", "kind", "role", "items", "from", "split", "keep", "f
               "attempts", "schema", "tools", "skills", "ask", "setup", "test", "refix", "on_failure",
               "max_items", "claude", "final", "prompt", "compare", "escalate", "unless_exists")
 PARAM_TYPES = ("string", "int", "list", "json", "file", "files", "runs")
+# the types a stage's `items: "{params.<k>}"` may name: their value is a list (a json one's checked
+# at the start). A string or file param passed validate and list() split its text into one task per
+# character, a paid one on an API role, up to max_items 200 (#1601, 2026-11-27)
+LIST_PARAMS = ("list", "files", "runs", "json")
 # a param is its type alone ("list"), or an object of these (#1295, Goose's recipe parameters):
 # `choices` for a string or int, `default` used when --param leaves it out, `optional` absent then
 PARAM_KEYS = ("type", "description", "default", "choices", "optional")
@@ -373,6 +377,9 @@ def validate(flow) -> list[str]:
             ph = placeholders(items)
             if len(ph) != 1 or ph[0][0] != "params" or ph[0][1] not in params or items.strip() != f"{{params.{ph[0][1]}}}":
                 errs.append(f"{where}: items is a list, or \"{{params.<a list param>}}\"")
+            elif (t := param_type(params[ph[0][1]])) not in LIST_PARAMS:
+                errs.append(f"{where}: items {{params.{ph[0][1]}}} is a {t} param: items need a list "
+                            f"({', '.join(LIST_PARAMS)})")
         elif items is not None and not isinstance(items, list):
             errs.append(f"{where}: items is a list, or \"{{params.<a list param>}}\"")
         # after a code stage, only a report over a code stage's {diff}, or the final: code waits
@@ -872,9 +879,15 @@ def item_open(spec: dict) -> bool:
 # --- the state: every item, from the flow, the journal and the tasks ---------------------------
 
 def _items_of(stage: dict, run: Run, params: dict) -> list:
+    """A stage's items; RuntimeError naming the param when its value is no list (a json param's
+    object or string), never list() of it: one task per character or key (#1601, 2026-11-27)."""
     items = stage.get("items")
     if isinstance(items, str):
-        items = (params or {}).get(placeholders(items)[0][1]) or []
+        k = placeholders(items)[0][1]
+        items = (params or {}).get(k)
+        if items is not None and not isinstance(items, list):
+            raise RuntimeError(f"stage {stage.get('id')}: items {{params.{k}}} holds a "
+                               f"{type(items).__name__}, not a list")
     return list(items or [])
 
 
@@ -2353,6 +2366,8 @@ def cmd_start(a) -> None:
     try:
         given = [*(parse_args(flow, a.args) if getattr(a, "args", None) else []), *(a.param or [])]
         params = parse_params(flow, given, repo, base)
+        for s in stages(flow):  # a json param that holds no list: refused, dry run or not (#1601)
+            _items_of(s, Run("-"), params)
         exists = existing(flow, params, repo, base)
     except (RuntimeError, gitops.GitError) as e:
         _die(str(e))
