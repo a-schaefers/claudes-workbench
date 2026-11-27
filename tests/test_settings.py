@@ -109,17 +109,26 @@ class Settings(Rows):
         self.assertEqual(says(), "API tasks stop for the day at $5 of spend: ≈$0.12 so far today.")
         self.assertNotIn("api-spend", [r["key"] for r in settings.rows(fresh=True)])
 
-    def test_each_role_has_a_card_of_its_own_its_gpu_and_api_model_and_thinking_under_more_1553(self):
+    def test_each_role_has_a_card_its_own_sides_model_on_it_the_other_and_thinking_under_more_1553_1626(self):
         # #1553 (2026-11-26): a role's GPU|API, GPU model, API model and thinking were in three
-        # cards, the API model 2,000 px below the choice that needed it
+        # cards, the API model 2,000 px below the choice that needed it; #1626 (2026-11-27): its GPU
+        # model under More read as a choice only Claude or Optimize could make
         rows = settings.rows()
         self.assertEqual(settings.GROUPS[:3], routes.ROLES)
-        for name in routes.ROLES:
+        for name in routes.ROLES:                                   # every role on the GPU here
             mine = [r for r in rows if r["group"] == name]
             self.assertEqual(mine[0]["key"], f"role-{name}")
             self.assertFalse(mine[0].get("more"))
             self.assertEqual({r["key"].partition("-")[0] for r in mine[1:]} - {"gpu", "api", "think", "review"}, set())
-            self.assertTrue(all(r.get("more") for r in mine[1:]))
+            self.assertEqual([r["key"] for r in mine[1:] if not r.get("more")], [f"gpu-{name}"])
+        doc = json.loads(self.routes.read_text())
+        doc["roles"]["trivial"]["via"] = "api"
+        self.routes.write_text(json.dumps(doc))
+        mine = [r for r in settings.rows(fresh=True) if r["group"] == "trivial"]
+        self.assertEqual([r["key"] for r in mine if not r.get("more")], ["role-trivial", "api-trivial"])
+        self.assertTrue(next(r for r in mine if r["key"] == "gpu-trivial").get("more"))
+        self.routes.write_text(json.dumps({**doc, "roles": {**doc["roles"], "trivial": {**doc["roles"]["trivial"], "via": "gpu"}}}))
+        rows = settings.rows(fresh=True)
         by = {r["key"]: r for r in rows}
         for key in ("gpu-trivial", "api-trivial", "think-trivial", "review-trivial"):
             self.assertEqual(by[key]["group"], "trivial", key)

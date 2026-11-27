@@ -117,9 +117,9 @@ THINK = [("off", "Off (default)", "Faster and cheaper; for tasks started after t
 REVIEW = [("off", "Off (default)", "An API task skips its own review round: Claude reviews its work."),
           ("on", "On", "With thinking off, an API task reviews its own change in one more round before "
            "Claude, that round alone thinking: it costs more; for tasks started after this.")]
-SIZES = [("all", "Any size (default)", "The router may give it any task."),
-         ("trivial", "Trivial only", "The router gives it trivial coding tasks only."),
-         ("significant", "Complex only", "The router gives it complex coding tasks only.")]
+SIZES = [("all", "Any size (default)", "For roles on Auto, the router may give it any task."),
+         ("trivial", "Trivial only", "For roles on Auto, the router gives it trivial coding tasks only."),
+         ("significant", "Complex only", "For roles on Auto, the router gives it complex coding tasks only.")]
 SPLASH = [("on", "Enabled (default)", "The first /workbench of a session opens with a short animation; any "
            "key skips it."),
           ("off", "Off", "The Tasks page opens at once.")]
@@ -582,8 +582,10 @@ def _build() -> dict:
     else:
         for name, label, row in roles:
             gpu = row.get("gpu") or routes.AUTO
+            # on the card while the role runs on the GPU, as its API model is while on API: under
+            # More it read as a choice only Claude or Optimize could make (#1626, the owner, 2026-11-27)
             out.append(_choice(f"gpu-{name}", name, label_of(f"gpu-{name}"), _gpu_stops(label, m["gpu"], gpu), gpu,
-                               more=True))
+                               more=row.get("via") == "api"))
         for g in m["gpu"]:  # every discovered model: the pane's six-row cap went with the pane
             sizes = g.get("sizes") or []
             out.append(_choice(f"size-{g['id']}", "gpu", f"{g.get('label') or g['id']} tasks", SIZES,
@@ -615,7 +617,8 @@ def _build() -> dict:
                 others = [x.get("api") for n, _, x in roles if n != name and x.get("api")]
                 api = row.get("api") or ""
                 stops = _api_stops(label, m, api, others)
-                c = _choice(f"api-{name}", name, label_of(f"api-{name}"), stops, api or None, other=True, more=True)
+                c = _choice(f"api-{name}", name, label_of(f"api-{name}"), stops, api or None, other=True,
+                            more=row.get("via") != "api")  # on the card while the role runs on API (#1626)
                 if not api:
                     c["says"] = f"{label} has no API model: it runs on the GPU."
                 out.append(c)
