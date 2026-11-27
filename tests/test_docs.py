@@ -465,7 +465,7 @@ class DocsFor20(unittest.TestCase):
         # 2026-11-27: "clearly use orchestrator agent vs subagents throughout"); links and
         # anchors (#what-the-agent-knows) aside
         import re
-        # code blocks aside: the README's diagram labels its boxes ORCHESTRATOR and SUBAGENT
+        # code blocks aside: a command or a file there names what it names
         prose = re.sub(r"```.*?```", "", readme, flags=re.S)
         prose = " ".join(re.sub(r"\]\([^)]*\)|<[^>]*>", "", prose).split())
         bare = [m.group(0) for m in re.finditer(r"(?<!sub)(?<!orchestrator )\bagents?\b", prose, re.I)]
