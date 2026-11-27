@@ -61,7 +61,7 @@ mark it `shadows shipped`, and `shipped changed since` once an update changed th
 read the new one and merge, or `wb flow reset <name>` / `wb card reset <name>` to use it again
 (yours is kept as `.bak`, `.bak.2` when that is taken: the reset line names it). `wb flow diff <name>` and
 `wb card diff <name>` show what a copy changed; the web app's Settings list the user's own under
-Dynamic workflows, More, with Diff, Reset and Ask Claude, which arrives as a request to edit the file.
+Dynamic workflows, More, with Diff and Reset; its ask button arrives as a request to edit the file.
 
 ## Scheduled
 `wb schedule add <name> --flow <flow> [--param k=v] [--budget-usd N] --repo DIR --at 'Sun 02:00'`:
