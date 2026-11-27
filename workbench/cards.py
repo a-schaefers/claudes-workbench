@@ -296,6 +296,36 @@ def copy_shipped(shipped: Path, dest: Path, force: bool = False) -> str:
     return f"copied the shipped {shipped.stem} to {dest}: yours now, edit it there (from {sha[:12]})"
 
 
+DIFF_CHARS = 16_000  # a diff past this is cut, as a run's Summary is (settings.RUN_DETAIL_CHARS)
+
+
+def _without_from(path: Path) -> list[str]:
+    """A card's, schema's or flow's lines as compared: its `from` left out, a JSON file as
+    copy_shipped writes it (indent 2), so a copy untouched has no diff."""
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".json":
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            return text.splitlines(keepends=True)
+        if isinstance(doc, dict):
+            doc.pop("from", None)
+        return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").splitlines(keepends=True)
+    return [ln for ln in text.splitlines(keepends=True) if not ln.startswith("from: ")]
+
+
+def diff_shipped(shipped: Path, mine: Path) -> str:
+    """What the user's copy changed from the shipped one (#1463 P6): a unified diff, shipped then
+    yours, `from` left out; "" for none. RuntimeError when either is missing."""
+    import difflib
+    if not mine.is_file():
+        raise RuntimeError(f"no {mine.stem} of yours ({mine.parent}): the shipped one is used")
+    if not shipped.is_file():
+        raise RuntimeError(f"{mine} is your own, with nothing shipped by its name to compare")
+    return "".join(difflib.unified_diff(_without_from(shipped), _without_from(mine),
+                                        f"shipped/{shipped.name}", f"yours/{mine.name}"))
+
+
 def reset_shipped(shipped: Path, mine: Path) -> str:
     """Put the shipped one back: the user's copy moved aside to <file>.bak (.bak.2, .bak.3, … when
     taken), never deleted."""
@@ -349,10 +379,21 @@ def cmd_card(a) -> None:
     try:
         if a.card_cmd == "copy":
             print(copy_shipped(shipped_dir / f"{a.name}{ext}", mine_dir / f"{a.name}{ext}", a.force))
+        elif a.card_cmd == "diff":
+            print(diff_said(diff_shipped(shipped_dir / f"{a.name}{ext}", mine_dir / f"{a.name}{ext}"), a.name))
         else:
             print(reset_shipped(shipped_dir / f"{a.name}{ext}", mine_dir / f"{a.name}{ext}"))
     except (RuntimeError, OSError, ValueError) as e:
         die(str(e))
+
+
+def diff_said(diff: str, name: str) -> str:
+    """wb card|flow diff's output: a first line (the web's toast), then the diff, cut at DIFF_CHARS."""
+    if not diff:
+        return f"{name}: yours is the shipped one, unchanged"
+    n = sum(1 for ln in diff.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---")))
+    body = diff if len(diff) <= DIFF_CHARS else diff[:DIFF_CHARS] + "\n… (cut)\n"
+    return f"{name}: {n} line(s) changed from the shipped one\n{body.rstrip()}"
 
 
 def handbook(card: dict, base: str) -> str:

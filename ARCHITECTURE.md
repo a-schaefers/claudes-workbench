@@ -7993,7 +7993,13 @@ ask before an offer over an hour old (#1557's review): a key added to `HELP` nee
   (`runs.snapshot`), its text `settings.run_text` (flow, phase, `(no driver)` when open with none, each stage's
   counts, spend of the budget, GPU minutes, why when not running), its choices `stop` (`RUN_STOP`, only while
   open, `runs.OPEN`) → `wb run stop <run>` and `summary` (`RUN_SUMMARY`, the morning's look at an overnight run)
-  → `wb run report <run>`, the answer's `detail`; `flows` (info: the shipped and the user's flows, `FLOWS_SAY`).
+  → `wb run report <run>`, the answer's `detail`; `flows` (info: the shipped and the user's flows, `FLOWS_SAY`);
+  Customize (#1463 P6, `settings._mine_rows`, under More): `mine-card-<name>` and `mine-flow-<name>` per card and flow of
+  the user's own, its text the mark (`Yours, shadows shipped[; shipped changed since]` or `Yours, your own`) and
+  description; a shipped one's copy is an action, `diff` (`MINE_DIFF`) → `wb card|flow diff <name>`, the answer's
+  `detail`, and `reset` (`MINE_RESET`) → `wb card|flow reset <name>`; one of the user's own an info row; each
+  `ask`s Claude to change it (its path in the draft: an edit is the driver's, no editor in the page). Like a run's,
+  neither is recorded as a change (`NOT_RECORDED`).
 - *terminal*: `splash` → `wb splash on|off`. *experimental*: `probe` → `wb experiment probe on|off`.
 
 Dropped: the pane's web chat switch (the web app is always on) and Wake Claude (a plugin option, set
@@ -10200,7 +10206,10 @@ fix; schemas `agent/schemas/` findings (`maxItems` 12), verdict, judgments, revi
 `from` the shipped file's git blob sha, `cards.blob_sha`, computed without git) and set it aside (`.bak`, then `.bak.2`, `.bak.3`… when taken, #1520: never
 deleted); `wb card list` and `wb run flows` mark a copy `shadows shipped`, and `; shipped changed since` once a `wb
 update` moved the shipped blob (`cards.shadow_mark`), so an improved shipped one is never lost unseen behind an
-older copy (Goose's prompt templates' customized and reset).
+older copy (Goose's prompt templates' customized and reset). `wb card diff <name> [--schema]` and `wb flow diff
+<name>` (#1463 P6, `cards.diff_shipped`) print what a copy changed, a unified diff shipped → yours with `from` left
+out and JSON as `copy_shipped` writes it (an untouched copy: none), its first line the count (`cards.diff_said`),
+cut at `DIFF_CHARS` 16,000; the web app's Customize rows (*The admin table*) show it.
 
 **Report tasks** (`wb start --report`, a report card, or a run's report stage). Read-only: the lane leaves the
 worktree out of `context.writable` (still readable as part of the task dir; `external_rules` allows it), the
@@ -10511,6 +10520,8 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb card list` | `--schema` | Every role card (`cards.rows`): yours (`$WB_ROLES`) or shipped, with the same marks as `wb run flows`, and its description; `--schema` the schemas (`$WB_ROLES/schemas`, `agent/schemas`). |
 | `wb card copy <name>` | `--force`, `--schema` | A shipped card (or schema) to yours to edit, with `from` (a card's frontmatter key, a schema's top-level one, which `schema.load` drops); as `wb flow copy`. |
 | `wb card reset <name>` | `--schema` | The shipped card (or schema) again: yours moved to `.bak`; as `wb flow reset`. |
+| `wb card diff <name>` | `--schema` | #1463 P6: what yours changed from the shipped card (or schema), `cards.diff_shipped`; refused with no copy or nothing shipped. |
+| `wb flow diff <name>` | | #1463 P6: what yours changed from the shipped flow; as `wb card diff`. |
 | `wb flow import <file.md>` | `--name NAME` (the file's), `--card NAME` (a code stage without), `--out FILE` (`$WB_FLOWS/<name>.json`), `--force` | *Deep workflows*: a slash command's Markdown as a flow of yours (`runs.import_command`): one stage over `--param items`, `$ARGUMENTS` as `{item}`. Refuses a positional `$1`, a file there already without `--force`, a flow `runs.validate` refuses. A directory, a git URL or `owner/repo` that isn't a `.md` is a bundle (#1463 P7, *Sharing a flow*). |
 | `wb flow export <name>` | `--to DIR` (`./<name>`, new or empty) | *Sharing a flow* (#1463 P7): the flow, the user's own cards and schemas it names, the library skills those cards name, and `bundle.json`. |
 | `wb flow import <dir\|url>` | `--install` (the directory it printed, once read), `--force` (over the user's own) | *Sharing a flow*: fetched (`skills.fetch`: a clone into `imports/`), checked (`runs._bundle_files`), scanned (`scan.scan`), listed for Claude to read; `--install` puts flows, cards and schemas in place (`runs.install_bundle`) and names each skill's `wb skill import`. |

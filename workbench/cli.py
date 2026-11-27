@@ -10309,6 +10309,7 @@ def parser() -> argparse.ArgumentParser:
                        "copy a shipped one to customize, or reset yours")
     fs = s.add_subparsers(dest="flow_cmd", required=True)
     for verb, what in (("copy", "a shipped flow to $WB_FLOWS as yours, to edit (its `from` records the shipped one)"),
+                       ("diff", "what yours changed from the shipped flow (#1463 P6)"),
                        ("reset", "use the shipped flow again: yours moved aside to <file>.bak")):
         x = fs.add_parser(verb, help=what)
         x.add_argument("name")
@@ -10337,6 +10338,7 @@ def parser() -> argparse.ArgumentParser:
     cs = s.add_subparsers(dest="card_cmd", required=True)
     for verb, what in (("list", "every card: yours, shipped, and yours that shadow a shipped one"),
                        ("copy", "a shipped card to $WB_ROLES as yours, to edit (its `from` records the shipped one)"),
+                       ("diff", "what yours changed from the shipped card (#1463 P6)"),
                        ("reset", "use the shipped card again: yours moved aside to <file>.bak")):
         x = cs.add_parser(verb, help=what)
         if verb != "list":

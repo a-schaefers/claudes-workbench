@@ -3166,12 +3166,15 @@ def cmd_flows(a) -> None:
 
 
 def cmd_flow_copy(a) -> None:
-    """wb flow copy|reset <name> (#1295): a shipped flow to customize as yours, or yours set aside."""
+    """wb flow copy|diff|reset <name> (#1295; diff #1463 P6): a shipped flow to customize as yours,
+    what yours changed, or yours set aside."""
     if not RUN_RE.match(a.name or ""):
         _die(f"{a.name!r}: a flow's name is lowercase letters, digits and hyphens, at most 24")
     try:
         if a.flow_cmd == "copy":
             print(cards.copy_shipped(SHIPPED / f"{a.name}.json", flows_dir() / f"{a.name}.json", a.force))
+        elif a.flow_cmd == "diff":
+            print(cards.diff_said(cards.diff_shipped(SHIPPED / f"{a.name}.json", flows_dir() / f"{a.name}.json"), a.name))
         else:
             print(cards.reset_shipped(SHIPPED / f"{a.name}.json", flows_dir() / f"{a.name}.json"))
     except (RuntimeError, OSError, ValueError) as e:
