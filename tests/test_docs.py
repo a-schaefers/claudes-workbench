@@ -429,11 +429,15 @@ class DocsFor20(unittest.TestCase):
     says so; an API-only user read "A local model" as "not for me"."""
 
     def test_the_readme_pitch_names_the_api_and_the_gpu(self):
+        # #1357 (2.2): the pitch leads with OpenCode, either host drives, and the pinned clause
+        # (the owner, 2026-11-23: agents, not subagents) stays word for word
         readme = (ROOT / "README.md").read_text()
-        self.assertIn("**Claude orchestrates. OpenCode agents via API or GPU write the code.**", readme)
-        self.assertIn("**Claude is the lead, your OpenCode agents are the crew:**", readme)
-        self.assertIn("- A model: one you connected in OpenCode (`/connect`), or a local one.", readme)
+        self.assertIn("**Workbench is a harness: OpenCode agents via API or GPU write the code.**", readme)
+        self.assertIn("Drive them from OpenCode with any model, or from Claude Code with `/workbench`.", readme)
+        self.assertIn("**The crew** are OpenCode agents, on your GPU or an API model.", readme)
+        self.assertIn("- A model for the agents: one you connected in OpenCode (`/connect`), or a local one.", readme)
         self.assertNotIn("local LLM", readme)
+        self.assertNotIn("subagent", readme)
 
     def test_the_plugin_description_says_opencode_agents_not_local_ones(self):
         import json
@@ -488,7 +492,7 @@ class DocsForTheWebApp(unittest.TestCase):
 
     def test_the_readme_quickstart_names_the_web_apps_settings_and_stats_and_its_link(self):
         readme = (ROOT / "README.md").read_text()
-        quick = readme[readme.index("## Quickstart"):readme.index("## License")]
+        quick = readme[readme.index("## Quickstart"):readme.index("## What it does")]
         self.assertIn("Settings and Stats live in the web app", quick)
         self.assertIn("`[•_•] Claude's Workbench - http://localhost:1337/#token=…`", quick)
         self.assertIn("`wb chat reach tailnet`", quick)  # #1355's phone reach: chat.json's `bind` by command
