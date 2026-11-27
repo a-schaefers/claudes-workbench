@@ -1225,6 +1225,36 @@ def _siblings(rows: list, me: dict, key: str) -> list[store.Task]:
             and (t := store.Task(r["task"])).exists]
 
 
+def _base_item(key: str) -> str:
+    """The item a try belongs to: ``key`` without its escalation (`#e<k>`, escalation_key's)
+    and then its attempt (`#a<n>`)."""
+    return re.sub(r"#a\d+\Z", "", re.sub(r"#e\d+\Z", "", key))
+
+
+def tries_of(task: store.Task):
+    """``task``'s tries at its code item, itself among them, as the hand-back groups them:
+    (its run, the stage, the item, the tasks that still exist, in start order), or None for a
+    task with no other try. A compare item's attempts (`#a`) and an escalation's (`#e`) with
+    the try it escalated from are alternatives for one change: _attempt_of saw `#a` alone, so
+    the hand-back of a fix-escalate run had Claude finish and accept the failed or superseded
+    try and its escalation both (#1592, 2026-11-27). _attempt_of stays `#a`'s, for not_chosen:
+    a failed cheap try is its model's failure, never a loss to the pick."""
+    name = task.spec.get("run")
+    if not (isinstance(name, str) and RUN_RE.match(name) and Run(name).exists):
+        return None
+    run = Run(name)
+    rows = [r for r in run.journal() if r.get("kind") == "item" and isinstance(r.get("task"), str)]
+    me = next((r for r in rows if r["task"] == task.name), None)
+    if me is None:
+        return None
+    item = _base_item(str(me.get("key") or ""))
+    mine = [r for r in rows if r.get("stage") == me.get("stage") and _base_item(str(r.get("key") or "")) == item]
+    if len({r.get("key") for r in mine}) < 2:  # one try (a start the cap held, then made again, is one)
+        return None
+    tries = [t for n in dict.fromkeys(r["task"] for r in mine) if (t := store.Task(n)).exists]
+    return run, me.get("stage"), item, tries
+
+
 def _chosen(run: Run, rows: list, stage: str, item: str) -> str | None:
     """The label (a1..aN) a compare stage over code stage ``stage`` named best for ``item``: its
     result's `best`, else its `ranking`'s first; None before a chooser answered."""

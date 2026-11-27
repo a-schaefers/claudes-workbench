@@ -951,6 +951,30 @@ class Runs(Base):
             if store.Task(n).exists:
                 run_wb("discard", n)
 
+    def test_the_hand_back_names_a_fix_escalate_items_attempts_as_alternatives(self):
+        # #1592 (bar loop #1030, 2026-11-27): only a compare item's `#a` attempts were grouped, so
+        # after an escalation (`#e1`) the hand-back said "wb accept (it commits)" for the failed
+        # cheap try and its escalation both: Claude finished and committed two competing fixes
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"fe-code-1": "crash", "fe-code-2": "hang"})
+        run_wb("run", "start", "fe", "--flow", "fix-escalate", "--param", 'findings=["answer.txt must hold 42"]',
+               "--repo", str(self.repo))
+        self.wait_item("fe-code-2", lambda st: bool(st.get("session")), timeout=90)
+        self.assertEqual(store.Task("fe-code-2").spec.get("item"), "1#e1")
+        self.assertEqual(store.Task("fe-code-1").status.get("phase"), "failed")
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertTrue(alts.startswith("took over fe-code-1, fe-code-2"), alts)  # the hosts' turn keys on it
+        self.assertIn("the run escalated fe-code-1 to fe-code-2", alts)
+        self.assertIn("wb accept only it", alts)
+        self.assertIn("then wb discard fe-code-1", alts)
+        self.assertNotIn("not chosen", alts)                              # a failed try lost to no pick
+        for n in ("fe-code-1", "fe-code-2"):
+            self.assertNotIn(f"wb accept {n} ", out)
+            self.assertNotIn(f"took over {n}: the agent is stopped", out)
+        for n in runs.run_tasks(runs.Run("fe")):
+            if store.Task(n).exists:
+                run_wb("discard", n)
+
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
         seq.write_text(json.dumps([

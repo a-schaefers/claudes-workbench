@@ -4982,10 +4982,11 @@ def cmd_takeover(a):
                 continue
             # a compare item's attempts are alternatives for one change: each said apart, with its
             # own "wb accept (it commits)", a hand-back of a best-of run had Claude finish and
-            # merge all three (#1576, the 2.2 bar, 2026-11-26): one line for them, by run and item
-            if (at := runs._attempt_of(task)) is not None and not task.spec.get("report"):
-                run, _rows, me, key = at
-                attempts.setdefault((run.name, me.get("stage"), key.rsplit("#a", 1)[0]), []).append(task.name)
+            # merge all three (#1576, the 2.2 bar, 2026-11-26): one line for them, by run and item;
+            # an escalation and the try it escalated from too (#1592, 2026-11-27)
+            if (at := runs.tries_of(task)) is not None and not task.spec.get("report"):
+                run, stage, item, _tries = at
+                attempts.setdefault((run.name, stage, item), []).append(task.name)
             else:
                 print(_took_over_line(task))
             _say(aside)  # after its line: "took over" opens the line the mod and plugin key on
@@ -5047,18 +5048,28 @@ def _took_over_line(task: store.Task) -> str:
 
 
 def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
-    """--all's one line for the attempts it took over at one compare item (#1576): one is kept,
-    the rest discarded, which records them as not chosen (runs.not_chosen), never as rejected."""
-    rest = [t.name for t in runs._siblings(*runs._attempt_of(store.Task(names[0]))[1:])
-            if t.name not in names]
+    """--all's one line for the tries it took over at one code item (runs.tries_of): a compare
+    item's attempts (#1576), one kept, the rest discarded, which records them as not chosen
+    (runs.not_chosen), never as rejected; or an escalation and the tries it escalated from
+    (#1592), the latest kept, the earlier ones discarded, no pick to count them against."""
+    tries = runs.tries_of(store.Task(names[0]))[3]
+    rest = [t.name for t in tries if t.name not in names]
     kept = [n for n in rest if store.Task(n).status.get("phase") == "accepted"]
     where = f"item {item} of stage {stage} in run {run}"
+    escalated = not any("#a" in str(t.spec.get("item") or "") for t in tries)
     if kept:  # the pick is in: these lost to it
-        return (f"took over {', '.join(names)}: the agents are stopped. Attempts at {where}, whose "
-                f"{kept[0]} is accepted: wb discard each of these (they count as not chosen)")
+        return (f"took over {', '.join(names)}: the agents are stopped. "
+                + ("Tries" if escalated else "Attempts") + f" at {where}, whose {kept[0]} is accepted: "
+                "wb discard each of these" + ("" if escalated else " (they count as not chosen)"))
     others = [n for n in rest if store.Task(n).status.get("phase") not in store.CLOSED]
     if len(names) == 1 and not others:  # the last attempt left: no alternative to weigh
         return _took_over_line(store.Task(names[0]))
+    if escalated:  # the run's own pick: its latest try, started from the base on the next role
+        live = [t.name for t in tries if t.name in names or t.name in others]
+        last, earlier = live[-1], live[:-1]
+        return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for one "
+                f"change, {where}: the run escalated {', '.join(earlier)} to {last}. Finish {last} in its "
+                f"worktree and wb accept only it -m \"…\" (it commits), then wb discard {', '.join(earlier)}")
     return (f"took over {', '.join(names)}: the agents are stopped. "
             + ("They are alternatives" if len(names) > 1 else "It is one of the alternatives")
             + f" for one change, the attempts at {where}"
