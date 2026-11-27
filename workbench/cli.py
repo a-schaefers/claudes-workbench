@@ -571,6 +571,8 @@ def reap(task: store.Task, quiet: bool = False) -> bool:
         except (ProcessLookupError, PermissionError):
             pass
     runner.sweep(task)
+    if not far:  # a self-review's edits aside, as wb stop's (#1610); another machine's tree isn't here
+        runner.stopped_aside(task, "its runner died")
     runner.hands_off(task)  # the agent is gone: what is written next is Claude's (#1179)
     ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
@@ -649,7 +651,7 @@ def _stop_for_update(tasks) -> str:
             if t.status.get("phase") in store.CLOSED or (t.status.get("pid") and store.elsewhere(
                     t.status) and runner_alive(t)):
                 continue  # another machine's live runner (#849): that machine's wb stops it
-            _stop_runner(t)
+            _stop_aside(t, "wb update --stop")  # a self-review's edits aside, as wb stop's (#1610)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": UPDATE_STOP})
             # `infra`: not the step's, so a discard (the wake offers one) isn't scored as the
@@ -2326,10 +2328,15 @@ def cmd_feedback(a):
     pictures = _keep_images(task, shown, n)
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
-                    # an infra stop's resume carries a self-review on as wb resume's does (#1228)
-                    # and after an env skip: no review counted, the pane's "resumed" (#1257)
+                    # an infra stop's or an env skip's: no review counted, the pane's "resumed"
+                    # (#1228, #1257), but never a self-review's green tree carried on: this round
+                    # is Claude's ask, not the self-review's. Carried, a quit on the green tree
+                    # (nothing set aside, no `rewound_to`) held the feedback round to it, and its
+                    # failing tests set the asked change aside as the self-review's under a
+                    # tests: PASS notice, which wb accept committed without (#1610, 2026-11-27);
+                    # wb resume, the carry-on itself, still carries it
                     **({} if unsent else {"round_for": "feedback"} if not (resumed or env) else
-                       {"round_for": "resume", "self_review_tree": runner.carried_tree(task)}),
+                       {"round_for": "resume", "self_review_tree": None}),
                     **({"step_note": None} if step else {}),  # #1300
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0, **pictures)
@@ -2623,7 +2630,9 @@ def cmd_next(a):
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"Step {step} of this task is done and committed ({commit or 'no changes to commit'}). "
-        "The next step:\n\n"
+        # after a rewind or a self-review's set-aside (#1610): its edits are in no commit
+        + (f"{REWOUND_LINE.format(st['rewound_to'])} " if st.get("rewound_to") else "")
+        + "The next step:\n\n"
         + nxt.rstrip()
         + protocol_for(spec).format(branch=spec["branch"], test_line=test_line(test), budget=budget,
                                     schema=context.rules_dir(task) / SCHEMA_FILE,
@@ -2978,6 +2987,8 @@ def cmd_wait(a):
                 if phase != "asking":  # a question always has its notice, which carries its id
                     print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
                     return
+        elif batch and (left := _batch_left(batch)):
+            die(f"nothing left running in backlog {batch}: {left} wait on you; the batch is done", 2)
         elif not any(t.status.get("phase") not in store.CLOSED and t.name not in theirs
                      for t in store.all_tasks()) and (batch or not any(
                          r.open() for r in runs._runs_in_scope(a))):
@@ -2988,6 +2999,26 @@ def cmd_wait(a):
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
         watcher.wait(min(60.0, deadline - time.time()) if deadline else 60.0)
+
+
+def _batch_left(batch: str) -> str:
+    """The open tasks of backlog ``batch`` ("bl2 (review), bl3 (stuck)") when each waits on
+    Claude with no runner, every notice of theirs claimed by then (wb wait prints an unclaimed one
+    first), else "": none queued (--after too), running, testing or asking. The batch is done,
+    what is left for the morning. Review, stuck and failed aren't CLOSED, so a task left in
+    review with `wb note`, as driving.md says, kept the fire's `wb wait --backlog` saying "timed
+    out" every 280 s, a paid turn each, until FIRE_HOURS stopped it with no summary posted (#1613,
+    bar loop #1030 round 6, M4, 2026-11-27)."""
+    open_ = [t for t in store.all_tasks() if t.spec.get("backlog") == batch
+             and t.status.get("phase") not in store.CLOSED]
+    if not open_ or any(t.status.get("phase") not in ("review", "stuck", "failed") or runner_alive(t)
+                        # another wb reaping it writes the phase before the notice (as cmd_wait's
+                        # named wait, the 0.90 review)
+                        or t.status.get("last") == RUNNER_DIED
+                        and time.time() - (t.status.get("updated_at") or 0) < 10
+                        for t in open_):
+        return ""
+    return ", ".join(f"{t.name} ({t.status['phase']})" for t in open_)
 
 
 def _wait_run(a, deadline) -> None:
@@ -3359,46 +3390,20 @@ LIVE = ("queued", "running", "testing", "asking")
 
 def _stop_aside(task, how: str, committed: bool = False) -> str:
     """_stop_runner, and for a runner stopped mid self-review off its green tree runner.set_aside's
-    one rule: its files kept as review tree `<n>s`, the green tree put back (status `tests`
-    stays the green round's: the tests aren't rerun, Claude's Bash stops at 2 minutes) and the
-    line naming `wb rewind <task> <n>s`, else "". wb stop, wb stop --all and wb takeover left the
-    unfinished tree, a check maybe still commented out, under a tests:ok that wb accept committed
-    without a word (#1582, bar loop #1030 round 3, 2026-11-26). Any round but one the runner
-    ended in review: only the runner sets review, after its own finish (its tests passing) or its
-    own set_aside, so a stuck or failed self-review is an outside stop. Gated on liveness, a
-    runner already dead (wb update --stop, a logout's SIGTERM: stuck, the runner gone) left the
-    unfinished tree to wb takeover and the hand-back under tests:ok, which wb accept committed
-    (#1582, 2026-11-26). ``committed``: wb accept --force's, set_aside's line for a tree it
-    commits next (#1596).
-
-    A round whose tree this step already keeps (`<n>s`, an earlier stop's set-aside; `<n>`, a
-    review of it or a rewind's save) is over: what is on disk since is Claude's or the user's
-    (a wb rewind, an editor). Counted live by its phase alone, wb stop then wb rewind <t> 2s
-    then the wb accept --force the rewind names committed the green tree, not the one Claude
-    chose, under a false "stopped mid-check" line, and a second stop or a takeover set aside
-    the user's own edits over the first 2s (#1596's review, 2026-11-27).
-
-    A round an earlier stop already handled is over too, whatever set_aside made of it (status
-    `aside_done`, its step, round and `round_started_at`, so the next round, or the runner
-    starting this one again, is live once more): a wb stop on the green tree (the self-review had
-    only read) kept nothing, so the user's edits in an editor were set aside as 2s by the
-    wb accept --force wb's refusal names, the green tree committed under a false "its edits"
-    line, and the review refs dropped with them (#1596's review, round 2, 2026-11-27). A round
-    only wb update --stop or a signal ended never gets the mark: its takeover still puts the
-    green tree back (#1582)."""
-    st = task.status
-    n = int(st.get("round") or 1)
-    steps = st.get("steps", 1)
-    mark = {"step": steps, "round": n, "began": st.get("round_started_at")}
-    done = {k for k, v in (st.get("review_trees") or {}).items() if v.get("step") == steps}
-    live = ((st.get("phase") != "review" or runner_alive(task)) and not {str(n), f"{n}s"} & done
-            and st.get("aside_done") != mark)
+    one rule (runner.stopped_aside, once a round): its files kept as review tree `<n>s`, the green
+    tree put back (status `tests` stays the green round's: the tests aren't rerun, Claude's Bash
+    stops at 2 minutes) and the line naming `wb rewind <task> <n>s`, else "". wb stop, wb stop
+    --all and wb takeover left the unfinished tree, a check maybe still commented out, under a
+    tests:ok that wb accept committed without a word (#1582, bar loop #1030 round 3,
+    2026-11-26). Any round but one the runner ended in review: only the runner sets review, after
+    its own finish (its tests passing) or its own set_aside, so a stuck or failed self-review is
+    an outside stop. Gated on liveness, a runner already dead (a logout's SIGTERM before #1610:
+    stuck, the runner gone) left the unfinished tree to wb takeover and the hand-back under
+    tests:ok, which wb accept committed (#1582, 2026-11-26). ``committed``: wb accept --force's,
+    set_aside's line for a tree it commits next (#1596)."""
+    live = task.status.get("phase") != "review" or runner_alive(task)
     _stop_runner(task)
-    if not live or not task.worktree.is_dir():
-        return ""
-    line = runner.set_aside(task, n, None, f"stopped mid-check ({how})", None, committed) or ""
-    task.set_status(aside_done=mark)  # handled, on the green tree or not (#1596's review)
-    return line
+    return runner.stopped_aside(task, how, committed) if live else ""
 
 
 def _open_tasks():
@@ -5071,8 +5076,10 @@ def _take_over(name: str, user: bool, hand_back: bool = False) -> tuple[store.Ta
     # over while slow, handed back with wb feedback, then refixed and escalated) still won, and
     # the hand-back had Claude discard the paid escalation (#1595's review, 2026-11-27)
     chosen = {} if hand_back else {"chosen_at": store.now()}
+    # and no self-review's any more: a hand-back after an infra stop carried its green tree on,
+    # and Claude's edits, their tests failing, were set aside for it (#1610, 2026-11-27)
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
-                    parked=None, prior_phase=prior, **chosen)  # Claude's now (#698)
+                    parked=None, prior_phase=prior, self_review_tree=None, **chosen)  # Claude's now (#698)
     _ack_all(task)
     return task, aside
 
@@ -5152,13 +5159,7 @@ def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
         # (`chosen_at`; one taken earlier the run escalated past), or one at review whose files
         # differ from every tree its agent left (Claude's edits by hand at review, SKILL.md's
         # small fixes, with no takeover)
-        began = store.Task(live[-1]).spec.get("created_at") or 0
-        how = {}
-        for n in live:
-            if (store.Task(n).status.get("chosen_at") or 0) > began:
-                how[n] = f"wb takeover {n}"
-            elif phase[n] == "review" and _edited_by_hand(store.Task(n)):
-                how[n] = "your edits since its review"
+        how = runs.claude_work(live)  # the one rule wb run report and close keep too (#1611)
         chosen = [n for n in live if n in how]
         if len(chosen) > 1:  # Claude's own pick to make: none of them named for wb discard
             return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for "
