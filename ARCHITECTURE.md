@@ -7470,7 +7470,9 @@ stream that ended or was refused with no tick says why and dials again after `TO
 doubling to 60 s), one that ticked after 5 s. `hide` (the shell calls it on leaving the view and
 when the page is hidden) aborts both fetches and cancels the stream's reader, so the server stops
 `wb top`, and forgets the tick and the samples: shown again it says `Reading this machine…`, never
-the old tick (#552). With `live` off (`wb stats set live off`; no Settings row since #1322) Now isn't shown and no stream opens. **Now** is `liveLines`
+the old tick (#552). With `live` off (`wb stats set live off`; no Settings row since #1322) Now isn't shown and no stream opens. **Now** opens,
+once a role is on API (`routes.effective_via`'s rule) or any is spent, with one line of today's spend against the cap
+(`apiToday`, `.st-today`: `API today ≈$0.60 of $5`, or `· no day cap`; `routes`' `spend_today` and `day_usd`, #1339), then is `liveLines`
 as cards (`nowCards`): a card per GPU and for RAM (`GPU 0 <card's name>`, `cardName`; a memory bar
 and a busy bar, toned at 80 and 95 % as the pane's, watts, `GPU may wire`) with an
 SVG sparkline of the last `BUSY_KEEP` 60 busy samples, kept here per GPU (`busyKey`: the RAM row
@@ -7657,7 +7659,9 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   (fixed)` (`settings.DRIVER_CLAUDE`);
   `role-<significant|trivial|writing>` → `wb route <role> gpu|api` (a role on API whose `api_status` says
   it can't run says `<Label> can't run on <id>: <why>.`, #1529); `coding` → `wb coding
-  only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`;
+  only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`, its note today's spend once a role is
+  on API or any is spent (`_spent_today`: `API tasks stop for the day at $5 of spend: ≈$0.12 so far today.`, #1339;
+  no `api-spend` row of its own since);
   `progress` → `wb progress on|off` (On names an `--after` threshold). *web* (the web app's own, "Web
   app" on the page and in `wb settings`, #1355): `reach` ("Web app reach", phone reach) → `wb chat reach local|tailnet` (`REACH`; a bind of the user's own reads
   `custom`, `REACH_CUSTOM`, a choice only then; chat.json that can't be read is a `reach-why`
@@ -7677,7 +7681,7 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   `api-connected` (info); `api-<role>` (the role's model, the others', those used, then the
   catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`; `think-<role>` (the
   pane's `thinkStops`) → `wb route <role> --thinking on|off`; `review-<role>`, only for a role with an
-  API model (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`; `api-spend` (info).
+  API model (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`.
 - *setup*, "What your agents get" (#1295 P1, `setup_rows`): read-only `info` rows from
   `context.agent_setup()` and `setup_said`: `setup-instructions`, `setup-skills` (with the
   library's line), `setup-plugins` (each plugin and its tools: allowed, the user's own),

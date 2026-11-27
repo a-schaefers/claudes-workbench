@@ -79,8 +79,9 @@ class Settings(Rows):
         json.dumps(rows)  # JSON-safe
         for want in ("agents", "busy", "role-significant", "coding", "workflows", "cap",
                      "progress", "gpu-trivial", "optimize", "api-connected", "api-writing",
-                     "think-trivial", "review-trivial", "api-spend", "splash", "probe", "reach"):
+                     "think-trivial", "review-trivial", "splash", "probe", "reach"):
             self.assertIn(want, keys)
+        self.assertNotIn("api-spend", keys)  # today's spend is the cap row's note now (#1339)
         self.assertNotIn("review-writing", keys)  # only a role with an API model (#1059)
         self.assertNotIn("chat", keys)   # the web app is always on now
         self.assertNotIn("wake", keys)   # a plugin option, set with /plugin
@@ -92,6 +93,20 @@ class Settings(Rows):
         self.assertTrue(by["api-trivial"]["other"])
         self.assertEqual(by["api-trivial"]["value"], "deepseek/deepseek-flash")
         self.assertEqual(by["role-trivial"]["says"], "Trivial coding runs on this machine's GPU.")
+
+    def test_the_cap_row_says_todays_api_spend_once_a_role_is_on_api_and_no_row_of_its_own_does(self):
+        # #1339's UX review (2026-11-26): the day's spend, which decides whether API tasks stop,
+        # was its own "Spend today" row 3.4k px down the page from the cap it is checked against
+        says = lambda: {r["key"]: r for r in settings.rows(fresh=True)}["cap"]["says"]
+        self.assertEqual(says(), "API tasks stop for the day at $5 of spend.")  # all GPU, nothing spent
+        doc = json.loads(self.routes.read_text())
+        doc["roles"]["trivial"]["via"] = "api"
+        self.routes.write_text(json.dumps(doc))
+        self.assertEqual(says(), "API tasks stop for the day at $5 of spend: $0 so far today.")
+        store.append_jsonl(store.home() / "spend-api.jsonl",
+                           {"day": time.strftime("%Y-%m-%d"), "kind": "step", "provider": "deepseek", "usd": 0.12})
+        self.assertEqual(says(), "API tasks stop for the day at $5 of spend: ≈$0.12 so far today.")
+        self.assertNotIn("api-spend", [r["key"] for r in settings.rows(fresh=True)])
 
     def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
         # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
@@ -192,7 +207,7 @@ class Settings(Rows):
         with self.assertRaises(KeyError):
             settings.apply("no-such-setting", "on")
         for key, value in (("busy", "sometimes"), ("splash", FREE_ID), ("workflows", 3), ("cap", -1), ("cap", "lots"),
-                           ("api-spend", "x"), ("api-trivial", "--day-usd=0"), ("api-trivial", "a b"), ("probe", True)):
+                           ("api-trivial", "--day-usd=0"), ("api-trivial", "a b"), ("probe", True)):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 settings.apply(key, value)
         self.assertFalse(log.exists())  # nothing ran for any of them

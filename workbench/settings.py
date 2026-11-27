@@ -318,18 +318,20 @@ def _think_stops(row: dict) -> list:
              "after this.") if on.startswith("thinking off") else THINK[1]]
 
 
-def _spend_line(r: dict) -> str:
+def _spent_today(r: dict) -> str | None:
+    """Today's API spend, the ledger's (`wb route --json`'s `spend_today`), as the cap row's note
+    says it (`≈$0.12`), or None while it says nothing: no role on API and nothing spent. Its own
+    "Spend today" row sat 3.4k px down the page from the cap it is checked against (#1339's UX
+    review, 2026-11-26); the Stats view's Now says it too."""
     s = r.get("spend_today") or {}
-    total = s.get("usd") or 0
-    names = r.get("providers") or {}
-    by = [f"{(names.get(p) or {}).get('name') or p} {savings.usd(v)}"
-          for p, v in (s.get("by_provider") or {}).items() if isinstance(v, (int, float)) and v > 0]
-    basis = s.get("prices") or "catalog"
+    total = s.get("usd") if isinstance(s.get("usd"), (int, float)) else 0
+    on_api = isinstance(r.get("roles"), dict) and any(
+        (r.get("use") if r.get("use") in ("gpu", "api") else (row or {}).get("via")) == "api"
+        for row in r["roles"].values() if isinstance(row, dict))  # routes.effective_via
+    if not total and not on_api:
+        return None
     # the `≈` alone says the basis: a "(catalog prices)" note after it said it twice (#1322)
-    each = f" ({' · '.join(by)})" if by else ""
-    spent = savings.money(total, basis)
-    cap = r.get("day_usd")
-    return f"Spend today: {spent}" + (f" of {routes.money(cap)}{each}" if cap is not None else f"{each} · no day cap")
+    return savings.money(total, s.get("prices") or "catalog")
 
 
 def _connected_line(r: dict) -> str:
@@ -510,7 +512,8 @@ def _build() -> dict:
         cap = r.get("day_usd")
         out.append(_number("cap", "shared", LABELS["cap"], float(cap) if cap is not None else None, "usd",
                            "Needed before an API role; $5 suggested." if cap is None else
-                           f"API tasks stop for the day at {routes.money(cap)} of spend."))
+                           f"API tasks stop for the day at {routes.money(cap)} of spend" +
+                           (f": {spent} so far today." if (spent := _spent_today(r)) else ".")))
     # Stats recording, Live view, Live refresh and the electricity price had rows here, as the
     # pane's Settings tab did until #1322 dropped them (recording always on; wb stats set and wb
     # savings --price keep the rest): a `recording` row read a key stats.settings() no longer has
@@ -574,7 +577,6 @@ def _build() -> dict:
                 if row.get("api"):
                     out.append(_choice(f"review-{name}", "api", label_of(f"review-{name}"), REVIEW,
                                        row.get("thinking_review") or "off"))
-            out.append(_info("api-spend", "api", "Spend today", _spend_line(r)))
 
     out += setup_rows()
     out.append(_choice("splash", "terminal", LABELS["splash"], SPLASH, "on" if cli.splash_on() else "off"))

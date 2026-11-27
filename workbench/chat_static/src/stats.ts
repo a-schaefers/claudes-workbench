@@ -66,6 +66,17 @@
     const inside = provs.join(' · ')
     return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no known cost' ? ` + ${a.unknown} with no known cost` : ''}`
   }
+  // Today's API spend against the day cap, the ledger's (`wb route --json`'s spend_today and
+  // day_usd): `API today ≈$0.60 of $5`. It decides whether API tasks stop, and sat 3.4k px down
+  // Settings (#1339's UX review, 2026-11-26). '' with no role on API and nothing spent.
+  const capMoney = (v: number) => (Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`)  // routes.money
+  function apiToday(r: Json) {
+    if (!r || typeof r.roles !== 'object' || !r.roles) return ''
+    const spent = typeof r.spend_today?.usd === 'number' ? r.spend_today.usd : 0
+    const use = r.use === 'gpu' || r.use === 'api' ? r.use : ''  // routes.effective_via
+    if (!spent && !Object.values<Json>(r.roles).some(x => (use || x?.via) === 'api')) return ''
+    return `API today ${estUsd(spent, r.spend_today?.prices)}` + (typeof r.day_usd === 'number' ? ` of ${capMoney(r.day_usd)}` : ' · no day cap')
+  }
   function apiParts(r: Json) {
     if (r.via !== 'api') return []
     // a plan's quota is no dollars: its row once said nothing where wb top said $0 (#1522)
@@ -289,7 +300,8 @@
   function drawNow() {
     if (!nowBox) return
     nowBox.hidden = !live()
-    nowBox.replaceChildren(...(live() ? [el('h2', 'st-h', 'Now'),
+    const today = apiToday(routes)
+    nowBox.replaceChildren(...(live() ? [el('h2', 'st-h', 'Now'), ...(today ? [el('p', 'small st-today', today)] : []),
       el('div', 'cards st-now', ...nowCards(snap && { ...snap, busy }, topWhy, names()))] : []))
   }
   function drawHistory() {

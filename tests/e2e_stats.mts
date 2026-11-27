@@ -42,7 +42,8 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
     window.fetch = async (u: RequestInfo | URL, o: RequestInit = {}) => {
       const path = new URL(String(u), location.href).pathname
       if (path === '/api/stats' && top.statsDown) throw new TypeError('Failed to fetch')   // out of reach (#1412)
-      if (path === '/api/stats' && !real) return new Response(JSON.stringify({ feed: JSON.parse(await window.e2eFeed()), routes: null, models: null }),
+      // top.routes: a fixed `wb route --json` in place of the server's, whichever is under test
+      if (path === '/api/stats' && (!real || top.routes)) return new Response(JSON.stringify({ feed: JSON.parse(await window.e2eFeed()), routes: top.routes ?? null, models: null }),
         { status: 200, headers: { 'Content-Type': 'application/json' } })
       if (path !== '/api/top') return realFetch(u, o)
       top.opened++
@@ -165,6 +166,21 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
       if (!s.running[1].includes('fix-api API deepinfra Fast-Coder-1 · running · round 1 · 12s · ≈$0.12')) throw new Error(say())
       if (s.rack.length !== 2 || !s.rack[0].includes('← fix-nav') || !s.rack[1].includes('+3 more (wb top)')) throw new Error(say())
       if (s.queue.join() !== '◌fix-later waits for the GPU (1m15s)') throw new Error(say())
+    })
+
+    await check('Stats: Now says today\'s API spend against the day cap once a role is on API, and nothing of it on the GPU alone (#1339)', async () => {
+      // #1339's UX review (2026-11-26): the figure that decides whether API tasks stop sat 3.4k px down Settings
+      const today = () => page.evaluate(() => (document.querySelector('#stats-body .st-now-box .st-today') || {}).textContent ?? null)
+      const routes = (via: string, usd: number) => ({ use: 'both', day_usd: 5, spend_today: { usd, prices: 'catalog', by_provider: {} },
+        roles: { significant: { via: 'gpu' }, trivial: { via }, writing: { via: 'gpu' } }, providers: {} })
+      try {
+        await page.evaluate((r: unknown) => { window.e2eTop.routes = r }, routes('api', 0.6))
+        await again()
+        await until(async () => (await today()) === 'API today ≈$0.60 of $5').catch(async () => { throw new Error(String(await today())) })
+        await page.evaluate((r: unknown) => { window.e2eTop.routes = r }, routes('gpu', 0))
+        await again()
+        await until(async () => (await today()) === null).catch(async () => { throw new Error('a spend line on the GPU alone: ' + await today()) })
+      } finally { await page.evaluate(() => { delete window.e2eTop.routes }) }
     })
 
     await check(`Stats: the view fits ${desktop ? 1280 : 'a phone\'s'} width with no sideways scroll${desktop ? ', its cards two columns' : ''}`, async () => {

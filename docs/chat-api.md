@@ -503,7 +503,8 @@ terminal is `by: "terminal"`). Each recorded change moves the state's `settings`
 
 ### `GET /api/stats` (user only)
 The Stats view's history: `{"feed": <wb stats --json>, "routes": <wb route --json, or null>,
-"models": <wb models --json, or null>}`. `routes` and `models` name the models; both come from
+"models": <wb models --json, or null>}`. `routes` and `models` name the models (and `routes`'
+`spend_today` and `day_usd` give Now's `API today` line); both come from
 the Settings rows' cache (10 s), null when wb couldn't read them.
 
 ### `GET /api/top` (user only)
