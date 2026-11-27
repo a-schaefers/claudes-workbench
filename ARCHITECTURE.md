@@ -6041,9 +6041,10 @@ either (`gitops.NO_HOOKS`, *No git hooks from the worktree*).
 **Checked on the way in** (`check`; `add` refuses the denied names and a source inside the library).
 `parse` reads front matter between `---` lines (top-level `key: value`, indented lines folded into
 the previous key, a block indicator `|`/`>` empty, quotes stripped, a leading BOM skipped, #479;
-`name`, `description`, `license`). Refused: a name not matching `^[a-z0-9]+(-[a-z0-9]+)*$` or
+`name`, `description`, `license`, `paths`: globs, one line split at commas or a `- ` list, #1463). Refused: a name not matching `^[a-z0-9]+(-[a-z0-9]+)*$` or
 differing from the front matter's, `workbench`, the user's personal skills' names
-(`context.denied_skills()`: denies are by name) or `retired`; no description or one over 300
+(`context.denied_skills()`: denies are by name) or `retired`; a `paths` glob that is absolute, `~` or
+climbs out with `..` (never a task's repo-relative file); no description or one over 300
 characters (all an agent sees before loading); over 8000 bytes; a body path under `references/` that
 is missing, or under `scripts/`, `templates/`, `assets/` when the skill has that directory but not
 the file (a single `--from` file is checked against the library's copy, #907); a source inside the
@@ -6115,7 +6116,11 @@ edit, none accepted; 3+ loads under 50% accepted (patch it); 3+ loads and 3+ wit
 offered in 60 days. `wb skill list` shows record and advice (and a personal skill of the same
 name, #515); `wb scout` lists the flagged ones.
 
-**Suggested for a spec** (`skills.suggest`, `wb start` without `--skill`): words
+**Suggested for a spec** (`skills.suggest`, `wb start` without `--skill`): first a skill whose
+`paths` globs (`skills.glob_re`: `*` and `?` within a directory, `**` across, a glob without `/`
+matching a file's name anywhere, a trailing `/` everything under it) match a path the spec names
+(`skills.spec_paths`: a word with a `/` or an extension, no URL or absolute path), as Claude Code's,
+Cline's and OpenHands' path-scoped rules are (#1463); then words
 `[a-z][a-z0-9]{3,}` less `STOP`, crudely stemmed, against the skill's name (counted twice) and its
 trigger (the description to its first colon); suggested at `SUGGEST_MIN` = 3 shared words, top 3.
 One loaded only in other repos says where and on what stack (`cli._elsewhere`), so one project's

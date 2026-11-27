@@ -143,7 +143,55 @@ def parse(skill_md: Path) -> dict:
                 v = v.strip()
                 meta[key] = "" if v in ("|", ">", "|-", ">-", "|+", ">+") else v.strip("\"'")
     return {"name": meta.get("name", ""), "description": meta.get("description", ""),
-            "license": meta.get("license", ""), "body": body, "text": text}
+            "license": meta.get("license", ""), "paths": globs(meta.get("paths", "")),
+            "body": body, "text": text}
+
+
+def globs(value: str) -> list[str]:
+    """`paths:` as a skill writes it, one line (`"src/**/*.ts, *.sql"`, `[a, b]`) or a YAML list
+    (`- a` lines, which parse folds into one): the globs, quotes and brackets dropped."""
+    value = value.strip().removeprefix("[").removesuffix("]")
+    parts = re.split(r",|(?:^|\s)-\s+", value)
+    return [g for g in (x.strip().strip("\"'") for x in parts) if g]
+
+
+def glob_re(pattern: str) -> re.Pattern:
+    """A repo-relative glob as git and Claude Code's `paths:` read it: `*` and `?` within one
+    directory, `**` across any; a glob without a `/` matches a file's name in any directory."""
+    pat = pattern.removeprefix("./")
+    if "/" not in pat.rstrip("/"):
+        pat = "**/" + pat
+    out, i = "", 0
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pat.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pat[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pat[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(pat[i]), i + 1
+    if pat.endswith("/"):  # a directory: everything under it
+        out += ".*"
+    return re.compile(out + r"\Z")
+
+
+# a path a spec names: `src/app.ts`, workbench/cli.py, docs/ (a word with a `/` or an extension);
+# URLs and absolute paths are no project's files
+SPEC_PATH = re.compile(r"(?<![\w./:-])((?:[\w.-]+/)+[\w.-]*|[\w-]+(?:\.[\w-]+)*\.[A-Za-z][\w]{0,7})(?![\w/:])")
+
+
+def spec_paths(text: str) -> set[str]:
+    """The repo-relative paths a spec names."""
+    return {m.rstrip(".") for m in SPEC_PATH.findall(text) if not m.startswith(("/", "."))}
+
+
+def path_hits(paths: list[str], named: set[str]) -> bool:
+    """Whether any of a skill's `paths:` globs matches a path the spec names."""
+    res = [glob_re(g) for g in paths]
+    return any(r.match(n) for r in res for n in named)
 
 
 def check(skill_md: Path, name: str, alone: bool = False,
@@ -175,6 +223,9 @@ def check(skill_md: Path, name: str, alone: bool = False,
     if re.search(r"(?<![\w.])(/home/|/Users/|/root/|/var/home/|~/)", s["text"]):  # Linux, macOS, Silverblue
         warnings.append("names a path outside the repo: agents go looking for such paths; "
                         "describe the thing instead")
+    for g in s["paths"]:  # repo-relative, as a task's files are: anything else never matches
+        if g.startswith(("/", "~")) or ".." in g.split("/"):
+            problems.append(f"paths: {g!r} isn't a path in the repo: globs are relative to its root")
     if s["description"] and not re.search(r"\b(when|for|before|after|if)\b", s["description"], re.I):
         warnings.append("the description should say when to use it (\"Use when ...\")")
     # what a directory skill ships beside its SKILL.md
@@ -209,12 +260,13 @@ def check(skill_md: Path, name: str, alone: bool = False,
 
 
 def available() -> dict[str, dict]:
-    """The library's live skills: name -> {path, description}."""
+    """The library's live skills: name -> {path, description, paths}."""
     lib = library()
     out = {}
     if lib.is_dir():
         for md in sorted(lib.glob("*/SKILL.md")):
-            out[md.parent.name] = {"path": md.parent, "description": parse(md)["description"]}
+            s = parse(md)
+            out[md.parent.name] = {"path": md.parent, "description": s["description"], "paths": s["paths"]}
     return out
 
 
@@ -558,13 +610,17 @@ SUGGEST_MIN = 3  # distinct shared words: one ("charts" in a spec that only says
 
 
 def suggest(text: str, held: list[str] | None = None, n: int = 3) -> list[str]:
-    """Library skills a spec seems to need: at least SUGGEST_MIN distinct words it shares with a
-    skill's name and trigger, ranked by them (a name word counts double). A hint for Claude, who
-    decides."""
-    spec = words(text)
+    """Library skills a spec seems to need: first those whose `paths:` globs match a path the spec
+    names (#1463, as Claude Code's, Cline's and OpenHands' path-scoped rules do), then at least
+    SUGGEST_MIN distinct words it shares with a skill's name and trigger, ranked by them (a name
+    word counts double). A hint for Claude, who decides."""
+    spec, named = words(text), spec_paths(text)
     scored = []
     for name, info in available().items():
         if name in (held or []):
+            continue
+        if info.get("paths") and path_hits(info["paths"], named):
+            scored.append((-1000, name))
             continue
         named = spec & words(name.replace("-", " "))
         shared = named | (spec & words(trigger(info["description"])))
