@@ -329,7 +329,8 @@ async function run(engine: string, device?: string) {
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
     const heads = await page.$$eval('#settings .card h3', (h: Element[]) => h.map(x => x.textContent).join(' | '))
-    if (heads !== 'How the chat works | While away | Notifications | Install the app | This chat | This device') throw new Error(heads)
+    // what the chat is, once: This chat went into How the chat works (the web app's review, 2026-11-26)
+    if (heads !== 'How the chat works | While away | Notifications | Install the app | This device') throw new Error(heads)
     if (await page.locator('[data-away]').count()) throw new Error('"Let Claude go ahead" is back')
     const r = await fetch(base + 'api/prefs', { method: 'POST', headers: { Authorization: 'Bearer ' + token,
       'Content-Type': 'application/json' }, body: '{"away":"allow"}' })
@@ -343,14 +344,15 @@ async function run(engine: string, device?: string) {
                         'until you type or answer a prompt in the terminal again',
                         "Stats and Settings don't count, nor this page opened on the computer itself"])  // #1374
       if (!said.includes(want)) throw new Error(said)
-    const prompts = await page.textContent('#away-prompts')
-    for (const want of ['are answered in the terminal, never here', 'Run Claude with permissions granted to work from the chat.'])
-      if (!prompts.includes(want)) throw new Error(prompts)
-    // the three rules, the story's words for the driver listening (#1355)
+    // the prompts said once, in How the chat works, not again under While away (the web app's review, 2026-11-26)
+    if (await page.locator('#away-prompts').count() || said.includes('prompts')) throw new Error('While away says the prompts again')
+    // its three lines, the story's words for the driver listening (#1355)
     const how = (await page.textContent('#how')).replace(/\s+/g, ' ')
-    for (const want of ['The terminal is where Claude lives', 'a prompt Claude raises is answered there, never in the chat',
+    for (const want of ['This chat is a second lane to Claude', 'The terminal is where Claude lives',
+                        'a prompt Claude raises (a permission, a question, a plan) is answered there, never here, and the line at the top of the chat says while one waits',
                         'more so with Claude run with permissions granted', "Settings are the source of truth: Claude changes one only when you ask and say yes"])
       if (!how.includes(want)) throw new Error(how)
+    if ((how.match(/answered there|in the terminal/g) || []).length !== 1) throw new Error('said more than once: ' + how)
     await goTo('chat')
     await until(async () => await page.locator('#settings').isHidden())
   })

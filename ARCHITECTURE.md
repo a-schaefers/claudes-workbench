@@ -6701,10 +6701,12 @@ default after 2.0 turned it on.
   `refusal.plan` Claude Code's alone: OpenCode has no plan dialog), `PAGE` (the keys the web app
   reads), `HOST` (the keys the hosts' module carries), `DOCS` (the doc
   blocks). `text(key, driver, **fields)`, `fill(t, fields, partial)`, `driver_of(tool)`. Keys:
-  `purpose`, `rule.terminal`, `rule.chat`, `rule.settings`, `state.*` and `next.*` (`none`, `idle`,
+  `purpose`, `rule.terminal`, `rule.settings`, `state.*` and `next.*` (`none`, `idle`,
   `working`, `waiting`, `next.grant`), `wait.*` (`permission`, `question`, `plan`, `elicitation`,
   `consent`: what `state.waiting`'s `{what}` is), `note.waiting` and `note.grant` (the notice row's
-  bytes, `chat.WAITING`, `WAITING_GRANT`), `receipt.blocked`, `prompts` and `lane` (Settings cards), `doc.rule`;
+  bytes, `chat.WAITING`, `WAITING_GRANT`), `receipt.blocked`, `lane` (with `rule.terminal` and `rule.settings`,
+  Settings' *How the chat works*: three short lines where "prompts wait in the terminal" was said five times over
+  three cards, `rule.chat` and `prompts` folded in, the web app's review, 2026-11-26), `doc.rule`;
   `link.where` (wb setup's last line: where the web app's link is) and `link.reach` (`wb chat on`'s
   and doctor's: `wb chat reach tailnet`), read by cli.py; `moved.deepmode` (`wb deepmode --moved`'s
   line, both hosts' toast, #1507); `refusal.question`, `refusal.plan`,
@@ -7406,8 +7408,8 @@ browser has), over plain http `#pick-voice` (`accept="audio/*" capture`: the pho
 waiting for their words in `wb-chat-dictate`, bytes in IndexedDB beside the draft's, sent by `hearAll` (from `flush`,
 so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts
 (`receipt.blocked` while the driver waits on a prompt), the state line (`drawState`, *The driver's state line*: a notice is no thread row since
-#1355, and no dialog cards since #1350) and the Settings and Stats cards (*How the chat works*: the story's `rule.*`; `#away-when` states the away rule
-above, `#away-prompts` (the story's `prompts`) that prompts are answered in the terminal and the line at the top says one waits; *This chat*, `lane`; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
+#1355, and no dialog cards since #1350) and the Settings and Stats cards (*How the chat works*: the story's `lane`, `rule.terminal` (a prompt is answered in the terminal and
+the line at the top says while one waits) and `rule.settings`; *While away*, `#away-when`, the away rule alone; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43).`, or that alone, #1022, #1135; the saving is the badge's
 one line, `~3K Claude tokens saved this week`, #1322) are in `app.ts`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
@@ -7437,7 +7439,7 @@ page opened on another view takes its first live state's `now`), `99+` at most, 
 `aria-label` too (`Chat, 3 new`), cleared on Chat (`drawBadge`). The thread keeps its place while
 hidden (`toEnd` waits; `chatTop`). A notification's click posts `{kind: "view", view: "chat"}` to an
 open page, else opens `/#chat` (`sw.ts`). The gear and its sheet are gone: its sections are
-Settings' cards, While away, Notifications, The app, This chat, This device (`#settings` is their
+Settings' cards, How the chat works, While away, Notifications, The app, This device (`#settings` is their
 grid), under `#settings-rows`; What it saved (`#badge`, `#saved`) is a Stats card under `#stats-body`;
 the ids are as they were, and `drawShown` draws the cards of the view shown (`drawSettings`,
 `drawSaved`) on each state and switch. Forget the key goes to the chat. Over the views, `#toast`.

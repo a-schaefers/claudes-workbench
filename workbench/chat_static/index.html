@@ -110,14 +110,13 @@
     <div class="cards" id="settings">
       <div class="card" id="how">
         <h3>How the chat works</h3>
-        <p class="small" data-story="rule.terminal">The terminal is where your driver lives, on this machine or over <code>ssh</code> + <code>tmux</code>: a prompt your driver raises is answered there, never in the chat.</p>
-        <p class="small" data-story="rule.chat">Most work can still run from the chat, more so with your driver run with permissions granted.</p>
+        <p class="small" data-story="lane">This chat is a second lane to your driver, not a copy of the terminal: your driver answers here with what matters, and most work can run from here, more so with your driver run with permissions granted.</p>
+        <p class="small" data-story="rule.terminal">The terminal is where your driver lives, on this machine or over <code>ssh</code> + <code>tmux</code>: a prompt your driver raises (a permission, a question, a plan) is answered there, never here, and the line at the top of the chat says while one waits.</p>
         <p class="small" data-story="rule.settings">The web app's Settings are the source of truth: your driver changes one only when you ask and say yes.</p>
       </div>
       <div class="card">
         <h3>While away</h3>
         <p class="small" id="away-when">You're away from the moment you use the chat on another device (open it or send a message here) after using the terminal, until you type or answer a prompt in the terminal again. Stats and Settings don't count, nor this page opened on the computer itself (its localhost link) unless you send a message. Away ends by itself 6 hours after you last used the chat, unless a night's batch is still running.</p>
-        <p class="small" id="away-prompts" data-story="prompts">Your driver's prompts (a permission, a question, a plan) are answered in the terminal, never here. While one waits, the line at the top of the chat says so. Run your driver with permissions granted to work from the chat.</p>
       </div>
       <div class="card">
         <h3>Notifications</h3>
@@ -126,13 +125,6 @@
       <div class="card">
         <h3 id="app-h">The app</h3>
         <div id="app"></div>
-      </div>
-      <div class="card">
-        <h3>This chat</h3>
-        <p data-story="lane">A second lane to your driver, not a copy of the terminal. What you send here reaches the session
-        listening on your computer; your driver answers here with what matters: results, questions, its plans.
-        Its prompts wait in the terminal, and the terminal's full output stays on the computer.
-        Ask your driver to keep you posted here, and it will.</p>
       </div>
       <div class="card">
         <h3>This device</h3>
