@@ -4633,7 +4633,8 @@ def _route_fallback(a) -> None:
 
     def changed(doc) -> routes.Change:
         try:
-            return routes.change(doc, role, fallback=fb, who=_who)
+            # free and thinks as a role's own model's change (#1619)
+            return routes.change(doc, role, fallback=fb, who=_who, free=_free, thinks=_thinks)
         except routes.RoutesError as e:
             die(str(e), 3)
 

@@ -52012,6 +52012,45 @@ class Fallbacks(Base):
         line = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "api")[1])["change"]
         self.assertIn(f"fallback {HAIKU} (Anthropic)", line)
 
+    def test_an_api_fallback_that_cant_turn_thinking_off_says_so_in_its_dialog_and_start_line(self):
+        # #1619 (2026-11-27): the fallback's line and its start said `thinking off` for a model
+        # that can't turn it off, so the user agreed to no reasoning and paid for it on a fallback
+        deep = "thinkco/deep-1"
+        caps = {"tools": True, "input": ["text"], "output": ["text"], "temperature": True, "reasoning": {}}
+        self.catalog([*ROLE_CATALOG, api_entry("thinkco", "deep-1", capabilities=caps, variants=[])],
+                     [*ROLE_AUTH, key_row("thinkco", "Thinkco", STORED)])
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", deep)[1])
+        self.assertEqual(asked["change"], f"trivial: fallback none → {deep}: your code goes to Thinkco when its "
+                                          "API model's provider is down or out of credit · thinking on (it can't "
+                                          "turn off) · cap $5/day")
+        self.set_role("trivial", "fallback", deep)
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-fb-think", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"model: {deep} · API (Thinkco) · trivial role's fallback · thinking on (it can't turn off)", out)
+        sp = store.Task("t-fb-think").spec
+        self.assertIn("thinking on (it can't turn off)", sp["route"])
+        self.assertNotIn("thinking off", sp["route"])
+
+    def test_a_free_fallback_says_the_provider_may_keep_or_train_on_the_code(self):
+        # #1619 (2026-11-27): a free fallback's line never said what #1193 has a free role's own
+        # model say, and took a day cap a free model has nothing for
+        from workbench import privacy
+        free = "opencode/big-pickle-free"
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", free)[1])
+        self.assertEqual(asked["change"], f"trivial: fallback none → {free}: your code goes to opencode when its "
+                                          f"API model's provider is down or out of credit · {privacy.FREE_LINE} · "
+                                          "thinking off")
+        self.assertTrue(asked["gate"])                      # still the user's yes: the code goes there
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"trivial": {"api": "deepseek/deepseek-flash"}}}))
+        code, out, err = self.wb("route", "trivial", "fallback", free)   # no cap: none taken for it
+        self.assertEqual(code, 0, err)
+        self.assertIn(privacy.FREE_LINE, out)
+        self.assertNotIn("cap", out)
+        self.assertIsNone(routes.read()["day_usd"])
+
     def test_a_provider_out_of_credit_at_start_starts_the_task_on_the_roles_api_fallback(self):
         from workbench import results
         self.on_api()

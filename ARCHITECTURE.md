@@ -5457,7 +5457,11 @@ that case needs nothing new): `routes._fallback_check`, also when the role's API
 onto the fallback's provider. Its change line names where the code goes (`routes._fallback_part`:
 `trivial: fallback none → anthropic/<id>: your code goes to Anthropic when its API model's provider
 is down or out of credit · thinking off · cap $5/day`) and takes the dialog's yes and a day cap
-(the suggested one with no cap yet, `routes._NoCap`, #1322); `gpu` (`fallback none → GPU (the router's pick) when …`) and `none` spend nothing and
+(the suggested one with no cap yet, `routes._NoCap`, #1322); its thinking is what the fallback
+model does with the role's (`routes.role_thinks` through `cli._thinks`, as a role's own model is
+said: `thinking on (it can't turn off)` for one that can't), and a free one says
+`privacy.FREE_LINE` and takes no cap, as a free role's own model (`cli._free`, #1193; the line
+said `thinking off` and no training clause for either, #1619); `gpu` (`fallback none → GPU (the router's pick) when …`) and `none` spend nothing and
 send nothing off the machine, so they take neither. A kept API fallback is named again when its role
 goes to API (`fallback <id> (<provider>)`). `routes.fallback_of` is the one that applies: `gpu` is
 none while Agents is API. Claude only recommends one, never sets one (the skill). It applies only to
@@ -5480,7 +5484,9 @@ of: `… its GPU model <id>, isn't found (not in OpenCode's config now)`, #1573)
   holders; a fallback start says `<id>: <why>: on the role's fallback, as you set (<fallback>)`
   (`routes.FALLBACK_LINE`) under its model line (`… · trivial role's fallback · …`,
   `routes.said_part`); task.json gets `fallback: true` and `fallback_from` (`routes.fallback_routed`,
-  through `cli._routed_keys`), and its `route` ends with the line. A fallback
+  through `cli._routed_keys`, with `thinking_shown`, the fallback model's own, as `busy_routed`'s:
+  the model line and `route` said `thinking off` for one that can't turn it off, #1619), and its
+  `route` ends with the line. A fallback
   that can't take it either leaves the start as before after `note: the <role> role's fallback <id>
   can't …`. This keeps an overnight `--queue` backlog draining.
 - **In the runner** (`runner._fallback_move`, `FALLBACK_STOPS`): a round stopped as `quota`, or held
@@ -11828,6 +11834,7 @@ OpenRouter's pick, and new backends on a busy role count as newly sent (`routes.
 
 **A fallback per role** (`Fallbacks`, `FallbackMoves`, #1196): routes.json's `fallback` read and checked, said in
 `routes.summary` (register.test.tsx's fixture too); `wb route <role> fallback <API id>` on the dialog's yes and a cap,
+the fallback model's own thinking in its line and start line and a free one's training clause with no cap (#1619),
 `gpu` and `none` with neither, the role's own provider or model and OpenRouter refused; a kept one named when its role
 goes to API; at `wb start` a provider marked out of credit starts the API fallback (task.json `fallback`, the line, the
 where-note, the results row) and a held one the GPU fallback, a fallback that can't take it (out of credit too, the
