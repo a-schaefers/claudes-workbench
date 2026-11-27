@@ -1189,6 +1189,15 @@ def paid_model(stage: dict, it: "Item | None" = None):
     return m if m is not None and m.kind == "api" else None
 
 
+def escalate_models(stage: dict) -> list:
+    """[(role, its API model now or None for the GPU)] for each of ``stage``'s escalate roles,
+    probed as an escalation's item (`1#e<k>`), as wb start's cap check probes them: estimate and
+    the dry run read the stage's own role only, so a GPU stage escalating to a paid API role
+    said "estimate $0" and named no side for it (#1597, 2026-11-27)."""
+    return [(item_role(stage, p := Item(stage["id"], f"1#e{k}")), stage_model(stage, p))
+            for k in range(1, len(stage.get("escalate") or []) + 1)]
+
+
 def role_cant_run(role: str) -> str:
     """wb start's own line for a role on API whose model can't be found (routes.resolve's: no
     API model, or one the catalog doesn't list, a missing key named), or "". Read fresh, not
@@ -1270,6 +1279,47 @@ def tries_of(task: store.Task):
         return None
     tries = [t for n in dict.fromkeys(r["task"] for r in mine) if (t := store.Task(n)).exists]
     return run, me.get("stage"), item, tries
+
+
+def change_groups(run: Run, names) -> list[tuple[str, list[str]]]:
+    """The run's code tasks ``names`` as the changes they are, in start order: ("<stage>:<item>",
+    its tries) for an item and its escalations (`<key>`, `<key>#e<k>`: one change, the
+    hand-back's grouping, tries_of), ("<stage>:<key>", [it]) for every other one. #1592
+    grouped them in the hand-back only: the report, run_done and wb run close counted the cheap
+    try and its escalation as two changes to accept, so Claude could accept both competing
+    fixes (#1597, 2026-11-27)."""
+    names = set(names)
+    out: dict = {}
+    for r in run.journal():
+        if r.get("kind") == "item" and r.get("task") in names:
+            g = out.setdefault((r.get("stage"), re.sub(r"#e\d+\Z", "", str(r.get("key") or ""))), [])
+            if r["task"] not in g:
+                g.append(r["task"])
+    return [(f"{sid}:{key}", g) for (sid, key), g in out.items()]
+
+
+def kept_try(names: list[str]) -> str | None:
+    """Which of an item's escalation tries ``names`` (start order) is the change to keep, the
+    hand-back's rule (cli._attempts_line): one accepted already; else the latest still open with a
+    finished change (at review, or at review before a takeover, `prior_phase`), so a failed
+    escalation keeps the cheap try its reviewer saw; None while none has one (#1597)."""
+    sts = {n: store.Task(n).status for n in names}
+    if acc := [n for n in names if sts[n].get("phase") == "accepted"]:
+        return acc[-1]
+    done = [n for n in names if sts[n].get("phase") not in store.CLOSED
+            and (sts[n].get("prior_phase") or sts[n].get("phase")) == "review"]
+    return done[-1] if done else None
+
+
+def tries_said(names: list[str], keep: str | None) -> str:
+    """What Claude does with one item's escalation tries (change_groups, kept_try's ``keep``)."""
+    rest = [n for n in names if n != keep and store.Task(n).status.get("phase") not in store.CLOSED]
+    then = f", then wb discard {', '.join(rest)}" if rest else ""
+    if keep is None:
+        return "none holds a finished change: keep at most one"
+    if store.Task(keep).status.get("phase") == "accepted":
+        return f"{keep} is accepted" + (f": wb discard {', '.join(rest)}" if rest else "")
+    return f"accept only {keep}{then}"
 
 
 def _chosen(run: Run, rows: list, stage: str, item: str) -> str | None:
@@ -1996,10 +2046,12 @@ def _finish(run: Run) -> bool:
     store.write_json(run.dir / "result.json", rep)
     if run.set_status_if(lambda x: x.get("phase") == "running", phase="review", why="its final stage is Claude's",
                          pid=None):
-        open_code = [c for c in rep["code"] if c["phase"] not in store.CLOSED]
+        n = open_changes(rep["code"])
+        tried = len({c["item"] for c in rep["code"] if c.get("tries") and c["phase"] not in store.CLOSED})
         run.notify("run_done", f"{len(rep['final'])} result(s), {len(rep['filtered'])} filtered, "
                    f"{len(rep['null'])} null, {len(rep['not_run'])} not run"
-                   + (f", {len(open_code)} change(s) at review" if open_code else "")
+                   + (f", {n} change(s) at review" if n else "")
+                   + (f" ({tried} escalated: accept only the try wb run report names)" if tried else "")
                    + f" · {meter.usd(rep['spend']['usd'])}"
                    + f". Read it: wb run report {run.name}; decide each item, then wb run close {run.name}")
     return False
@@ -2145,6 +2197,12 @@ def report_of(name: str) -> dict:
                 rep["pending"].append({"key": k, "task": it.task, **({"why": f"refix held: {why}"} if why else {})})
             for mk in unanswered(s, it):
                 rep["not_run"].append({"key": f"{s['id']}:{mk}", "why": f"unjudged: {k} returned nothing for it"})
+    for item, g in change_groups(run, [c["task"] for c in rep["code"]]):
+        if len(g) > 1:  # one change, its tries the alternatives (#1597)
+            keep = kept_try(g)
+            for c in rep["code"]:
+                if c["task"] in g:
+                    c.update(item=item, tries=g, keep=keep)
     used = spent(run)
     rep["spend"] = {"usd": used["usd"], "budget_usd": run.spec.get("budget_usd"), "gpu_min": used["gpu_min"],
                     "budget_min": run.spec.get("budget_min")}
@@ -2183,9 +2241,21 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
             if it.state == "done" and not any(r["key"] == f"{stage}:{it.key}" for r in rep["final"] + rep["results"]):
                 out.append(f"  {stage}:{it.key}: {js(it.output)}")
     if rep["code"]:
-        out.append("code (Claude's to review, accept or discard): "
-                   + ", ".join(f"{c['task']} {c['phase']}" for c in rep["code"]))
+        solo = [c for c in rep["code"] if not c.get("tries")]
+        out.append("code (Claude's to review, accept or discard):"
+                   + "".join(f"{',' if i else ''} {c['task']} {c['phase']}" for i, c in enumerate(solo)))
+        for item in dict.fromkeys(c["item"] for c in rep["code"] if c.get("tries")):
+            g = [c for c in rep["code"] if c.get("item") == item]
+            tries = g[0]["tries"]
+            out.append(f"  {item}: " + ", ".join(f"{c['task']} {c['phase']}" for c in g)
+                       + f": alternatives for one change, the run escalated {', '.join(tries[:-1])} to {tries[-1]}: "
+                       + tries_said(tries, g[0]["keep"]))
     return out
+
+
+def open_changes(code: list) -> int:
+    """How many changes of report_of's ``code`` wait on Claude: an item's tries one (#1597)."""
+    return len({c.get("item") or c["task"] for c in code if c["phase"] not in store.CLOSED})
 
 
 def status_line(name: str) -> str:
@@ -2204,16 +2274,21 @@ def status_line(name: str) -> str:
 
 def estimate(flow: dict, params: dict, exists: dict | None = None) -> tuple[float | None, float, list[str]]:
     """(dollars for the stages whose items are known now, GPU minutes for them, the stages whose
-    count is known only as they run), from each card's `est` × meter.price; the items
+    count is known only as they run, and each stage's escalations to a paid API role, which run
+    only when an item fails: escalate_models), from each card's `est` × meter.price; the items
     `unless_exists` skips (``exists``, existing's) cost nothing."""
     usd, mins, later = 0.0, 0.0, []
     priced = True
     for s in stages(flow):
         if s.get("final") or s.get("claude"):
             continue
+        # an escalation runs only when an item fails: never in the figure, said as later when paid
+        esc = [f"{s['id']}'s escalations to {role} (API)" for role, em in escalate_models(s)
+               if em is not None and not (meter.is_plan(em) or meter.is_free(em))]
         if "items" not in s:
-            later.append(s["id"])
+            later += [s["id"], *esc]
             continue
+        later += esc
         n = len(_items_of(s, Run("-"), params)) - len((exists or {}).get(s["id"]) or ())
         n = min(n, int(s.get("max_items") or MAX_ITEMS)) * int(s.get("attempts") or 1)
         if (s.get("batch") or 1) > 1:
@@ -2409,7 +2484,8 @@ def cmd_start(a) -> None:
         said.append(f"context: {len(ctx):,} characters, the first {CUTS['context']:,} go in each spec's {{context}}")
     est_usd, est_min, later = estimate(flow, params, exists)
     roles = ", ".join(dict.fromkeys(f"{s['id']} {stage_role(s)}" + (" (API)" if stage_model(s) else " (GPU)")
-                                    + (f", then {', '.join(s['escalate'])}" if s.get("escalate") else "")
+                                    + "".join(f", then {role} ({'API' if em else 'GPU'})"
+                                              for role, em in escalate_models(s))
                                     for s in stages(flow) if not (s.get("final") or s.get("claude"))))
     est = (meter.usd(est_usd) if est_usd is not None else "unpriced") + (f", GPU ~{est_min:g} min" if est_min else "")
     # tracked files only, as wb start's (#1322): every item starts from the base without them,
@@ -2491,7 +2567,8 @@ def dry_run(name: str, flow: dict, params: dict, exists: dict, ctx: str, base: s
             src = f"from {s['from']}" + (f" split by {s['split']}" if s.get("split") else "") + \
                 (", once all are in" if s.get("flow") == "barrier" else ", as each comes")
         att = int(s.get("attempts") or 1)
-        out.append(f"  {sid}: {what} on {stage_role(s)} ({side}) · {src}" + (f" · {att} attempts" if att > 1 else "")
+        then = "".join(f" · then {role} ({'API' if em else 'GPU'})" for role, em in escalate_models(s))
+        out.append(f"  {sid}: {what} on {stage_role(s)} ({side}){then} · {src}" + (f" · {att} attempts" if att > 1 else "")
                    + (f" · batches of {s['batch']}" if (s.get("batch") or 1) > 1 else ""))
     for s in stages(flow):
         if "items" not in s or s.get("final") or s.get("claude"):
@@ -2730,7 +2807,14 @@ def cmd_close(a) -> None:
                  and store.Task(n).status.get("phase") not in store.CLOSED
                  and not store.Task(n).spec.get("report")]
     if open_code:
-        _die(f"run {run.name} has code waiting on you: {', '.join(open_code)} (wb accept or wb discard each)")
+        # an item's escalation tries as the one change they are (#1597)
+        code = [n for n in run_tasks(run) if store.Task(n).exists and not store.Task(n).spec.get("report")]
+        said = []
+        for _, g in change_groups(run, code):
+            if not (left := [n for n in g if n in open_code]):
+                continue
+            said.append(", ".join(left) + (f" (one change: {tries_said(g, kept_try(g))})" if len(g) > 1 else ""))
+        _die(f"run {run.name} has code waiting on you: {', '.join(said)} (wb accept or wb discard each)")
     if run.status.get("phase") in OPEN:
         stop(run, "closed")
     for n in run_tasks(run):  # a report item never taken (stopped first): its worktree goes

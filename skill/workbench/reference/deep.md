@@ -35,7 +35,9 @@ not on a repo's flow), `stages`. Each stage:
   goes back to the coder as `wb feedback`, then the change is reviewed again.
 - `escalate: [roles]`: on a code stage: an item stuck or failed, or with its review's asks left
   past refix's max, is tried again from the base on the next role (`<key>#e1`, …); the attempt
-  before is kept. Shipped as `fix-escalate` (trivial, then significant).
+  before is kept. The tries are one change: `wb run report` names the one to accept (the latest
+  with a finished change), and you discard the rest. A paid API escalate role is in the estimate's
+  "as their items come", never its figure. Shipped as `fix-escalate` (trivial, then significant).
 - `on_failure`: `checkpoint` asks you when an item ends with no result; a code item stuck or
   failed always does (with `escalate`, only once its last role has). It holds only that item:
   the others still start and run, and the run ends after your `wb run resume`.

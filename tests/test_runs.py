@@ -975,6 +975,35 @@ class Runs(Base):
             if store.Task(n).exists:
                 run_wb("discard", n)
 
+    def test_a_fix_escalate_items_cheap_try_and_its_escalation_are_one_change_in_the_report_and_run_done(self):
+        # #1597 (bar loop #1030, 2026-11-27): #1592 grouped the tries in the hand-back only, so the
+        # report and run_done listed the cheap try and its escalation as two changes to accept,
+        # and Claude could accept both competing fixes
+        seq = Path(self.tmp.name) / "seq.json"
+        changes = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        seq.write_text(json.dumps([changes, changes, changes,
+                                   {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+        os.environ["FAKE_RESULT_SEQ"] = str(seq)
+        run_wb("run", "start", "fe", "--flow", "fix-escalate", "--param", 'findings=["answer.txt must hold 42"]',
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("fe", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        self.assertEqual(store.Task("fe-code-2").spec.get("item"), "1#e1")
+        done = self.run_notices("fe")[-1]["text"]
+        self.assertIn("1 change(s) at review", done)
+        rep = runs.report_of("fe")
+        self.assertEqual({c["task"]: c.get("keep") for c in rep["code"]}, {"fe-code-1": "fe-code-2",
+                                                                            "fe-code-2": "fe-code-2"})
+        out = run_wb("run", "report", "fe")
+        (alts,) = [ln for ln in out.splitlines() if ln.startswith("  code:1: ")]
+        self.assertTrue(alts.startswith("  code:1: fe-code-1 review, fe-code-2 review: alternatives for one change"), alts)
+        self.assertIn("the run escalated fe-code-1 to fe-code-2", alts)
+        self.assertIn("accept only fe-code-2, then wb discard fe-code-1", alts)
+        code, _, err = wb("run", "close", "fe")
+        self.assertEqual(code, 1)
+        self.assertIn("has code waiting on you: fe-code-1, fe-code-2 (one change: accept only fe-code-2", err)
+        for n in ("fe-code-1", "fe-code-2"):
+            run_wb("discard", n)
+
     def test_a_review_sends_its_must_fix_back_to_the_coder_then_the_change_waits_for_claude(self):
         seq = Path(self.tmp.name) / "seq.json"
         seq.write_text(json.dumps([
@@ -2040,6 +2069,27 @@ class RunsApi(Base):
         self.assertIn("run: code on significant (API) · 3 item(s)", out)
         self.assertNotIn("estimate $0 ·", out)
         self.assertRegex(out, r"\nestimate \$\d+\.\d*[1-9]\d* · budget")
+
+    def test_a_gpu_stages_escalation_to_a_paid_api_role_is_said_as_later_never_counted_as_0(self):
+        # #1597 (bar loop #1030, 2026-11-27): estimate and the dry run read the stage's own role
+        # only, so a fix-escalate run on a GPU trivial role said "estimate $0" with its
+        # escalations going to a paid API model, and its start line named no side for them
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+            "trivial": {"via": "gpu"}, "significant": {"via": "api", "api": SPEND_FLASH}}})
+        meter._CAP.clear()
+        argv = ("run", "start", "r1", "--flow", "fix-escalate", "--param", 'findings=["a is wrong", "b is wrong"]',
+                "--repo", str(self.repo))
+        code, out, err = wb(*argv, "--dry-run")
+        self.assertEqual(code, 0, err)
+        (line,) = [ln for ln in out.splitlines() if ln.startswith("  code: ")]
+        self.assertIn("fix on trivial (GPU) · then significant (API) · 2 item(s)", line)
+        (est,) = [ln for ln in out.splitlines() if ln.startswith("estimate ")]
+        self.assertIn("code's escalations to significant (API)", est)
+        with mock.patch.object(runs, "spawn", return_value=0):
+            code, out, err = wb(*argv)
+        self.assertEqual(code, 0, err)
+        self.assertIn("code trivial (GPU), then significant (API)", out)
+        self.assertIn("code's escalations to significant (API)", out)
 
     def test_a_code_item_refused_at_its_start_is_no_change_at_review_and_names_no_task(self):
         # #1531 (2026-11-26): _start logs the item's task before wb start runs, so a code item
