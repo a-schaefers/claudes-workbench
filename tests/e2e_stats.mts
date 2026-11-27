@@ -177,19 +177,27 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
         w.e2eOpened = []
         if (!w.e2eOpenSeen) { w.e2eOpenSeen = true; addEventListener('wb:open-task', (e: Event) => w.e2eOpened.push((e as CustomEvent).detail)) }
       })
-      const row = page.locator('#stats-body .st-run button').nth(1)
-      await row.click()
-      await row.focus()
+      // the row's look: no button face, and its ▶ hangs at the card's edge, under the title, as before
+      const look = await page.evaluate(() => { const b = document.querySelector<HTMLElement>('#stats-body .st-run button')!, s = getComputedStyle(b)
+        return { bg: s.backgroundColor, border: s.borderTopWidth, align: s.textAlign,
+          mark: Math.round(b.querySelector('.st-mark')!.getBoundingClientRect().left), title: Math.round(document.querySelector('#stats-body .st-running h3')!.getBoundingClientRect().left) } })
+      if (look.border !== '0px' || look.align !== 'left' || !/rgba\(0, 0, 0, 0\)|transparent/.test(look.bg) || Math.abs(look.mark - look.title) > 1) throw new Error(JSON.stringify(look))
+      // a tap, then Enter on the focused row: each asks once, and the shell's listener (app.ts's
+      // openTask) shows the Chat view with the sheet on that task, so the row is found again on
+      // Stats for the key (the a22-ux-int merge, 2026-11-26: written before that listener, the
+      // Enter went to a hidden row)
+      const sheetOn = async () => await page.evaluate(() => WB.current()) === 'chat' && (await page.textContent('#ts-name')) === 'fix-api'
+      const row = () => page.locator('#stats-body .st-run button').nth(1)
+      await row().click()
+      await until(sheetOn).catch(async () => { throw new Error('the sheet not on fix-api: ' + await page.evaluate(() => WB.current())) })
+      await goTo('stats')
+      await until(async () => (await page.locator('#stats-body .st-run button').count()) > 1)
+      await row().focus()
       await page.keyboard.press('Enter')
+      await until(sheetOn).catch(async () => { throw new Error('Enter left the sheet off fix-api: ' + await page.evaluate(() => WB.current())) })
       const got = await page.evaluate(() => (window as any).e2eOpened)
       if (JSON.stringify(got) !== JSON.stringify([{ task: 'fix-api' }, { task: 'fix-api' }])) throw new Error(JSON.stringify(got))
-      if (await page.evaluate(() => WB.current()) === 'stats') {
-        // the row's look: no button face, and its ▶ hangs at the card's edge, under the title, as before
-        const look = await page.evaluate(() => { const b = document.querySelector<HTMLElement>('#stats-body .st-run button')!, s = getComputedStyle(b)
-          return { bg: s.backgroundColor, border: s.borderTopWidth, align: s.textAlign,
-            mark: Math.round(b.querySelector('.st-mark')!.getBoundingClientRect().left), title: Math.round(document.querySelector('#stats-body .st-running h3')!.getBoundingClientRect().left) } })
-        if (look.border !== '0px' || look.align !== 'left' || !/rgba\(0, 0, 0, 0\)|transparent/.test(look.bg) || Math.abs(look.mark - look.title) > 1) throw new Error(JSON.stringify(look))
-      }
+      await goTo('stats')
     })
 
     await check('Stats: Now says today\'s API spend against the day cap once a role is on API, and nothing of it on the GPU alone (#1339)', async () => {
