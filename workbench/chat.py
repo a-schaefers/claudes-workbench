@@ -1122,20 +1122,36 @@ def _cut_lines(text: str, most: int) -> tuple[str, int]:
     return "\n".join(out), n
 
 
+def in_tree(t: store.Task, text: str) -> str:
+    """``text`` with the task's worktree written away: `read src/f0.py`, not the 70 characters of
+    `~/.local/state/workbench/tasks/<t>/worktree/` before it, which wrapped each Log row to two
+    lines on a phone and named a path the phone can't open (#1339, 2026-11-26); the worktree
+    itself is `.`. Both spellings, as given and resolved: an agent's tools see either."""
+    roots = {str(t.worktree)}
+    try:
+        roots.add(os.path.realpath(t.worktree))
+    except (OSError, ValueError):
+        pass
+    for root in sorted(roots, key=len, reverse=True):
+        text = re.sub(re.escape(root) + r"(?:/|(?![\w.-]))", lambda m: "" if m.group(0).endswith("/") else ".", text)
+    return text
+
+
 def task_summary(t: store.Task) -> dict:
     """`wb status <t>`'s row and `wb report <t>`'s text: phase, round, step, last, when it began
     and last changed (the page counts age and idle from `now`), its model, the newest round's
-    report (cut at TASK_REPORT_CHARS) and the regression check's lines."""
+    report (cut at TASK_REPORT_CHARS) and the regression check's lines, the worktree's paths
+    relative to it (in_tree)."""
     from . import gitops, transcript, verify
     st, sp = t.status, t.spec
     n = st.get("round", 1)
-    report = transcript.plain(t.report(n))
+    report = in_tree(t, transcript.plain(t.report(n)))
     try:
-        checks = [transcript.plain(x) for x in verify.report_lines(t)]
+        checks = [in_tree(t, transcript.plain(x)) for x in verify.report_lines(t)]
     except (OSError, ValueError, KeyError, gitops.GitError):
         checks = []
     return {"phase": st.get("phase") or "queued", "round": n, "step": st.get("steps", 1),
-            "last": transcript.plain(str(st.get("last") or "")), "created_at": sp.get("created_at"),
+            "last": in_tree(t, transcript.plain(str(st.get("last") or ""))), "created_at": sp.get("created_at"),
             "updated_at": st.get("updated_at"), "model": sp.get("model") or "", "label": model_label(sp),
             "via": sp.get("via") or "gpu",
             "provider_name": sp.get("provider_name") or "", "report": report[:TASK_REPORT_CHARS],
@@ -1180,14 +1196,15 @@ def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dic
 
 def task_log(t: store.Task, n: int = TASK_LOG_ROWS) -> dict:
     """`wb log <t> -v -n <n>`: its last ``n`` rows (from the last TASK_LOG_BYTES of events.jsonl),
-    each `{ts, round, kind, text}` with wb log's words (transcript.log_body) cut at
-    transcript.JSON_LINE_CHARS, `ok` for a tool call; `more` when older ones were left out."""
+    each `{ts, round, kind, text}` with wb log's words (transcript.log_body), the worktree's paths
+    relative to it (in_tree), cut at transcript.JSON_LINE_CHARS, `ok` for a tool call; `more` when
+    older ones were left out."""
     from . import transcript
     rows = [r for r in store.read_jsonl_tail(t.dir / "events.jsonl", TASK_LOG_BYTES)
             if isinstance(r, dict) and r.get("kind") in transcript.LOG_KINDS]
     out = []
     for r in rows[-n:]:
-        text = transcript.plain(transcript.log_body(r, verbose=True) or "")
+        text = in_tree(t, transcript.plain(transcript.log_body(r, verbose=True) or ""))
         cut = text if len(text) <= transcript.JSON_LINE_CHARS else text[:transcript.JSON_LINE_CHARS - 1] + "…"
         out.append({"ts": r.get("ts"), "round": r.get("round"), "kind": r.get("kind"), "text": cut,
                     **({"ok": bool(r.get("ok"))} if r.get("kind") == "tool" else {})})

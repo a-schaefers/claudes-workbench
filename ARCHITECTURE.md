@@ -7330,7 +7330,10 @@ address (#534).
   and `cut` past `TASK_DIFF_CHARS` 256 KB (`gitops.diff`'s `limit`: never held whole); no worktree or
   a git failure, a `note`. `log` (`chat.task_log`): the last `n` (`TASK_LOG_ROWS` 50, at most
   `TASK_LOG_MAX` 200) of the `transcript.LOG_KINDS` rows in events.jsonl's last `TASK_LOG_BYTES` 1 MiB,
-  `{ts, round, kind, text: transcript.log_body(…, verbose)}`, `more`. 400 for another part or `n`.
+  `{ts, round, kind, text: transcript.log_body(…, verbose)}`, `more`. The summary's report, `last`
+  and `verify`, and each log row, name the worktree's paths relative to it (`chat.in_tree`: `read
+  src/f0.py`, the worktree itself `.`, as given or resolved; #1339: the 70-character prefix wrapped
+  each row to two lines on a phone). 400 for another part or `n`.
 - `GET /api/stream`: SSE: `event: state` at once, then `event: patch` (`chat.patch` against what
   this stream sent: `messages` as `{put, drop}`, every other field whole so a stale busy flag
   can't stick; #755), each event followed `NUDGE_AFTER` (50 ms) later by a blank line of its own
@@ -7504,7 +7507,8 @@ user saw of the work, and "is it on track?" cost a message to Claude. A tap (or 
 opens `#task-sheet` under it in `#view-chat` (closed by Esc, a tap outside, a strip gone empty or
 another view shown): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
 Diff and Log tabs fetch `GET /api/task` when opened (the diff's stat first, "Show the whole diff",
-one file at a time when it is `cut`). Nothing polls: a change in the stream's `tasks` (`sheetNews`)
+one file at a time when it is `cut`; the Log scrolled to its newest row, and kept there by a quiet
+refetch unless the reader scrolled up, #1339). Nothing polls: a change in the stream's `tasks` (`sheetNews`)
 re-fetches only the open view, quietly, and Refresh asks again; a task gone says it is no longer
 open. Its report, diff and log are agent-written, drawn with `textContent` and `<pre>` alone, never
 markup: the page holds the user's token, which changes their Settings, so markup an agent wrote

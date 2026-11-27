@@ -441,6 +441,9 @@ open task"}`. Every answer is `{task, part, …, now}`:
   kind, text}` (`wb log`'s words after the time, cut at 2,000 characters; `ok` for a tool call),
   and `more: true` when older ones were left out.
 
+A path inside the task's worktree, in the summary's `report`, `last` and `verify` and in each log
+row, is written relative to it (`read src/f0.py`; the worktree itself is `.`).
+
 400 for another `part` or a bad `n`. All of it is text the agent wrote: show it as text.
 
 ### `POST /api/transcribe/<id>` (user only)

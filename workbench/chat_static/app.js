@@ -619,7 +619,14 @@
             return tsBody.replaceChildren(mk('span', 'ts-note', `${name} is no longer open (accepted, discarded or parked).`));
         if (!r.ok)
             return tsBody.replaceChildren(mk('span', 'ts-note', j.error || `Not loaded (HTTP ${r.status}): try again`));
+        // the Log opens at its newest row, and a quiet refetch keeps it there unless the reader
+        // scrolled up: "now" is at the bottom, six rows of a screen away on a phone (#1339, 2026-11-26)
+        const was = tsBody.querySelector('.ts-log');
+        const atEnd = !quiet || !was || was.scrollHeight - was.scrollTop - was.clientHeight < 24;
         tsBody.replaceChildren(...(tsPart === 'summary' ? drawSummary(j) : tsPart === 'diff' ? drawDiff(j) : drawLog(j)));
+        const log = tsBody.querySelector('.ts-log');
+        if (log && atEnd)
+            log.scrollTop = log.scrollHeight;
     }
     function drawSummary(j) {
         const out = [mk('p', '', `${j.phase} · round ${j.round}${j.step > 1 ? ` · step ${j.step}` : ''} · ${taskNote(j)}`)];

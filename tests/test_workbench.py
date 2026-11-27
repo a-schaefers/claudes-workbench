@@ -32732,6 +32732,23 @@ class WebChat(Base):
         code, lg = self.call(q + "log&n=1", token=tok)
         self.assertEqual(([r["kind"] for r in lg["rows"]], lg["more"]), (["tool"], True))
 
+    def test_the_task_sheets_log_and_summary_name_paths_relative_to_the_worktree(self):
+        # #1339 (2026-11-26): each Log row carried the worktree's 70-character path before the
+        # file, wrapping to two lines on a phone, a path the phone can't open
+        t = self._sheet_task()
+        tree, real = str(t.worktree), os.path.realpath(t.worktree)
+        t.set_status(last=f"read {tree}/src/f0.py")
+        t.round_dir(2).mkdir(parents=True)
+        (t.round_dir(2) / "summary.md").write_text(f"files changed:\n{real}/new.py\nran in {tree}\n")
+        t.event({"kind": "tool", "round": 2, "tool": "read", "brief": f"{tree}/src/f0.py", "ok": True, "ts": store.now()})
+        t.event({"kind": "tool", "round": 2, "tool": "bash", "brief": f"ls {tree} {tree}-other/x", "ok": True,
+                 "ts": store.now()})
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part="
+        s = self.call(q + "summary", token=tok)[1]
+        self.assertEqual((s["last"], s["report"]), ("read src/f0.py", "files changed:\nnew.py\nran in .\n"))
+        rows = [r["text"] for r in self.call(q + "log", token=tok)[1]["rows"]]
+        self.assertEqual(rows, ["read     src/f0.py", f"bash     ls . {tree}-other/x"])
+
     def test_the_task_sheet_is_the_users_and_only_for_an_open_task(self):
         # the diff and report are the user's work: an agent's token reads none of it (AGENT_UNREAD)
         self._sheet_task()

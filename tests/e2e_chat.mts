@@ -675,7 +675,11 @@ async function run(engine: string, device?: string) {
     writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'review', round: 1, last: 'tests pass', updated_at: Date.now() / 1000 - 60 }))
     mkdirSync(join(t, 'rounds/1'), { recursive: true })
     writeFileSync(join(t, 'rounds/1/summary.md'), 'Changed the README. <b id="bold">not bold</b>\n')
-    writeFileSync(join(t, 'events.jsonl'), JSON.stringify({ kind: 'tool', round: 1, tool: 'bash', brief: 'pytest -q', ok: true, ts: Date.now() / 1000 }) + '\n')
+    // more rows than the Log's box holds, the worktree's path in each (#1339: written away, and
+    // the Log opens at its newest row)
+    writeFileSync(join(t, 'events.jsonl'), Array.from({ length: 40 }, (_, i) => JSON.stringify({ kind: 'tool', round: 1, tool: 'read',
+      brief: join(t, 'worktree', `src/f${i}.py`), ok: true, ts: Date.now() / 1000 }) + '\n').join('')
+      + JSON.stringify({ kind: 'tool', round: 1, tool: 'bash', brief: 'pytest -q', ok: true, ts: Date.now() / 1000 }) + '\n')
     try {
       wb('chat', 'reply', '--text', 'Started fix-sheet.')
       await until(async () => (await page.textContent('#tasks')).includes('fix-sheet'))
@@ -694,6 +698,10 @@ async function run(engine: string, device?: string) {
       if (!(await page.textContent('.ts-diff')).includes('+world <img src=x onerror="window.pwned=1">')) throw new Error(await page.textContent('.ts-diff'))
       await page.click('#ts-tabs [data-part="log"]')
       await until(async () => (await page.textContent('#ts-body')).includes('r1 bash     pytest -q'))
+      const log = await page.evaluate(() => { const l = document.querySelector<HTMLElement>('.ts-log')!
+        return { text: l.textContent, end: l.scrollHeight - l.scrollTop - l.clientHeight, over: l.scrollHeight > l.clientHeight } })
+      if (!log.text!.includes('r1 read     src/f39.py\n') || log.text!.includes('/worktree/')) throw new Error('the log says: ' + log.text!.slice(0, 200))
+      if (!log.over || log.end > 2) throw new Error('the log is not at its newest row: ' + JSON.stringify(log))
       if (await page.evaluate(() => window.pwned)) throw new Error('agent text ran as markup')
       if (!(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))) throw new Error('the page scrolls sideways')
       await page.click('#ts-reply')
