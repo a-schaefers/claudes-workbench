@@ -40,12 +40,12 @@ FLOW_NAME_MAX = 14
 SAME_DAY = 99         # fires on one date, each its own batch
 TURNS = 300           # claude -p's --max-turns for one fire, unless `wb schedule add --max-turns`
 FIRE_HOURS = 12       # a fire's Claude is stopped past this, whatever its turns
-# headless Claude's Bash timeouts (ms), unless the user set theirs: driving.md's loop of
-# `wb wait --backlog <batch> --timeout 280` is one call, one turn, per 280 s idle, inside the prompt
-# cache's 5 minutes. Under Bash's 120 s default it polled every 100 s, a paid turn re-reading the
-# whole conversation each, and a long GPU night ran out of TURNS before its reviews and summary
-# (#1602, 2026-11-27)
-BASH_TIMEOUT_MS = {"BASH_DEFAULT_TIMEOUT_MS": "300000", "BASH_MAX_TIMEOUT_MS": "600000"}
+# headless Claude's Bash timeouts (ms), unless the user set theirs: the whole fire, so driving.md's
+# one `wb wait --backlog <batch>` blocks, outside Claude, until a task needs it or the batch is done
+# (cli._batch_left). Under Bash's 120 s default it polled every 100 s, a paid turn re-reading the
+# whole conversation each, and a long GPU night ran out of TURNS (#1602); polled every 280 s, a
+# batch held at the day cap still paid ~140 idle turns until the 12 h stop (#1622, 2026-11-27)
+BASH_TIMEOUT_MS = dict.fromkeys(("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"), str(FIRE_HOURS * 3600_000))
 UNIT = "wb-schedule-"             # systemd: wb-schedule-<name>.timer / .service
 LABEL = "workbench.schedule."     # launchd: workbench.schedule.<name>
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -632,16 +632,20 @@ def _env_key_skip(role: str, m) -> str | None:
     return f"{role} role: {why}"
 
 
-def spend_skip() -> str | None:
+def spend_skip(roles=None) -> str | None:
     """Why tonight's fire is skipped for money: an API role (routes.effective_via) that meter.refusal
     refuses: no day cap at all (meter.no_cap), today's spend at it, or no price; or whose key is
     an exported variable this fire's environment lacks (_env_key_skip, #1495). None when every
-    role is on the GPU, or each API role has room. routes.json unreadable is a skip too."""
+    role is on the GPU, or each API role has room. routes.json unreadable is a skip too.
+    ``roles``: the only roles to check (a flow's, runs.flow_roles, #1621); a backlog's headless
+    Claude may start any, so its fire checks every one."""
     try:
         doc = routes.read()
     except routes.RoutesError as e:
         return f"routes.json can't be read ({e})"
     for role in routes.ROLES:
+        if roles is not None and role not in roles:
+            continue
         mid = doc["roles"][role].get("api")
         if routes.effective_via(doc, role) != "api" or not mid:
             continue
@@ -726,7 +730,11 @@ def _fire_flow(name: str, s: dict, started: float) -> int:
         _row(name, {"ts": started, "outcome": "skipped", "why": why})
         print(f"{name}: skipped, {why}")
         return 0
-    if why := spend_skip():
+    try:  # only the roles its stages run on (#1621): wb run start says why for a flow it can't read
+        used = runs_.flow_roles(runs_.load_flow(s["flow"]))
+    except RuntimeError:
+        used = set()
+    if why := spend_skip(used):
         _row(name, {"ts": started, "outcome": "skipped", "why": why})
         print(f"{name}: skipped: {why}")
         return 0
