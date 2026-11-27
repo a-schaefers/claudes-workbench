@@ -7897,8 +7897,9 @@ alone, and a generic renderer: a new setting touches only Python.
     open the web app on your phone, pick My tailnet."
   - **Ask <driver>** (`.set-ask`, the web app's review, 2026-11-26: Settings' only fixes were terminal
     commands a phone can't run): on a `note`, a row with `help` or one with `ask`, a link (a 44 px button,
-    named as the state's `driver.who` names it) that calls `WB.ask`: the Chat view, its box filled with `ask`
-    when a string, else `Help me with Settings › <its card>: <its line>`, for the user to send; it waits like
+    named as the state's `driver.who` names it) that calls `WB.ask`: the Chat view, `ask` when a string,
+    else `Help me with Settings › <its card>: <its line>`, put in its box after what the box holds (a blank
+    line between; a typed message was replaced, its draft with it: #1563), for the user to send; it waits like
     any message, so no listener is needed. The words say what it is about: an `about` names a task or a take,
     which the server checks.
 - **The owner's click is the yes** (the owner, 2026-11-24: "We trust Claude"; the server runs wb as

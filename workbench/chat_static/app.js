@@ -2675,7 +2675,10 @@
             // (2026-11-26); hashchange's setView is then a no-op
             go('chat');
             setView('chat');
-            input.value = String(text);
+            // what the box holds is kept, the request after it, as the outbox's edit keeps it: a message
+            // typed before the tap was replaced, its saved draft with it (#1563, 2026-11-26; #958's rule)
+            const typed = input.value.trim();
+            input.value = typed ? input.value.replace(/\s*$/, '\n\n') + String(text) : String(text);
             save(K.draft, input.value);
             grow();
             armSend();

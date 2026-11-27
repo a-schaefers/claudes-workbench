@@ -428,7 +428,7 @@ export async function check(page: any, ctx: E2eCtx) {
       if (JSON.stringify(sent) !== JSON.stringify([{ key: 'cap', value: '7.5' }, { key: 'cap', value: null }, { key: 'probe', value: 'on' }])) throw new Error(JSON.stringify(sent))
     })
 
-    await ctx.check('with no API provider one line stands for the API controls: a role reads its sentence alone, a hidden row is not drawn', async () => {
+    await ctx.check('with no API provider one line stands for the API controls: a role reads its sentence alone, a hidden row is not drawn; its Ask link keeps what the box holds (#1563)', async () => {
       // the web app's review (2026-11-26): six API controls came before the line saying there was no provider
       const gpuOnly: SettingRow[] = [
         { key: 'role-significant', group: 'significant', label: 'Complex coding', kind: 'choice', value: 'gpu', other: false, fixed: true,
@@ -449,10 +449,15 @@ export async function check(page: any, ctx: E2eCtx) {
       // the line's Ask link: the chat's box filled with what it is about, sent by the user, not by the tap
       const link = await row('gpu-only').locator('.set-ask').textContent()
       if (!/^Ask (Claude|OpenCode|your driver)$/.test(link)) throw new Error('link: ' + link)
+      // a message typed before the tap stays, the request after it: it was replaced, its saved
+      // draft with it (#1563, 2026-11-26; the rule of #958's audit: what the box holds is kept)
+      await page.evaluate(() => { const i = document.getElementById('input') as HTMLTextAreaElement; i.value = 'my long message'; i.dispatchEvent(new Event('input')) })
       await row('gpu-only').locator('.set-ask').click()
       await until(() => page.evaluate(() => document.body.dataset.view === 'chat'))
       const box = await page.locator('#input').inputValue()
-      if (!box.startsWith('Help me with Settings › Agents and roles: Every role runs on your GPU.')) throw new Error('box: ' + box)
+      if (!box.startsWith('my long message\n\nHelp me with Settings › Agents and roles: Every role runs on your GPU.')) throw new Error('box: ' + box)
+      const kept = await page.evaluate(() => localStorage.getItem('wb-chat-draft'))
+      if (kept !== JSON.stringify(box)) throw new Error('draft: ' + kept)
       if (!(await page.evaluate(() => document.activeElement === document.getElementById('input')))) throw new Error('the box not focused')
       await page.locator('#input').fill('')
     })
