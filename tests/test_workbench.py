@@ -6173,8 +6173,8 @@ class AgentSetup(Base):
         self.assertTrue(lines[0].startswith("agents get the handbook "), lines)
         self.assertIn("skill oc-skill", lines[0])
         self.assertIn("plugin lint.js (tools lintcheck)", lines[0])
-        self.assertEqual(lines[1], "kept from agents: 2 skills denied by name (Claude's, ~/.agents', "
-                                   f"`workbench`), ~/.claude/CLAUDE.md, {own} (OPENCODE_CONFIG), "
+        self.assertEqual(lines[1], "kept from agents: 2 skills kept out by name (Claude's, ~/.agents and "
+                                   f"workbench's own), ~/.claude/CLAUDE.md, {own} (OPENCODE_CONFIG), "
                                    "reference bare, MCP server github")
         buf = io.StringIO()
         with redirect_stdout(buf), contextlib.suppress(SystemExit):

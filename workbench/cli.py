@@ -3910,7 +3910,7 @@ def cmd_splash(a):
 # to explain the options and, on the user's clear ask and yes in the conversation, change one
 # through the same writer the web app uses (the owner, 2026-11-24: "claude is an interactive
 # assistant to the web panel, in case a user gets confused about the options"; "We trust Claude")
-SETTINGS_GROUPS = {"shared": "Shared", "web": "Web app", "gpu": "GPU", "api": "API", "terminal": "Terminal",
+SETTINGS_GROUPS = {**routes.LABELS, "shared": "Shared", "web": "Web app", "gpu": "GPU", "api": "API", "terminal": "Terminal",
                    "experimental": "Experimental"}
 SETTINGS_SET = "wb settings set <key> <value> changes one, on the user's clear ask and yes"
 
@@ -7597,8 +7597,11 @@ def cmd_chat(a):
             die(f"wb chat url: {got['why']}")
         else:
             print(got["url"])  # the token is the key: keep it private
-            if sys.stdout.isatty():  # a person's terminal, never the mod's or a script's read (#1552)
-                chat_qr(a.port, got["url"])
+            # and the phone's, once there is one: localhost alone left the user to edit the host by
+            # hand (the web app's review, 2026-11-26); at a person's terminal its QR code under it,
+            # never in the mod's read or a script's (#1552)
+            if got["url"]:
+                chat_phone(a.port, got["url"], sys.stdout.isatty())
     elif a.action == "on":  # the switch, kept: the link shows and a session listens
         # a failure puts the switch back as it was: turned on and left on when this died, the
         # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an
@@ -7789,16 +7792,18 @@ def chat_reach(to: str | None, port: int) -> None:
               "serves it on your tailnet only")
 
 
-def chat_qr(port: int, shown: str) -> None:
-    """`wb chat url` at a terminal: the phone link (chat.phone_url) as a QR code under the link, so
-    a phone's camera opens it instead of a 40-character token typed by hand (#1552, 2026-11-26);
-    the link above it first when it isn't the one already printed. Nothing while there is none."""
+def chat_phone(port: int, shown: str, qr_code: bool) -> None:
+    """`wb chat url`'s phone link (chat.phone_url), `on your phone: <link>` under the link when it
+    isn't the one already printed, and with ``qr_code`` (a terminal) its QR code, so a phone's
+    camera opens it instead of a 40-character token typed by hand (#1552, 2026-11-26). Nothing
+    while there is none."""
     link = chat.phone_url(port)
     if not link:
         return
     if link != shown:
         print(f"on your phone: {link}")
-    print(qr.half_blocks(link))
+    if qr_code:
+        print(qr.half_blocks(link))
 
 
 def chat_token(what: str | None, name: str | None) -> None:

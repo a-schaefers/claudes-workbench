@@ -48,6 +48,8 @@ interface WbApi {
   post(path: string, body: unknown): Promise<Posted>
   view(name: string, mod: WbView): void
   toast(text: unknown): void
+  ask(text: string): void
+  roving(e: KeyboardEvent, items: HTMLElement[]): void
   on(event: 'state' | 'view', fn: (arg: any) => void): void
   current(): string
 }

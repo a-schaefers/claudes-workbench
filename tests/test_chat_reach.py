@@ -173,6 +173,26 @@ class Reach(Base):
         row = next(r for r in settings.rows(fresh=True) if r["key"] == "reach")
         self.assertEqual((row["value"], row["says"]), ("custom", settings.REACH_CUSTOM[2]))
 
+    def test_once_reach_is_the_tailnet_the_phones_link_is_its_https_name_else_its_tailnet_name_and_wb_chat_url_prints_it(self):
+        # the web app's review (2026-11-26): the phone needed a terminal trip, a host edited by hand
+        # and the 40-character token carried over some other way
+        settings.drop()
+        self.addCleanup(settings.drop)
+        with self.with_tailscale(FAKE_TS_SERVE="1400"):
+            self.assertEqual(chat.phone_base(1400), "")                       # reach local: none
+            run_wb("chat", "reach", "tailnet", "--port", "1400")
+            self.assertEqual(chat.phone_base(1400), f"https://{NAME}")        # tailscale serve in front
+        with self.with_tailscale():
+            self.assertEqual(chat.phone_base(1400), f"http://{NAME}:1400")    # its tailnet name
+            with mock.patch.object(chat, "port", return_value=1400):
+                row = next(r for r in settings.rows(fresh=True) if r["key"] == "reach")
+            self.assertEqual(row["phone"], f"http://{NAME}:1400")             # no token: the page adds its own
+            with mock.patch.object(chat, "ensure", return_value={"url": f"http://localhost:1400/#token={chat.token()}", "state": "up"}):
+                out = run_wb("chat", "url", "--port", "1400").splitlines()
+        self.assertEqual(out, [f"http://localhost:1400/#token={chat.token()}", f"on your phone: http://{NAME}:1400/#token={chat.token()}"])
+        with self.with_tailscale(FAKE_TS="down"):
+            self.assertEqual(chat.phone_base(1400), "")                       # Tailscale down: none
+
     def test_chat_on_and_doctor_point_at_the_phones_way_in_only_while_it_opens_here_alone(self):
         from workbench import cli
         with self.with_tailscale():
@@ -229,13 +249,14 @@ class Reach(Base):
                 return True
         here = "http://localhost:1400/#token=t"
         self.conf.write_text(json.dumps({"bind": chat.TAILNET_BIND}))
+        phone = f"http://{NAME}:1400/#token={chat.token()}"
         with self.with_tailscale(), mock.patch.object(chat, "ensure", return_value={"url": here, "state": "up"}):
-            self.assertEqual(run_wb("chat", "url", "--port", "1400"), here + "\n")  # read whole: the link alone
+            # a pipe: the phone's line, never its code (the mod reads --json)
+            self.assertEqual(run_wb("chat", "url", "--port", "1400"), f"{here}\non your phone: {phone}\n")
             self.assertEqual(json.loads(run_wb("chat", "url", "--json", "--port", "1400"))["url"], here)
             out = Terminal()
             with redirect_stdout(out):
                 cli.main(["chat", "url", "--port", "1400"])
-        phone = f"http://{NAME}:1400/#token={chat.token()}"
         self.assertEqual(out.getvalue(), f"{here}\non your phone: {phone}\n{qr.half_blocks(phone)}\n")
         self.conf.write_text("{}")
         out = Terminal()

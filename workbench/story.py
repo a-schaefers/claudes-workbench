@@ -48,7 +48,9 @@ DRIVERS: dict[str, dict[str, str]] = {
 # three rules), `state.*` (the driver's state line) and `next.*` (what to do about it), `wait.*`
 # (what a waiting dialog is, for `state.waiting`'s {what}), `note.*` (the thread's waiting row,
 # whose bytes the mod's tests and the phone's pushes know), `receipt.*` (a message's meta),
-# `prompts` and `lane` (the Settings cards), `doc.rule` (the docs' block), `link.*` (wb's own
+# `lane` (Settings' How the chat works, beside `rule.terminal` and `rule.settings`: the three lines
+# that said "prompts wait in the terminal" five times over three cards, the web app's review,
+# 2026-11-26), `doc.rule` (the docs' block), `link.*` (wb's own
 # lines on where the web app is: wb setup, wb chat on, wb doctor), `moved.deepmode` (`wb deepmode
 # --moved`'s one line, which both hosts toast once: a 2.1 Dynamic workflows on starts 2.2 off,
 # #1507), `refusal.*` (what a host tells
@@ -63,9 +65,9 @@ TEXTS: dict[str, str] = {
     "purpose": "Message {who} from anywhere: most work can run from here. A prompt {who} raises waits in "
                "its terminal (`ssh` + `tmux`); run {who} with permissions granted to skip those. "
                "Your settings live here too.",
-    "rule.terminal": "The terminal is where {who} lives, on this machine or over `ssh` + `tmux`: "
-                     "a prompt {who} raises is answered there, never in the chat.",
-    "rule.chat": "Most work can still run from the chat, more so with {who} run with permissions granted.",
+    "rule.terminal": "The terminal is where {who} lives, on this machine or over `ssh` + `tmux`: a prompt {who} "
+                     "raises (a permission, a question, a plan) is answered there, never here, and the line at the "
+                     "top of the chat says while one waits.",
     "rule.settings": "The web app's Settings are the source of truth: {who} changes one only when you ask and say yes.",
     "state.none": "No session is listening: messages wait.",
     "state.idle": "{Who} is listening in {where}.",
@@ -86,13 +88,8 @@ TEXTS: dict[str, str] = {
     "note.waiting": "{Who} is waiting for you in the terminal.",
     "note.grant": "Run it with permissions granted to work from the chat.",
     "receipt.blocked": "Waiting behind the prompt in the terminal",
-    "lane": "A second lane to {who}, not a copy of the terminal. What you send here reaches the session "
-            "listening on your computer; {who} answers here with what matters: results, questions, its plans. "
-            "Its prompts wait in the terminal, and the terminal's full output stays on the computer. "
-            "Ask {who} to keep you posted here, and it will.",
-    "prompts": "{Who}'s prompts (a permission, a question, a plan) are answered in the terminal, never here. "
-               "While one waits, the line at the top of the chat says so. Run {who} with permissions "
-               "granted to work from the chat.",
+    "lane": "This chat is a second lane to {who}, not a copy of the terminal: {who} answers here with what "
+            "matters, and most work can run from here, more so with {who} run with permissions granted.",
     "doc.rule": "The terminal is where {who} lives (locally, or over `ssh` + `tmux`), and a prompt it raises "
                 "is answered there. Most work can still run from the web app's chat, more so with {who} run "
                 "with permissions granted. The web app's Settings are the source of truth: {who} changes one "
@@ -135,7 +132,7 @@ HOST: tuple[str, ...] = ("refusal.question", "refusal.plan", "refusal.consent", 
                          "tasks.pickup")
 
 # What the web app's generated story.ts carries: the keys its page reads (`data-story`, app.ts).
-PAGE: tuple[str, ...] = ("purpose", "rule.terminal", "rule.chat", "rule.settings", "receipt.blocked", "prompts", "lane")
+PAGE: tuple[str, ...] = ("purpose", "rule.terminal", "rule.settings", "receipt.blocked", "lane")
 
 # The doc blocks gen_story.py fills: {repo path: ((key, driver), ...)}, each one's text between
 # `<!-- story:KEY[:driver] -->` and `<!-- /story -->`.

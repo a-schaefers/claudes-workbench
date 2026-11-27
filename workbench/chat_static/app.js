@@ -680,17 +680,15 @@
     const tsTabs = [...document.querySelectorAll('#ts-tabs [data-part]')];
     for (const b of tsTabs)
         b.onclick = () => { tsPart = b.dataset.part; tsDiff = null; loadPart(); };
-    // the tabs one Tab stop, the arrows (and Home, End) moving between them and showing each, as a
-    // tablist does (#1339, 2026-11-26; Settings' radio groups do the same)
+    // the tabs one Tab stop, the arrows (and Home, End) moving the focus between them (`roving`, as
+    // Settings' radio groups: every tab was a stop of its own and the arrows did nothing, the web
+    // app's review, 2026-11-26), and here showing each, as a tablist does (#1339)
     $('ts-tabs').addEventListener('keydown', e => {
-        const at = tsTabs.findIndex(b => b.dataset.part === tsPart);
-        const to = e.key === 'ArrowRight' ? (at + 1) % tsTabs.length : e.key === 'ArrowLeft' ? (at + tsTabs.length - 1) % tsTabs.length
-            : e.key === 'Home' ? 0 : e.key === 'End' ? tsTabs.length - 1 : -1;
-        if (to < 0)
-            return;
-        e.preventDefault();
-        tsTabs[to].click();
-        tsTabs[to].focus();
+        const was = document.activeElement;
+        roving(e, tsTabs);
+        const now = document.activeElement;
+        if (now !== was && tsTabs.includes(now))
+            now.click();
     });
     // Another view opens a task's sheet (#1339: Stats' Running rows, stats.ts): a window event
     // `wb:open-task` {task}, the Chat view shown and the sheet open on that task, as a tap on the
@@ -2466,13 +2464,13 @@
         try {
             if (on) {
                 if (Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted')
-                    throw new Error('Notifications were not allowed.');
+                    throw new Refused('Notifications were not allowed.');
                 let sub = await swReg.pushManager.getSubscription();
                 if (!sub)
                     sub = await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(state.push.key) });
                 const r = await post('/api/push', { endpoint: sub.endpoint, on: true });
                 if (!r.ok)
-                    throw new Error((await r.json().catch(() => ({}))).error || 'The computer refused it.');
+                    throw new Refused((await r.json().catch(() => ({}))).error || 'The computer refused it.');
                 pushOn = true;
                 pushEndpoint = sub.endpoint;
             }
@@ -2485,9 +2483,11 @@
                 pushOn = false;
                 pushEndpoint = '';
             }
+            // our own words (`Refused`), else one next step: the browser's raw error ("Registration failed -
+            // push service error") said nothing a user could act on (the web app's review, 2026-11-26)
         }
         catch (e) {
-            pushNote = String((e && e.message) || e);
+            pushNote = e instanceof Refused ? e.message : "Notifications couldn't be turned on here: reload the page and try again.";
         }
         pushBusy = false;
         drawSettings();
@@ -2501,8 +2501,12 @@
         text.split(/`([^`]+)`/).forEach((part, i) => p.append(i % 2 ? Object.assign(document.createElement('code'), { textContent: part }) : part));
         return p;
     };
-    const HTTPS = "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
-        'on the computer, `tailscale serve --bg 1337` gives the chat an https address on your tailnet.';
+    // the port this chat runs on: both lines show only over plain http, where the page's own port is
+    // the server's; the cards said 1337 whatever it was, and `--bg 1337` served nothing, or another
+    // account's chat (#1562, 2026-11-26)
+    const servePort = () => location.port || '1337';
+    const HTTPS = () => "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
+        `on the computer, \`tailscale serve --bg ${servePort()}\` gives the chat an https address on your tailnet.`;
     function drawApp() {
         const box = $('app');
         box.replaceChildren();
@@ -2510,10 +2514,10 @@
         if (standalone())
             return para(box, "Installed ✓ — you're using the chat as an app.");
         if (!window.isSecureContext)
-            return paraCode(box, HTTPS, 'small');
+            return paraCode(box, HTTPS(), 'small');
         if (!https)
             return paraCode(box, 'The app installs from the https address, so the one app works on every device: ' +
-                'on the computer, `tailscale serve --bg 1337` gives the chat one on your tailnet.', 'small');
+                `on the computer, \`tailscale serve --bg ${servePort()}\` gives the chat one on your tailnet.`, 'small');
         if (installEvt) {
             const b = document.createElement('button');
             b.type = 'button';
@@ -2535,8 +2539,9 @@
     function drawNotify() {
         const box = $('notify');
         box.replaceChildren();
+        // the https line is Install the app's, below this card: "(see above)" pointed at nothing (2026-11-26)
         if (!window.isSecureContext)
-            return para(box, 'They need the page over https too (see above).', 'small');
+            return para(box, 'They need the page over https too: Install the app, below, says how.', 'small');
         if (ios && !standalone())
             return para(box, 'On iPhone and iPad, notifications come only to the installed app: install it above in Safari, open it from its icon, and turn them on here.', 'small');
         if (!canPush)
@@ -2757,14 +2762,40 @@
         modHide(curView);
     else
         modShow(curView); });
-    let toastTimer = 0;
-    function toast(text) {
-        const t = $('toast');
-        t.textContent = String(text);
-        t.hidden = false;
-        clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
+    // A group's arrow keys (a radio group, a tab list): the focus moves to the next or previous one,
+    // round at the ends, Home and End to the first and last; nothing is picked (Enter or Space does)
+    function roving(e, items) {
+        const at = items.indexOf(document.activeElement);
+        if (at < 0)
+            return;
+        const to = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? (at + 1) % items.length
+            : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? (at - 1 + items.length) % items.length
+                : e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : -1;
+        if (to < 0)
+            return;
+        e.preventDefault();
+        items[to].focus();
     }
+    // A short word from a view (WB.toast). Hidden by its look (`.toast` without `.on`: faded, moved
+    // down), never display:none: some screen readers miss a live region that starts out of the tree.
+    // Up for as long as its words need, 60 ms a character and 3.5 s at least (a 236-character refusal
+    // went in 3.5 s, #1563), and held while hovered or focused (the web app's review, 2026-11-26)
+    const TOAST_MS = 3500, TOAST_CHAR_MS = 60;
+    let toastTimer = 0, toastHeld = false, toastFor = 0;
+    const toastEl = $('toast');
+    const toastGo = () => { clearTimeout(toastTimer); if (!toastHeld)
+        toastTimer = setTimeout(() => toastEl.classList.remove('on'), toastFor); };
+    function toast(text) {
+        toastEl.textContent = String(text);
+        toastEl.classList.add('on');
+        toastFor = Math.max(TOAST_MS, TOAST_CHAR_MS * toastEl.textContent.length);
+        toastGo();
+    }
+    for (const [on, held] of [['mouseenter', true], ['mouseleave', false], ['focusin', true], ['focusout', false]])
+        toastEl.addEventListener(on, () => { toastHeld = held; if (held)
+            clearTimeout(toastTimer);
+        else if (toastEl.classList.contains('on'))
+            toastGo(); });
     // The view-module API: stats.js and settings.js build against exactly this (#1284)
     window.WB = Object.freeze({
         token: () => token,
@@ -2794,6 +2825,25 @@
                 modShow(name);
         },
         toast,
+        roving,
+        // a request for the driver, from a Settings row with a problem (its Ask link): the chat's box
+        // filled and focused, sent by the user; it waits like any message, so no listener is needed.
+        // The words carry what it is about ("Help me with Settings › API: …"): an `about` names a
+        // task or a take, which the server checks, and Settings is neither
+        ask: (text) => {
+            // the chat shown now, not at hashchange: a focus given while it was still hidden went nowhere
+            // (2026-11-26); hashchange's setView is then a no-op
+            go('chat');
+            setView('chat');
+            // what the box holds is kept, the request after it, as the outbox's edit keeps it: a message
+            // typed before the tap was replaced, its saved draft with it (#1563, 2026-11-26; #958's rule)
+            const typed = input.value.trim();
+            input.value = typed ? input.value.replace(/\s*$/, '\n\n') + String(text) : String(text);
+            save(K.draft, input.value);
+            grow();
+            armSend();
+            input.focus();
+        },
         on: (event, fn) => { if (handlers[event] && typeof fn === 'function')
             handlers[event].add(fn); },
         current: () => curView || 'chat',

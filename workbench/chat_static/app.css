@@ -59,6 +59,12 @@ body[data-view="stats"] #view-stats, body[data-view="settings"] #view-settings {
 .cards { display: grid; gap: 12px; align-items: start; }
 #stats-body:not(:empty), #settings-rows:not(:empty) { margin-bottom: 12px; }
 @media (min-width: 1100px) { .cards { grid-template-columns: 1fr 1fr; } }
+/* Settings' cards in two CSS columns, short ones under short ones: a grid row as tall as its taller
+   card left about 1,000 px empty beside Agents and roles (the web app's review, 2026-11-26) */
+@media (min-width: 1100px) {
+  #view-settings .cards { display: block; columns: 2; column-gap: 12px; }
+  #view-settings .cards > .card { break-inside: avoid; margin-bottom: 12px; }
+}
 /* the card views' own: scoped to .view-in, never .view, since #view-chat is a .view too and its
    rows, their <p> and <code>, and the intro's <code> kept their sizes (#1284 review) */
 .view-in .card { min-width: 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line);
@@ -118,11 +124,14 @@ body.kb-open #tabbar, body.kb-open .purpose { display: none; }
   .who { display: flex; align-items: baseline; gap: 8px; }
 }
 
-/* a short word from a view (WB.toast), over the nav */
-.toast { position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 5;
+/* a short word from a view (WB.toast), over the nav. Shown with .on; without it faded out and moved
+   down, never display:none, so it stays in the accessibility tree (the web app's review, 2026-11-26) */
+.toast { position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom)); transform: translate(-50%, 8px); z-index: 5;
   max-width: min(90vw, 420px); padding: 9px 14px; border-radius: 12px; background: var(--fg); color: var(--bg);
-  font: 14px/1.4 var(--sans); box-shadow: var(--shadow); animation: rise .2s ease-out; }
-.toast[hidden] { display: none; }
+  font: 14px/1.4 var(--sans); box-shadow: var(--shadow); opacity: 0; pointer-events: none;
+  transition: opacity .2s ease-out, transform .2s ease-out; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.toast:empty { padding: 0; }
 /* what a screen reader hears of the thread (#1408): there, never seen */
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; }

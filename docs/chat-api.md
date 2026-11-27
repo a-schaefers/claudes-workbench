@@ -480,8 +480,14 @@ sent for it (to every device, or with `endpoint` to that one) → `{}`.
 
 ### `GET /api/settings` (user only)
 The web app's Settings: `{"rows": [...], "changes": [...], "ts": <seconds>}`. Each row is `{key, group, label, kind,
-…}`: `group` one of `shared`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental` (in that order); `kind` one
-of `choice` (`value`, `choices: [{value, label, says}]`, `says`, `other`: any id is taken),
+…}`: `group` one of `significant`, `trivial`, `writing` (a card per role, #1553), `shared`, `web`, `gpu`, `api`, `setup`,
+`workflows`, `terminal`, `experimental` (in that order); `more: true`, a row shown under its card's More (a role's GPU
+and API model and thinking); `hidden: true`, a row the page doesn't show while it can do nothing; `fixed: true`, a
+choice shown as its `says` alone; `ask`, a row with a problem or a request the page offers to hand to the driver
+(true, or a string: the request); `brief`, what a folded card's summary says of it; `phone` (the `reach` row's),
+the web app's address on the tailnet, with no token, `""` while reach isn't the tailnet; `kind` one
+of `choice` (`value`, `choices: [{value, label, says, needs?}]` (`needs`: the row whose value that choice needs
+first, a role's API its `api-<role>`), `says`, `other`: any id is taken),
 `number` (`value`: a number or null for off, `unit`: `usd`, `says`), `info`
 (`text`), `action` (`text`, `choices` as buttons) or `note` (`text`, standing where its group's
 rows would be). A row may carry `help` (*POST /api/settings*), and `changed: {ts, by}`, its newest
@@ -494,15 +500,18 @@ closed (its `text` the run's flow, phase, stage counts and spend; its choices `s
 ### `POST /api/settings` (user only)
 `{key, value}` (`value`: a string, a number, or null for a number row's off), JSON only (else 415
 `json only`). It runs that row's `wb` command as the user, not as the driver:
-- 200 `{"ok": true, "said": <wb's line>, "rows": [...], "changes": [...], "help"?: <note>, "detail"?: <text>}`. `help` comes when the
+- 200 `{"ok": true, "said": <wb's line>, "rows": [...], "changes": [...], "help"?: <note>, "detail"?: <text>, "page"?: <a note in
+  the page's words, such as "Set Agents to Both for this to apply.">}`. `help` comes when the
   value just chosen needs the driver's help to work (Agent code navigation on with probe not set
   up). The server returns it and records it (below), and the driver in the terminal offers to set it up
   (installing nothing without the user's yes); showing it is the Settings view's job. `detail` comes
   with a run's `summary`: `wb run report <run>` (cut past 16,000 characters), its agents' results among it
   (show it as text, never markup); `said` is its first line.
-- 400 `{"error": "no such setting"}` for an unknown `key`; 400 `{"error": "not one of its
-  choices"}` for a value the row doesn't take (nothing runs for either).
-- 409 `{"ok": false, "error": <wb's line>, "rows": [...]}` when wb refused.
+- 400 `{"error": "no such setting"}` for an unknown `key`; 400 `{"error": <why>}` for a value the row doesn't
+  take (`'x' isn't one of coding's choices`, the cap's `a positive number, or off`; `not one of its choices` for
+  a value neither string, number nor null; nothing runs for any).
+- 409 `{"ok": false, "error": <wb's line>, "page"?: <the refusal in the page's words>, "rows": [...]}` when wb
+  refused (`page`: by the row's label, with no `wb:` and no command, where the server has the words).
 
 A change that went through is recorded (`settings-changes.jsonl` in the state directory: `{ts,
 key, label, from, to, said, help?, by: "web"}`), so the driver in the terminal hears of it; a

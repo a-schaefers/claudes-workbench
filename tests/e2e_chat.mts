@@ -355,7 +355,8 @@ async function run(engine: string, device?: string) {
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
     const heads = await page.$$eval('#settings .card h3', (h: Element[]) => h.map(x => x.textContent).join(' | '))
-    if (heads !== 'How the chat works | While away | Notifications | Install the app | This chat | This device') throw new Error(heads)
+    // what the chat is, once: This chat went into How the chat works (the web app's review, 2026-11-26)
+    if (heads !== 'How the chat works | While away | Notifications | Install the app | This device') throw new Error(heads)
     if (await page.locator('[data-away]').count()) throw new Error('"Let Claude go ahead" is back')
     const r = await fetch(base + 'api/prefs', { method: 'POST', headers: { Authorization: 'Bearer ' + token,
       'Content-Type': 'application/json' }, body: '{"away":"allow"}' })
@@ -369,14 +370,15 @@ async function run(engine: string, device?: string) {
                         'until you type or answer a prompt in the terminal again',
                         "Stats and Settings don't count, nor this page opened on the computer itself"])  // #1374
       if (!said.includes(want)) throw new Error(said)
-    const prompts = await page.textContent('#away-prompts')
-    for (const want of ['are answered in the terminal, never here', 'Run Claude with permissions granted to work from the chat.'])
-      if (!prompts.includes(want)) throw new Error(prompts)
-    // the three rules, the story's words for the driver listening (#1355)
+    // the prompts said once, in How the chat works, not again under While away (the web app's review, 2026-11-26)
+    if (await page.locator('#away-prompts').count() || said.includes('prompts')) throw new Error('While away says the prompts again')
+    // its three lines, the story's words for the driver listening (#1355)
     const how = (await page.textContent('#how')).replace(/\s+/g, ' ')
-    for (const want of ['The terminal is where Claude lives', 'a prompt Claude raises is answered there, never in the chat',
+    for (const want of ['This chat is a second lane to Claude', 'The terminal is where Claude lives',
+                        'a prompt Claude raises (a permission, a question, a plan) is answered there, never here, and the line at the top of the chat says while one waits',
                         'more so with Claude run with permissions granted', "Settings are the source of truth: Claude changes one only when you ask and say yes"])
       if (!how.includes(want)) throw new Error(how)
+    if ((how.match(/answered there|in the terminal/g) || []).length !== 1) throw new Error('said more than once: ' + how)
     await goTo('chat')
     await until(async () => await page.locator('#settings').isHidden())
   })
@@ -562,9 +564,10 @@ async function run(engine: string, device?: string) {
     await until(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())))
     await until(() => page.evaluate(async () => (await (await caches.open('wb-chat')).match('/key')) !== undefined))
     if (!(await page.textContent('#app')).includes('installs from the https address')) throw new Error('install offered over http')
-    // its command as code, never its backticks as text (#1323)
+    // its command as code, never its backticks as text (#1323), on the port this chat runs on: this
+    // test's 13371, where the card said 1337 whatever the port (#1562)
     const cmd = await page.$$eval('#app code', (c: Element[]) => c.map(x => x.textContent))
-    if (JSON.stringify(cmd) !== '["tailscale serve --bg 1337"]' || (await page.textContent('#app')).includes('`'))
+    if (JSON.stringify(cmd) !== JSON.stringify([`tailscale serve --bg ${PORT}`]) || (await page.textContent('#app')).includes('`'))
       throw new Error('the install card: ' + await page.textContent('#app'))
     const notify = await page.textContent('#notify')
     if (engine === 'webkit' ? !notify.includes('installed app') : !(await page.locator('#push').count())) throw new Error('notifications: ' + notify)
@@ -1761,10 +1764,11 @@ async function run(engine: string, device?: string) {
       })
       if (got.p !== got.card || got.margins !== `${got.p} ${got.p}` || got.code !== got.p || got.introCode !== got.intro) throw new Error(JSON.stringify(got))
     })
-    if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px', async () => {
+    if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px, Settings\' as CSS columns, short cards under short ones', async () => {
       await goTo('settings')
+      // CSS columns, not a grid: a grid row as tall as its taller card left 1,000 px empty (the web app's review, 2026-11-26)
       const got = await page.evaluate(() => ({ w: document.querySelector('#view-settings .view-in')!.getBoundingClientRect().width,
-        cols: getComputedStyle(document.getElementById('settings')!).gridTemplateColumns.split(' ').length }))
+        cols: Number(getComputedStyle(document.getElementById('settings')!).columnCount) || 1 }))
       if (got.w > 1041 || got.cols !== 2) throw new Error(JSON.stringify(got))
       await goTo('chat')
     })
@@ -1851,7 +1855,7 @@ async function run(engine: string, device?: string) {
       await page.evaluate(() => document.getElementById('input')!.blur())
       await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
     })
-    await check('window.WB gives the views the key, the API, the view and its changes, the state and a toast', async () => {
+    await check('window.WB gives the views the key, the API, the view and its changes, the state, a toast and the chat\'s box', async () => {
       const got = await page.evaluate(async () => {
         const seen: string[] = []
         window._states = 0
@@ -1866,9 +1870,9 @@ async function run(engine: string, device?: string) {
         WB.toast('Saved.')
         const t = document.getElementById('toast')!
         return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, timed: [q.status, JSON.stringify(await q.json())], cur: WB.current(), seen,
-          token: WB.token().length > 20, toast: !t.hidden && t.textContent }
+          token: WB.token().length > 20, toast: t.classList.contains('on') && t.textContent }
       })
-      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,current,on,post,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
+      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,ask,current,on,post,roving,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
         cur: 'settings', seen: ['settings'], token: true, toast: 'Saved.' })) throw new Error(JSON.stringify(got))
       const was = await page.evaluate(() => window._states)
       wb('chat', 'reply', '--text', 'A state for the views.')

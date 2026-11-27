@@ -423,6 +423,39 @@ def served_site(port: int) -> str | None:
     return ""
 
 
+def _served_base(port: int) -> str:
+    """`https://<name>[:<port>]` while `tailscale serve` serves this chat's ``port`` (served_site),
+    else "": phone_base's and phone_url's first answer."""
+    site = served_site(port)
+    if not site:
+        return ""
+    name, _, https = site.rpartition(":") if ":" in site else (site, "", "")
+    return f"https://{name}" + ("" if https in ("", "443") else f":{https}")
+
+
+def _on_tailnet() -> bool:
+    try:
+        return reach() == "tailnet"
+    except ConfigError:
+        return False
+
+
+def _tailnet_http(port: int) -> str:
+    """http://<this machine's tailnet name, else its IP>:<port>, "" while Tailscale isn't up."""
+    ts = tailscale()
+    name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts.get("ip") or ""
+    return f"http://{f'[{name}]' if ':' in name else name}:{port}" if name else ""
+
+
+def phone_base(port: int) -> str:
+    """The web app's address on the user's tailnet, for their phone (the web app's review,
+    2026-11-26: the phone needed a terminal trip, a host edited by hand and a 40-character token
+    carried over): its https name when `tailscale serve` serves this chat's ``port`` (served_site),
+    else http://<this machine's tailnet name>:<port>; "" while reach isn't `tailnet` or Tailscale
+    isn't up. No token: the page adds its own (Settings' reach row)."""
+    return (_served_base(port) or _tailnet_http(port)) if _on_tailnet() else ""
+
+
 _tailnet = {"at": float("-inf"), "name": ""}
 _tailnet_lock = threading.Lock()
 
@@ -441,23 +474,12 @@ def tailnet_name() -> str:
 
 def phone_url(port: int) -> str:
     """The link a phone on the tailnet opens, the token in its fragment (#1552, 2026-11-26): at
-    `tailscale serve`'s https name when it serves ``port`` (served_site), else while reach is
-    `tailnet` at this machine's tailnet name over http; "" for neither (reach local, a bind of the
-    user's own, Tailscale down). The QR code `wb chat url` draws and GET /api/phone-qr.svg serves."""
-    site = served_site(port)
-    if site:
-        name, _, https = site.rpartition(":") if ":" in site else (site, "", "443")
-        return f"https://{name}{'' if https == '443' else ':' + https}/#token={token()}"
-    try:
-        if reach() != "tailnet":
-            return ""
-    except ConfigError:
-        return ""
-    ts = tailscale()
-    host = ts.get("dns") or ts.get("ip") or ""
-    if not host:
-        return ""
-    return f"http://{f'[{host}]' if ':' in host else host}:{port}/#token={token()}"
+    `tailscale serve`'s https name when it serves ``port`` (served_site, whatever the reach: serve
+    proxies to localhost), else phone_base's (reach `tailnet`, this machine's tailnet name over
+    http); "" for neither (reach local, a bind of the user's own, Tailscale down). The second line
+    `wb chat url` prints, the QR code it draws at a terminal and GET /api/phone-qr.svg serves."""
+    base = _served_base(port) or (_tailnet_http(port) if _on_tailnet() else "")
+    return f"{base}/#token={token()}" if base else ""
 
 
 # ---- the thread ----
@@ -2798,8 +2820,8 @@ def settings_rev() -> dict | None:
 
 
 def admin_set(key, value) -> tuple[int, dict]:
-    """POST /api/settings: (status, body). 200 {ok, said, rows, changes, help?, detail?}; 400 for no such row
-    or a value it doesn't take (nothing runs); 409 {ok: false, error, rows} when wb refused. A
+    """POST /api/settings: (status, body). 200 {ok, said, rows, changes, help?, detail?, page?}; 400 for no such row
+    or a value it doesn't take (its reason, nothing runs); 409 {ok: false, error, page?, rows} when wb refused. A
     change that went through is {ts, key, label, from, to, said, help?, by: "web"} in CHANGES, which
     the row's wb child logs (cli.main, settings.logged: one writer for every caller, #1355)."""
     from . import settings as admin
@@ -2811,14 +2833,15 @@ def admin_set(key, value) -> tuple[int, dict]:
         done = admin.apply(key, value)
     except KeyError:
         return 400, {"error": "no such setting"}
-    except ValueError:
-        return 400, {"error": "not one of its choices"}
+    except ValueError as e:  # its reason: a number box was told "not one of its choices" (the web app's review, 2026-11-26)
+        return 400, {"error": str(e) or "not one of its choices"}
     rows = admin.rows()
-    if not done["ok"]:
-        return 409, {"ok": False, "error": done["said"], "rows": rows}
+    if not done["ok"]:  # `page`: the refusal in the page's words (settings.page_line, #1558)
+        return 409, {"ok": False, "error": done["said"], "rows": rows, **({"page": done["page"]} if done.get("page") else {})}
     helps = {"help": done["help"]} if done.get("help") else {}
     detail = {"detail": done["detail"]} if done.get("detail") else {}  # a run's Summary (#1278's S12)
-    return 200, {"ok": True, "said": done["said"], "rows": rows, "changes": admin.changes(), **helps, **detail}
+    page = {"page": done["page"]} if done.get("page") else {}  # a note the page adds to its own words
+    return 200, {"ok": True, "said": done["said"], "rows": rows, "changes": admin.changes(), **helps, **detail, **page}
 
 
 class TopFeed:

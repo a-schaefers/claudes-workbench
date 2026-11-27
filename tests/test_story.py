@@ -190,7 +190,7 @@ class Story(unittest.TestCase):
     def test_the_pages_text_before_a_state_arrives_is_the_storys_for_any_driver(self):
         body = (ROOT / "workbench" / "chat_static" / "index.html").read_text()
         found = re.findall(r'<(\w+)[^>]*data-story="([a-z.]+)"[^>]*>(.*?)</\1>', body, re.S)
-        self.assertGreaterEqual(len(found), 6)
+        self.assertGreaterEqual(len(found), 5)  # the hint, the intro, How the chat works' three lines (2026-11-26)
         for _, key, inner in found:
             with self.subTest(key=key):
                 self.assertIn(key, story.PAGE)
