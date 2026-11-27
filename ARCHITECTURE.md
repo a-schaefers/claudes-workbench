@@ -5321,8 +5321,18 @@ running finishes. The stop is the user's spending, as the cap's (*Spend*): phase
 `<task> stopped: Agents is GPU, so nothing spends, and it runs on its API model (<id>). Its work so far
 is in the worktree. Ask the user: Agents back to Both or API (wb route all both), then wb resume
 <task>; or wb takeover <task> or wb discard <task>.` then `<what> didn't run: Agents is GPU, so nothing
-spends.` A role's own move to the GPU stops nothing: its started tasks keep their model, and its change
-line says so.
+spends.` Only the first API task stops and tells (#1585): one that meets the switch after another's
+Agents stop has told Claude (`runner._agents_told`: phase `stuck`, guard `agents`, its `noticed` since
+routes.json's mtime, so a stop from an earlier switch, never resumed, holds no new task untold) waits
+instead, before round 1 or before its next (`_agents_gpu` with the lease, `runner._agents_wait`):
+`phase: queued`, `last: waiting: Agents is GPU, so nothing spends; <task>'s stop has asked the user: it
+goes on once Agents is Both or API (wb stop gives up)`, its provider slot let go and taken again after,
+on a watch of routes.json's directory, looking again at most every `API_WAIT`'s 30 s. Agents Both or API
+lets it go on with no `wb resume`; that stop gone (resumed, taken over, discarded) it looks again, and
+stops and tells when none stands: never a wait untold. The look and the stop are under
+`locks/agents-stop.lock` (`runner.AGENTS_LOCK`), so two at once can't both tell. Each task of a fan-out
+or backlog stopped with its own notice before, the same ask, one wake and one `wb resume` a task. A
+role's own move to the GPU stops nothing: its started tasks keep their model, and its change line says so.
 
 **When the GPU is busy** (#1023, the owner's opt-in, off by default): routes.json's `busy`
 (`routes.BUSY`: `wait`, missing, or `api`; any other value a `RoutesError`), set by `wb route busy
@@ -10551,6 +10561,7 @@ $WB_HOME (~/.local/state/workbench)
   locks/prepare-check.json, prepare-check-<n>.lock   the base checks' and the rounds' tests' own
   locks/signal-stop.lock         one runner writing a shutdown's one notice (runner._signal_notice)
   locks/cap-wait.lock            the one API task let past the day cap to its own stop, its name in it (runner._cap_go, #1304)
+  locks/agents-stop.lock         an API task's look for a told Agents stop and its own stop, one at a time (runner.AGENTS_LOCK, #1585)
   locks/provider-stop-<provider>.lock   empty: one running task's quota, rate limit or outage stop at a time looks for a told one and tells (runner._told_stop, #1344)
   locks/workflows.lock           one `wb deepmode --moved` at a time: two hosts loading at once say the 2.1 move once (cli.deepmode_moved, #1507)
   locks/skills.lock              one skill-library change at a time, add to commit (skills._library_lock)
@@ -10812,7 +10823,7 @@ off), not `wb start`'s.
 | `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, at_catalog (that total as OpenCode's figure prices it, a provider's own row at its `metered`, a `usage.cost` one as booked: what `results.api_usage` compares the export with, #1165, #1234; none for a plan), source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, prices, plan?}`, per ledger row |
 | `api_stop` | `{guard, text}` (`spend`'s with `worst`, the refused request's at its worst, which the round's stop carries on to `meter.stop_text`, #1150): stop the round now: the keyhole's `quota` (#1020) or `setup` (a certificate or proxy of this machine's, #1080), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
 | `cap_told` | a spend stop's day cap when it stopped (`runner._stop_before`, or the round's): the tasks waiting behind the stop go on only once the cap is above it (`runner._cap_told`, #1304) |
-| `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), `agents` when Agents on GPU did (`runner._agents_gpu`, #1213); with `infra` `spend`. With `infra` `provider`, the round's guard that stopped it (`rate_limited`, `outage`, `quota`, `auth`, `setup`, `refused`): `models.held_told` finds a told rate limit or outage by it (#1277), or a 402 (`quota`, `runner._told_stop`, #1344) |
+| `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), `agents` when Agents on GPU did (`runner._agents_gpu`, #1213; the first such stop told, the rest wait behind it, `runner._agents_told`, #1585); with `infra` `spend`. With `infra` `provider`, the round's guard that stopped it (`rate_limited`, `outage`, `quota`, `auth`, `setup`, `refused`): `models.held_told` finds a told rate limit or outage by it (#1277), or a 402 (`quota`, `runner._told_stop`, #1344) |
 | `updated_at` | every write |
 
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?, programs?, names?, workdir?}`

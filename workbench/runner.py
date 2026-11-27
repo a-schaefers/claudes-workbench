@@ -6068,7 +6068,7 @@ def _go_on(task: store.Task, n: int, what: str, lease=None) -> bool:
     if meter.for_task(task) is None:
         return True
     while True:
-        if _agents_gpu(task, n, what):
+        if _agents_gpu(task, n, what, lease):
             return False
         tokens = first_tokens(task)
         if not (why := meter.stop_reason(task, ahead=True, tokens=tokens)):
@@ -6079,20 +6079,67 @@ def _go_on(task: store.Task, n: int, what: str, lease=None) -> bool:
     return False
 
 
-def _agents_gpu(task: store.Task, n: int, what: str) -> bool:
+def _agents_gpu(task: store.Task, n: int, what: str, lease=None) -> bool:
     """Whether an API task stopped before ``what`` (round n's next, or round n itself) for the
     Agents switch on GPU, the user's "nothing spends" (routes.AGENTS_GPU, #1213): only wb start
     read it, so a queued task took its provider slot after the switch and spent. A stop of the
     user's spending, as the cap's (infra and cause `spend`, never the step's), its guard `agents`:
-    the remedy is the switch, not a cap (the mod's AGENTS_NEXT)."""
-    if meter.for_task(task) is None or not routes.agents_gpu():
+    the remedy is the switch, not a cap (the mod's AGENTS_NEXT). With ``lease``, behind another
+    task's Agents stop that has told Claude (_agents_told) it waits as queued instead, its slot
+    let go, and goes on once Agents is Both or API (_agents_wait): each API task of a fan-out or
+    backlog stopped and woke Claude with the same ask, one wake and one wb resume a task (#1585,
+    the bar loop, 2026-11-26). The look and the stop are under one lock, so two tasks at once
+    can't both find none told and both tell."""
+    if meter.for_task(task) is None:
         return False
-    name = task.name
-    _stop_before(task, n, what, routes.AGENTS_GPU, (
-        f"{name} stopped: {routes.AGENTS_GPU}, and it runs on its API model ({task.spec.get('model')}). "
-        f"Its work so far is in the worktree. {routes.AGENTS_BACK}, then wb resume {name}; or wb "
-        f"takeover {name} or wb discard {name}."), guard=AGENTS)
-    return True
+    while routes.agents_gpu():
+        with store.locked(store.home() / "locks" / AGENTS_LOCK):
+            if not (told := _agents_told(task) if lease is not None else ""):
+                name = task.name
+                _stop_before(task, n, what, routes.AGENTS_GPU, (
+                    f"{name} stopped: {routes.AGENTS_GPU}, and it runs on its API model ({task.spec.get('model')}). "
+                    f"Its work so far is in the worktree. {routes.AGENTS_BACK}, then wb resume {name}; or wb "
+                    f"takeover {name} or wb discard {name}."), guard=AGENTS)
+                return True
+        _agents_wait(task, lease, told)  # until the switch, or that stop no longer stands
+    return False
+
+
+AGENTS_LOCK = "agents-stop.lock"  # _agents_gpu's look for a told stop and its own stop (#1585)
+
+
+def _agents_told(task: store.Task, told: str = "") -> str:
+    """Another task's Agents stop (phase `stuck`, guard `agents`) still standing, else '': with
+    ``told``, that one while it is so (a resume, takeover or discard ends it); else any told since
+    routes.json last changed (its `noticed` mark later), so a stop from an earlier switch to GPU,
+    never resumed, holds no new task untold (#1585)."""
+    with contextlib.suppress(OSError):
+        since = os.stat(routes.path()).st_mtime
+        for d in ([store.tasks_dir() / told] if told else store.tasks_dir().iterdir()):
+            if d.name == task.name or not (d / "task.json").is_file():
+                continue
+            st = store.Task(d.name).status
+            if st.get("phase") != "stuck" or st.get("guard") != AGENTS:
+                continue
+            try:
+                if told or float((d / "noticed").read_text() or 0) >= since:
+                    return d.name
+            except (OSError, ValueError):
+                continue
+    return ""
+
+
+def _agents_wait(task: store.Task, lease, told: str) -> None:
+    """Queued behind ``told``'s Agents stop (#1585), its provider slot let go and taken again
+    after, until Agents is Both or API (a watch on routes.json's directory) or that stop no
+    longer stands (looked at every API_WAIT's 30 s): never a wait untold, as the cap's."""
+    with Watcher(routes.path().parent) as w:
+        lease.__exit__(None, None, None)
+        task.set_status(phase="queued", last=f"waiting: {routes.AGENTS_GPU}; {told}'s stop has asked the "
+                                             "user: it goes on once Agents is Both or API (wb stop gives up)")
+        while routes.agents_gpu() and _agents_told(task, told):
+            w.wait(models.API_WAIT[1])
+    lease.__enter__()
 
 
 def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard: str = SPEND) -> None:
@@ -6443,7 +6490,7 @@ def _leased(task: store.Task, m: models.Model, say):
             return _load_failed(task, e)
         n = task.status.get("round", 1)
         while True:
-            if _agents_gpu(task, n, f"round {n}"):  # a queued task's slot came after the switch (#1213)
+            if _agents_gpu(task, n, f"round {n}", lease):  # a queued task's slot came after the switch (#1213)
                 return
             if not _cap_wait(task, lease):  # behind a spend stop Claude was told of (#1249)
                 break

@@ -44523,6 +44523,50 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         with mock.patch.object(runner.meter, "for_task", lambda *a, **k: None):
             self.assertTrue(runner._go_on(task, 1, "auto-fix"))
 
+    def test_with_agents_on_gpu_only_the_first_api_task_stops_and_tells_and_the_rest_wait_queued_until_both(self):
+        # #1585 (the bar loop, 2026-11-26): each API task of a fan-out or backlog stopped with its
+        # own stuck notice, the same "Agents back to Both or API" ask, one wake and one wb resume
+        # a task. The first stop tells; the rest wait as queued behind it and go on at Both
+        for name in ("fan-1", "fan-2", "fan-3"):
+            self.start_api(name, "ok", "--no-base-check", spawn=False)
+        routes_json = Path(os.environ["WB_ROUTES"])
+        doc = store.read_json(routes_json)
+        store.write_json(routes_json, {**doc, "use": "gpu"})
+        agents = lambda: [r["task"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]  # noqa: E731
+                          if r.get("guard") == "agents"]
+        self.drive_here("fan-1")
+        self.assertEqual((store.Task("fan-1").status["phase"], agents()), ("stuck", ["fan-1"]))
+        two, three = store.Task("fan-2"), store.Task("fan-3")
+        driver = threading.Thread(target=self.drive_here, args=("fan-2",), daemon=True)  # before round 1
+        lease, went = mock.MagicMock(), []
+        between = threading.Thread(target=lambda: went.append(runner._go_on(three, 1, "auto-fix", lease)),
+                                   daemon=True)                                       # before its next round
+        for t in (driver, between):
+            t.start()
+            self.addCleanup(t.join, 60)
+        deadline = time.time() + 30
+        while not all(t.status.get("phase") == "queued" and str(t.status.get("last") or "").startswith(
+                "waiting: Agents is GPU, so nothing spends; fan-1's stop has asked the user") for t in (two, three)):
+            self.assertLess(time.time(), deadline, (two.status, three.status))
+            self.assertTrue(driver.is_alive() and between.is_alive(), (two.status, three.status))
+            time.sleep(POLL)
+        self.assertEqual(agents(), ["fan-1"])                     # no stop of their own
+        lease.__exit__.assert_called_once()                       # its provider slot let go
+        store.write_json(routes_json, {**doc, "use": "both"})     # the user's answer to fan-1's ask
+        driver.join(60)
+        between.join(60)
+        self.assertFalse(driver.is_alive() or between.is_alive())
+        self.assertEqual(two.status["phase"], "review", two.status)  # with no wb resume
+        self.assertEqual(went, [True])
+        lease.__enter__.assert_called_once()                      # and taken again
+        self.assertEqual(agents(), ["fan-1"])
+        self.assertEqual([r["task"] for r in store.notices() if r["kind"] == "stuck"], ["fan-1"])
+        # a stop told before the last switch holds no new task untold; a resumed one holds none
+        store.write_json(routes_json, {**doc, "use": "gpu"})
+        self.assertEqual((runner._agents_told(two), runner._agents_told(two, "fan-1")), ("", "fan-1"))
+        store.Task("fan-1").set_status(phase="running")
+        self.assertEqual(runner._agents_told(two, "fan-1"), "")
+
 
 # Catalog rows for thinking per task (#1018), shaped as OpenCode 2.3.2's `api model.list` prints
 # them: DeepSeek's own API lists `none` (a body field), OpenRouter a model whose variants have no

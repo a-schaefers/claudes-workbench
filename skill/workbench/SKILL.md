@@ -636,9 +636,10 @@ yours to edit: the coding choice is the user's (`wb coding`), never changed by a
   The notice's route change is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it, and so do those queued behind it: they wait on,
   but for one, whose own stop is the next notice. Nothing but the user raises the cap.
-  With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: API tasks already
-  started stop before their next round, and feedback, next, resume and an API `--model` are
-  refused. Ask the user (Agents back to Both or API, then `wb resume`), or takeover or discard.
+  With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: the first API task
+  stops before its next round, the rest wait queued behind its stop and go on by themselves at
+  Both or API, and feedback, next, resume and an API `--model` are refused. Ask the user (Agents
+  back to Both or API, then `wb resume` the stopped one), or takeover or discard.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
