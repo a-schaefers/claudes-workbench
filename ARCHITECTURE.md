@@ -631,8 +631,8 @@ sentence "I used about 62% less Claude than if Claude had done this work alone",
 amount" or "about 20% more" (both score 1); else `NO_SCORE`. Energy and price stay out. The text
 output never prints it (the percent again, #1322): `--json` carries `{score, color, pct,
 sentence}`; the web app's Stats view shows the badge's number with one line under it, `~3K Claude
-tokens saved this week`, and the GPU's energy and the API line in the paragraph below (the
-saving there only when there is no badge); `wb savings --card FILE.svg` (`savings.card`) writes an
+tokens saved this week`, and the GPU's energy in the paragraph below (the saving there only when
+there is no badge; no API line since #1339: History's This week says the week's API money); `wb savings --card FILE.svg` (`savings.card`) writes an
 SVG (`CARD_COLORS`, each past 4.5:1) holding no name, path, host or account, its footer `Last 7
 days · 3 tasks · estimated`.
 
@@ -658,7 +658,7 @@ written at accept or discard; `claude`/`self_est`
 side by side through `_compare`, of_row's comparison of any kind). Dollars are OpenCode's unit
 (`Money.USD`), printed with `$` by one formatter, `meter.usd` (savings imports it): `$0.42`,
 `$5.00`, `<$0.01` under a cent, a free model's `$0`, `unknown` for None; `meter.money` puts `≈`
-in front of a catalog estimate. The mod's `usd` and the chat's `apiSaved` follow the same rule
+in front of a catalog estimate. The mod's `usd` and the Stats view's `usd` follow the same rule
 (#1322: `$5` from meter and `$5.00` from savings said one cap two ways); the electricity's cost
 keeps none (#609, #845). A task with no known cost counts as `N with no known cost`, whatever the
 cause (`unknown_parts`; a provider's `unknown`, `unpriced`, #1106, one wording since #1322), never
@@ -668,8 +668,8 @@ line: `· paid ≈$0.12` (plain at the user's prices or the provider's figure, *
 prices*), `· paid: unknown` or `· plan usage (opencode-go)`; "" for a GPU task. `wb savings` adds,
 when the period has API rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43) + 1
 with no known cost · claude 210K · writing it yourself ~520K` (`api_summary`); `--json` gains
-`api` (api_totals), which the web app's Stats view reads (`apiSaved`; the pane's footer went
-with #1283). **`wb savings --api`**
+`api` (api_totals), in the chat's state (`savings.api`); the web app shows the week's API money in
+Stats' This week (`apiPeriod`) alone (`apiSaved` went with #1339; the pane's footer with #1283). **`wb savings --api`**
 (`api_report`, with `--week`/`--month`/`--all`) reports the day ledger only (`savings.spent(since)`:
 spend-api.jsonl's `step` and `reconcile` rows since then, open tasks and bench replays in, each on
 its own `day`; `today` is `meter.today()`, the pane's): `api, the last 7 days: ≈$1.57 (≈$0.73
@@ -879,7 +879,7 @@ Status `api.prices`, `meter.today()`'s `basis`, results `api.prices`, `bench.pai
 `spent`'s and the roles' JSON `spend_today.prices` carry it to the start line (` · today ≈$0.42 of
 $5.00`: today's rows' basis, `meter.today()`, no ledger scan for the model's next figures, #1322),
 `wb accept`'s `paid`, the round report, `wb savings`, `wb stats` (and `paid` `≈$0.12`; no footnote under the table, #1322), `wb top`, scout, the stop texts, the pane
-(`isEst`; a narrow Tasks row drops the `≈` before its place) and the chat (`apiSaved`).
+(`isEst`; a narrow Tasks row drops the `≈` before its place) and the chat's Stats view (`estUsd`).
 `wb models --json` gives `prices` (`meter.model_basis`). The day cap counts the figure shown: a catalog that runs high
 stops tasks early (the safe side); one that runs low lets real spend pass the cap, which the opt-in
 tightens.
@@ -7406,8 +7406,7 @@ waiting for their words in `wb-chat-dictate`, bytes in IndexedDB beside the draf
 so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts
 (`receipt.blocked` while the driver waits on a prompt), the state line (`drawState`, *The driver's state line*: a notice is no thread row since
 #1355, and no dialog cards since #1350) and the Settings and Stats cards (*How the chat works*: the story's `rule.*`; `#away-when` states the away rule
-above, `#away-prompts` (the story's `prompts`) that prompts are answered in the terminal and the line at the top says one waits; *This chat*, `lane`; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
-models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43).`, or that alone, #1022, #1135; the saving is the badge's
+above, `#away-prompts` (the story's `prompts`) that prompts are answered in the terminal and the line at the top says one waits; *This chat*, `lane`; `drawSaved` shows no currency sign, as `wb savings`, #845, and no API dollars, #1339 (History's This week has them); the saving is the badge's
 one line, `~3K Claude tokens saved this week`, #1322) are in `app.ts`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
 
@@ -7481,8 +7480,9 @@ task's model by `modelWord`, `apiParts`: `$spend`, or `plan usage` on a plan, #1
 and remote ones folded past `RACK_FOLD_MIN` 2 into `+N more (wb top)` (#1322; no `another machine:
 no telemetry`); Queue. **The history** is `statsLines` ported label for label and in its order
 (`statsRows`): This week and All time (tasks, landed, the API dollars: `apiPeriod`, `API no known
-cost` or `API plan usage` with none known, no `(catalog prices)` note, the `≈` alone says it), the
-model lines capped at `STATS_SHOWN` 3 (each one's write trend an SVG sparkline), Other models, By
+cost` or `API plan usage` with none known, no `(catalog prices)` note, the `≈` alone says it, the
+per-provider split only with two or more, #1339), the model lines capped at `STATS_SHOWN` 3 (tasks, landed,
+the mean rounds, `1 round` or `2.5 rounds`, minutes; each one's write trend an SVG sparkline), Other models, By
 size (`ROLE_WORDS`), What stopped agents (`GUARD_WORDS`;
 `spend` is `the API day cap`), What helps, Bench, Optimized; with no section, `No finished tasks
 yet: delegate one with /workbench, and how it went shows here.` The names follow the pane's
@@ -11812,8 +11812,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `drawSaved`.
 - **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share and badge
   GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, the web app's
-  `apiMoney`, `apiPeriod` (`stats.ts`), the chat's `apiSaved`; `meter.usd` → the mod's `usd`, `apiSaved`'s, `stats.ts`' `usd`; `meter.basis`' values
-  (`meter.BASES`: `catalog`, `yours`, `provider`) → the mod's `isEst`, tasks.ts' `est`, `apiSaved`'s `est`
+  `apiMoney`, `apiPeriod` (`stats.ts`); `meter.usd` → the mod's `usd`, `stats.ts`' `usd`; `meter.basis`' values
+  (`meter.BASES`: `catalog`, `yours`, `provider`) → the mod's `isEst`, tasks.ts' `est`, `stats.ts`' `isEst`
   (#1135); the `kind` default (`gpu`) →
   `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`). `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
   table and the round report's `agent tokens` (an API task's) together.

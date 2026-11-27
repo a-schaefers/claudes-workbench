@@ -2213,33 +2213,16 @@
             n.append(Object.assign(document.createElement('small'), { textContent: ' / 100' }));
             $('badge-s').textContent = t.saved >= 0 ? `~${tokens(t.saved)} Claude tokens saved this week` : `~${tokens(-t.saved)} more Claude tokens this week`;
         }
-        const api = apiSaved(t && t.api);
+        // no API line: History's This week says the week's API money, and spend read under "saved"
+        // (counting trials, so 3 tasks against History's 2) misled (#1339's UX review, 2026-11-26)
         if (!t || !t.tasks) {
-            $('saved').textContent = api || 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.';
+            $('saved').textContent = 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.';
             return;
         }
         const gpu = t.wh ? `The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''; // no currency sign: the price is the user's, in theirs (#845, as #609)
         // no badge (nothing written to compare against, only discards): the saving here instead
         const saved = s ? '' : t.saved >= 0 ? `~${tokens(t.saved)} Claude tokens saved this week.` : `~${tokens(-t.saved)} more Claude tokens this week.`;
-        $('saved').textContent = [saved, gpu, api].filter(Boolean).join(' ');
-    }
-    // The week's API tasks, apart from the saving (#1022): dollars, OpenCode's unit, so a `$`;
-    // a task with no price is counted, never shown as $0
-    function apiSaved(a) {
-        if (!a || !a.tasks)
-            return '';
-        // meter.usd's rule: $0.42, `<$0.01` under a cent, $0 for none (#1322)
-        const usd = (x) => x === 0 ? '$0' : Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`;
-        // ≈: at the catalog's prices, an estimate, unless the user set the model's (wb model price, #1135);
-        // the `≈` alone says it, no "(catalog prices)" after it (#1322)
-        const est = (v) => ((v.prices || 'catalog') === 'catalog' && v.cost ? '≈' : '') + usd(v.cost);
-        const provs = Object.entries(a.by_provider || {}).filter(([, v]) => v.tasks > v.unknown + (v.plan || 0))
-            .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${(a.names || {})[p] || p} ${est(v)}`);
-        const known = a.tasks - a.unknown - (a.plan || 0);
-        const inside = provs.join(', ');
-        const parts = [known ? `${est(a)}${inside ? ` (${inside})` : ''}` : '',
-            a.unknown ? `${a.unknown} with no known cost` : '', a.plan ? `${a.plan} on plan usage` : ''].filter(Boolean);
-        return `API models: ${a.tasks} task${a.tasks === 1 ? '' : 's'}, ${parts.join(', ')}.`;
+        $('saved').textContent = [saved, gpu].filter(Boolean).join(' ');
     }
     function drawSettings() {
         drawApp();

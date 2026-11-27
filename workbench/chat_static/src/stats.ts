@@ -63,7 +63,7 @@
     if (!money) return ''
     const provs = Object.entries<Json>(a.by_provider ?? {}).filter(([, v]) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
       .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${providerWord(p, n)} ${estUsd(v.cost, v.prices)}`)
-    const inside = provs.join(' · ')
+    const inside = provs.length > 1 ? provs.join(' · ') : ''  // one provider's split said the total twice (#1339)
     return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no known cost' ? ` + ${a.unknown} with no known cost` : ''}`
   }
   // Today's API spend against the day cap, the ledger's (`wb route --json`'s spend_today and
@@ -119,9 +119,10 @@
       const change = typeof m.write_change_pct === 'number' && m.write_change_pct
         ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
       const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
+      // rounds is a mean, said `1 round`: `1 rounds` read wrong (#1339's UX review, 2026-11-26)
       out.push({ label: word(model) + windows, trend: trend.length > 1 && Math.max(...trend) > 0 ? trend : null,
         text: `${plural(m.tasks, 'task')} · ${m.accepted_pct}% landed` +
-          (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
+          (m.rounds != null ? ` · ${m.rounds} round${m.rounds === 1 ? '' : 's'}` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
           speed + change })
     }
     const older = f.model_lines?.older

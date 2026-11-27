@@ -494,17 +494,24 @@ async function run(engine: string, device?: string) {
     await goTo('stats')
     await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18.'))
     if ((await page.textContent('#saved')).includes('$')) throw new Error('a currency sign: ' + await page.textContent('#saved'))
-    // #1022: an API task's dollars carry a `$` (OpenCode's unit), apart from the saving, while the
-    // energy's cost still has none (#845)
+    // #1022: an API task's dollars carry a `$` (OpenCode's unit), apart from the saving: History's
+    // This week says them, and What it saved no longer does (#1339: spend read under "saved", and
+    // counted trials, 3 tasks against History's 2), while the energy's cost still has none (#845)
+    const week = () => page.evaluate(() => [...document.querySelectorAll('#stats-body .st-row')]
+      .filter(r => r.querySelector('dt')!.textContent === 'This week').map(r => r.querySelector('dd')!.textContent).join(''))
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepseek',
         model: 'deepseek/deepseek-flash', api: { cost: 0.42, source: 'opencode' } }) + '\n')
+    await page.reload()
+    await goTo('stats')
+    // one provider: no split, which said the total twice (#1339)
+    await until(async () => /API ≈\$0\.42$/.test(await week())).catch(async () => { throw new Error(await week()) })
     // #1135: at the catalog's prices a figure is an estimate (≈); at the user's own (wb model price) it isn't
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepinfra',
         model: 'deepinfra/acme-flash', api: { cost: 0.1, source: 'metered', prices: 'yours' } }) + '\n')
     await page.reload()
     await goTo('stats')
-    await until(async () => (await page.textContent('#saved')).includes('API models: 2 tasks, ≈$0.52 (deepseek ≈$0.42, deepinfra $0.10).'))
-    if (!(await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18. API')) throw new Error(await page.textContent('#saved'))
+    await until(async () => /API ≈\$0\.52 \(.+ ≈\$0\.42 · .+ \$0\.10\)$/.test(await week())).catch(async () => { throw new Error(await week()) })
+    if ((await page.textContent('#saved')) !== 'The GPU used 600 Wh, cost 0.18.') throw new Error(await page.textContent('#saved'))
     writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
     // #101: the badge, its number and its words, legible at phone width
     if (await page.locator('#badge').isHidden()) throw new Error('no badge')
