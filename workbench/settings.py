@@ -16,7 +16,8 @@ list under it instead of sending); `ask`, a row
 that carries a problem or a request, which the page gives an "Ask <driver>" link filling the chat's box
 (true: "Help me with Settings › <its card>: <its line>"; a string: that request); a note, or a row with
 `help`, gets the link without it. `brief`, what a folded card's one-line summary says of the row ("" for
-nothing; without it, a choice's `<label>: <its choice>`). A row may
+nothing; without it, a choice's `<label>: <its choice>`); `phone` (the reach row), the web app's address on
+the tailnet, "" while it isn't there. A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,
@@ -584,8 +585,10 @@ def _build() -> dict:
     except chat.ConfigError as e:
         out.append(_note("reach-why", "web", str(e)))
     else:
+        # `phone`: its address on the tailnet (chat.phone_base, no token: the page adds its own), ""
+        # while it isn't there; the page's Open on your phone line
         out.append(_choice("reach", "web", LABELS["reach"], [*REACH, *([REACH_CUSTOM] if reach == "custom" else [])],
-                           reach))
+                           reach, phone=chat.phone_base(chat.port()) if reach == "tailnet" else ""))
 
     # gpu
     if r is None:

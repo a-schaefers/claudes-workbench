@@ -6777,7 +6777,10 @@ for macOS's system tools, #1305; it retries even
 exit 78; unchecked on a Mac, #449). Messages name the OS's service (`chat.service_name`,
 `service_hint`, #756). `wb setup` installs the service (*Up by default*, below); without one,
 `chat.ensure` starts a server of wb's own. `wb chat url` prints `http://localhost:<port>/#token=…` (the port from `chat/port.json`,
-else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server and drops its pid, else 1337; `--port`, #349; the fragment never leaves the browser).
+else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server and drops its pid, else 1337; `--port`, #349; the fragment never leaves the browser),
+and once reach is the tailnet a second line, the phone's link (`chat.phone_base(port)` + `/#token=…`: `https://<name>` when
+`tailscale serve` serves this port, `served_site`, else `http://<tailnet name>:<port>`; localhost alone left the user to
+edit the host by hand, the web app's review, 2026-11-26).
 
 - **The path of a message.** The page posts it to `chat/messages.jsonl`; the listening session's
   mod submits `[web chat] <the user's words>` and nothing more (plus `(about <task>, step <s>,
@@ -6851,7 +6854,8 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   `failed` (`why`: serve.log's last line). A unit that doesn't answer is followed by `chat.start`
   once (#1343: one that exits 78, stopped for good, left the app down, as only the unit was ever
   started again): `started` with `why` naming the unit, or `failed`. One at a time
-  (`chat/ensure.lock`). `wb chat url` runs it and prints the link alone (the mod reads it whole);
+  (`chat/ensure.lock`). `wb chat url` runs it and prints the link (and, reach the tailnet, the phone's on a line of
+  its own; the mod reads `--json`, and plain output only from a wb older than it, which prints the link alone);
   `wb chat url --json` prints the dict, exit 0, for the mod. **`wb setup`** installs the service
   (`cli.install_service`; `--no-service` skips it): on Linux, where `systemctl --user
   show-environment` answers with this HOME, it links `systemd/wb-chat.service` into
@@ -7662,7 +7666,8 @@ problem or a request: true, or a string, the request itself; the page gives it a
 run, `api-connected` with a provider that has no key it can run on, `flows`), `brief` (what a folded card's
 one-line summary says of it, `""` nothing: `api-connected` its providers, `api-spend` `today ≈$0.07 of $5`,
 `api-none`, `gpu-none`, `optimize` `N models, <state>`, a run, `flows`, `setup-size`; the `size-<id>` rows
-`""`; without it, a choice's `<label>: <its choice>`) and by kind: `choice` (`value`, `choices`
+`""`; without it, a choice's `<label>: <its choice>`), `phone` (the `reach` row's: `chat.phone_base`, the web
+app's address on the tailnet with no token, `""` while reach isn't the tailnet) and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd`; `off`, `""` and null clear it); `info` (`text`); `action`
 (`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
@@ -7882,6 +7887,13 @@ alone, and a generic renderer: a new setting touches only Python.
   - `info`: its `text` as a muted line.
   - A row's `says`, `text` and note, and a kept refusal, draw a `` `…` `` span as `<code>` (text nodes and
     `<code>`, never markup: literal backticks showed, the web app's review, 2026-11-26).
+  - **Open on your phone** (the `reach` row's `phone`, on a desktop page with the key, `(hover: hover) and
+    (pointer: fine)`; the web app's review, 2026-11-26: the phone needed a terminal trip, a host edited by
+    hand and a 40-character token carried over): the full link, `<phone>/#token=<this page's token>`
+    (`.set-phone-link`), Copy (the clipboard, else the link selected for the keys), Share where
+    `navigator.share` is, and its QR code from `GET /api/phone-qr.svg` (fetched with the token, shown as
+    a blob, asked once per link, hidden when the server answers none). With reach `local`, one line: "To
+    open the web app on your phone, pick My tailnet."
   - **Ask <driver>** (`.set-ask`, the web app's review, 2026-11-26: Settings' only fixes were terminal
     commands a phone can't run): on a `note`, a row with `help` or one with `ask`, a link (a 44 px button,
     named as the state's `driver.who` names it) that calls `WB.ask`: the Chat view, its box filled with `ask`
@@ -11322,7 +11334,8 @@ open them all through `wb-settings-open`); a radio group one Tab
 stop, its arrows moving the focus and picking nothing; a role's API choice with
 no model opening its API model list under the row, a pick sending the model, then the role's API (#1558); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
-group; a row's `` `…` `` drawn as `<code>`; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
+group; a row's `` `…` `` drawn as `<code>`; on a desktop with reach the tailnet, Open on your phone's link with the page's
+token and Copy, no QR where the server has none, and with reach local its one line (none of it on a phone); a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
 (two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side
 `fetch` wrapper to a binding (`__wbSettings`), never `page.route`: the page is its service worker's client, and
 WebKit sends such a page's fetches past Playwright's routes. While the server answers that path 404, a stand-in

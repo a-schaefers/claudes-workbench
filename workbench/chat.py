@@ -422,6 +422,28 @@ def served_site(port: int) -> str | None:
     return ""
 
 
+def phone_base(port: int) -> str:
+    """The web app's address on the user's tailnet, for their phone (the web app's review,
+    2026-11-26: the phone needed a terminal trip, a host edited by hand and a 40-character token
+    carried over): its https name when `tailscale serve` serves this chat's ``port`` (served_site),
+    else http://<this machine's tailnet name>:<port>; "" while reach isn't `tailnet` or Tailscale
+    isn't up. No token: the caller adds the link's #token (`wb chat url`, the page from its own)."""
+    try:
+        if reach() != "tailnet":
+            return ""
+    except ConfigError:
+        return ""
+    site = served_site(port)
+    if site:
+        name, _, https = site.rpartition(":") if ":" in site else (site, "", "")
+        return f"https://{name}" + ("" if https in ("", "443") else f":{https}")
+    ts = tailscale()
+    name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts.get("ip") or ""
+    if not name:
+        return ""
+    return f"http://{f'[{name}]' if ':' in name else name}:{port}"
+
+
 _tailnet = {"at": float("-inf"), "name": ""}
 _tailnet_lock = threading.Lock()
 

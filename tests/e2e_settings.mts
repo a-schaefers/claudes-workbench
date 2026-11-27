@@ -74,7 +74,7 @@ export function ringContrast(el: Element, outside = false) {
 }
 
 export async function check(page: any, ctx: E2eCtx) {
-  const { base, token, env, home, until, goTo, desktop } = ctx
+  const { base, token, env, home, until, goTo, desktop, sleep } = ctx
   const view = () => page.locator('#settings-rows')
   const row = (key: string) => page.locator(`#settings-rows .set-row[data-key="${key}"]`)
   const toast = () => page.evaluate(() => { const t = document.getElementById('toast')!; return t.classList.contains('on') ? t.textContent : '' })
@@ -527,6 +527,31 @@ export async function check(page: any, ctx: E2eCtx) {
           .catch(async () => { throw new Error(JSON.stringify(await got())) })
         if ((await got()).api !== `${wide}|Provider`) throw new Error('another card moved: ' + JSON.stringify(await got()))
       } finally { await openAll() }
+    })
+
+    await ctx.check(desktop ? 'once reach is the tailnet, Open on your phone shows the tailnet link with this page\'s token and Copy; with reach local, one line pointing there'
+                            : 'a phone shows no Open on your phone: it is the phone', async () => {
+      // the web app's review (2026-11-26): the phone needed a terminal trip and the token carried over by hand
+      const reach = (value: string, phone: string): SettingRow => ({ key: 'reach', group: 'web', label: 'Web app reach', kind: 'choice', value, other: false,
+        says: 'x', phone, choices: [{ value: 'local', label: 'This machine (default)' }, { value: 'tailnet', label: 'My tailnet' }] })
+      let rows: SettingRow[] = [reach('tailnet', 'http://box.example.ts.net:13371'), ...MOCK_ROWS]
+      unmock()
+      mock(async (method: string) => method === 'POST' ? null : answer(200, { rows, ts: 1 }))
+      await reshow()
+      await until(async () => (await row('reach').count()) === 1)
+      if (!desktop) {
+        if (await row('reach').locator('.set-phone, .set-phone-hint').count()) throw new Error('shown on a phone')
+        return
+      }
+      const link = await row('reach').locator('.set-phone-link').textContent()
+      if (link !== `http://box.example.ts.net:13371/#token=${token}`) throw new Error('link: ' + link)
+      if ((await row('reach').locator('.set-phone button').allTextContents())[0] !== 'Copy') throw new Error('no Copy')
+      await sleep(500)                                     // the QR's GET answered: this server has none (404), no picture
+      if (await row('reach').locator('img.set-phone-qr').isVisible()) throw new Error('a QR with none to show')
+      rows = [reach('local', ''), ...MOCK_ROWS]
+      await reshow()
+      await until(async () => (await row('reach').locator('.set-phone-hint').count()) === 1)
+      if (await row('reach').locator('.set-phone').count()) throw new Error('the link with reach local')
     })
 
     await ctx.check(desktop ? 'the view lays out at 1280 px, two columns of cards, and at 390 px, one, nothing past its edge'

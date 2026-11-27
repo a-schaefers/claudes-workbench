@@ -7596,6 +7596,10 @@ def cmd_chat(a):
             die(f"wb chat url: {got['why']}")
         else:
             print(got["url"])  # the token is the key: keep it private
+            # and the phone's, once reach is the tailnet: localhost alone left the user to edit
+            # the host by hand (the web app's review, 2026-11-26)
+            if got["url"] and (base := chat.phone_base(a.port)):
+                print(f"{base}/#token={chat.token()}")
     elif a.action == "on":  # the switch, kept: the link shows and a session listens
         # a failure puts the switch back as it was: turned on and left on when this died, the
         # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an

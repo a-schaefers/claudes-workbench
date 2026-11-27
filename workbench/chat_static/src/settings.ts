@@ -276,6 +276,7 @@
     }
     const says = lit && pending(row.key) ? lit.says : row.says
     if (says) box.append(para('small set-says', says))
+    phone(row, box)
   }
 
   function number(row: SettingRow, box: HTMLElement) {
@@ -356,6 +357,61 @@
     return ask(`${row.label}: ${row.says || row.text || ''}`)
   }
 
+  // Open on your phone (the web app's review, 2026-11-26: the phone needed a terminal trip, a host
+  // edited by hand and a 40-character token carried over some other way): on a desktop page with
+  // the key, once reach is the tailnet, the full link with the token this page holds, Copy, Share
+  // where the browser has it, and its QR code (GET /api/phone-qr.svg behind the token, so fetched,
+  // shown as a blob, hidden when the server has none); with reach local, one line pointing there
+  const desk = () => matchMedia('(hover: hover) and (pointer: fine)').matches
+  let qr: { link: string; url: string } | null = null
+  function phone(row: SettingRow, box: HTMLElement) {
+    if (typeof row.phone !== 'string' || !desk() || !WB.token()) return
+    if (!row.phone) {
+      if (shown(row) === 'local') box.append(para('small set-phone-hint', 'To open the web app on your phone, pick My tailnet.'))
+      return
+    }
+    const link = `${row.phone}/#token=${WB.token()}`
+    const card = el('div', 'set-phone')
+    card.append(el('div', 'set-label', 'Open on your phone'))
+    const code = el('code', 'set-phone-link', link)
+    card.append(code)
+    const acts = el('div', 'set-actions')
+    const copy = el('button', 'plain', 'Copy')
+    copy.type = 'button'
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(link); WB.toast('Link copied: open it on your phone.') }
+      catch {                                // no clipboard here: the link selected, for the keys
+        const r = document.createRange(); r.selectNodeContents(code)
+        const sel = getSelection(); if (sel) { sel.removeAllRanges(); sel.addRange(r) }
+        WB.toast('The link is selected: copy it with your keys.')
+      }
+    })
+    acts.append(copy)
+    if (typeof navigator.share === 'function') {
+      const share = el('button', 'plain', 'Share')
+      share.type = 'button'
+      share.addEventListener('click', () => { navigator.share({ title: 'Workbench', url: link }).catch(() => {}) })
+      acts.append(share)
+    }
+    card.append(acts)
+    const img = el('img', 'set-phone-qr')
+    img.alt = 'A QR code of this link, for your phone\'s camera'
+    img.width = img.height = 160
+    img.hidden = true
+    if (qr && qr.link === link) { if (qr.url) { img.src = qr.url; img.hidden = false } }  // asked once a link
+    else {
+      if (qr && qr.url) URL.revokeObjectURL(qr.url)
+      qr = { link, url: '' }
+      WB.api('/api/phone-qr.svg').then(async r => {
+        if (!r.ok || !qr || qr.link !== link) return     // none on this server (404): no picture
+        qr.url = URL.createObjectURL(await r.blob())
+        const now = root && root.querySelector<HTMLImageElement>('img.set-phone-qr')  // a redraw since made its own
+        if (now) { now.src = qr.url; now.hidden = false }
+      }).catch(() => {})
+    }
+    card.append(img)
+    box.append(card)
+  }
   // a folded card: <details> whose <summary> holds its name and a line of its state
   function foldCard(k: string, title: string, sum: string) {
     const card = el('details', 'card set-fold')

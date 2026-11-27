@@ -74,3 +74,11 @@
 .set-fold[open] > summary { margin-bottom: 2px; }
 .set-fold[open] > summary .set-sum { display: none; }
 .set-fold > summary + .set-row { padding-top: 4px; }
+
+/* Open on your phone: the tailnet link with its token, Copy, Share, its QR code (the web app's review, 2026-11-26) */
+.set-phone { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
+.set-phone .set-label { margin-bottom: 4px; }
+.view-in code.set-phone-link { display: block; overflow-wrap: anywhere; font-size: 12.5px; user-select: all; }
+.set-phone .set-actions { margin-top: 8px; }
+.set-phone-qr { display: block; margin-top: 10px; background: #fff; border-radius: 8px; }
+.set-phone-qr[hidden] { display: none; }
