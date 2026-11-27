@@ -1764,6 +1764,50 @@ class Runs(Base):
             if store.Task(n).exists and store.Task(n).status.get("phase") not in store.CLOSED:
                 run_wb("discard", n)
 
+    def test_the_run_report_and_close_keep_the_cheap_try_claude_took_over_or_edited_by_hand(self):
+        # #1611 (bar loop #1030, 2026-11-27): #1595 taught the hand-back to keep the try holding
+        # Claude's work, but kept_try kept the old rule, so wb run report, run_done and wb run close
+        # still had Claude wb discard the cheap try it took over or fixed by hand, edits and all
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))
+        self.assertEqual([store.Task(n).status["phase"] for n in ("fxe-code-1", "fxe-code-2")], ["review", "review"])
+
+        def said():
+            (alts,) = [ln for ln in run_wb("run", "report", "fxe").splitlines() if ln.startswith("  code:1: ")]
+            code, _, err = wb("run", "close", "fxe")
+            self.assertEqual(code, 1)
+            return alts, err
+        mine = store.Task("fxe-code-1").worktree / "claude_fix.py"
+        mine.write_text("print('mine')\n")                                # (a) edited by hand at review
+        alts, err = said()
+        self.assertIn("accept only fxe-code-1, then wb discard fxe-code-2", alts)
+        self.assertIn("(one change: accept only fxe-code-1, then wb discard fxe-code-2)", err)
+        self.assertNotIn("wb discard fxe-code-1", alts + err)
+        self.assertEqual({c["keep"] for c in runs.report_of("fxe")["code"]}, {"fxe-code-1"})
+        mine.unlink()
+        run_wb("takeover", "fxe-code-1")                                  # (b) taken over by name
+        alts, err = said()
+        self.assertIn("accept only fxe-code-1, then wb discard fxe-code-2", alts)
+        self.assertIn("(one change: accept only fxe-code-1, then wb discard fxe-code-2)", err)
+        self.assertNotIn("wb discard fxe-code-1", alts + err)
+        theirs = store.Task("fxe-code-2").worktree / "claude_fix.py"
+        theirs.write_text("print('mine too')\n")                          # (c) Claude's work in both
+        alts, err = said()
+        self.assertIn("your work is in fxe-code-1 (wb takeover fxe-code-1), fxe-code-2 (your edits since its "
+                      "review): accept only the one you chose", alts)
+        self.assertNotIn("wb discard fxe-code", alts + err)
+        theirs.unlink()                                                   # (d) chosen before the run escalated
+        store.Task("fxe-code-1").set_status(chosen_at=store.Task("fxe-code-2").spec["created_at"] - 1)
+        alts, err = said()
+        self.assertIn("accept only fxe-code-2, then wb discard fxe-code-1", alts)
+        self.assertNotIn("wb discard fxe-code-2", alts + err)
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
     def test_an_items_role_follows_its_escalation_and_escalate_takes_distinct_roles(self):
         st = [{"id": "code", "kind": "code", "items": ["x"], "escalate": ["significant", "writing"]},
               {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 1},

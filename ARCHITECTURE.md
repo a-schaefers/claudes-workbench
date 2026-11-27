@@ -3707,7 +3707,8 @@ are grouped the same way (`runs.tries_of`, by the key without `#e<k>`, then `#a<
 to B", finish and accept only the try holding Claude's work: one taken over by name since the latest
 try began (status `chosen_at`, kept across later takeovers and runs; a choice the run then escalated
 past, the try handed back with `wb feedback`, counts for nothing), or one at `review` whose files are
-none of its step's `review_trees` (`cli._edited_by_hand`: Claude's small fixes by hand, no takeover).
+none of its step's `review_trees` (`cli._edited_by_hand`: Claude's small fixes by hand, no takeover):
+`runs.claude_work`, the one rule `wb run report`, `run_done` and `wb run close` keep too (`runs.kept_try`, #1611).
 With B at `review` too, the hand-back kept B and had Claude discard the try it chose or fixed and its
 edits (#1595); more than one holding Claude's work, it finishes the one it chose and discards the rest,
 none named. Else the latest try that was at `review` before Claude first took it over
@@ -10252,6 +10253,9 @@ item fails, so `runs.estimate` leaves it out of the figure and, for a paid API e
 read `estimate $0`, #1597). An item's tries are one change in `wb run report`, `run_done` and `wb run close`
 (`runs.change_groups`, by the key without `#e<k>`, as the hand-back's `tries_of`): the report's `code` entries
 of such an item carry `item`, `tries` and `keep` (`runs.kept_try`, the hand-back's rule: one accepted, else the
+one holding Claude's work, `runs.claude_work` as the hand-back's (taken over by name since the latest try began,
+or edited by hand at `review`: the report and close had Claude discard it, its edits with it, #1611; more than one,
+none: `your work is in A (…), B (…): accept only the one you chose`, no discard named), else the
 latest still open at `review` or, after a takeover, `prior_phase` `review`; none while a later try is still
 running or held for `wb run resume`, `runs.try_pending`, which the line names instead: `B is still running` or `B is
 held: wb run resume <run> goes on`, `; decide once it ends`, never a discard of it: a run paused at its budget or the
@@ -10910,7 +10914,7 @@ off), not `wb start`'s.
 | `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output, or a build or test command of Claude's wrote (`runner._claude_built`), but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
 | `prior_phase` | `wb takeover` (`cli._take_over`): the phase before Claude first took the task over, kept by another takeover (a by-name `wb takeover <task>` records `review`: Claude chose to write that try; only `--all`'s own takeover records the phase it found); the hand-back's escalated item keeps the try that was at `review` then (`cli._attempts_line`, #1592); cleared by `spawn_runner` |
-| `chosen_at` | when a by-name `wb takeover <task>` (`cli._take_over`), never `--all`'s, made Claude's choice to write that try, kept across later takeovers and runs; the hand-back's escalated item keeps it whatever the other tries' phases, if made since the latest try began (its spec's `created_at`): one the run escalated past is superseded (`cli._attempts_line`, #1595) |
+| `chosen_at` | when a by-name `wb takeover <task>` (`cli._take_over`), never `--all`'s, made Claude's choice to write that try, kept across later takeovers and runs; the hand-back's escalated item keeps it whatever the other tries' phases, if made since the latest try began (its spec's `created_at`): one the run escalated past is superseded (`runs.claude_work`, for the hand-back, `cli._attempts_line`, #1595, and `wb run report`/`close`, `runs.kept_try`, #1611) |
 | `branch_made` | the commit `runner.checkout` makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists: the only branch a cut-short cleanup deletes (#416) |
 | `failed_before` | `setup` or `load`: before the agent ran; the row copies it |
 | `stopping` | `cli._stop_runner`; cleared by `spawn_runner` and the runner's exit |

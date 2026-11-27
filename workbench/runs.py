@@ -1311,9 +1311,34 @@ def change_groups(run: Run, names) -> list[tuple[str, list[str]]]:
     return [(f"{sid}:{key}", g) for (sid, key), g in out.items()]
 
 
+def claude_work(names: list[str]) -> dict[str, str]:
+    """{try: how} for those of an item's escalation tries ``names`` (start order) that hold
+    Claude's work, each with how it got there: one taken over by name since the latest still
+    open try began (status ``chosen_at``; a choice the run escalated past counts for nothing),
+    or one at review (before any takeover, ``prior_phase``) whose files are none of the trees its
+    agent left (cli._edited_by_hand: Claude's small fixes by hand, no takeover). The one rule of
+    the hand-back (cli._attempts_line) and of kept_try: #1595 taught the hand-back alone, and wb
+    run report, run_done and wb run close went on naming the try Claude took over or fixed by
+    hand for wb discard, its edits deleted with its worktree (#1611, 2026-11-27)."""
+    from . import cli
+    live = [n for n in names if store.Task(n).status.get("phase") not in store.CLOSED]
+    if not live:
+        return {}
+    began = store.Task(live[-1]).spec.get("created_at") or 0
+    how = {}
+    for n in live:
+        st = store.Task(n).status
+        if (st.get("chosen_at") or 0) > began:
+            how[n] = f"wb takeover {n}"
+        elif (st.get("prior_phase") or st.get("phase")) == "review" and cli._edited_by_hand(store.Task(n)):
+            how[n] = "your edits since its review"
+    return how
+
+
 def kept_try(names: list[str], run: Run | None = None) -> str | None:
     """Which of an item's escalation tries ``names`` (start order) is the change to keep, the
-    hand-back's rule (cli._attempts_line): one accepted already; else the latest still open with a
+    hand-back's rule: one accepted already; else the one holding Claude's work (claude_work:
+    None when more than one does, Claude's pick, #1611); else the latest still open with a
     finished change (at review, or at review before a takeover, `prior_phase`), so a failed
     escalation keeps the cheap try its reviewer saw; None while none has one (#1597), or while a
     later try is still in flight or held (try_pending): its outcome isn't in yet (#1597's second
@@ -1321,8 +1346,10 @@ def kept_try(names: list[str], run: Run | None = None) -> str | None:
     sts = {n: store.Task(n).status for n in names}
     if acc := [n for n in names if sts[n].get("phase") == "accepted"]:
         return acc[-1]
-    done = [n for n in names if sts[n].get("phase") not in store.CLOSED
-            and (sts[n].get("prior_phase") or sts[n].get("phase")) == "review"]
+    if len(mine := claude_work(names)) > 1:
+        return None
+    done = list(mine) or [n for n in names if sts[n].get("phase") not in store.CLOSED
+                          and (sts[n].get("prior_phase") or sts[n].get("phase")) == "review"]
     if (p := try_pending(names, run)) and (not done or names.index(p[0]) > names.index(done[-1])):
         return None
     return done[-1] if done else None
@@ -1354,6 +1381,9 @@ def tries_said(names: list[str], keep: str | None, run: Run | None = None) -> st
             how = (f"held: wb run resume {run.name if run is not None else '<run>'} goes on" if p[1]
                    else "still running")
             return f"{p[0]} is {how}; decide once it ends"
+        if len(mine := claude_work(names)) > 1:  # Claude's pick: none named for wb discard (#1611)
+            return (f"your work is in {', '.join(f'{n} ({h})' for n, h in mine.items())}: accept only the "
+                    f"one you chose")
         return "none holds a finished change: keep at most one"
     if store.Task(keep).status.get("phase") == "accepted":
         return f"{keep} is accepted" + (f": wb discard {', '.join(rest)}" if rest else "")

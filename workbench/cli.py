@@ -5152,13 +5152,7 @@ def _attempts_line(run: str, stage, item: str, names: list[str]) -> str:
         # (`chosen_at`; one taken earlier the run escalated past), or one at review whose files
         # differ from every tree its agent left (Claude's edits by hand at review, SKILL.md's
         # small fixes, with no takeover)
-        began = store.Task(live[-1]).spec.get("created_at") or 0
-        how = {}
-        for n in live:
-            if (store.Task(n).status.get("chosen_at") or 0) > began:
-                how[n] = f"wb takeover {n}"
-            elif phase[n] == "review" and _edited_by_hand(store.Task(n)):
-                how[n] = "your edits since its review"
+        how = runs.claude_work(live)  # the one rule wb run report and close keep too (#1611)
         chosen = [n for n in live if n in how]
         if len(chosen) > 1:  # Claude's own pick to make: none of them named for wb discard
             return (f"took over {', '.join(names)}: the agents are stopped. They are alternatives for "
