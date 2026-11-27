@@ -10318,12 +10318,16 @@ round, a provider's rate limit, outage or refusal, a repo made local-only, `wb s
 `resumed` `by: driver`, unless past the run's budget, *Budgets*; never Claude's own `wb stop <item>`, `last` `runs.STOPPED_BY_CLAUDE`, whatever `infra`
 it left: one made while the item waited behind a told cap kept the wait's `spend`, and the driver resumed it, #1588's). The rest of `cli.stopped_outside`'s, a model that failed, a setup, a crash, a full disk,
 the repo gone, OpenCode unusable, end the item as its own failure (its stage's `on_failure`, `null` by default),
-as `wb resume --all` leaves them (`cli.INTERRUPTED`). A resume refused with exit 3
-(the cap, local-only, Agents on the GPU) holds the item (journal `held`) and pauses the run, or under
-`--overnight` with the cap's `meter.RESETS` is tried again each pass, so past midnight it goes on; any other
-refusal is its null. While the run is open a held code item reads `running` (`runs._live`), so its stage stays
-incomplete and no escalate role's attempt starts beside it, unless the driver's last resume of it was refused
-(journal `resumed` `by: driver`, `ok: false`: its null); read as null, a code item the cap stopped mid-round under
+as `wb resume --all` leaves them (`cli.INTERRUPTED`). No refused resume, the driver's or `wb run resume`'s
+(`runs._resume_held`, one path for both), drops or nulls the item: it stays held where it stopped, journal `held`
+(`by`, `code`, `why`), until a resume that runs it (journal `resumed`, `ok` true, the only row that ends `wb run
+stop`'s hold). Refused with exit 3 (the cap, local-only, Agents on the GPU) the run pauses, or under
+`--overnight` with the cap's `meter.RESETS` the item is tried again each pass, so past midnight it goes on; refused
+otherwise it is Claude's item checkpoint, tried again only by `wb run resume`. `wb run resume`'s refusal at the cap
+ended `wb run stop`'s hold, so the next tick took a report item as null, its paid work dropped, and escalated a code
+item to the dearer role; the driver's other refusals were the item's null (#1623). While the run is open a held code
+item reads `running` (`runs._live`), so its stage stays incomplete and no escalate role's attempt starts beside it;
+read as null, a code item the cap stopped mid-round under
 `--overnight` ended the run in the pass that held it (#1581). A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
 Claude's, its work kept; while the run isn't `running` the item waits for `wb run resume`. It takes each report item that ended (`_take`: its object to `outputs/`,
 through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fix` list, at most `max`, the review
@@ -10372,7 +10376,7 @@ each pass, so the first pass after `wb run amend --budget-usd N` and `wb run res
 refix paid a coding round past the budget, while the run read `paused`, #1586), and so does a resume of a held
 item, the driver's (`runs._held`) and `wb run resume`'s (`runs._resume_items`): past the budget the item stays
 held, its work kept, and the run pauses (`--overnight` waits past the day cap only, never past the run's own
-budget). Held means `wb run stop`'s items too (`runs._held_stop`, journal `stopped` not yet `resumed`; `_live`
+budget). Held means `wb run stop`'s items too (`runs._held_stop`, journal `stopped` not yet `resumed` `ok`; `_live`
 reads such a code item `running` while the run is open): only the ones stopped from outside were, so a resume
 held at the budget let the next tick take a stopped report item as null, its paid work discarded, and read a
 stopped code item as null, escalated to the paid role unasked (#1612). Each is priced by `runs.paid_model(stage, it)`: the item's task's own model once it has one (a resume or
@@ -10418,7 +10422,7 @@ the drivers of the runs whose items it stops first (`runs.stop`, `items=False`).
 stop or an interruption left (`runs._resume_items`, `_resumable`: `wb run stop`'s, journal `stopped`, and not
 Claude's own `wb stop <item>`, which leaves the same `last`; and those failed or stuck from outside, `_outside`;
 a live runner reaped first, quietly) `wb resume`d, journal `resumed` `by:
-resume`: by the new driver as it starts, alive so their notices are its, or by `_resume` under a live one. A
+resume` (refused, held as the driver's are, `runs._resume_held`): by the new driver as it starts, alive so their notices are its, or by `_resume` under a live one. A
 closed run, or one at `review`, never goes on (`runs._ended`; `wb run feed` asks before it writes the inbox).
 **Close** refuses while a code item is open. `wb stop --all` and `wb takeover --all` (the hand-back) stop runs' drivers (#1471); while a run is open, a code item Claude took over (status `taken_over`) is `not_run` (`runs.TAKEN_OVER`, `runs._live`), never done, so no next stage reviews, refixes or approves the diff Claude is editing; once the run has ended, its report keeps the item as it was. `wb gc` archives closed runs.
 `wb top --json`'s `runs` (`runs.snapshot`) is the pane's and the web's seam. **A slash command as a flow**: `wb

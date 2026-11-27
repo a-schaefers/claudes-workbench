@@ -902,7 +902,6 @@ def state(run: Run) -> dict:
     refixes: dict = {}  # (stage, src key) -> [refix rows]
     fed = {}
     escalated = set()  # (code stage, key): a review's asks left past refix's max sent it on (_take)
-    refused = set()  # tasks whose last resume was the driver's, refused (_held's null)
     run_stopped = set()  # tasks wb run stop stopped, not resumed since (_run_stopped, _live's, #1612)
     for r in rows:
         k = (r.get("stage"), r.get("key"))
@@ -920,8 +919,7 @@ def state(run: Run) -> dict:
             fed[r.get("stage")] = r
         elif r.get("kind") == "escalate":  # the trigger; "escalated" is the next role's start
             escalated.add((r.get("stage"), r.get("key")))
-        elif r.get("kind") == "resumed":  # _live's: the driver's own resume refused, its last
-            (refused.add if r.get("by") == "driver" and not r.get("ok") else refused.discard)(r.get("task"))
+        elif r.get("kind") == "resumed" and r.get("ok"):  # a refused one ends no hold (#1623)
             run_stopped.discard(r.get("task"))
         elif r.get("kind") == "stopped":
             run_stopped.add(r.get("task"))
@@ -1049,7 +1047,7 @@ def state(run: Run) -> dict:
             elif v is WAITING:
                 it.state, it.input = "waiting", None
             elif it.task:
-                it.state, it.why, it.output = _live(s, it, driven, refused=it.task in refused,
+                it.state, it.why, it.output = _live(s, it, driven,
                                                     run_stopped=it.task in run_stopped)
             if "#e" not in key and hit not in there:
                 counted.add(one)
@@ -1099,16 +1097,14 @@ def _stop_skipped(run: Run) -> list[str]:
     return out
 
 
-def _live(stage: dict, it: Item, driven: bool = False, refused: bool = False,
-          run_stopped: bool = False) -> tuple[str, str, object]:
+def _live(stage: dict, it: Item, driven: bool = False, run_stopped: bool = False) -> tuple[str, str, object]:
     """A started item's state from its task, before the driver has taken its end. ``driven``:
     the run is open, its driver starting what follows: there a code item Claude took over is no
     longer the run's (not_run, never an escalation's null), as its review phase read as done and
     the next stage reviewed, approved or sent a refix to the unfinished diff Claude was editing
     (#1471, the #1373 audit, 2026-11-26), and a code item stopped from outside (_outside) runs on,
-    as _held holds it, unless the driver's last resume of it was refused otherwise (``refused``:
-    its null, Claude's checkpoint), and so does one wb run stop stopped (``run_stopped``, _held's
-    too). Read as null, an item the day cap stopped mid-round under
+    as _held holds it, and so does one wb run stop stopped (``run_stopped``, _held's too), a
+    refused resume of either included (_resume_held, #1623). Read as null, an item the day cap stopped mid-round under
     --overnight ended its stage and the run in the pass that held it for midnight, and in
     fix-escalate started the next role's attempt beside it (#1581, 2026-11-26). Once the run has
     ended (stopped, at review, closed) its report keeps the item as it was."""
@@ -1122,7 +1118,7 @@ def _live(stage: dict, it: Item, driven: bool = False, refused: bool = False,
     if is_code(stage):
         if phase in ("review", "accepted"):
             return "done", "", {"task": it.task, "round": st.get("round"), "item": it.input}
-        if phase in ("stuck", "failed") and driven and _held_stop(st, refused, run_stopped):
+        if phase in ("stuck", "failed") and driven and _held_stop(st, run_stopped):
             return "running", "", None
         if phase in ("stuck", "failed", "discarded"):
             return "null", st.get("last") or phase, None
@@ -1810,19 +1806,21 @@ def held_infra() -> frozenset:
 def _run_stopped(run: Run, name: str) -> bool:
     """Whether wb run stop stopped task ``name`` (journal `stopped`), not resumed since. Claude's
     own `wb stop <item>` leaves the same `last`, and wb run resume took that one up too (the
-    review of #1278, 2026-11-25)."""
-    kinds = [r.get("kind") for r in run.journal() if r.get("task") == name and r.get("kind") in ("stopped", "resumed")]
+    review of #1278, 2026-11-25). Only a resume that ran ends it: wb run resume's refused at the day
+    cap (an old journal's `resumed` ok false) let the next tick take the item as null (#1623)."""
+    kinds = [r.get("kind") for r in run.journal() if r.get("task") == name and (
+        r.get("kind") == "stopped" or (r.get("kind") == "resumed" and r.get("ok")))]
     return bool(kinds) and kinds[-1] == "stopped"
 
 
-def _held_stop(st: dict, refused: bool, run_stopped: bool) -> bool:
+def _held_stop(st: dict, run_stopped: bool) -> bool:
     """Whether a stopped item waits where it stopped while the run is driven: one stopped from
-    outside its step (_outside) whose last resume wasn't refused, or one wb run stop stopped
-    (``run_stopped``, _run_stopped's), as _resumable takes both up. Only the first were held: a
-    wb run resume held at the run's budget (#1600) left wb run stop's items stopped, and the next
-    tick took a report item as null, its paid work discarded, and read a code item as null,
-    which escalated it to the next, paid role unasked (#1612, 2026-11-27)."""
-    return (not refused and _outside(st)) or (run_stopped and st.get("last") == STOPPED_BY_CLAUDE)
+    outside its step (_outside), or one wb run stop stopped (``run_stopped``, _run_stopped's), as
+    _resumable takes both up. Only the first were held: a wb run resume held at the run's budget
+    (#1600) left wb run stop's items stopped, and the next tick took a report item as null, its
+    paid work discarded, and read a code item as null, which escalated it to the next, paid role
+    unasked (#1612, 2026-11-27). A refused resume never ends the hold (_resume_held, #1623)."""
+    return _outside(st) or (run_stopped and st.get("last") == STOPPED_BY_CLAUDE)
 
 
 def _resumable(run: Run, name: str, st: dict) -> bool:
@@ -1852,15 +1850,42 @@ def _resume_items(run: Run) -> list[str]:
         if _resumable(run, n, st) and not cli.runner_alive(t):
             row = next(r for r in run.journal() if r.get("kind") == "item" and r.get("task") == n)
             stage = stage_by(run.flow, str(row.get("stage"))) or {}
-            if over := _budget_stop(run, stage, paid_model(stage, Item(stage=str(row.get("stage")),
-                                                                       key=str(row.get("key")), task=n))):
-                _pause_at_budget(run, over)  # a resume is a start (#1600): held, its work kept
-                continue
-            r = _wb(["resume", n], run)
-            run.log(kind="resumed", task=n, by="resume", ok=r.returncode == 0,
-                    why="" if r.returncode == 0 else _last_line(r))
-            out.append(n)
+            if _resume_held(run, stage, Item(stage=str(row.get("stage")), key=str(row.get("key")), task=n),
+                            "resume"):
+                out.append(n)
     return out
+
+
+def _resume_held(run: Run, stage: dict, it: Item, by: str) -> bool:
+    """`wb resume` of held item ``it``, by the driver (_held) or wb run resume (_resume_items):
+    True when it runs again (journal `resumed` ok, ``by``). Every refusal keeps it held where it
+    stopped, its state and work kept, until a resume that runs it: past the run's budget (a resume
+    is a start, #1600) the run pauses there; refused with exit 3 (the day cap, which clears at
+    midnight; a repo made local-only, Agents on the GPU: the user's to lift) it is journalled
+    `held` and the run paused, or under --overnight at the cap tried again each pass; refused
+    otherwise it is Claude's checkpoint. wb run resume's refusal journalled `resumed` ok false, which
+    ended wb run stop's hold, so the next tick took a report item as null, its paid work dropped,
+    and read a code item as null, escalated to the paid role unasked; the driver's own refusal
+    other than exit 3 was its null (#1623, 2026-11-27)."""
+    if over := _budget_stop(run, stage, paid_model(stage, it)):
+        _pause_at_budget(run, over)
+        return False
+    r = _wb(["resume", it.task], run)
+    if r.returncode == 0:
+        run.log(kind="resumed", task=it.task, by=by, ok=True, why="")
+        return True
+    why = _last_line(r)
+    mine = [x for x in run.journal() if x.get("task") == it.task]
+    if not (mine and mine[-1].get("kind") == "held" and mine[-1].get("code", 3) == r.returncode):
+        run.log(kind="held", task=it.task, by=by, code=r.returncode, why=why)  # once a refusal: _held reads its code
+    if r.returncode != 3:
+        _checkpoint(run, f"{it.task}'s resume was refused ({why}); its work is kept: wb run resume "
+                         f"{run.name} tries it again, or wb discard {it.task}", item=True)
+    elif not (meter.RESETS in (r.stderr or "") + (r.stdout or "") and run.spec.get("overnight")) and \
+            run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
+        run.notify("run_paused", f"paused: {why}. Done work is kept, and {it.task} waits where it stopped: "
+                                 f"wb run resume {run.name} once that allows")
+    return False
 
 
 def _held(run: Run, stage: dict, it: Item) -> bool:
@@ -1871,40 +1896,25 @@ def _held(run: Run, stage: dict, it: Item) -> bool:
     Agents on the GPU: the user's to lift) holds it too, the run paused, or under --overnight
     tried again each pass while the cap's refusal stands. A second stop from outside after the
     driver's resume is a checkpoint, Claude's call, never a loop of resumes (a spend stop aside:
-    one a night, each past midnight). False for any other item, and for one whose resume was
-    refused otherwise (its null, said). Past the run's budget it is held, the run paused there:
-    --overnight waits past the day cap only, never past the run's own budget (#1600)."""
+    one a night, each past midnight). False for any other item. Every refusal holds it (_resume_held,
+    #1623); past the run's budget the run pauses there: --overnight waits past the day cap only,
+    never past the run's own budget (#1600)."""
     from . import cli, runner
     st = store.Task(it.task).status
-    if not _held_stop(st, False, _run_stopped(run, it.task)):  # wb run stop's too (#1612)
+    if not _held_stop(st, _run_stopped(run, it.task)):  # wb run stop's too (#1612)
         return False
     if not _going(run.status):
         return True
     mine = [r for r in run.journal() if r.get("task") == it.task]
+    if mine and mine[-1].get("kind") == "held" and mine[-1].get("code", 3) != 3:
+        return True  # refused otherwise: at Claude's item checkpoint, which goes on, wb run resume's to retry
     why_out = cli.stopped_outside(st) or st.get("last") or "stopped"
     if _outside(st) and why_out != runner.SPEND and any(
             r.get("kind") == "resumed" and r.get("by") == "driver" and r.get("ok") for r in mine):
         _checkpoint(run, f"{it.task} was stopped from outside again ({why_out}: {st.get('last') or ''}); "
                          f"its work is kept: wb run resume {run.name} takes it up again, or wb discard {it.task}")
         return True
-    if over := _budget_stop(run, stage, paid_model(stage, it)):
-        _pause_at_budget(run, over)
-        return True
-    r = _wb(["resume", it.task], run)
-    if r.returncode == 0:
-        run.log(kind="resumed", task=it.task, by="driver", ok=True, why="")
-        return True
-    why = _last_line(r)
-    if r.returncode != 3:
-        run.log(kind="resumed", task=it.task, by="driver", ok=False, why=why)
-        return False
-    if not (mine and mine[-1].get("kind") == "held"):
-        run.log(kind="held", task=it.task, why=why)
-    if meter.RESETS in (r.stderr or "") + (r.stdout or "") and run.spec.get("overnight"):
-        return True  # the day cap's: resumed on the first pass past midnight
-    if run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
-        run.notify("run_paused", f"paused: {why}. Done work is kept, and {it.task} waits where it stopped: "
-                                 f"wb run resume {run.name} once that allows")
+    _resume_held(run, stage, it, "driver")
     return True
 
 
