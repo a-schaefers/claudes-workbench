@@ -128,9 +128,19 @@ async function run(engine: string, device?: string) {
     await until(() => messages().length === 1)
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Delivered'))
     if (await page.inputValue('#input')) throw new Error('the box was not cleared')
+    // #1339: what the chat is for is known once a message is sent: the hint goes, for good
+    if (await page.locator('#hint').isVisible() || await page.evaluate(() => localStorage.getItem('wb-chat-hint')) !== 'true')
+      throw new Error('the hint stayed after the first message sent')
   })
-  await check('over a thread the hint shows once, dismisses, and stays dismissed after a reload', async () => {
+  await check('over a thread the hint shows once, hides while the state line says the same, dismisses, and stays dismissed after a reload', async () => {
+    await page.evaluate(() => localStorage.removeItem('wb-chat-hint'))  // this device never sent: as another one's thread
+    await page.reload()
     await until(async () => await page.locator('#hint').isVisible())
+    // no session listening: the state line says how to start one, and the hint, the same, hides (#1339)
+    writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+    await until(async () => (await page.locator('#driver-state').isVisible()) && await page.locator('#hint').isHidden())
+    listen(false)
+    await until(async () => (await page.locator('#driver-state').isHidden()) && await page.locator('#hint').isVisible())
     const said = (await page.textContent('#hint-text')).replace(/\s+/g, ' ')
     for (const want of [PURPOSE, 'waits in its terminal', 'permissions granted', 'settings live here'])
       if (!said.includes(want)) throw new Error(said)
@@ -623,7 +633,8 @@ async function run(engine: string, device?: string) {
     try {
       wb('chat', 'reply', '--text', 'Started fix-auth.')  // a chat change wakes the stream
       // #1339: no catalog here names it, so the id's last part; the provider is the sheet's note
-      await until(async () => (await page.textContent('#tasks')) === 'Running: fix-auth · API · deepseek-flash')
+      // a phone's strip is one line of counts and names, the model left to the sheet (#1339)
+      await until(async () => (await page.textContent('#tasks')) === (desktop ? 'Running: fix-auth · API · deepseek-flash' : '1 running: fix-auth'))
       if (await page.locator('#tasks').isHidden()) throw new Error('the strip is hidden')
       const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
       if (!width) throw new Error('the page scrolls sideways')
@@ -648,13 +659,15 @@ async function run(engine: string, device?: string) {
     task('old-parked', 'review', -1, { parked: Date.now() / 1000 })
     try {
       wb('chat', 'reply', '--text', 'Started the backlog.')
-      await until(async () => (await page.textContent('#tasks')).startsWith('2 running, 1 waiting on Claude, 22 queued: backlog-step-03 · '))
-      const text = await page.textContent('#tasks')
-      if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('; backlog-step-05 (asking) · '))
-        throw new Error('the strip says: ' + text)
+      if (desktop) {
+        await until(async () => (await page.textContent('#tasks')).startsWith('2 running, 1 waiting on Claude, 22 queued: backlog-step-03 · '))
+        const text = await page.textContent('#tasks')
+        if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('; backlog-step-05 (asking) · '))
+          throw new Error('the strip says: ' + text)
+      } else await until(async () => (await page.textContent('#tasks')) === '2 running, 1 need Claude, 22 queued: backlog-step-03, backlog-step-04, backlog-step-05 +22')
       const got = await page.evaluate(() => ({ strip: document.getElementById('tasks')!.getBoundingClientRect().height,
         thread: document.getElementById('scroll')!.getBoundingClientRect().height, height: innerHeight, line: parseFloat(getComputedStyle(document.getElementById('tasks')!).lineHeight) || 18 }))
-      if (got.strip > got.line * 3 + 16) throw new Error(`the strip is ${got.strip} px tall`)
+      if (got.strip > got.line * (desktop ? 3 : 1) + 16) throw new Error(`the strip is ${got.strip} px tall`)
       if (got.thread < got.height * 0.4) throw new Error(`the thread has ${got.thread} of ${got.height} px`)
     } finally { for (const t of made) rmSync(t, { recursive: true, force: true }) }
     wb('chat', 'reply', '--text', 'Backlog done.')
@@ -723,8 +736,8 @@ async function run(engine: string, device?: string) {
       writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'failed', round: 1, last: 'opencode exited 1', updated_at: Date.now() / 1000 }))
       writeFileSync(join(t, 'rounds/1/summary.md'), `task fix-sheet\nopencode exited 1 (see ${t}/runner.log)\n\nagent's summary:\n(the agent wrote no final message)\n\nfiles changed:\n(none)\n`)
       wb('chat', 'reply', '--text', 'fix-sheet failed.')
-      await until(async () => (await page.textContent('#tasks')).includes('fix-sheet (failed)'))
       await page.click('#tasks')
+      await until(async () => (await page.textContent('.ts-row:has-text("fix-sheet")')).includes('· failed'))
       await page.click('.ts-row:has-text("fix-sheet")')
       await until(async () => (await page.textContent('.ts-happened')) === 'The agent stopped before writing anything (OpenCode exited).')
       const next = await page.$$eval('#ts-next .chip', (x: Element[]) => x.map(c => c.textContent).join())
@@ -1612,6 +1625,20 @@ async function run(engine: string, device?: string) {
         if (g.tabs.some((t: any) => t.w < 44 || t.cut || t.icon > g.rail) || g.pads.join() !== '16px,16px,12px') throw new Error(JSON.stringify(g))
       } finally { await sc.close() }
     })
+    if (desktop) await check('a short window has a short header, and with the keyboard up the rail gives its column back (#1339)', async () => {
+      // #1339 (2026-11-26): held sideways a phone's thread had 41% of the screen, and none with
+      // the keyboard up, the hidden rail's 76 px column still kept
+      const sc = await browser.newContext({ viewport: { width: 844, height: 390 }, serviceWorkers: 'block' })
+      const p = await sc.newPage()
+      try {
+        await p.goto(base + '#token=' + token)
+        await until(async () => await p.evaluate(() => getComputedStyle(document.body).display === 'grid'))
+        const head = await p.evaluate(() => document.querySelector('.top')!.getBoundingClientRect().height)
+        if (head > 44) throw new Error(`the header is ${head} px tall`)
+        const cols = await p.evaluate(() => { document.body.classList.add('kb-open'); return getComputedStyle(document.body).gridTemplateColumns })
+        if (!cols.startsWith('0px')) throw new Error('the columns: ' + cols)
+      } finally { await sc.close() }
+    })
     await check('the card views\' styles stay out of the chat: a plan card\'s text and code, and the intro\'s code, as before', async () => {
       // the #1284 review: `.view .card p` and `.view code` matched #view-chat, a .view too, and
       // shrank a plan's <p> (its margins 0 and 8px) and code, and the intro's code, to 13px
@@ -1692,6 +1719,8 @@ async function run(engine: string, device?: string) {
         await kb(true)
         await until(async () => { const a = await at(); return a.kb && a.nav === 'none' && Math.abs(a.foot - a.h) <= 2 })
           .catch(async () => { throw new Error(JSON.stringify(await at())) })
+        // and the hint with it (#1339)
+        if (await page.evaluate(() => getComputedStyle(document.getElementById('hint')!).display) !== 'none') throw new Error('the hint stayed up')
       } finally { await kb(false) }
       await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
     })

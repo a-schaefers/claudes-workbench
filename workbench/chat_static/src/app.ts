@@ -35,8 +35,10 @@
   // what the chat is for (#1341), one wording: the empty state's, and over a thread the same words
   // as a hint until dismissed on this device. load and save catch a storage that throws: there the
   // hint shows on each open, and a dismissal holds until the page is left
+  // It gives the thread its screen back (#1339, 2026-11-26): hidden while the state line shows,
+  // which says the same, and for good once a message is sent from here (send)
   let hintGone = load(K.hint, false) === true
-  function drawHint() { $('hint').hidden = hintGone || !$('intro').hidden || !!document.querySelector('.keyless') }
+  function drawHint() { $('hint').hidden = hintGone || !$('intro').hidden || !!document.querySelector('.keyless') || !$('driver-state').hidden }
   $('hint-x').onclick = () => { hintGone = true; save(K.hint, true); drawHint() }
 
   // ---- the key ----
@@ -383,9 +385,23 @@
       : counts.map(([c, what]) => `${c} ${what}`).join(', ')
     return head + ': ' + named.join('; ') + (one ? ` · ${taskOn(all[0]!)}` : '')
   }
+  // On a phone, below about 500 px of height and with the keyboard up, one line: the counts and
+  // the names, `4 need Claude: fix-parser, add-login, rename-flag +1`, the models left to the
+  // sheet. Three lines of it left the thread 26 to 34% of a portrait phone, and none in landscape
+  // with the keyboard up (#1339, 2026-11-26)
+  const narrow = matchMedia('(max-width: 600px), (max-height: 500px)')
+  function tasksShort(tasks?: OpenTask[]) {
+    const all = ranked(tasks)
+    if (!all.length) return ''
+    const n = (r: number) => all.filter(t => rank(t) === r).length
+    const head = [[n(0), 'running'], [n(1), `need ${driverName()}`], [n(2), 'queued']].filter(([c]) => c)
+      .map(([c, what]) => `${c} ${what}`).join(', ')
+    return `${head}: ${all.slice(0, TASKS_SHOWN).map(t => t.name).join(', ')}${all.length > TASKS_SHOWN ? ` +${all.length - TASKS_SHOWN}` : ''}`
+  }
   function drawTasks() {
-    const el = $('tasks'), text = tasksLine(state.tasks)
-    el.textContent = text
+    const el = $('tasks'), short = narrow.matches || kbOpen, text = short ? tasksShort(state.tasks) : tasksLine(state.tasks)
+    el.classList.toggle('short', short)
+    if (el.textContent !== text) el.replaceChildren(span('tasks-text', text))
     el.hidden = !text
     if (!text) showTaskSheet(false)
     sheetNews()
@@ -430,6 +446,7 @@
   // textContent alone, never as markup: this page holds the user's key and changes their
   // Settings, so markup an agent wrote would be a way to both. Steering is Claude's: "Reply about this task" tags the
   // next message with the task (`about: {task}`), and Claude decides on wb steer.
+  narrow.addEventListener('change', drawTasks)
   const strip = $('tasks'), tsheet = $('task-sheet'), tsBody = $('ts-body')
   let tsTask: string | null = null, tsPart = 'summary', tsDiff: { path: string } | null = null, tsSeen = '', tsAsked = 0  // tsDiff: null (the stat) or {path}
   function showTaskSheet(on: boolean | string) {  // string: `hidden`'s 'until-found', never set here
@@ -747,6 +764,7 @@
     const d = state.driver
     const show = !!token && live && reachable && !!d && (d.state === 'waiting' || d.state === 'none' || d.state === 'off')
     stateLine.hidden = !show
+    drawHint()
     if (!show || !d) { stateLine.dataset.key = ''; return }
     const key = JSON.stringify([d.state, d.line, d.next, d.waiting && d.waiting.what, d.grant && d.grant.line])
     if (stateLine.dataset.key === key) return
@@ -1009,7 +1027,7 @@
       document.body.style.height = document.body.style.transform = ''
       if (scrollX || scrollY) scrollTo(0, 0)    // the page never scrolls: its thread does
     }
-    document.body.classList.toggle('kb-open', kbOpen)
+    if (document.body.classList.contains('kb-open') !== kbOpen) { document.body.classList.toggle('kb-open', kbOpen); drawTasks() }
     toEnd()
   }
   // the keyboard takes ~300 ms to stand or fall, and iOS scrolls the page after it has: fit again
@@ -1530,6 +1548,7 @@
     }
     outbox = outItems()
     setAbout(null)
+    if (!hintGone) { hintGone = true; save(K.hint, true); drawHint() }  // what the chat is for: known now (#1339)
     clearTray(files)
     input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true
     render(); toEnd(true); flush(true)

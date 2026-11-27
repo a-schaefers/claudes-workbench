@@ -94,8 +94,8 @@ body[data-view="stats"] #view-stats, body[data-view="settings"] #view-settings {
   text-align: center; box-shadow: 0 0 0 2px var(--panel); }
 .tab-badge[hidden] { display: none; }
 @media (hover: none) { #tabbar { -webkit-user-select: none; user-select: none; } }
-/* the keyboard up: the composer sits on it, the nav out of the way */
-body.kb-open #tabbar { display: none; }
+/* the keyboard up: the composer sits on it, the nav out of the way, and the hint too (#1339) */
+body.kb-open #tabbar, body.kb-open .purpose { display: none; }
 
 @media (min-width: 601px) {
   /* the rail takes the left notch's inset on top of its 76px: inside them, an iPhone held sideways
@@ -108,6 +108,14 @@ body.kb-open #tabbar { display: none; }
     width: calc(76px + env(safe-area-inset-left)); height: auto; padding: calc(12px + env(safe-area-inset-top)) 0 calc(12px + env(safe-area-inset-bottom)) env(safe-area-inset-left);
     border-top: 0; border-right: 1px solid var(--line); }
   .tab { flex: none; height: 64px; }
+  /* the rail hidden under the keyboard gives its 76 px column back (#1339) */
+  body.kb-open { grid-template-columns: 0 minmax(0, 1fr); }
+}
+/* a short window (a phone held sideways): a shorter header, its name and state on one line (#1339) */
+@media (max-height: 419px) {
+  .top { padding-top: calc(4px + env(safe-area-inset-top)); padding-bottom: 4px; gap: 10px; }
+  .mark { width: 26px; height: 26px; padding: 5px; border-radius: 8px; }
+  .who { display: flex; align-items: baseline; gap: 8px; }
 }
 
 /* a short word from a view (WB.toast), over the nav */
@@ -154,6 +162,11 @@ body.kb-open #tabbar { display: none; }
 .tasks { cursor: pointer; }
 .tasks::after { content: " ▾"; }
 .tasks[aria-expanded="true"] { color: var(--fg); background: var(--accent-soft); }
+/* one line of counts and names on a phone, below 500 px of height and with the keyboard up
+   (app.ts's tasksShort, #1339): the ▾ kept outside the ellipsis */
+.tasks.short:not([hidden]) { display: flex; justify-content: center; white-space: nowrap; }
+.tasks.short .tasks-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tasks.short::after { flex: none; white-space: pre; }
 /* the runs not closed (#1278's S12), over the tasks' strip: one line each, two at most; a tap
    opens Settings at the workflows group (each run's Stop and Summary) */
 .runs {

@@ -6681,9 +6681,11 @@ why it is down (*Seeing what the agent does*).
 **What it's for** (#1341; the owner, 2026-11-24): message the driver from anywhere, and most work
 can run from here; a prompt the driver raises waits in its terminal (ssh + tmux) unless the driver
 runs with permissions granted, and the settings live here too. The empty state (`#intro`) says so,
-and over a thread the same words are a hint (`#hint`) until dismissed on that device
+and over a thread the same words are a hint (`#hint`) until dismissed on that device, or the
+first message is sent from it (`send`; #1339: what the chat is for is known by then)
 (`localStorage` `wb-chat-hint`, read and written in try/catch: a storage that throws shows it on
-each open). Both are the story's `purpose` (*The story*), naming the driver that listens (else the
+each open); it hides while the state line shows (`drawHint`: the two said the same) and under
+`body.kb-open` (#1339). Both are the story's `purpose` (*The story*), naming the driver that listens (else the
 last that wrote, else "your driver").
 
 ### The story
@@ -7301,7 +7303,12 @@ address (#534).
   `testing`), then those waiting on Claude (`asking` among them, `store.NEEDS_CLAUDE`: counted
   running, a task blocked on its question read as nothing needing Claude, the #1097 review), then
   the queued, three at most, then `+N more`, and `.tasks` is clamped to three lines: a
-  25-task backlog took the screen from the thread on a phone, the queued read as running (#1097); the
+  25-task backlog took the screen from the thread on a phone, the queued read as running (#1097).
+  On a phone and below 500 px of height (`narrow`, `(max-width: 600px), (max-height: 500px)`) and
+  under `body.kb-open` it is one line instead (`tasksShort`, `.tasks.short`: the counts and the
+  names, `4 need Claude: fix-parser, add-login, rename-flag +1`, the models left to the sheet, its
+  ▾ outside the ellipsis): three lines left the thread 26 to 34% of a portrait phone, and none in
+  landscape with the keyboard up (#1339); the
   stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
   task's own status write; a tap on the strip opens the task sheet, `GET /api/task` below), runs
   (`chat.open_runs`, #1278's S12: `runs.snapshot(live=False)`'s rows without `session`, `cwd` or `alive`, a
@@ -7436,7 +7443,8 @@ id="tabbar" aria-label="Primary">` holds three `button.tab[data-view]`, each a 2
 over an 11 px `.tab-lbl`; the current one has `aria-current="true"`, colour and a 1 px lift. On a
 phone (≤600 px) it is the body's last flex child, under the composer, `56px` plus the safe area
 tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidden under
-`body.kb-open` so the composer sits on the keyboard (`fit`: the visual viewport 120 px short of
+`body.kb-open` so the composer sits on the keyboard (with the hint and the strip's extra lines;
+from 601 px the grid's rail column goes to 0 px, #1339) (`fit`: the visual viewport 120 px short of
 the layout one, as on iOS, or, while typing on a touch screen, of the tallest the page has been at
 this width, `full`, since Android's Chrome shrinks both under `interactive-widget=resizes-content`,
 #1414), `user-select:
@@ -7444,7 +7452,8 @@ none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail (an
 inset beside it, which the header, the thread, the composer and the views then don't pad for: inside
 76 px an iPhone held sideways had 16 px tabs and labels cut to 'C.', #1413), the header, banner and
 view beside it; the chat a 760 px column, Stats and Settings `.view-in` 1040 px of `.card`s, two
-columns (`.cards`) from 1100 px. The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
+columns (`.cards`) from 1100 px. Below 420 px of height (a phone held sideways) the header is shorter,
+its name and state on one line (#1339). The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
 to `.view-in`, never `.view`: `#view-chat` is a `.view` too, and its rows and the
 intro's `<code>` keep the chat's sizes. The Chat tab's `.tab-badge` counts Claude's messages and notices
 for the user newer than when the thread was left (`leftAt`, the server's clock; a
@@ -11257,8 +11266,10 @@ group; a number's Enter and Off; `help`'s toast; the layout at the phone's width
 WebKit sends such a page's fetches past Playwright's routes. While the server answers that path 404, a stand-in
 answers from `settings.rows()` and `settings.apply()` on the run's `WB_HOME`, with #1280's shapes and statuses, so
 the click still runs the real wb. What the chat is for (#1341): the empty state's words and no hint over it; over a
-thread the hint shows, dismisses, and stays dismissed after a reload, and where every storage call throws it still
-shows and dismisses with no page error. Sends land exactly once through
+thread the hint shows, hides while the state line shows and once a message is sent (#1339), dismisses, and stays
+dismissed after a reload, and where every storage call throws it still shows and dismisses with no page error; a
+phone's strip is one line of counts and names, and a 844×390 window has a short header and, with the keyboard up,
+no rail column (#1339). Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
 `/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
 `computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
