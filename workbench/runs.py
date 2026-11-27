@@ -1535,7 +1535,19 @@ def _take(run: Run, stage: dict, it: Item) -> None:
                 if over := _budget_stop(run, src_stage, stage_model(src_stage, src_item)):
                     _pause_at_budget(run, over)
                     return
+                # and at the day cap, as a start is (_start, _cap_held): wb feedback's refusal
+                # was logged as output done and the review accepted, the run said done with the
+                # must_fix never sent, under --overnight too (#1589, 2026-11-27)
+                if capped := _refix_held(run, stage, it, code):
+                    _pause_at_cap(run, capped)
+                    return
                 r = _wb(["feedback", src_item.task, "--text", text], run)
+                if r.returncode == 3 and meter.RESETS in (r.stderr or "") + (r.stdout or ""):
+                    # its day, cap and model, so the next pass doesn't run wb feedback again while they hold
+                    run.log(kind="refix_held", stage=stage["id"], key=it.key, src=it.src, task=src_item.task,
+                            day=meter.day(), cap=meter.cap(), model=code.spec.get("model"), why=_last_line(r))
+                    _pause_at_cap(run, _last_line(r))
+                    return
                 if r.returncode == 0:
                     run.log(kind="refix", stage=stage["id"], src=it.src, task=src_item.task,
                             count=len(fixes) + 1, round=was)
@@ -1724,6 +1736,31 @@ def _cap_held(run: Run, stage: dict, it: Item, m) -> str | None:
     why = meter.refusal(m, item_role(stage, it), advice=False,
                         tokens=runner.first_tokens(prompt=_spec_of(run, stage, it)))
     return why if why and meter.RESETS in why else None  # any other refusal is wb start's to say
+
+
+def _refix_held(run: Run, stage: dict, it: Item, code: store.Task) -> str | None:
+    """The day cap's refusal of review ``it``'s refix to ``code`` while it still holds (that
+    day, that cap, the code task's model: its rounds keep it), else None: as _cap_held holds
+    a start, on the journal's `refix_held` row alone, so a pass at the cap runs no wb feedback
+    and writes nothing, which would wake the driver at once (#1543); past midnight or a cap
+    raised, wb feedback is asked again (#1589, 2026-11-27)."""
+    rows = [r for r in run.journal() if r.get("stage") == stage["id"] and r.get("key") == it.key
+            and r.get("kind") == "refix_held"]
+    last = rows[-1] if rows else {}
+    if last.get("day") == meter.day() and last.get("cap") == meter.cap() \
+            and last.get("model") == code.spec.get("model"):
+        return last.get("why") or f"the day cap ({meter.RESETS})"
+    return None
+
+
+def _pause_at_cap(run: Run, why: str) -> None:
+    """A refix the day cap holds (_take): under --overnight the run goes on and the review waits
+    for midnight; else the run paused, said once, as _start's cap pause is."""
+    if run.spec.get("overnight"):
+        return
+    if run.set_status_if(_going, phase="paused", why=why):
+        run.notify("run_paused", f"paused: {why}. Done work is kept, and a review's refix waits: "
+                                 f"wb run resume {run.name} once the cap allows")
 
 
 def _room(run: Run, stage: dict, st: dict, m) -> str | None:
@@ -2009,6 +2046,7 @@ def report_of(name: str) -> dict:
             if cur is not None:
                 out.append({"stage": cur.stage, "key": cur.key, "result": cur.output})
         return out
+    held = {(r.get("stage"), r.get("key")): r.get("why") for r in run.journal() if r.get("kind") == "refix_held"}
     rep = {"run": name, "flow": flow.get("name"), "phase": run.status.get("phase"),
            "final": [], "results": [], "filtered": [], "superseded": [], "null": [], "not_run": [], "code": [], "pending": []}
     for s in sts:
@@ -2023,10 +2061,13 @@ def report_of(name: str) -> dict:
             # the report named a task that never was (#1531, 2026-11-26), as cmd_close filters
             if is_code(s) and it.task and store.Task(it.task).exists:
                 rep["code"].append({"key": k, "task": it.task, "phase": store.Task(it.task).status.get("phase")})
+            # a done review's why is its refix not sent, and why: the final entry showed the
+            # `changes` verdict alone, as if its must_fix had gone to the coder (#1589, 2026-11-27)
+            said = {"why": it.why} if it.why else {}
             if it.state == "done" and s["id"] == feeds and not is_code(s):
-                rep["final"].append({"key": k, "result": it.output, "trail": trail(it)})
+                rep["final"].append({"key": k, "result": it.output, "trail": trail(it), **said})
             elif it.state == "done" and s["id"] not in read and not (is_code(s) or s.get("claude")):
-                rep["results"].append({"key": k, "result": it.output, "trail": trail(it)})
+                rep["results"].append({"key": k, "result": it.output, "trail": trail(it), **said})
             elif it.state == "filtered":
                 rep["filtered"].append({"key": k, "why": it.why, "result": it.output})
             elif it.state == "superseded":
@@ -2037,7 +2078,8 @@ def report_of(name: str) -> dict:
             elif it.state == "not_run":
                 rep["not_run"].append({"key": k, "why": it.why})
             elif it.state in ("pending", "running", "waiting"):
-                rep["pending"].append({"key": k, "task": it.task})
+                why = held.get((s["id"], it.key))
+                rep["pending"].append({"key": k, "task": it.task, **({"why": f"refix held: {why}"} if why else {})})
             for mk in unanswered(s, it):
                 rep["not_run"].append({"key": f"{s['id']}:{mk}", "why": f"unjudged: {k} returned nothing for it"})
     used = spent(run)
@@ -2062,11 +2104,13 @@ def report_lines(rep: dict, stage: str | None = None) -> list[str]:
         for r in rows:
             if what in ("final", "results"):
                 out.append(f"  {r['key']}: {js(r['result'])}" + (f"  ← {js([t['result'] for t in r['trail']])}"
-                                                                if r["trail"] else ""))
+                                                                if r["trail"] else "")
+                           + (f"  ({r['why']})" if r.get("why") else ""))
             elif what in ("filtered", "superseded"):
                 out.append(f"  {r['key']}: {r['why']}: {js(r['result'])}")
             elif what == "pending":
-                out.append(f"  {r.get('key') or r.get('stage')}: {r.get('task') or r.get('why')}")
+                out.append(f"  {r.get('key') or r.get('stage')}: {r.get('task') or r.get('why')}"
+                           + (f" · {r['why']}" if r.get("task") and r.get("why") else ""))
             else:
                 out.append(f"  {r['key']}: {r['why']}" + (f" (its items: {', '.join(r['members'])})"
                                                          if r.get("members") else ""))

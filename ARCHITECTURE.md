@@ -10234,7 +10234,12 @@ incomplete and no escalate role's attempt starts beside it, unless the driver's 
 `--overnight` ended the run in the pass that held it (#1581). A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
 Claude's, its work kept; while the run isn't `running` the item waits for `wb run resume`. It takes each report item that ended (`_take`: its object to `outputs/`,
 through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fix` list, at most `max`, the review
-`superseded`, held as a start is, *Budgets*; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
+`superseded`, held as a start is, *Budgets*, and at the day cap: wb feedback's exit 3 with `meter.RESETS` writes
+no output and accepts nothing, journal `refix_held` with its `day`, `cap` and the code task's `model`, on which
+`runs._refix_held` holds the review each pass without running wb feedback or writing, as `_cap_held` holds a start;
+the run paused (`run_paused`), or under `--overnight` running and tried again past midnight or a raised cap; the
+report's pending entry says `refix held: <why>`, and a refix not sent otherwise is the review's final entry's
+`why`: the review was accepted and the run said done with its must_fix never sent, #1589; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed (status
 `cause: item`, as an `on_failure` report item's: it holds only that item, and while it is open the driver still starts
 and resumes the others, `runs._going`, though it never finishes the run or pauses it; a second item's null then is
 raised after `wb run resume`, journalled `notice` only once raised; a `claude` stage's checkpoint waits for the resume, never replacing it, #1510),
@@ -10483,8 +10488,8 @@ $WB_HOME (~/.local/state/workbench)
                                  repo (the top), package_dir? (the directory started from, under it: each item's --repo, #1494), base, base_ref, base_branch (`gitops.start_branch`: each item's, #1541), cwd, budget_usd, budget_min, overnight, trial, no_claude_md, created, driver {python, machine},
                                  session? (Claude Code's, or an OpenCode driver's with session_kind: opencode, #1309), claude_pid?, claude_start?, skip?}; status.json {phase running|checkpoint|paused|stopped|review|closed|failed,
                                  why, cause? (item: a checkpoint an item's null raised, runs._going), pid, start, machine, spawned, stages {<id>: {done, running, null, filtered, not_run}}, spent_usd, gpu_min,
-                                 budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|escalate|escalated|fed|amend|notice|stopped|resumed|reaped,
-                                 stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), skip? (stopped: wb run amend --skip's stage), ok?, day?, cap?, model? (retry: runs._cap_held)}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
+                                 budget_usd, budget_min, updated_at}; journal.jsonl ({ts, kind start|item|retry|output|null|not_run|refix|refix_held|escalate|escalated|fed|amend|notice|stopped|resumed|reaped,
+                                 stage?, key?, n?, task?, state?, why?, src?, round?, by? (resumed: driver|resume), skip? (stopped: wb run amend --skip's stage), ok?, day?, cap?, model? (retry: runs._cap_held; refix_held: runs._refix_held)}); inbox/<stage>-feed (wb run feed's list); outputs/<stage>-<n>.json
                                  {key, input, result, task}; specs/<stage>-<n>.md (each item's spec); schemas/<stage>-<n>.json (a batch's schema, runs.batch_schema); notify.jsonl (its items' notices, the driver's);
                                  result.json (runs.report_of at the end); acked (its notices taken); driver.log
   runs/.archive/<run>/           a run closed ARCHIVE_DAYS, moved by gc (runs.archive)

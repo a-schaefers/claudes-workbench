@@ -1752,6 +1752,65 @@ class RunsApi(Base):
         self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
         run_wb("discard", "bgr-code-1")
 
+    def test_a_review_at_the_day_cap_holds_its_refix_until_midnight_or_a_higher_cap(self):
+        # #1589 (bar loop #1030, 2026-11-27): wb feedback's day-cap refusal was logged as the
+        # review's output, done, the review accepted, and the run said done (`run_done`) with the
+        # must_fix never sent, under --overnight too
+        os.environ["FAKE_SCENARIO"] = "ok"
+        for name, extra in (("bgc", ()), ("bgo", ("--overnight",))):
+            cap = round(meter.today()["usd"] + 5, 2)                    # the first's spend stays today's
+            self.roles(SPEND_FLASH, cap)
+            seq = Path(self.tmp.name) / f"{name}-seq.json"
+            seq.write_text(json.dumps([
+                {"verdict": "changes", "must_fix": ["name the answer file in the README"], "nits": [], "summary": "close"},
+                {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"}]))
+            os.environ["FAKE_RESULT_SEQ"] = str(seq)
+            with mock.patch.object(runs, "spawn", return_value=0):
+                code, _, err = wb("run", "start", name, "--flow", "build", "--param", "request=Write answer.txt.",
+                                  "--repo", str(self.repo), "--budget-usd", "20", *extra)
+            self.assertEqual(code, 0, err)
+            run = runs.Run(name)
+            runs.tick(run)
+            self.wait_item(f"{name}-code-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+            runs.tick(run)
+            self.wait_item(f"{name}-review-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+            self.spent(5.03, f"{name}-code-1")                           # today at the cap
+            runs.tick(run)
+            coder, reviewer = store.Task(f"{name}-code-1"), store.Task(f"{name}-review-1")
+            self.assertEqual((coder.status["round"], reviewer.status["phase"]), (1, "review"))
+            kinds = [r["kind"] for r in run.journal()]
+            self.assertNotIn("refix", kinds)
+            self.assertFalse([r for r in run.journal() if r.get("kind") == "output" and r.get("stage") == "review"])
+            (held,) = [r for r in run.journal() if r.get("kind") == "refix_held"]
+            self.assertIn(meter.RESETS, held["why"])
+            (pend,) = [p for p in runs.report_of(name)["pending"] if p.get("key") == "review:1"]
+            self.assertTrue(pend["why"].startswith("refix held: significant role: API spend today is"), pend)
+            if extra:                                                    # --overnight: running, nothing said
+                self.assertEqual(run.status["phase"], "running")
+                self.assertEqual(self.notices(name), [])
+            else:
+                self.assertEqual(run.status["phase"], "paused")
+                self.assertIn(meter.RESETS, run.status["why"])
+                (told,) = self.notices(name)
+                self.assertIn(f"a review's refix waits: wb run resume {name} once the cap allows", told["text"])
+            n = len(run.journal())
+            for _ in range(2):
+                runs.tick(run)                                           # held on the row: no wb feedback, no write
+            self.assertEqual((len(run.journal()), coder.status["round"]), (n, 1))
+            self.roles(SPEND_FLASH, cap + 15)                            # a higher cap: asked again
+            if not extra:
+                runs.tick(run)                                           # paused: still held
+                self.assertNotIn("refix", [r["kind"] for r in run.journal()])
+                with mock.patch.object(runs, "spawn", return_value=0):
+                    self.assertEqual(wb("run", "resume", name)[0], 0)
+            runs.tick(run)
+            self.assertEqual([r["src"] for r in run.journal() if r.get("kind") == "refix"], ["1"])
+            self.assertIn(f"refix 1 sent to {name}-code-1",
+                          [r.get("why") for r in run.journal() if r.get("kind") == "output"])
+            self.wait_item(f"{name}-code-1", lambda st: (st.get("round") or 0) >= 2
+                           and st.get("phase") in ("review", "stuck", "failed"))
+            run_wb("discard", f"{name}-code-1")
+
     def test_the_day_cap_pauses_the_run_and_an_overnight_run_tries_again_with_no_wake(self):
         self.spent(5.03)                                                 # today at the $5 cap
         run, out = self.start("capr", "--budget-usd", "1")
