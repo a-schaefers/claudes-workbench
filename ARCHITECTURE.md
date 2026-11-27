@@ -7315,7 +7315,7 @@ address (#534).
   `status.json`, `task.json`, or a task's directory made or gone; never `events.jsonl`, written on each
   step), else at the hub's idle bump (`IDLE_BUMP_S`, 60 s, counted from the last wake) (#1559: a
   task's phase reached the page up to 60 s late); each row's `updated_at` (its status's last write)
-  is the page's mark to fetch an open task's view again; a tap on the strip opens the task sheet,
+  is the page's mark to fetch an open task's Log again; a tap on the strip opens the task sheet,
   `GET /api/task` below), runs
   (`chat.open_runs`, #1278's S12: `runs.snapshot(live=False)`'s rows without `session`, `cwd` or `alive`, a
   `ps` each on macOS on every state built, `[{run, flow, phase, why, stages: {id: {done, running, null,
@@ -7551,8 +7551,11 @@ the chat padded for it (`body.ts-open`, `#jump` moved left of it), and a tap in 
 (#1554: over the chat it covered the thread, the screen empty on both sides): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
 Diff and Log tabs fetch `GET /api/task` when opened (the diff's stat first, "Show the whole diff",
 one file at a time when it is `cut`; the Log scrolled to its newest row, and kept there by a quiet
-refetch unless the reader scrolled up, #1339). Nothing polls: a change in the stream's `tasks` (`sheetNews`;
-for an open task, its own row's alone, `sheetKey`) re-fetches only the open view, quietly, and Refresh
+refetch unless the reader scrolled up, #1339; a quiet redraw keeps each box's scroll, the Log's, the
+diff's and the report's, and an opened 'Full report': the new boxes started at the top, a reader up the
+Log thrown to its oldest row on each step, #1559's review). Nothing polls: a change in the stream's `tasks` (`sheetNews`;
+for an open task, its own row's alone, `sheetKey`, whose `updated_at` counts only with the Log open: it
+re-ran git diff and redrew the Summary, the Diff and the list's focused row on each tool call) re-fetches only the open view, quietly, and Refresh
 asks again; the stream wakes on a task's own status write (`TASK_NEWS`, #1559), so the strip and the
 open sheet follow a task as it moves, and a running task's Log its steps; the focus stays where the user is
 (#1561): the Summary, Diff and Log tabs are one Tab stop (`tabIndex` 0 on the shown one), the arrows,

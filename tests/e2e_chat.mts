@@ -766,6 +766,15 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.textContent('#ts-body')).includes('r1 bash     pytest -q again'), 10000)
       if (await page.evaluate(() => { const l = document.querySelector<HTMLElement>('.ts-log')!; return l.scrollHeight - l.scrollTop - l.clientHeight }) > 2)
         throw new Error('the Log left its newest row')
+      // #1559's review (2026-11-26): a reader scrolled up the Log stays there through a step's
+      // refetch; the new <pre> started at the top, the oldest row, on every tool call
+      const up = await page.evaluate(() => { const l = document.querySelector<HTMLElement>('.ts-log')!
+        l.scrollTop = Math.floor((l.scrollHeight - l.clientHeight) / 2); return l.scrollTop })
+      appendFileSync(join(t, 'events.jsonl'), JSON.stringify({ kind: 'tool', round: 1, tool: 'bash', brief: 'pytest -q third', ok: true, ts: Date.now() / 1000 }) + '\n')
+      writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'review', round: 1, last: 'tests pass', updated_at: Date.now() / 1000 + 1 }))
+      await until(async () => (await page.textContent('#ts-body')).includes('r1 bash     pytest -q third'), 10000)
+      const kept = await page.evaluate(() => document.querySelector<HTMLElement>('.ts-log')!.scrollTop)
+      if (up < 20 || Math.abs(kept - up) > 1) throw new Error(`the Log's scroll went from ${up} to ${kept}`)
       if (await page.evaluate(() => window.pwned)) throw new Error('agent text ran as markup')
       if (!(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))) throw new Error('the page scrolls sideways')
       // #1339: Reply is pinned to the sheet's foot, and under it the next steps of a task in review

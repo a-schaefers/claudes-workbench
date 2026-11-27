@@ -614,8 +614,18 @@
     const btn = (cls, text, fn) => { const b = mk('button', cls, text); b.type = 'button'; b.onclick = fn; return b; };
     const agoSecs = (s) => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d`;
     // the stream's `tasks` changed: the list redrawn, or the open task's view fetched again, only
-    // for a change of its own row: another task's steps fetched this one's diff again (#1559)
-    const sheetKey = () => JSON.stringify(tsTask ? (state.tasks || []).find(t => t.name === tsTask) || null : state.tasks || []);
+    // for a change of its own row: another task's steps fetched this one's diff again (#1559).
+    // `updated_at` (a write on every tool call) counts only with the Log open, the one view that
+    // follows each step: in the rest it re-ran git diff and redrew the Summary and Diff on every
+    // tool call, and in the list re-focused the row a screen reader then announced again (#1559's
+    // review, 2026-11-26)
+    const rowKey = (t) => tsTask && tsPart === 'log' ? t : { ...t, updated_at: undefined };
+    const sheetKey = () => {
+        if (!tsTask)
+            return JSON.stringify((state.tasks || []).map(rowKey));
+        const t = (state.tasks || []).find(x => x.name === tsTask);
+        return JSON.stringify(t ? rowKey(t) : null);
+    };
     function sheetNews() {
         const key = sheetKey();
         if (key === tsSeen)
@@ -699,6 +709,7 @@
         openTask(name); });
     async function loadPart({ quiet = false } = {}) {
         const asked = ++tsAsked, name = tsTask;
+        tsSeen = sheetKey(); // a tab's own key: the Log's has `updated_at`, the rest not
         // a ts-link or ts-file pressed: the new view's first button takes the focus; a quiet redraw
         // gives it back to the button of the same words (#1561)
         const focused = tsBody.contains(document.activeElement) ? document.activeElement.textContent : null;
@@ -728,10 +739,19 @@
         if (!r.ok)
             return tsBody.replaceChildren(mk('span', 'ts-note', j.error || `Not loaded (HTTP ${r.status}): try again`));
         // the Log opens at its newest row, and a quiet refetch keeps it there unless the reader
-        // scrolled up: "now" is at the bottom, six rows of a screen away on a phone (#1339, 2026-11-26)
+        // scrolled up: "now" is at the bottom, six rows of a screen away on a phone (#1339, 2026-11-26).
+        // A quiet redraw (the same view) keeps where the reader was in each box, the Log, the diff,
+        // the report, and an opened 'Full report': the new <pre>s started at the top, and a reader
+        // scrolled up the Log was thrown to its oldest row on each step (#1559's review, 2026-11-26)
         const was = tsBody.querySelector('.ts-log');
         const atEnd = !quiet || !was || was.scrollHeight - was.scrollTop - was.clientHeight < 24;
+        const tops = quiet ? [...tsBody.querySelectorAll('pre')].map(x => x.scrollTop) : [];
+        const opened = quiet ? [...tsBody.querySelectorAll('details')].map(x => x.open) : [];
         tsBody.replaceChildren(...(tsPart === 'summary' ? drawSummary(j) : tsPart === 'diff' ? drawDiff(j) : drawLog(j)));
+        tsBody.querySelectorAll('details').forEach((x, i) => { if (i < opened.length)
+            x.open = opened[i]; }); // before the tops: a closed box has none
+        tsBody.querySelectorAll('pre').forEach((x, i) => { if (i < tops.length)
+            x.scrollTop = tops[i]; });
         const log = tsBody.querySelector('.ts-log');
         if (log && atEnd)
             log.scrollTop = log.scrollHeight;

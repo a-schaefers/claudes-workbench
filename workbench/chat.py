@@ -1049,7 +1049,7 @@ def open_tasks() -> list[dict]:
     """The open tasks for the page's strip over the thread (#1016): while away, the chat is all
     the user sees, and it named no model (robustness minor 8). From task.json and status.json:
     `{name, phase, model, label, via, provider_name, updated_at}` (`updated_at`, its status's last
-    write: the page's mark to fetch an open task's view again, #1559); a bench replay is no one's task, and a parked one
+    write: the page's mark to fetch an open task's Log again, #1559); a bench replay is no one's task, and a parked one
     (`wb stop --all`) is left out as `wb status` leaves it: the quit's tasks filled the strip for
     good (#1097, 2026-11-23)."""
     out = []
