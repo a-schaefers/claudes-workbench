@@ -1,0 +1,45 @@
+{
+  "v": 1,
+  "name": "backlog",
+  "description": "Backlog triage, then the work: blind judges sort the issues (fix, close, ask, later), Claude picks the ones to fix, a fixer per pick with its test and a reviewer, then Claude reviews each",
+  "params": {
+    "issues": "list"
+  },
+  "stages": [
+    {
+      "id": "triage",
+      "card": "judge",
+      "schema": "triage",
+      "items": "{params.issues}",
+      "flow": "barrier",
+      "batch": 5,
+      "prompt": "Here the bar is triage. For each issue below, by the id it is given, return an action: fix (real and worth doing now), close (not real, done, or not worth it), ask (it needs the user's answer) or later; and why, in a sentence.\n\n{item}"
+    },
+    {
+      "id": "pick",
+      "claude": true,
+      "from": "triage"
+    },
+    {
+      "id": "code",
+      "card": "fix",
+      "from": "pick",
+      "prompt": "Fix this issue, with a regression test that fails before the fix:\n\n{item}\n\n{context}"
+    },
+    {
+      "id": "review",
+      "card": "review",
+      "from": "code",
+      "refix": {
+        "path": "must_fix",
+        "max": 2
+      },
+      "prompt": "Review this fix. The issue:\n{item}\n\nThe coder's report:\n{report}\n\nThe change:\n{diff}"
+    },
+    {
+      "id": "claude",
+      "final": true,
+      "from": "review"
+    }
+  ]
+}

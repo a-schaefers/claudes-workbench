@@ -221,7 +221,7 @@ curl -s "${auth[@]}" "$WORKBENCH_URL/api/wait?after=1795436900301-a1b2c3&timeout
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
   `messages` holds only its own messages and the driver's rows whose `to` names it. No
-  `push`, `spend`, `build`, `tasks`, `runs`, `dictate`, `driver` or `settings`: those are the user's. `/api/send`'s `state` is the same view.
+  `push`, `spend`, `build`, `tasks`, `runs`, `commands`, `dictate`, `driver` or `settings`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
 - **Files:** `GET /api/upload/<id>` and `/api/file/<id>` answer only for a file it uploaded or one
@@ -319,6 +319,9 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
   budget_min, gpu_min}]`, by their start. `phase` is `running`, `checkpoint`, `paused`, `stopped`,
   `review` or `failed`; `budget_usd` null for none. Each run's
   Stop and Summary are its Settings row (`run-<run>`, *GET /api/settings*).
+- `commands`: the flows' slash commands, as the hosts register them: `[{command, flow,
+  description, hint}]`. The page lists them as the box starts with `/`; a message `/<command> <args>`
+  goes as typed, and the driver runs that flow (`wb run start --flow <flow> --args '<args>'`).
 - `dictate`: true while the computer has a listener (a speech recognizer in `wb audio`'s
   audio.json) for `POST /api/transcribe/<id>`: the page shows its mic only then.
 - `driver`: the driver's state, the line the page keeps at the top of the chat (#1355): `{state:

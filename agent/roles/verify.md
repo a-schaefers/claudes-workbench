@@ -16,3 +16,5 @@ You are a skeptic. Your task holds one finding from another agent. Start from re
   `refuted` when you showed it can't; `unsure` when neither holds. Say which in `evidence`, with
   the command and its output, or the file:line quotes.
 - `confidence`: 0-100. Never confirm on the finder's word alone.
+- `claim`: the finding's claim restated in a sentence or two, so a later stage that sees only
+  your verdict (a blind judge) knows what it is about.
