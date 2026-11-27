@@ -1148,7 +1148,11 @@ class Runs(Base):
         self.assertEqual(st["phase"], "paused")
         self.assertIn("the run's GPU budget: 0 of 0 minutes used", st["why"])
         self.assertEqual(runs.run_tasks(runs.Run("bud")), [])
-        self.assertIn("Run `bud` is paused", self.run_notices("bud")[-1]["text"])
+        told = self.run_notices("bud")[-1]["text"]
+        self.assertIn("Run `bud` is paused", told)
+        # #1620 (bar loop #1030, 2026-11-27): it named --budget-usd, which lifts no GPU minutes
+        self.assertIn("wb run amend bud --budget-min N, then wb run resume bud", told)
+        self.assertNotIn("--budget-usd", told)
         self.assertIn("amended bud: GPU budget 100 min. It is paused: wb run resume bud",
                       run_wb("run", "amend", "bud", "--budget-min", "100"))
         run_wb("run", "resume", "bud")

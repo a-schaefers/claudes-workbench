@@ -10363,7 +10363,8 @@ crash adopts the item.
 **Budgets.** Dollars: `--budget-usd`, else the flow's, else today's cap left (said at start); the cap itself
 still checks every start. Before each API start `meter.run_total` (one pass over the ledger for the run's tasks)
 plus `meter.request_floor` past the budget pauses the run (`run_paused`); plan and free models count $0. GPU
-minutes: `--budget-min`, the items' `active_s`. `--overnight` (needs `--budget-usd`) keeps trying past the day
+minutes: `--budget-min`, the items' `active_s`. The pause's notice names the amend that lifts the budget hit
+(`runs._pause_at_budget`: `--budget-min` for the GPU one, else `--budget-usd`, as `schedule.held_why`; #1620). `--overnight` (needs `--budget-usd`) keeps trying past the day
 cap's midnight instead of pausing. A stage on an API role with no cap refuses the start (`meter.no_cap`).
 The run's budgets are checked before each start only, and a review's refix counts as one (`runs._take`: past the
 budget it pauses the run as a start does, and while the run isn't going, `runs._going`, the review waits, retaken

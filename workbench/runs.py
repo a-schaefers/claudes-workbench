@@ -2001,10 +2001,13 @@ def _budget_stop(run: Run, stage: dict, m) -> str | None:
 
 
 def _pause_at_budget(run: Run, why: str) -> None:
-    """The run paused at ``why``, _budget_stop's, and said once: a start's, or a refix's (_take)."""
+    """The run paused at ``why``, _budget_stop's, and said once: a start's, or a refix's (_take).
+    Its amend is the budget's own: --budget-usd lifts none of the GPU minutes, so the run told to
+    amend it paused again at the resume's next start (#1620, 2026-11-27; schedule.held_why's too)."""
+    flag = "--budget-min" if why.startswith("the run's GPU budget") else "--budget-usd"
     if run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
         run.notify("run_paused", f"paused at {why}. Done work is kept: wb run report "
-                                 f"{run.name}; wb run amend {run.name} --budget-usd N, then "
+                                 f"{run.name}; wb run amend {run.name} {flag} N, then "
                                  f"wb run resume {run.name}")
 
 
