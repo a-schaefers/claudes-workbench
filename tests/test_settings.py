@@ -564,10 +564,16 @@ class ClaudeSets(Rows):
                     self.assertIn(f"  {r['text']}", lines)
                     continue
                 self.assertTrue(any(ln.startswith(f"  {r['key']}") for ln in lines), r["key"])
+                # an API row's models past those in use are counted, not listed (#1617)
+                rest = [c for c in r.get("choices") or [] if r.get("other") and c["value"] != r["value"]
+                        and c.get("group") not in (None, settings.IN_USE, "GPU")]
                 for c in r.get("choices") or []:
                     mark = "*" if r["kind"] == "choice" and c["value"] == r["value"] else " "
                     says = "" if r.get("other") else f". {c['says']}"
-                    self.assertIn(f"    {mark} {c['value']}: {c['label']}{says}", lines)
+                    (self.assertNotIn if c in rest else self.assertIn)(f"    {mark} {c['value']}: {c['label']}{says}", lines)
+                if rest:
+                    self.assertIn(f"      or any of the {len(rest)} other API models' exact provider/model id "
+                                  "(wb models lists them)", lines)
         self.assertIn("  coding: Claude coding: decide", lines)
         self.assertIn("  cap: API day cap: $5. API tasks stop for the day at $5 of spend. Takes a number, or off.", lines)
         self.assertEqual(lines[-1], "wb settings set <key> <value> changes one, on the user's clear ask and yes")
