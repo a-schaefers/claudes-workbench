@@ -6483,6 +6483,29 @@ test('#1283: Agent code navigation turned on in the web app without probe makes 
   expect(offers()).toHaveLength(1)
 })
 
+test('#1555: a web change\'s offer while the user is away on the web chat says to answer there', async ($, on) => {
+  // made from the phone, the offer went to the terminal they had left (2026-11-26)
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', chatWb(files, () => ({ state: 'up', url: LINK })))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
+  files['/wb/settings-changes.jsonl'] = JSON.stringify({ ts: ts0 + 5, key: 'probe', label: 'Agent code navigation',
+    from: 'off', to: 'on', help: 'Offer to set probe up.', by: 'web' }) + '\n'
+  mtimes['/wb/settings-changes.jsonl'] = 4
+  await clock.advance(31_000)
+  const [offer] = woken.filter(t => t.includes('Agent code navigation'))
+  expect(offer).toContain('Offer to set probe up.')
+  expect(offer).toContain('wb chat reply')
+})
+
 test('#1283: a closed session\'s claim on the listener leaves a web change\'s help to this session', async ($, on) => {
   // review of #1283, 2026-11-24: a session that ended in workbench mode left chat/listener.json,
   // read as standing, and no session outside workbench mode offered to set probe up ever after

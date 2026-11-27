@@ -4095,7 +4095,8 @@ user sees.
   `workbench: <label> changed on the web app: Claude will offer to set it up` and queues a
   `[workbench]` turn (`mem.queued`): `The user changed <label> from <from> to <to> on the web app.
   wb said: <said>`, the help, and `Offer to help with it, and install or change nothing without
-  their yes.` (`SETTING_HELP`, `settingSaid`). One without goes in as one quiet `[workbench]` row
+  their yes.` (`SETTING_HELP`, `settingSaid`), with the away note (`awayToo`) while the user is away
+  on the web chat (#1555: it was made in the terminal they had left). One without goes in as one quiet `[workbench]` row
   (no turn); the roles, the busy row, the cap, Claude coding and Dynamic workflows (`SAID_ELSEWHERE`)
   are left out of it, as `unsaid` says them already (*The roles in the conversation*, *The rules
   said later*).

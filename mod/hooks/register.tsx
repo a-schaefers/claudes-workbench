@@ -2402,8 +2402,9 @@ async function chatLink($: any): Promise<void> {
 // [workbench] turn that asks Claude to offer to set it up, queued (mem.queued) as the pane's
 // Settings once queued it; any other as a row Claude reads, starting no turn. The roles, Claude
 // coding and Dynamic workflows aren't said twice: their own rows say every change (unsaid). A row
-// older than OLDEST_WAKE_MS is no news. The newest delivered is kept in $.store, every session's,
-// so a reload or another session never says it again.
+// older than OLDEST_WAKE_MS is no news. While the user is away on the web chat the offer's turn says
+// to answer there (#1555, 2026-11-26: it was made in the terminal they had left). The newest
+// delivered is kept in $.store, every session's, so a reload or another session never says it again.
 const SETTINGS_CHANGES = 'settings-changes.jsonl'
 const SETTINGS_TAIL = 64 << 10
 const SAID_ELSEWHERE = /^(?:agents|busy|cap|coding|workflows|(?:role|gpu|api|think)-[a-z]+)$/
@@ -2439,7 +2440,7 @@ async function settingsTurns($: any, now: number) {
     const help = typeof r.help === 'string' && r.help.trim()
     if (help) {
       $.ui.toast(`workbench: ${one(r.label, 80) || one(r.key, 80)} changed on the web app: Claude will offer to set it up`)
-      mem.queued.push(SETTING_HELP(r))
+      mem.queued.push(await awayToo($, SETTING_HELP(r)))
     } else if (!SAID_ELSEWHERE.test(String(r.key ?? ''))) notes.push(settingSaid(r))
   }
   if (newest > mark) try { await $.store.set('settingsSeen', newest) } catch { /* no store */ }
