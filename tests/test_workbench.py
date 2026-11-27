@@ -32749,6 +32749,40 @@ class WebChat(Base):
         rows = [r["text"] for r in self.call(q + "log", token=tok)[1]["rows"]]
         self.assertEqual(rows, ["read     src/f0.py", f"bash     ls . {tree}-other/x"])
 
+    def test_the_task_sheet_leads_with_what_happened_and_the_reports_own_lines_never_runner_logs_tail(self):
+        # #1339 (2026-11-26): a failed task's sheet showed only `opencode exited 1 (see
+        # <path>/runner.log)`; it leads with one plain line, then the agent's summary, the files
+        # and the tests, read from the report (chat.report_lead), and no runner.log text
+        t = self._sheet_task(phase="failed")
+        (t.dir / "runner.log").write_text("Error: raw stderr of OpenCode\n")
+        t.round_dir(2).mkdir(parents=True)
+        report = t.round_dir(2) / "summary.md"
+        report.write_text(f"task fix-auth · m · round 2\nopencode exited 1 (see {t.dir}/runner.log)\n\n"
+                          "agent's summary:\n(the agent wrote no final message)\n\nfiles changed:\n(none)\n")
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part=summary"
+        s = self.call(q, token=tok)[1]
+        self.assertEqual({k: s[k] for k in ("happened", "agent_summary", "changed", "tests")},
+                         {"happened": "The agent stopped before writing anything (OpenCode exited).",
+                          "agent_summary": "(the agent wrote no final message)", "changed": [], "tests": ""})
+        self.assertNotIn("raw stderr", json.dumps(s))
+        t.set_status(phase="stuck")
+        report.write_text("task fix-auth · m · round 2\nSTOPPED: 40 tool calls without changing a file.\n"
+                          "tests: FAIL (`pytest`, exit 1)\n```\nE assert 1 == 2\n```\n\nagent's summary:\nTried twice.\n\n"
+                          "Gave up.\n\nfiles changed:\n M README.md\n?? new.py\nNOTE: x\n2 files changed, 2 insertions(+)")
+        s = self.call(q, token=tok)[1]
+        self.assertEqual({k: s[k] for k in ("happened", "agent_summary", "changed", "tests")},
+                         {"happened": "The agent was stopped partway: what it changed so far is in the worktree "
+                                      "(40 tool calls without changing a file).",
+                          "agent_summary": "Tried twice.\n\nGave up.", "changed": ["README.md", "new.py"],
+                          "tests": "tests: FAIL (`pytest`, exit 1)"})
+        t.set_status(phase="review")
+        self.assertEqual(self.call(q, token=tok)[1]["happened"], "")      # nothing went wrong to say
+        report.unlink()
+        t.set_status(phase="failed", last="setup: npm ci exited 1")
+        s = self.call(q, token=tok)[1]
+        self.assertEqual((s["happened"], s["agent_summary"], s["changed"]),
+                         ("The task stopped before the agent ran (setup: npm ci exited 1).", None, None))
+
     def test_the_task_sheet_is_the_users_and_only_for_an_open_task(self):
         # the diff and report are the user's work: an agent's token reads none of it (AGENT_UNREAD)
         self._sheet_task()

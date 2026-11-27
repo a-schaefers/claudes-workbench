@@ -430,7 +430,11 @@ open task"}`. Every answer is `{task, part, …, now}`:
   `created_at` and `updated_at` (seconds; age and idle are `now` minus them), `model`, `label`
   (the model's name: a GPU model's label, an API model's name in OpenCode's catalog, `""` for
   none), `via`, `provider_name`, `report` (the round's summary.md, or what stands instead, cut at 64 KB with
-  `report_cut: true`) and `verify` (the regression check's lines, `[]` for none).
+  `report_cut: true`) and `verify` (the regression check's lines, `[]` for none). Read from the
+  report: `agent_summary` (the agent's final words, null with no report), `changed` (the paths of
+  the files it changed, `[]` for none, null with no report), `tests` (`tests: PASS (…)` or
+  `tests: FAIL (…)`, `""` for none) and, for a failed or stuck task, `happened`: one plain line of
+  what happened (`The agent stopped before writing anything (OpenCode exited).`; `""` otherwise).
 - `diff`: against `base` (the task's base commit, or `HEAD` after `wb next`: the current step,
   as `wb diff`, the gitignored files the agent wrote included): `stat` (`wb diff --stat`) and `files` (`[{path, added, deleted}]`, null counts
   for a binary file). With `full=1`, `diff` instead of the stat: the whole diff, or with

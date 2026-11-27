@@ -704,6 +704,13 @@ async function run(engine: string, device?: string) {
       if (!log.over || log.end > 2) throw new Error('the log is not at its newest row: ' + JSON.stringify(log))
       if (await page.evaluate(() => window.pwned)) throw new Error('agent text ran as markup')
       if (!(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))) throw new Error('the page scrolls sideways')
+      // #1339: Reply is pinned to the sheet's foot, and under it the next steps of a task in review
+      await page.click('#ts-tabs [data-part="summary"]')
+      await until(async () => (await page.textContent('#ts-body')).includes('Full report, round 1'))
+      const foot = await page.evaluate(() => ({ reply: document.getElementById('ts-reply')!.getBoundingClientRect().bottom,
+        sheet: document.getElementById('task-sheet')!.getBoundingClientRect().bottom, h: innerHeight,
+        next: [...document.querySelectorAll('#ts-next .chip')].map(c => c.textContent) }))
+      if (foot.reply > Math.min(foot.sheet, foot.h) + 1 || foot.next.join() !== 'Review it') throw new Error('the foot: ' + JSON.stringify(foot))
       await page.click('#ts-reply')
       await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-sheet')
       if (await page.locator('#task-sheet').isVisible()) throw new Error('the sheet stayed open')
@@ -712,6 +719,20 @@ async function run(engine: string, device?: string) {
       await until(() => { const r = messages().at(-1); return r && r.text === 'is it on track?' && r.about })
       if (JSON.stringify(messages().at(-1).about) !== JSON.stringify({ task: 'fix-sheet' })) throw new Error(JSON.stringify(messages().at(-1).about))
       await until(async () => (await page.$$eval('.about-tag', (x: Element[]) => x.at(-1)?.textContent)) === 'About fix-sheet')
+      // a failed task leads with what happened, and its next steps fill the box, tagged (#1339)
+      writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'failed', round: 1, last: 'opencode exited 1', updated_at: Date.now() / 1000 }))
+      writeFileSync(join(t, 'rounds/1/summary.md'), `task fix-sheet\nopencode exited 1 (see ${t}/runner.log)\n\nagent's summary:\n(the agent wrote no final message)\n\nfiles changed:\n(none)\n`)
+      wb('chat', 'reply', '--text', 'fix-sheet failed.')
+      await until(async () => (await page.textContent('#tasks')).includes('fix-sheet (failed)'))
+      await page.click('#tasks')
+      await page.click('.ts-row:has-text("fix-sheet")')
+      await until(async () => (await page.textContent('.ts-happened')) === 'The agent stopped before writing anything (OpenCode exited).')
+      const next = await page.$$eval('#ts-next .chip', (x: Element[]) => x.map(c => c.textContent).join())
+      if (next !== 'Why did it fail?,Try it again,Discard it') throw new Error('the next steps: ' + next)
+      await page.click('#ts-next .chip:has-text("Why did it fail?")')
+      await until(async () => (await page.inputValue('#input')) === 'Why did it fail?' && (await page.textContent('#about-text')) === 'Replying about fix-sheet')
+      if (await page.locator('#task-sheet').isVisible()) throw new Error('the sheet stayed open')
+      await page.click('#about-x'); await page.fill('#input', '')
     } finally {
       rmSync(t, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true })
     }

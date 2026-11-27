@@ -1137,15 +1137,58 @@ def in_tree(t: store.Task, text: str) -> str:
     return text
 
 
+LEAD_CAUSE_CHARS = 160  # the cause in the task sheet's "what happened" line, cut past this
+
+
+def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
+    """What the task sheet leads with (#1339, 2026-11-26), read from the report runner.summary_text
+    writes: the agent's summary (`agent_summary`), the files it changed (`changed`, the status
+    lines' paths; None with no report) and the tests' line (`tests`, `tests: PASS (…)`), and for a
+    failed or stuck task one plain line of what happened (`happened`: `The agent stopped before
+    writing anything (OpenCode exited).`). The sheet showed only `opencode exited 1 (see
+    <path>/runner.log)`, a path the phone can't open, with Reply below the fold. Never
+    runner.log's tail: OpenCode's raw stderr, which Claude reads when asked."""
+    lines = report.split("\n")
+    out: dict = {"happened": "", "agent_summary": None, "changed": None, "tests": ""}
+    if has_report:
+        if "agent's summary:" in lines:
+            at = len(lines) - 1 - lines[::-1].index("agent's summary:")
+            end = lines.index("files changed:", at) if "files changed:" in lines[at:] else len(lines)
+            out["agent_summary"] = "\n".join(lines[at + 1:end]).strip()
+            files = []
+            for line in lines[end + 1:]:
+                if not line or line.startswith(("NOTE:", "not in the spec:")) or re.match(r"\d+ files? changed", line.strip()):
+                    break
+                if line != "(none)":
+                    files.append(line[3:] if re.match(r"^[ MADRCU?!]{2} ", line) else line)
+            out["changed"] = files
+        out["tests"] = next((x for x in lines if re.match(r"tests: (PASS|FAIL)\b", x)), "")
+    phase = t.status.get("phase")
+    if phase in ("failed", "stuck"):
+        stopped = next((x.removeprefix("STOPPED: ") for x in lines if x.startswith("STOPPED: ")), "")
+        cause = stopped or ("OpenCode exited" if any(x.startswith("opencode exited ") for x in lines)
+                            else str(t.status.get("last") or ""))
+        cause = cause.strip().rstrip(".")
+        cause = cause if len(cause) <= LEAD_CAUSE_CHARS else cause[:LEAD_CAUSE_CHARS - 1] + "…"
+        why = f" ({cause})" if cause else ""
+        if not has_report:
+            out["happened"] = f"The task stopped before the agent ran{why}."
+        else:
+            did = "partway: what it changed so far is in the worktree" if out["changed"] else "before writing anything"
+            out["happened"] = f"The agent {'was stopped' if phase == 'stuck' else 'stopped'} {did}{why}."
+    return out
+
+
 def task_summary(t: store.Task) -> dict:
     """`wb status <t>`'s row and `wb report <t>`'s text: phase, round, step, last, when it began
     and last changed (the page counts age and idle from `now`), its model, the newest round's
     report (cut at TASK_REPORT_CHARS) and the regression check's lines, the worktree's paths
-    relative to it (in_tree)."""
+    relative to it (in_tree), and what the sheet leads with (report_lead)."""
     from . import gitops, transcript, verify
     st, sp = t.status, t.spec
     n = st.get("round", 1)
     report = in_tree(t, transcript.plain(t.report(n)))
+    lead = report_lead(t, report, (t.round_dir(n) / "summary.md").is_file())
     try:
         checks = [in_tree(t, transcript.plain(x)) for x in verify.report_lines(t)]
     except (OSError, ValueError, KeyError, gitops.GitError):
@@ -1155,7 +1198,7 @@ def task_summary(t: store.Task) -> dict:
             "updated_at": st.get("updated_at"), "model": sp.get("model") or "", "label": model_label(sp),
             "via": sp.get("via") or "gpu",
             "provider_name": sp.get("provider_name") or "", "report": report[:TASK_REPORT_CHARS],
-            "report_cut": len(report) > TASK_REPORT_CHARS, "verify": checks}
+            "report_cut": len(report) > TASK_REPORT_CHARS, "verify": checks, **lead}
 
 
 def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dict | None:

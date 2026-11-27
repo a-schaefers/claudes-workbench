@@ -195,8 +195,17 @@ body.kb-open #tabbar { display: none; }
 .ts-file { min-height: 40px; padding: 6px 2px; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: none;
   color: var(--fg); font: 12.5px/1.4 var(--mono); overflow-wrap: anywhere; cursor: pointer; }
 div.ts-file { cursor: default; color: var(--dim); }
-.ts-reply { width: 100%; min-height: 44px; margin-top: 10px; border: 1px solid var(--line); border-radius: 12px;
+.ts-reply { width: 100%; min-height: 44px; border: 1px solid var(--line); border-radius: 12px;
   background: var(--bg); color: var(--fg); font: inherit; font-size: 14.5px; cursor: pointer; }
+/* what the sheet leads with, and Reply with the next steps pinned to its foot (#1339): Reply was
+   below the fold under a long report */
+.ts-body .ts-happened { font-weight: 600; }
+.ts-body .ts-said { white-space: pre-wrap; }
+.ts-body .ts-fail { color: var(--bad); }
+.ts-full { margin-top: 10px; }
+.ts-full > summary { min-height: 44px; display: flex; align-items: center; color: var(--accent); cursor: pointer; font-size: 14px; }
+.ts-foot { position: sticky; bottom: -12px; margin: 10px 0 -12px; padding: 8px 0 12px; background: var(--panel); }
+.ts-next { margin-top: 8px; }
 
 /* what the chat is for, over a thread until dismissed on this device (#1341): a hint, not a warning */
 .purpose { display: flex; align-items: flex-start; gap: 6px; max-width: 760px; width: 100%; margin: 0 auto;

@@ -7322,7 +7322,14 @@ address (#534).
   else 404 "no such open task"), read in-process from the task's files, never through `wb watch
   --json`, which can start OpenCode. `summary` (`chat.task_summary`): phase, round, step, last,
   `created_at`/`updated_at`, model, label (`chat.model_label`), via, provider_name, the round's report (`store.Task.report`, as
-  `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`).
+  `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`),
+  and what the sheet leads with (`chat.report_lead`, #1339), read from the report `runner.summary_text`
+  writes: `agent_summary`, `changed` (the files' paths, `[]` for `(none)`, null with no report),
+  `tests` (its `tests: PASS|FAIL …` line) and, for a failed or stuck task, `happened`: one plain line
+  (`The agent stopped before writing anything (OpenCode exited).`, `The agent was stopped partway:
+  what it changed so far is in the worktree (<the STOPPED reason>).`, `The task stopped before the
+  agent ran (<last>).`; the cause cut at `LEAD_CAUSE_CHARS` 160). Never runner.log's tail: OpenCode's
+  raw stderr, which Claude reads when asked.
   `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), with the
   ignored files `--include` commits (`force=runner.ignored_to_commit`, as `wb diff`: #1548), `stat`
   and `files` (numstat); `full=1` the diff instead (`path=` one of `files`, `:(literal)`, else 404 "no
@@ -7512,9 +7519,15 @@ refetch unless the reader scrolled up, #1339). Nothing polls: a change in the st
 re-fetches only the open view, quietly, and Refresh asks again; a task gone says it is no longer
 open. Its report, diff and log are agent-written, drawn with `textContent` and `<pre>` alone, never
 markup: the page holds the user's token, which changes their Settings, so markup an agent wrote
-would be a way to both. "Reply about this task" sets `about: {task}` (`setAbout`), so the next message
-reaches Claude as `[web chat] (about task <task>) …`; steering stays Claude's (`wb steer`), and the
-page never steers, edits or accepts.
+would be a way to both. The Summary leads with the phase, a failed or stuck task's `happened` line,
+then the report's own lines (the agent's summary, `Files changed: …`, the tests' line), and the rest
+under a `Full report` `<details>` (open when the report has none of those lines) (#1339: it showed
+only `opencode exited 1 (see <path>/runner.log)`). "Reply about this task" is pinned to the
+sheet's foot (`.ts-foot`, sticky) and sets `about: {task}` (`setAbout`), so the next message
+reaches Claude as `[web chat] (about task <task>) …`; under it the next steps of the task's phase
+(`NEXT`, `drawNext`: `Why did it fail?`, `Try it again`, `Discard it` for a failed or stuck task,
+`Review it` for one in review) each fill the box, tagged with the task, for the user to send.
+Steering stays Claude's (`wb steer`), and the page never steers, edits or accepts.
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.ts` removes its link
 over http: localhost counts as secure and one computer got two apps); there the Settings card says how to get
 https, its `tailscale serve --bg 1337` drawn as code (`paraCode`: a line's backticked part as a `<code>`, #1323). The `badge` is

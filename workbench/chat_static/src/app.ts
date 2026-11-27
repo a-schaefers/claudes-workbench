@@ -463,10 +463,25 @@
   $('ts-back').onclick = () => { tsTask = null; tsAsked++; drawTaskSheet() }
   $('ts-refresh').onclick = () => loadPart({ quiet: true })
   $('ts-reply').onclick = () => { setAbout({ task: tsTask }); showTaskSheet(false); input.focus() }
+  // Under Reply, the next steps a task's phase offers (#1339, 2026-11-26): each fills the box,
+  // tagged with the task, for the user to send or change; what to do stays Claude's call
+  const NEXT: Record<string, string[]> = { failed: ['Why did it fail?', 'Try it again', 'Discard it'],
+    stuck: ['Why did it fail?', 'Try it again', 'Discard it'], review: ['Review it'] }
+  function drawNext() {
+    const box = $('ts-next'), t = (state.tasks || []).find(x => x.name === tsTask), says = (t && NEXT[t.phase]) || []
+    box.hidden = !says.length
+    if (box.dataset.key === tsTask + ':' + says.join()) return
+    box.dataset.key = tsTask + ':' + says.join()
+    box.replaceChildren(...says.map(text => btn('chip', text, () => {
+      setAbout({ task: tsTask }); showTaskSheet(false)
+      input.value = text; save(K.draft, text); grow(); armSend(); input.focus()
+    })))
+  }
   for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.onclick = () => { tsPart = b.dataset.part as string; tsDiff = null; loadPart() }
   async function loadPart({ quiet = false } = {}) {  // quiet: the view stays until the new one comes
     const asked = ++tsAsked, name = tsTask
     $('ts-name').textContent = name
+    drawNext()
     for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.setAttribute('aria-selected', String(b.dataset.part === tsPart))
     if (!quiet || !tsBody.childElementCount) tsBody.replaceChildren(mk('span', 'ts-note', 'Loading…'))
     const extra = tsPart === 'diff' && tsDiff ? '&full=1' + (tsDiff.path ? '&path=' + encodeURIComponent(tsDiff.path) : '') : ''
@@ -487,14 +502,27 @@
     const log = tsBody.querySelector<HTMLElement>('.ts-log')
     if (log && atEnd) log.scrollTop = log.scrollHeight
   }
+  // What the sheet leads with (#1339, 2026-11-26): the phase, for a failed or stuck task one plain
+  // line of what happened, then the report's own lines (the agent's summary, the files it changed,
+  // the tests' PASS or FAIL: chat.report_lead), the rest under "Full report". It showed only
+  // `opencode exited 1 (see <path>/runner.log)`, with Reply below the fold. Never runner.log's
+  // tail: OpenCode's raw stderr, which Claude reads when asked "Why did it fail?"
   function drawSummary(j: TaskPart) {
     const out: HTMLElement[] = [mk('p', '', `${j.phase} · round ${j.round}${j.step! > 1 ? ` · step ${j.step}` : ''} · ${taskNote(j)}`)]
     const times = [j.created_at && `started ${agoSecs(j.now - j.created_at)} ago`, j.updated_at && `last change ${agoSecs(j.now - j.updated_at)} ago`].filter(Boolean)
     if (times.length) out.push(mk('p', 'ts-dim', times.join(' · ')))
+    if (j.happened) out.push(mk('p', 'ts-happened', j.happened))
     if (j.last) out.push(mk('p', '', j.last))
-    out.push(mk('h4', '', `Report, round ${j.round}`), mk('pre', '', j.report))
-    if (j.report_cut) out.push(mk('span', 'ts-note', `Cut here: wb report ${j.task} on the computer has it all.`))
-    if (j.verify && j.verify.length) out.push(mk('h4', '', 'Regression check'), mk('pre', '', j.verify.join('\n')))
+    const lead = !!(j.agent_summary || j.changed || j.tests)
+    if (j.agent_summary) out.push(mk('h4', '', "The agent's summary"), mk('p', 'ts-said', j.agent_summary))
+    if (j.changed) out.push(mk('p', '', j.changed.length ? 'Files changed: ' + j.changed.join(', ') : 'No files changed.'))
+    if (j.tests) out.push(mk('p', /^tests: FAIL/.test(j.tests) ? 'ts-fail' : '', j.tests))
+    // a report with none of those lines (a round still running, an older server's): open
+    const full = mk('details', 'ts-full'); full.open = !lead
+    full.append(mk('summary', '', `Full report, round ${j.round}`), mk('pre', '', j.report))
+    if (j.report_cut) full.append(mk('span', 'ts-note', `Cut here: wb report ${j.task} on the computer has it all.`))
+    if (j.verify && j.verify.length) full.append(mk('h4', '', 'Regression check'), mk('pre', '', j.verify.join('\n')))
+    out.push(full)
     return out
   }
   function drawDiff(j: TaskPart) {

@@ -170,6 +170,9 @@ export type TaskPart = {
   report_cut?: boolean; verify?: string[]; base?: string; note?: string; stat?: string; cut?: boolean; diff: string
   lines_cut?: number; files: { path: string; added: number | null; deleted?: number }[]
   rows: { ok?: boolean; ts?: number; round?: number; text: string }[]; more?: boolean
+  /** the summary's lead (chat.report_lead, #1339): what happened to a failed or stuck task, the
+   * agent's summary, the files it changed (null with no report), the tests' line */
+  happened?: string; agent_summary?: string | null; changed?: string[] | null; tests?: string
 }
 
 // ---- settings (workbench/settings.py, #1279)
