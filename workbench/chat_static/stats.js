@@ -16,7 +16,9 @@
     const SVG = 'http://www.w3.org/2000/svg';
     const NB = ' ';
     // ---- words: the pane's (its Names), so the terminal and the page agree ----
-    const ROLE_WORDS = { significant: 'complex', trivial: 'trivial', writing: 'writing' };
+    // a role's name, Settings' and the task sheet's: `wb route --json`'s `label` (routes.LABELS), this
+    // copy while it can't be read; the pane's `complex` was a second name for one role (#1339)
+    const ROLE_LABELS = { significant: 'Complex coding', trivial: 'Trivial coding', writing: 'English writing' };
     const GUARD_WORDS = {
         repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
         round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
@@ -54,14 +56,15 @@
         return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no known cost';
     }
     // The words one model or provider goes by (the pane's Names): a GPU model by its label, an API
-    // model as `API <provider's name> <the id's last part>`, a provider by its name; an id nothing
-    // named stays the id. From the roles and models /api/stats carries, and wb top's rack.
+    // model as `API <the id's last part> (<provider's name>)`, as the task strip says it (taskOn:
+    // Stats said `API deepinfra Fast-Coder-1` of the strip's `API Fast-Coder-1 (DeepInfra)`, #1339),
+    // a provider by its name; an id nothing named stays the id. From the roles and models /api/stats carries, and wb top's rack.
     const providerWord = (id, n) => n.providers[id] || id;
     function modelWord(id, api, n) {
         if (!api)
             return n.models[id] || id;
         const cut = id.indexOf('/'); // the provider ends at the first /
-        return cut > 0 ? `API ${providerWord(id.slice(0, cut), n)} ${id.split('/').pop()}` : `API ${id}`;
+        return cut > 0 ? `API ${id.split('/').pop()} (${providerWord(id.slice(0, cut), n)})` : `API ${id}`;
     }
     function apiPeriod(a, n) {
         const money = apiMoney(a);
@@ -96,11 +99,11 @@
     // row is its text. The score, the savings estimate, spec-gap discards, the energy and its cost,
     // the streak, the work absorbed, the questions, Claude's tokens a task, the 30 days, the bests and
     // the milestones were here too, as on the pane: precision nobody acted on, gone from the feed (#1322).
-    function statsRows(f, why, n) {
+    function statsRows(f, why, n, roles = ROLE_LABELS) {
         if (!f)
             return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…', retry: !!why }];
         if (why)
-            return [{ label: '', text: `Not updated: ${why} (wb stats --json)`, stale: true, retry: true }, ...statsRows(f, '', n)];
+            return [{ label: '', text: `Not updated: ${why} (wb stats --json)`, stale: true, retry: true }, ...statsRows(f, '', n, roles)];
         if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
             return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.', empty: true }];
         const out = [];
@@ -153,7 +156,7 @@
             ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`;
         const sized = Object.entries(f.sizes ?? {});
         if (sized.length)
-            out.push({ label: 'By size', text: sized.map(([k, v]) => `${ROLE_WORDS[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') });
+            out.push({ label: 'By size', text: sized.map(([k, v]) => `${roles[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') });
         const guards = Object.entries(f.guards ?? {});
         if (guards.length)
             out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
@@ -361,7 +364,11 @@
     function drawHistory() {
         if (!histBox)
             return;
-        histBox.replaceChildren(el('h2', 'st-h', 'History'), el('div', 'cards st-hist', ...historyCards(statsRows(feed, statsWhy, names()))));
+        const roles = { ...ROLE_LABELS };
+        for (const [k, r] of Object.entries((routes && routes.roles) || {}))
+            if (r && typeof r.label === 'string' && r.label)
+                roles[k] = r.label;
+        histBox.replaceChildren(el('h2', 'st-h', 'History'), el('div', 'cards st-hist', ...historyCards(statsRows(feed, statsWhy, names(), roles))));
     }
     function draw() { drawNow(); drawHistory(); }
     async function loadStats() {

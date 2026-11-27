@@ -7485,10 +7485,11 @@ no telemetry`); Queue. **The history** is `statsLines` ported label for label an
 cost` or `API plan usage` with none known, no `(catalog prices)` note, the `≈` alone says it, the
 per-provider split only with two or more, #1339), the model lines capped at `STATS_SHOWN` 3 (tasks, landed,
 the mean rounds, `1 round` or `2.5 rounds`, minutes; each one's write trend an SVG sparkline), Other models, By
-size (`ROLE_WORDS`), What stopped agents (`GUARD_WORDS`;
+size (each role by `wb route --json`'s `label`, `routes.LABELS`, Settings' names; `ROLE_LABELS`, a copy, while unread, #1339), What stopped agents (`GUARD_WORDS`;
 `spend` is `the API day cap`), What helps, Bench, Optimized; with no section, `No finished tasks
 yet: delegate one with /workbench, and how it went shows here.` The names follow the pane's
-`Names` (`modelWord`, `providerWord`, `usd`, `apiPeriod`): GPU labels from `models.gpu` and
+`Names` (`modelWord`, `providerWord`, `usd`, `apiPeriod`; an API model `API <id's last part> (<provider>)`, as the
+task strip's `taskOn` says it, #1339): GPU labels from `models.gpu` and
 `wb top`'s rack and running rows, provider names from `routes.providers` and `models.api`'s
 `provider_name`; `usd` is `meter.usd`'s rule. No score, saving, spec-gap discards, energy, streak,
 work absorbed, questions, Claude's tokens a task, 30 days' bars, bests or milestone: #1322 took
@@ -11809,6 +11810,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **Stats folds**: `top.FOLD`, `stats.STATS_MODEL_LINES`, `model_lines`' `more`/`older`/`variants`, `wb stats
   --json`'s and `wb top --json`'s keys → the web app's `stats.ts` (`RACK_FOLD`, `STATS_SHOWN`, its `statsLines`;
   *The Stats view*), and `cli.cmd_stats`.
+- **`routes.LABELS`** → `stats.ts`' `ROLE_LABELS` (By size's names while `wb route --json` is unread, #1339).
 - **`cli.CODING`** → the mod's `CODING_RULES`, the skill's *Claude coding* bullet.
 - **`savings.totals`' keys** → `drawSaved` (the web app); the cost's label (no currency sign) → `wb savings`,
   `drawSaved`.
