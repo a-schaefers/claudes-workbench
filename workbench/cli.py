@@ -5191,6 +5191,8 @@ def cmd_accept(a):
                     unrecorded={"outcome": "accepted", "step": measured, "extra": extra}, closing=None)
     row = results.record(task, "accepted", measured, **extra)
     task.set_status(unrecorded=None)
+    # a best-of attempt's siblings discarded before this pick: their rows lost (#1568, 2026-11-26)
+    store.mark_not_chosen(runs.discarded_siblings(task))
     _ack_all(task)
     _closed(task)
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
