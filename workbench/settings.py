@@ -66,7 +66,11 @@ NO_PROVIDER = "No API provider connected: /connect in OpenCode adds one; every r
 # in NO_PROVIDER's place when OpenCode's catalog couldn't be read: /connect was no fix for a
 # server that couldn't find OpenCode, whose keys were stored (#1342)
 CATALOG_FAILED = "OpenCode's catalog couldn't be read, so no API provider shows: {why}"
-NO_GPU = "No GPU model found (wb models)"
+# With no model discover() finds: a next step, where "No GPU model found (wb models)" left a first
+# `wb start` to exit 3 with the page never saying why (the web app's review, 2026-11-26). {who}: the
+# driver to ask, as GPU_ONLY's; the note's Ask link asks for the local one (NO_GPU_ASK)
+NO_GPU = "No GPU model yet: pick an API model for a role above (its More), or ask {who} to set up a local one."
+NO_GPU_ASK = "Help me set up a local model"
 # With no API provider, the one line that stands for every API control (the roles' API choice, Agents,
 # When the GPU is busy, the day cap), which the page then hides (`hidden`, `fixed`): six API controls
 # came before the line saying there was no provider, on the GPU-only path (the web app's review,
@@ -272,8 +276,10 @@ def _window(n) -> str:
     return f" ({round(n / 1024)}K)" if isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0 else ""
 
 
-def _role_stops(label: str, api: str | None, name: str | None) -> list:
-    return [("gpu", "GPU", f"{label} runs on this machine's GPU."),
+def _role_stops(label: str, api: str | None, name: str | None, no_gpu: bool = False) -> list:
+    """A role's GPU|API; ``no_gpu``: discover() finds no model, so a task on the GPU can't start."""
+    return [("gpu", "GPU", f"{label} runs on the GPU, which has no model yet: its tasks can't start."
+             if no_gpu else f"{label} runs on this machine's GPU."),
             ("api", f"API ({name or api})" if api else "API (set its model under API first)",
              f"{label} runs on {api}; your code goes to its provider." if api else "Pick its API model under API first.")]
 
@@ -509,13 +515,15 @@ def _build() -> dict:
     # wait until they can do something; not when the catalog couldn't be read (CATALOG_FAILED says why)
     gpu_only = r is not None and not stored and not any_api and not r.get("catalog_error")
     quiet = {"hidden": True} if gpu_only else {}
+    no_gpu = m is not None and not m.get("gpu")  # discover() finds none: a GPU role's tasks can't start
+    who = "OpenCode" if _opencode_path() else "Claude"
 
     # the roles, then the rows for every role (shared)
     if r is None:
         out.append(_note("roles-why", "shared", why or OLDER_WB))
     else:
         if gpu_only:
-            out.append(_note("gpu-only", "shared", GPU_ONLY.format(who="OpenCode" if _opencode_path() else "Claude")))
+            out.append(_note("gpu-only", "shared", GPU_ONLY.format(who=who)))
         out.append({**_choice("agents", "shared", LABELS["agents"], AGENTS, r.get("use") or "both"), **quiet})
         # only once a role has an API model: before it, "Use the role's API model" did nothing but
         # set a cap (the web app's review, 2026-11-26)
@@ -523,7 +531,7 @@ def _build() -> dict:
                     **({} if any_api else {"hidden": True})})
         for name, label, row in roles:
             c = _choice(f"role-{name}", name, label_of(f"role-{name}"),
-                        _role_stops(label, row.get("api"), api_name.get(row.get("api"))), row.get("via") or "gpu")
+                        _role_stops(label, row.get("api"), api_name.get(row.get("api")), no_gpu), row.get("via") or "gpu")
             # a role on an API model that can't run says why: with no key for its provider the
             # rows said it runs there, and nothing said it couldn't (#1529, 2026-11-26)
             st = row.get("api_status")
@@ -564,7 +572,7 @@ def _build() -> dict:
     elif m is None:
         out.append(_note("gpu-why", "gpu", mwhy or OLDER_WB))
     elif not m["gpu"]:
-        out.append(_note("gpu-none", "gpu", NO_GPU))
+        out.append({**_note("gpu-none", "gpu", NO_GPU.format(who=who)), "ask": NO_GPU_ASK})
     else:
         for name, label, row in roles:
             gpu = row.get("gpu") or routes.AUTO

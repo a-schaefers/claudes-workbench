@@ -144,6 +144,21 @@ class Settings(Rows):
         self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"trivial": {"via": "gpu", "api": "deepseek/deepseek-flash"}}}))
         self.assertFalse({x["key"]: x for x in settings.rows(fresh=True)}["busy"].get("hidden"))
 
+    def test_with_no_gpu_model_a_gpu_role_says_its_tasks_cant_start_and_the_gpu_card_gives_a_next_step(self):
+        # the web app's review (2026-11-26): a first `wb start` exited 3 and the page never said why
+        m, _ = settings._read_json(["models", "--json"])
+        real = settings._read_json
+        with mock.patch.object(settings, "_read_json", lambda argv: ({**m, "gpu": []}, "") if argv == ["models", "--json"] else real(argv)):
+            by = {x["key"]: x for x in settings.rows(fresh=True)}
+        self.assertEqual(by["role-significant"]["says"],
+                         "Complex coding runs on the GPU, which has no model yet: its tasks can't start.")
+        self.assertEqual((by["gpu-none"]["text"], by["gpu-none"]["ask"]),
+                         ("No GPU model yet: pick an API model for a role above (its More), or ask Claude to set up a "
+                          "local one.", "Help me set up a local model"))
+        self.assertNotIn("gpu-significant", by)
+        self.assertEqual({x["key"]: x for x in settings.rows(fresh=True)}["role-significant"]["says"],
+                         "Complex coding runs on this machine's GPU.")      # with a model: as before
+
     def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
         # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
         home = Path(self.tmp.name) / "home"

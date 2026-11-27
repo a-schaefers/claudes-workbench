@@ -7644,7 +7644,11 @@ run, `api-connected` with a provider that has no key it can run on, `flows`) and
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd`; `off`, `""` and null clear it); `info` (`text`); `action`
 (`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
-beside the group's other rows: `NO_PROVIDER`, `CATALOG_FAILED`, `OLDER_WB`, `NO_GPU`, or wb's own reason when
+beside the group's other rows: `NO_PROVIDER`, `CATALOG_FAILED`, `OLDER_WB`, `NO_GPU` (`gpu-none`: "No GPU model yet:
+pick an API model for a role above (its More), or ask <Claude|OpenCode> to set up a local one.", its `ask`
+`NO_GPU_ASK`, "Help me set up a local model"; a GPU role's `says` is then `<Label> runs on the GPU, which has no
+model yet: its tasks can't start.`, where a first `wb start` exited 3 and the page never said why, the web app's
+review, 2026-11-26), or wb's own reason when
 routes.json can't be read).
 `other: true` (the `api-<role>` rows) takes any id; `wb route` checks it (a value starting `-` or
 holding a space is refused here, never read as a flag). A row may carry `help`, the note for Claude
