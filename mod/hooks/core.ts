@@ -1,6 +1,6 @@
 // The membrane (kernel/BOUNDARY.md): the one file that imports ./kernel.js, the PureScript kernel
 // compiled by scripts/kernel.py. It maps the kernel's wire records to what TypeScript uses and
-// decides nothing. Both hosts reach the kernel only through here: the Claude Code mod, and the
+// decides nothing of its own but `freshInstall` (at the end). Both hosts reach the kernel only through here: the Claude Code mod, and the
 // OpenCode plugin (#1296), so a decision made in the kernel is made the same way on each (#1356).
 import * as K from './kernel.js'
 
@@ -113,3 +113,17 @@ export const codingGate = (facts: CodingFacts): Coding => K.codingGate(facts) as
 export const editFields = (host: 'claude-code' | 'opencode'): Readonly<Record<string, string>> =>
   Object.assign(Object.create(null),
     Object.fromEntries(K.editTools.filter(t => t.host === host).map(t => [t.tool, t.field])))
+
+// A fresh install (#1190): no task ever ran (nothing under tasks/, no results.jsonl rows) and no
+// role is on API, so /workbench alone starts the procedure's *First run* (the story's
+// `firstrun.note`). Not the kernel's (three facts, one AND), but both hosts' (#1574, 2026-11-26:
+// only the mod had it, so OpenCode's bare /workbench on a fresh install did nothing). Each host
+// reads its own facts, asked in this order and only while the install still looks fresh: the
+// task entries, results.jsonl's size, whether a role names an API model.
+export interface FreshReads {
+  readonly tasks: () => Promise<number>
+  readonly results: () => Promise<number>
+  readonly api: () => Promise<boolean>
+}
+export const freshInstall = async (read: FreshReads): Promise<boolean> =>
+  !(await read.tasks()) && !(await read.results()) && !(await read.api())

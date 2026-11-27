@@ -82,7 +82,7 @@ import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, focusOf as focusOfTasks, frameOf, isEst, speechOf, taskLines, viewFacts } from './tasks'
 // moved to tasks.ts, shared with the OpenCode plugin's panel (#1312); still exported from here
 export { isEst, viewFacts }
-import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, codingGate, compactPlan, editFields, gateOf, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, runNoticePlan, runNoticesDue, tellPlan, WAKE_OPENING } from './core'
+import { ACTIVE, awayNow as awayOf, CHAT_STALE_MS, CLOSED, codingGate, compactPlan, editFields, freshInstall, gateOf, modesPlan, NEEDS, NO_ANSWER, noticePlan, noticesDue, openCounts, owns, PARKS, phaseOf, rewakePlan, runNoticePlan, runNoticesDue, tellPlan, WAKE_OPENING } from './core'
 import type { Gate as CommandGate } from './core'
 import type { Part as RowPart } from './tasks'
 // the command line as bash reads it and the consent gate's reading of it, shared with the OpenCode
@@ -767,21 +767,18 @@ async function onPath($: any, name: string): Promise<boolean | null> {
   return false
 }
 
-// A fresh install (#1190), read from the task files so the mod keeps no state: no task ever ran
-// (nothing under tasks/, no results.jsonl rows) and no role is on API. /workbench alone then starts
-// the skill's *First run* at once: told to wait for a first request, a new user saw nothing happen.
-async function freshInstall($: any): Promise<boolean> {
-  if ((await $.fs.list(`${mem.root}/tasks`).catch(() => []))?.length) return false
-  if ((await $.fs.stat(`${mem.root}/results.jsonl`).catch(() => undefined))?.size) return false
-  return !(await readRoutes($)).api
-}
+// A fresh install (#1190), read from the task files so the mod keeps no state; the rule is
+// core.ts's `freshInstall`, the OpenCode plugin's too (#1574). /workbench alone then starts the
+// skill's *First run* at once: told to wait for a first request, a new user saw nothing happen.
+const fresh = ($: any): Promise<boolean> => freshInstall({
+  tasks: async () => (await $.fs.list(`${mem.root}/tasks`).catch(() => []))?.length ?? 0,
+  results: async () => (await $.fs.stat(`${mem.root}/results.jsonl`).catch(() => undefined))?.size ?? 0,
+  api: async () => (await readRoutes($)).api,
+})
 
-// What a fresh install's /workbench alone carries after the skill's text; SKILL.md's *First
-// task* reads it by this name
-const FIRSTRUN = 'workbench-firstrun'
-const FIRSTRUN_NOTE = `[${FIRSTRUN}] A fresh install: no task has run here yet and no role is on API. ` +
-  'Run the skill\'s *First run* now, from its step 1, each install or download on the user\'s yes; ' +
-  'don\'t wait for a first request.'
+// What a fresh install's /workbench alone carries after the skill's text, the story's (#1574);
+// SKILL.md's *First task* reads its `[workbench-firstrun]` tag by name
+const FIRSTRUN_NOTE: string = SAY['firstrun.note']
 
 // `wb setup` on a session's start when the /workbench skill isn't linked (#1190): a fresh install,
 // which `claude plugin install` alone leaves without it. It makes only links (and starts the
@@ -3483,7 +3480,7 @@ export const register: Register = (on, options) => {
     // alone on a fresh install, the skill's whole text and the note to run its *First run* now
     // (#1190), the mode on already or not: in this text, since prompt.context fires only at a
     // conversation's first message, and /workbench may come later in it
-    const first = !firstTask(e.text) && await freshInstall($)
+    const first = !firstTask(e.text) && await fresh($)
     if (again && !firstTask(e.text) && !first) return { text: add(AGAIN_NOTE(mem.skill)) }
     const r = await next(e)
     return { ...r, text: add(first ? `${r.text}\n\n${FIRSTRUN_NOTE}` : r.text) }

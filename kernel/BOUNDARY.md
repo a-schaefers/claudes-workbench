@@ -187,7 +187,8 @@ The OpenCode plugin takes the kernel through `../mod/hooks/core.ts` too (notices
 its copies and its Git install carry the membrane (the root `package.json`'s
 `files`, whose `mod/` entries `ocplugin.shared_files` copies). Only `mod/hooks/core.ts` imports `./kernel.js`, across `mod/`, `opencode-plugin/` and
 `workbench/chat_static/` (every `.ts`, `.tsx`, `.js`, `.mjs`, `.mts`, `.cts`, `.cjs` and `.jsx`;
-`import`, `from` and `require(`). It maps tags and decides nothing. Its `kernel` record (every
+`import`, `from` and `require(`). It maps tags and decides nothing but `freshInstall` (both hosts' first-run
+rule, three facts, too small for the kernel: #1574). Its `kernel` record (every
 export by name, untyped) is the goldens': only tests (`*.test.*`) and `golden/` import it; the hosts
 take its typed names.
 
