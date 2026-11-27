@@ -6155,11 +6155,16 @@ def _agents_wait(task: store.Task, lease, told: str) -> None:
     longer stands (looked at every API_WAIT's 30 s): never a wait untold, as the cap's."""
     with Watcher(routes.path().parent) as w:
         lease.__exit__(None, None, None)
-        task.set_status(phase="queued", last=f"waiting: {routes.AGENTS_GPU}; {told}'s stop has asked the "
-                                             "user: it goes on once Agents is Both or API (wb stop gives up)")
+        # infra `spend` while it waits, as the stop it waits behind (_stop_before), cleared once
+        # the wait ends: the wake's wb discard of a task queued here was the model's rejected
+        # work in results.jsonl, its status as a running task's (#1588, the bar loop, 2026-11-27)
+        task.set_status(phase="queued", infra=SPEND,
+                        last=f"waiting: {routes.AGENTS_GPU}; {told}'s stop has asked the "
+                             "user: it goes on once Agents is Both or API (wb stop gives up)")
         while routes.agents_gpu() and _agents_told(task, told):
             w.wait(models.API_WAIT[1])
     lease.__enter__()
+    task.set_status(infra=None)
 
 
 def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard: str = SPEND) -> None:
@@ -6307,11 +6312,15 @@ def _cap_wait(task: store.Task, lease) -> bool:
             msg = (f"waiting: {why}; {behind}: it goes on once the cap is "
                    f"raised (wb route cap <usd>) or at local midnight (wb stop gives up)")
             if msg != said:
-                task.set_status(phase="queued", last=msg)
+                # infra `spend` while it waits, as the told stop's, cleared once the wait ends:
+                # the wake's wb discard of a task waiting here was scored as the model's
+                # rejected work (#1588, the bar loop, 2026-11-27)
+                task.set_status(phase="queued", last=msg, infra=SPEND)
                 said = msg
             w.wait(min(max(_midnight(after=True) - time.time(), 0.1), models.API_WAIT[1]))
     if waited:
         lease.__enter__()
+        task.set_status(infra=None)  # its wait's, not a stop's (#1588): drive clears it only at start
         if (kh := CURRENT.get("keyhole")) is not None:
             kh.reopen()
     return waited

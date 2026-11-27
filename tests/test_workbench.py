@@ -44752,6 +44752,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(two.status["phase"], "review", two.status)  # with no wb resume
         self.assertEqual(went, [True])
         lease.__enter__.assert_called_once()                      # and taken again
+        self.assertEqual([t.status.get("infra") for t in (two, three)], [None, None])  # #1588
         self.assertEqual(agents(), ["fan-1"])
         self.assertEqual([r["task"] for r in store.notices() if r["kind"] == "stuck"], ["fan-1"])
         # a stop told before the last switch holds no new task untold; a resumed one holds none
@@ -44759,6 +44760,37 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual((runner._agents_told(two), runner._agents_told(two, "fan-1")), ("", "fan-1"))
         store.Task("fan-1").set_status(phase="running")
         self.assertEqual(runner._agents_told(two, "fan-1"), "")
+
+    def test_a_task_waiting_behind_a_told_agents_stop_and_discarded_is_not_scored_as_the_models_rejected_work(self):
+        # #1588 (the bar loop, 2026-11-27): _agents_wait set no `infra`, so the wb discard the
+        # stop offers for the tasks queued behind it was the model's rejected work
+        from workbench import tuning
+        for name in ("fan-1", "fan-2"):
+            self.start_api(name, "ok", "--no-base-check", spawn=False)
+        self.drive_here("fan-2")                                  # round 1 ran, before the switch
+        two = store.Task("fan-2")
+        self.assertEqual(two.status["phase"], "review", two.status)
+        routes_json = Path(os.environ["WB_ROUTES"])
+        doc = store.read_json(routes_json)
+        store.write_json(routes_json, {**doc, "use": "gpu"})
+        self.drive_here("fan-1")
+        self.assertEqual(store.Task("fan-1").status.get("guard"), "agents")
+        between = threading.Thread(target=runner._go_on, args=(two, 1, "auto-fix", mock.MagicMock()),
+                                   daemon=True)
+        between.start()
+        self.addCleanup(between.join, 60)
+        deadline = time.time() + 30
+        while not str(two.status.get("last") or "").startswith("waiting: Agents is GPU, so nothing spends"):
+            self.assertLess(time.time(), deadline, two.status)
+            time.sleep(POLL)
+        self.assertEqual((two.status["phase"], two.status.get("infra")), ("queued", "spend"))
+        with mock.patch.object(cli, "_stop_runner"):
+            run_wb("discard", "fan-2")
+        store.write_json(routes_json, {**doc, "use": "both"})
+        between.join(60)
+        (row,) = [r for r in store.results() if r["task"] == "fan-2"]
+        self.assertEqual((row["outcome"], row["ran"], row["infra"]), ("discarded", True, "spend"))
+        self.assertFalse(tuning.judged(row))
 
 
 # Catalog rows for thinking per task (#1018), shaped as OpenCode 2.3.2's `api model.list` prints
@@ -46425,8 +46457,37 @@ class ApiSpend(Base):
         driver.join(30)
         self.assertEqual(went, [True])
         lease.__enter__.assert_called_once()                      # and taken again
+        self.assertIsNone(task.status.get("infra"))               # the wait's, gone with it (#1588)
         self.assertEqual(self.notices("t-next", "stuck"), [])
         self.assertEqual(runner._CAP_GO, {})
+
+    def test_a_task_waiting_behind_a_told_cap_stop_mid_step_and_discarded_is_not_scored_as_the_models_rejected_work(self):
+        # #1588 (the bar loop, 2026-11-27): the wait set no `infra`, so the wb discard SKILL.md
+        # advises for the tasks queued behind a told stop was the model's rejected work
+        from workbench import tuning
+        self.cap(100, api=("significant",))
+        told = self.api_task("t-told", SPEND_M, "ok")
+        task = self.api_task("t-next", SPEND_M, "ok", FAKE_STEP_IN="100")
+        runner.drive(task)
+        task.set_status(pid=None)
+        self.told_cap_stop(told, 100)
+        self.spent(150.0)
+        lease = mock.MagicMock()
+        driver = threading.Thread(target=runner._go_on, args=(task, 2, "auto-fix", lease), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 30)
+        deadline = time.time() + 20
+        while not str(task.status.get("last") or "").startswith("waiting: the day's API spend cap"):
+            self.assertLess(time.time(), deadline, task.status)
+            time.sleep(POLL)
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("queued", "spend"))
+        with mock.patch.object(cli, "_stop_runner"):
+            run_wb("discard", "t-next")
+        self.cap(1000, api=("significant",))
+        driver.join(30)
+        (row,) = [r for r in store.results() if r["task"] == "t-next"]
+        self.assertEqual((row["outcome"], row["ran"], row["infra"]), ("discarded", True, "spend"))
+        self.assertFalse(tuning.judged(row))
 
     def local_only(self):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))
