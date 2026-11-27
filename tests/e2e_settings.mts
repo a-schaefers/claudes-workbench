@@ -307,13 +307,28 @@ export async function check(page: any, ctx: E2eCtx) {
     await ctx.check('the focus ring on a Settings choice, lit or not, stands 3:1 or more against what is under it (#1410)', async () => {
       // #1410 (2026-11-25): the ring was the accent, drawn on the lit choice's own accent fill, and
       // 2.99:1 on the panel
-      for (const v of ['off', 'on']) {                     // splash is off since the last check: lit, then not
+      for (const [v, from] of [['off', 'on'], ['on', 'off']]) {  // splash is off since the last check: lit, then not
         const b = row('splash').locator(`[data-value="${v}"]`)
-        await b.focus()
-        await page.keyboard.press('ArrowRight')            // a key: the focus is the keyboard's
+        await row('splash').locator(`[data-value="${from}"]`).focus()
+        await page.keyboard.press('ArrowRight')            // the arrows move the focus within the group, round
         const got = await b.evaluate(ringContrast)
         if (!got.visible || got.ratio < 3) throw new Error(`${v}: ${JSON.stringify(got)}`)
       }
+      await page.evaluate(() => (document.activeElement as HTMLElement).blur())
+    })
+
+    await ctx.check('a Settings radio group is one Tab stop, its checked choice, and the arrows move the focus within it, picking nothing', async () => {
+      // the web app's review (2026-11-26): 45 Tab stops, and arrows that did nothing in a radio group
+      const got = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.set-row[data-key="splash"] [role="radio"]')]
+        .map(b => `${b.dataset.value}:${b.tabIndex}:${b.getAttribute('aria-checked')}`).join())
+      if (got !== 'on:-1:false,off:0:true') throw new Error(got)
+      await row('splash').locator('[data-value="off"]').focus()
+      await page.keyboard.press('ArrowLeft')
+      const at = await page.evaluate(() => (document.activeElement as HTMLElement).dataset.value)
+      await page.keyboard.press('End')
+      const end = await page.evaluate(() => (document.activeElement as HTMLElement).dataset.value)
+      if (at !== 'on' || end !== 'off' || (await row('splash').locator('[aria-checked="true"]').getAttribute('data-value')) !== 'off')
+        throw new Error(`${at} ${end}`)
       await page.evaluate(() => (document.activeElement as HTMLElement).blur())
     })
 

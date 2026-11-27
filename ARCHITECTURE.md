@@ -7455,7 +7455,8 @@ shown and hidden on each switch and on `visibilitychange`, and the view shown is
 second registration is ignored),
 `toast(text)` (`#toast`, a live region shown with `.on` and hidden by its look, faded and moved down, never
 `display: none`, which some screen readers miss; up `max(3.5 s, 60 ms a character)`, `TOAST_MS`, `TOAST_CHAR_MS`:
-a 236-character refusal went in 3.5 s, #1563; held while hovered or focused: the web app's review, 2026-11-26), `ask(text)` (the Chat view with its box filled with `text` and focused, sent
+a 236-character refusal went in 3.5 s, #1563; held while hovered or focused: the web app's review, 2026-11-26), `roving(event, items)` (a group's arrow keys: the focus to the next or previous item, round, Home and End to
+the ends, nothing picked), `ask(text)` (the Chat view with its box filled with `text` and focused, sent
 by the user, never by the call: Settings' Ask link), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
@@ -7839,7 +7840,11 @@ alone, and a generic renderer: a new setting touches only Python.
     choices, a `<select>` past it or with `other`. Such a select ends with "Other model…", which opens
     a text input (`input[data-other]`); Enter sends the typed id, Escape closes the input and the
     select shows the row's value again. A value off the list (none, for an API role without a model)
-    is the select's first option. A choice with `needs` (a role's API with no model, `api-<role>`, #1558)
+    is the select's first option. A segmented control is one Tab stop (the checked radio, else the first,
+    `tabindex` 0, the others -1), the arrows moving the focus within it, round, Home and End to its ends,
+    picking nothing (Enter or Space does: `WB.roving`); so are the task sheet's tabs (`#ts-tabs`, each
+    `aria-controls="ts-body"`): 45 Tab stops, and arrows that did nothing in what was announced as a radio
+    group (the web app's review, 2026-11-26). A choice with `needs` (a role's API with no model, `api-<role>`, #1558)
     sends nothing while that row has no value: its tap opens that row's list (`.set-pick`, the same
     choices and "Other model…") under the row, and a pick sends that row's value, then the choice
     (`queue`'s `then`, sent only once the first went through); the tap had been refused with a terminal
@@ -11289,7 +11294,8 @@ the window's `focus`, and a click on the value shown still sent (#1392); a POST 
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the
 computer out of reach, Try again shown and the rows drawn once the stream gets through, with no tab switch (#1412); a choice
 made with Space keeping the focus on its radio, and a number sent with Enter on its box (#1409); the focus ring
-on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); a role's API choice with
+on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); a radio group one Tab
+stop, its arrows moving the focus and picking nothing; a role's API choice with
 no model opening its API model list under the row, a pick sending the model, then the role's API (#1558); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
 group; a row's `` `…` `` drawn as `<code>`; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px

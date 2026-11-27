@@ -455,10 +455,15 @@
   $('ts-refresh').onclick = () => loadPart({ quiet: true })
   $('ts-reply').onclick = () => { setAbout({ task: tsTask }); showTaskSheet(false); input.focus() }
   for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.onclick = () => { tsPart = b.dataset.part as string; tsDiff = null; loadPart() }
+  // the tabs as one Tab stop, the arrows moving the focus within them (Enter or Space picks one):
+  // every tab was a stop of its own, and the arrows did nothing (the web app's review, 2026-11-26)
+  $('ts-tabs').addEventListener('keydown', e => roving(e, [...document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')]))
   async function loadPart({ quiet = false } = {}) {  // quiet: the view stays until the new one comes
     const asked = ++tsAsked, name = tsTask
     $('ts-name').textContent = name
-    for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.setAttribute('aria-selected', String(b.dataset.part === tsPart))
+    for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) {
+      b.setAttribute('aria-selected', String(b.dataset.part === tsPart)); b.tabIndex = b.dataset.part === tsPart ? 0 : -1
+    }
     if (!quiet || !tsBody.childElementCount) tsBody.replaceChildren(mk('span', 'ts-note', 'Loading…'))
     const extra = tsPart === 'diff' && tsDiff ? '&full=1' + (tsDiff.path ? '&path=' + encodeURIComponent(tsDiff.path) : '') : ''
     let r: Response | null, j!: TaskPart
@@ -1842,6 +1847,18 @@
   for (const b of tabs) b.addEventListener('click', () => go(b.dataset.view as string))
   addEventListener('hashchange', () => setView(location.hash.slice(1)))
   document.addEventListener('visibilitychange', () => { if (document.hidden) modHide(curView); else modShow(curView) })
+  // A group's arrow keys (a radio group, a tab list): the focus moves to the next or previous one,
+  // round at the ends, Home and End to the first and last; nothing is picked (Enter or Space does)
+  function roving(e: KeyboardEvent, items: HTMLElement[]) {
+    const at = items.indexOf(document.activeElement as HTMLElement)
+    if (at < 0) return
+    const to = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? (at + 1) % items.length
+      : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? (at - 1 + items.length) % items.length
+      : e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : -1
+    if (to < 0) return
+    e.preventDefault()
+    items[to].focus()
+  }
   // A short word from a view (WB.toast). Hidden by its look (`.toast` without `.on`: faded, moved
   // down), never display:none: some screen readers miss a live region that starts out of the tree.
   // Up for as long as its words need, 60 ms a character and 3.5 s at least (a 236-character refusal
@@ -1881,6 +1898,7 @@
       if (curView === name) modShow(name)
     },
     toast,
+    roving,
     // a request for the driver, from a Settings row with a problem (its Ask link): the chat's box
     // filled and focused, sent by the user; it waits like any message, so no listener is needed.
     // The words carry what it is about ("Help me with Settings › API: …"): an `about` names a

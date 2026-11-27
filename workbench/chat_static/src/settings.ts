@@ -230,11 +230,16 @@
       seg.setAttribute('role', 'radiogroup')
       seg.setAttribute('aria-label', row.label)
       seg.style.setProperty('--n', String(choices.length))
+      // one Tab stop, the checked radio (else the first), the arrows moving within: 45 Tab stops, and
+      // arrows that did nothing in what was announced as a radio group (the web app's review, 2026-11-26)
+      const stop = lit ? lit.value : choices[0].value
+      seg.addEventListener('keydown', e => WB.roving(e, [...seg.querySelectorAll<HTMLElement>('[role="radio"]')]))
       for (const c of choices) {
         const b = el('button', '', c.label)
         b.type = 'button'
         b.setAttribute('role', 'radio')
         b.dataset.value = c.value
+        b.tabIndex = c.value === stop ? 0 : -1
         b.setAttribute('aria-checked', String(c.value === value))
         // sent even when lit: what's shown may be stale (a change made at the terminal), and a
         // click to put it back sent nothing while the setting stayed changed (#1392, 2026-11-25)

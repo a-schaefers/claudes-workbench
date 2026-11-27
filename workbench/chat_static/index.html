@@ -40,9 +40,9 @@
         <button type="button" id="ts-refresh">Refresh</button>
       </div>
       <div class="seg ts-tabs" id="ts-tabs" role="tablist" aria-label="What to show">
-        <button type="button" role="tab" data-part="summary">Summary</button>
-        <button type="button" role="tab" data-part="diff">Diff</button>
-        <button type="button" role="tab" data-part="log">Log</button>
+        <button type="button" role="tab" data-part="summary" aria-controls="ts-body">Summary</button>
+        <button type="button" role="tab" data-part="diff" aria-controls="ts-body" tabindex="-1">Diff</button>
+        <button type="button" role="tab" data-part="log" aria-controls="ts-body" tabindex="-1">Log</button>
       </div>
       <div class="ts-body" id="ts-body" role="tabpanel"></div>
       <button type="button" class="ts-reply" id="ts-reply">Reply about this task</button>

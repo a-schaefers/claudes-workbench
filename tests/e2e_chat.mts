@@ -1698,7 +1698,7 @@ async function run(engine: string, device?: string) {
         return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, timed: [q.status, JSON.stringify(await q.json())], cur: WB.current(), seen,
           token: WB.token().length > 20, toast: t.classList.contains('on') && t.textContent }
       })
-      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,ask,current,on,post,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
+      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,ask,current,on,post,roving,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
         cur: 'settings', seen: ['settings'], token: true, toast: 'Saved.' })) throw new Error(JSON.stringify(got))
       const was = await page.evaluate(() => window._states)
       wb('chat', 'reply', '--text', 'A state for the views.')
