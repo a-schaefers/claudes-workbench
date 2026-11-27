@@ -1508,7 +1508,8 @@ directory holding nothing but caches (`gitops.cache_specs`: no tracked file, no 
 else the file itself), and `gitops.changed` leaves them out of `git status`'s lines in Python: one
 exclude per file in argv failed every `wb accept` and `wb next` on "Argument list too long" for an
 un-ignored venv's 30,000 `.pyc` (#1593). The review leaves the same paths out (`runner.run_caches`:
-`accept_writes` are kept): the round report's "files changed" and the check-in's, the review
+`accept_writes` are kept): the round report's "files changed" and its closing diffstat (its
+`(none)` then said `1 file changed`: #1593's review) and the check-in's, the review
 snapshots (`review_snapshot`'s and `restore_tree`'s `skip`, so a rewind or a self-review's
 set-aside leaves them as they are), the review diff, `wb diff` and `wb verify`'s candidate; the
 report names them in one `run_caches_line`. Shown, the `.pyc` `wb next` left read as the agent's
@@ -2012,7 +2013,8 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
    (`claude_files_changed`: CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/`), `NOTE: edits in
    submodule <path> can't land: …` (`gitops.submodule_edits`, #419), `NOTE: new files in submodule
    <path> won't be committed: …` (`gitops.submodule_check`, #889), and the diffstat's last line
-   (after `wb next`, the step's, from HEAD, as the files list and `wb diff` are: #1404).
+   (after `wb next`, the step's, from HEAD, as the files list and `wb diff` are: #1404; both
+   without the run caches, `runner.run_caches`: #1593).
 
 **Speed** (`measure_speed`): after each round the export's new messages give write and read samples
 (`router.record_speed`; a cut-short request with a first token still gives a read sample). A round

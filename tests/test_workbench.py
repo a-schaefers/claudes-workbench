@@ -3781,6 +3781,7 @@ class Lifecycle(Base):
                           if r["task"] == "t-nxc" and r["kind"] == "review"]
         step2 = review()[-1]
         self.assertIn("files changed:\n(none)", step2)
+        self.assertNotIn("file changed", step2)  # the closing diffstat too (#1593's review)
         self.assertIn("the diff: (no changes)", step2)
         self.assertIn("note: the commit leaves out a run's caches, which nobody wrote: "
                       "__pycache__/ (1 file)", step2)
@@ -3791,6 +3792,7 @@ class Lifecycle(Base):
         fb = review()
         self.assertEqual(len(fb), 3)
         self.assertIn("files changed:\n(none)", fb[-1])
+        self.assertNotIn("files changed,", fb[-1])
         self.assertIn("the diff since your last review: (no changes)", fb[-1])
         self.assertIn("__pycache__/ (2 files)", fb[-1])
 

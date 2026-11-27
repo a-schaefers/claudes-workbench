@@ -4910,9 +4910,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     lines += [f"NOTE: {e}" for e in edits + new]  # #419, #889
     # after wb next, the step's, as the files list, review_diff and wb diff are: the task's total
     # from its base read as a second file the diff "(all of it)" never showed (#1404, 2026-11-25)
+    # and without the run caches the files list leaves out: step 2's notice said "(none)" and
+    # then "1 file changed" for wb next's .pyc (#1593's review, 2026-11-27)
     base = "HEAD" if st.get("steps", 1) > 1 else spec["base"]
     try:  # a git that refuses the diff costs the report a line, not the task (#493)
-        stat = gitops.diff(task.worktree, base, stat=True).splitlines()
+        stat = gitops.diff(task.worktree, base, stat=True, skip=caches).splitlines()
     except gitops.GitError as e:
         stat = [f"(no diffstat: {(str(e).splitlines() or [''])[0][:300]})"]
     if stat:
