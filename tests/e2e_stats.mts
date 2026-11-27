@@ -170,6 +170,26 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
       if (s.queue.join() !== '◌fix-later waits for the GPU (1m15s)') throw new Error(say())
     })
 
+    await check('Stats: a Running row is a button that asks the shell to open the task sheet on its task (#1339)', async () => {
+      // #1339's UX review (2026-11-26): the ▶ read as a disclosure and did nothing, a task 3 taps from Stats
+      await page.evaluate(() => {
+        const w = window as any
+        w.e2eOpened = []
+        if (!w.e2eOpenSeen) { w.e2eOpenSeen = true; addEventListener('wb:open-task', (e: Event) => w.e2eOpened.push((e as CustomEvent).detail)) }
+      })
+      const row = page.locator('#stats-body .st-run button').nth(1)
+      await row.click()
+      await row.focus()
+      await page.keyboard.press('Enter')
+      const got = await page.evaluate(() => (window as any).e2eOpened)
+      if (JSON.stringify(got) !== JSON.stringify([{ task: 'fix-api' }, { task: 'fix-api' }])) throw new Error(JSON.stringify(got))
+      if (await page.evaluate(() => WB.current()) === 'stats') {
+        const look = await page.evaluate(() => { const b = document.querySelector<HTMLElement>('#stats-body .st-run button')!, s = getComputedStyle(b)
+          return { bg: s.backgroundColor, border: s.borderTopWidth, align: s.textAlign } })
+        if (look.border !== '0px' || look.align !== 'left' || !/rgba\(0, 0, 0, 0\)|transparent/.test(look.bg)) throw new Error(JSON.stringify(look))
+      }
+    })
+
     await check('Stats: Now says today\'s API spend against the day cap once a role is on API, and nothing of it on the GPU alone (#1339)', async () => {
       // #1339's UX review (2026-11-26): the figure that decides whether API tasks stop sat 3.4k px down Settings
       const today = () => page.evaluate(() => (document.querySelector('#stats-body .st-now-box .st-today') || {}).textContent ?? null)

@@ -214,6 +214,18 @@
         track.setAttribute('aria-valuenow', String(Math.round(frac * 100)));
         return el('div', 'st-meter', el('span', 'st-meter-l', label), track, el('span', 'st-meter-n', said));
     }
+    // A Running row is a button that opens the task sheet on its task: its ▶ read as a disclosure
+    // and did nothing, so a task was 3 taps from Stats, not 1 (#1339's UX review, 2026-11-26). It
+    // says so to the shell (`wb:open-task`, {task}), which opens the sheet as the strip's tap does.
+    // Its look stays the row's: stats.css is as it was, so the button's own face is undone here
+    function openTask(task, ...kids) {
+        const b = el('button', 'st-open', ...kids);
+        b.type = 'button';
+        Object.assign(b.style, { font: 'inherit', color: 'inherit', background: 'none', border: '0', padding: '0', margin: '0',
+            textAlign: 'left', textIndent: 'inherit', width: '100%', cursor: 'pointer' });
+        b.addEventListener('click', () => dispatchEvent(new CustomEvent('wb:open-task', { detail: { task } })));
+        return b;
+    }
     // a GPU's samples by its index; the RAM row has none, and kept under GPU 0's it drew GPU 0's line
     const busyKey = (g) => (g.ram ? 'ram' : String(g.index ?? 0));
     const card = (cls, title, ...kids) => el('div', `card ${cls}`, title ? el('h3', '', title) : null, ...kids);
@@ -253,7 +265,7 @@
                 typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
                 typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : '', ...apiParts(r)].filter(Boolean);
             const model = r.via === 'api' ? modelWord(String(r.model ?? ''), true, n) : r.label || r.model;
-            return el('li', 'st-run', el('span', 'st-mark claude', '▶'), el('b', '', String(r.task ?? '')), el('span', 'st-dim', ` ${model} · ${parts.join(' · ')}`));
+            return el('li', 'st-run', openTask(String(r.task ?? ''), el('span', 'st-mark claude', '▶'), el('b', '', String(r.task ?? '')), el('span', 'st-dim', ` ${model} · ${parts.join(' · ')}`)));
         })) : el('p', 'small', 'Nothing running.')));
         const rack = t.rack ?? [];
         const folds = rack.filter((m) => RACK_FOLD.has(m.state) && !(m.tasks ?? []).length);

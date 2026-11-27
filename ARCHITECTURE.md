@@ -7476,7 +7476,9 @@ as cards (`nowCards`): a card per GPU and for RAM (`GPU 0 <card's name>`, `cardN
 and a busy bar, toned at 80 and 95 % as the pane's, watts, `GPU may wire`) with an
 SVG sparkline of the last `BUSY_KEEP` 60 busy samples, kept here per GPU (`busyKey`: the RAM row
 keeps none); Running (`▶ <task> <model> · phase · round · secs · tok/s · context% · $spend`, an API
-task's model by `modelWord`, `apiParts`: `$spend`, or `plan usage` on a plan, #1522, or `Nothing running.`); Models, the rack, the idle, can't-run
+task's model by `modelWord`, `apiParts`: `$spend`, or `plan usage` on a plan, #1522, or `Nothing running.`;
+each row a button, `openTask`, its look the row's, that dispatches `wb:open-task` (a `CustomEvent` on `window`,
+`detail: {task}`) for the shell to open the task sheet on it, #1339); Models, the rack, the idle, can't-run
 and remote ones folded past `RACK_FOLD_MIN` 2 into `+N more (wb top)` (#1322; no `another machine:
 no telemetry`); Queue. **The history** is `statsLines` ported label for label and in its order
 (`statsRows`): This week and All time (tasks, landed, the API dollars: `apiPeriod`, `API no known
