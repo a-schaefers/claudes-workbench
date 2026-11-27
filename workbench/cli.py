@@ -1953,7 +1953,11 @@ def cmd_start(a):
     setup = _worktree_setup(repo, a, sub, m.kind)
     # the user's MCP servers commands.json names for this repo (#1202): one that holds a
     # credential is refused by name and key, never its value, like a token file (API_HIDDEN)
-    mcp = context.mcp_names(repo, sub)
+    # a card narrows them to its own (#1463 P8), before the refusal: one it leaves out isn't given
+    mcp, unlisted = cards.narrow_mcp(card, context.mcp_names(repo, sub))
+    if unlisted:
+        print(f"note: card {card.name} names MCP server(s) {', '.join(unlisted)} that commands.json "
+              "\"mcp\" doesn't give this repo: left out")
     if bad := context.mcp_servers(mcp)[1]:
         die(bad[0], 3)
     checkout_bytes = _disk_room(repo, a.base, setup)
@@ -2131,8 +2135,9 @@ def cmd_start(a):
     elif card:
         print(f"card: {card.name} (its role's text after the handbook)")
     if mcp:  # each server's tools go into every request: prefill on the GPU (#1202)
-        print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\"): each server's tools go into every "
-              "request")
+        print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\""
+              + (f", card {card.name}" if card is not None and card.mcp is not None else "")
+              + "): each server's tools go into every request")
         # only where a lane hides the checkout (Landlock, or Seatbelt on macOS: #1194): with none
         # or the lane off the server reads it, and the note had Claude tell the user to change a
         # config that works (#1202's review, 2026-11-24; api_hidden_note's gate, #1156)

@@ -11883,6 +11883,38 @@ class UsersMcpServers(Base):
         self.start("t-clean-remote", "ok")
         wait_phase("t-clean-remote", {"review"})
 
+    def test_a_role_cards_mcp_narrows_the_repos_servers_and_never_adds_one_1463(self):
+        # #1463 P8: a card names the servers its role may use, from #1202's allow-list
+        self.commands({"mcp": ["docs", "other"]})
+        mine = Path(self.tmp.name) / "roles"
+        mine.mkdir()
+        (mine / "docs-only.md").write_text("---\ntools: code\nmcp: [docs, vault]\n---\nUse the docs.\n")
+        (mine / "no-mcp.md").write_text("---\ntools: code\nmcp: []\n---\nNo servers.\n")
+        (mine / "any.md").write_text("---\ntools: code\n---\nAs the repo says.\n")
+        os.environ["WB_ROLES"] = str(mine)
+        out = self.start("t-docs", "ok", "--card", "docs-only")
+        self.assertIn('MCP: docs (commands.json "mcp", card docs-only)', out)
+        self.assertIn('note: card docs-only names MCP server(s) vault that commands.json "mcp" doesn\'t give '
+                      "this repo: left out", out)
+        self.assertEqual(store.Task("t-docs").spec["mcp"], ["docs"])
+        out = self.start("t-none", "ok", "--card", "no-mcp")
+        self.assertNotIn("MCP:", out)
+        self.assertNotIn("mcp", store.Task("t-none").spec)
+        self.start("t-any", "ok", "--card", "any")
+        self.assertEqual(store.Task("t-any").spec["mcp"], ["docs", "other"])
+        # a server a card leaves out is never refused for its credential: it isn't given
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "other": {"type": "local", "command": self.server, "environment": {"TOKEN": "CANARY"}}})
+        self.start("t-docs2", "ok", "--card", "docs-only")
+        self.assertEqual(store.Task("t-docs2").spec["mcp"], ["docs"])
+        (mine / "bad.md").write_text("---\ntools: code\nmcp: 3\n---\nx\n")
+        from workbench import cards
+        with self.assertRaises(RuntimeError) as e:
+            cards.load("bad")
+        self.assertIn("mcp is a list", str(e.exception))
+        for n in ("t-docs", "t-none", "t-any", "t-docs2"):
+            wait_phase(n, ("review", "failed", "stuck"))
+
     def test_commands_json_mcp_takes_a_list_of_server_names_and_never_workbenchs_own(self):
         for bad in ("docs", ["docs", 3], ["my_docs"], ["workbench"], ["opencode"], ["a worktree"],
                     ["my-worktree"]):
