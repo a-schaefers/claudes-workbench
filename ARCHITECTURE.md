@@ -4422,7 +4422,7 @@ wb setup's and scout's line said `local: true` after the `wb model add` it has t
 
 #### A model on another machine
 Ollama there with `OLLAMA_HOST=0.0.0.0`, reachable only from the client (no login; plain `http://`
-carries the code: a firewall or Tailscale), then `wb remote <host>` (`--context N`, since that
+carries the code: a firewall, or a VPN that encrypts it), then `wb remote <host>` (`--context N`, since that
 Ollama says no window until a model loads; `--remove` undoes it). It adds
 a model, never splits one; its energy isn't measured. Another server there: models.json `"local":
 true` on its provider, then `wb model add … --url`.
