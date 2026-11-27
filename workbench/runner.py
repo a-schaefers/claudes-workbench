@@ -1935,25 +1935,85 @@ def mcp_unreached(task: store.Task, since: int) -> dict[str, str]:
     return {n: why.get(n, "") for n in ran if n not in connected}
 
 
-def settle(task: store.Task, n: int, out: dict, began: str | None, why: str | None = None) -> bool:
+def settle(task: store.Task, n: int, out: dict, began: str | None, why: str | None = None,
+           stopped: bool = True) -> bool:
     """A guard's stop of a self-review round (out["stuck"]; or ``why``, the think nudge about
     to interrupt it) on the tree its tests passed on (green_tree) is the agent's finish, never a
     stop: out["settled"] takes the reason and the stuck and guard keys go, so the round goes on
-    to the tests, then review. A self-review is reads, runs and thinking by design (break a
-    check, see a test fail, copy the file back), and each guard that met it there woke Claude
+    to the tests, then review. On a tree the self-review changed, a stop (``stopped``: not a
+    nudge, which stays the guard's) settles too, out["mid_check"] the green tree's mark: the
+    tests run, and if they fail drive's set_aside puts the green tree back (#1572). A
+    self-review is reads, runs and thinking by design (break a check, see a test fail, copy the
+    file back), and each guard that met it there woke Claude
     with a stuck notice and no tests line for a green change, the step recorded stuck: the
     explore guard (#1168), then the repeat and error guards (#1250), then the think nudge (a
     needless check-in), silence and the round's wall (#1261, 2026-11-24), each fixed alone. So
     every stop goes through here: run_round's guards, the provider's (in the round or at
     OpenCode's exit), the spend cap's in the round, drive's handover limit, and OpenCode's own
-    non-zero exit that no server revive took (#1270). A tree the
-    self-review left changed, or any other round: False, nothing changed, stopped as before."""
+    non-zero exit that no server revive took (#1270). Any other round, or a nudge on a tree the
+    self-review changed: False, nothing changed, stopped (or nudged) as before.
+
+    A stop on a changed tree was stuck, and that tree was a mutation check left half done: a
+    9B's repeat guard met it after `cp aside/stats.py stats.py` put a broken copy back, so a
+    change whose tests had passed woke Claude as stuck with a stale tests:ok, no tree to rewind
+    to, and a run item null (bar loop #1030 round 2, M1, 2026-11-26)."""
     why = out.get("stuck") or why
-    if not why or gitops.mark(task.worktree) != green_tree(task, began):
+    green = green_tree(task, began)
+    if not why or green is None:
+        return False
+    if gitops.mark(task.worktree) == green:
+        text = f"self-review: {why}, the tree its tests passed on: stopped as its finish"
+    elif stopped:
+        out["mid_check"] = green
+        text = f"self-review: {why}, on a tree it changed: stopped, the tests run on it"
+    else:
         return False
     out["settled"], out["stuck"], out["guard"] = why, None, None
-    task.event({"ts": store.now(), "round": n, "kind": "settled",
-                "text": f"self-review: {why}, the tree its tests passed on: stopped as its finish"})
+    task.event({"ts": store.now(), "round": n, "kind": "settled", "text": text})
+    return True
+
+
+def keep_green(task: store.Task, n: int, green: str) -> None:
+    """Round ``n``'s tree, whose tests passed, kept as a review tree (status `review_trees`, not
+    reviewed, `green` its gitops.mark, pinned at REVIEW_REF) as the self-review begins: a
+    fingerprint alone left nothing to go back to when the self-review stopped mid-check with a
+    check broken (#1572, 2026-11-26)."""
+    steps = task.status.get("steps", 1)
+    try:
+        tree, left, keep = gitops.review_snapshot(task.worktree, force=ignored_to_commit(task))
+    except (gitops.GitError, OSError):
+        return
+    trees = {k: v for k, v in (task.status.get("review_trees") or {}).items() if v.get("step") == steps}
+    trees[str(n)] = {"step": steps, "tree": tree, "left": left, "keep": keep, "reviewed": False,
+                     "green": green}
+    gitops.keep_review(task.worktree, task.name, n, tree)
+    task.set_status(review_trees=trees)
+
+
+def set_aside(task: store.Task, n: int, rnd: dict) -> bool:
+    """A self-review stopped on a tree it changed (rnd["mid_check"]) whose tests then failed:
+    its files kept as review tree `<n>s` (not reviewed), the green tree keep_green kept put back
+    (gitops.restore_tree), and rnd["set_aside"] the report's line; whether it was. The task goes
+    to review on the green tree, never stuck on a check left broken (#1572)."""
+    steps = task.status.get("steps", 1)
+    trees = {k: v for k, v in (task.status.get("review_trees") or {}).items() if v.get("step") == steps}
+    green = next((v for v in trees.values() if v.get("green") == rnd.get("mid_check")), None)
+    if not green or not gitops.has_tree(task.worktree, green["tree"]):
+        return False
+    force, key = ignored_to_commit(task), f"{n}s"
+    try:
+        now, left, keep = gitops.review_snapshot(task.worktree, force=force)
+        trees[key] = {"step": steps, "tree": now, "left": left, "keep": keep, "reviewed": False}
+        gitops.keep_review(task.worktree, task.name, key, now)
+        task.set_status(review_trees=trees)  # kept before anything is put back
+        gitops.restore_tree(task.worktree, green["tree"], green.get("keep") or [], now=now,
+                            now_keep=keep, force=force)
+    except (gitops.GitError, OSError):
+        return False
+    rnd["set_aside"] = (f"self-review stopped mid-check ({rnd.get('settled')}); its unfinished "
+                        f"edits (tests failing) were set aside, the tree its tests passed on put "
+                        f"back: wb rewind {task.name} {key} brings them back")
+    task.event({"ts": store.now(), "round": n, "kind": "set_aside", "text": rnd["set_aside"]})
     return True
 
 
@@ -2338,7 +2398,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         # the think nudge woke Claude with a check-in, and silence, the wall or the stop after a
         # nudge set stuck, past #1168/#1250's settle, which was the detector's alone)
         if (out["stuck"] or nudge or explore) and settle(
-                task, n, out, began, explore[0] if explore else f"no tool call or word for {_span(quiet)}"):
+                task, n, out, began, explore[0] if explore else f"no tool call or word for {_span(quiet)}",
+                stopped=bool(out["stuck"])):  # a nudge on a changed tree stays one (#1572)
             _stop(proc)
             break
         if explore and not out["stuck"]:  # another guard's stop this pass: stopped, not nudged
@@ -4726,6 +4787,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines += [f"note: {w}: this round's agent ran without it" for w in left.get("why") or ()]
     if (oc := st.get("opencode_note") or {}).get("round") == n:  # opencode_moved (#1322)
         lines.append(oc.get("text") or "")
+    if rnd.get("set_aside"):  # #1572: the self-review's stop mid-check, its files kept
+        lines.append(rnd["set_aside"])
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
         if rnd.get("guard") in PROVIDER_GUARDS:
@@ -6608,6 +6671,8 @@ def _leased(task: store.Task, m: models.Model, say):
             with _tests_gpu(task, lease), \
                     prep_turn(task, "check") if task.spec.get("test_cmd") else contextlib.nullcontext():
                 tests = run_tests(task, n)
+                if rnd.get("mid_check") and tests and not tests["ok"] and set_aside(task, n, rnd):
+                    tests = run_tests(task, n)  # the green tree's, put back: status tests says it (#1572)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)
                 if not _go_on(task, n, "Claude's note", lease):
@@ -6645,8 +6710,10 @@ def _leased(task: store.Task, m: models.Model, say):
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     SELF_REVIEW.format(cmd=task.spec["test_cmd"], aside=self_review_aside(task)))
+                green = gitops.mark(task.worktree)
                 task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review",
-                                self_review_tree=gitops.mark(task.worktree))  # #1188: the green tree
+                                self_review_tree=green)  # #1188: the green tree
+                keep_green(task, n, green)  # and its files, to put back (#1572)
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
                 if not _go_on(task, n, "self-review", lease):

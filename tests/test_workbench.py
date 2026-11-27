@@ -8173,13 +8173,36 @@ class Context(Base):
         self.assertTrue(st["tests"]["ok"])
         self.assertNotIn("errors", st.get("guards") or {})
 
-    def test_a_self_review_that_reruns_a_command_on_a_changed_tree_is_still_stopped_by_the_repeat_guard(self):
-        # #1250's finish, like #1168's, is for the green tree: one left changed is stopped
+    def assert_set_aside(self, name, st, said):
+        """A self-review stopped on a tree it changed, its tests failing there: the green tree
+        put back and tested, the unfinished files kept as review tree `2s`, a review (#1572)."""
+        t = store.Task(name)
+        self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "42\n")
+        self.assertEqual((st["tests"]["ok"], st["tests"]["round"]), (True, 2))   # the tree it is left on
+        self.assertEqual(st["last"], "tests passed: Claude reviews next")
+        trees = st["review_trees"]
+        self.assertEqual(trees["2s"]["reviewed"], False)
+        self.assertTrue(trees["1"]["green"])                     # kept as the self-review began
+        self.assertEqual(trees["1"]["tree"], trees["2"]["tree"])   # the tree under review
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == name]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn(f"self-review stopped mid-check ({said}", rows[0]["text"])
+        self.assertIn(f"wb rewind {name} 2s brings them back", rows[0]["text"])
+        self.assertIn("tests: PASS", rows[0]["text"])
+        from workbench import results
+        self.assertFalse(results.step(t, landed=False)["stuck"])  # the router's
+        run_wb("rewind", name, "2s")
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "43\n")   # the unfinished edit
+
+    def test_a_self_review_stopped_by_the_repeat_guard_on_a_tree_it_broke_is_set_aside_for_the_green_tree(self):
+        # #1572 (bar loop #1030 round 2, M1, 2026-11-26): a 9B's self-review copied a broken
+        # copy back mid-check and the repeat guard stopped it there: stuck, a stale tests:ok,
+        # the green tree only fingerprinted, so nothing to rewind to
         os.environ.update(FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
         self.start("t-srx", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srx", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
-        self.assertIn("the same call 4 times in a row", st["last"])
+        self.assert_set_aside("t-srx", st, "the same call 4 times in a row")
 
     def test_a_self_review_whose_opencode_exits_on_its_servers_error_on_the_green_tree_goes_to_review(self):
         # #1270 (bar loop round 7, 2026-11-24): a GPU server's 500 in the self-review (Ollama's
@@ -8195,14 +8218,13 @@ class Context(Base):
         self.assertIn("self-review: opencode exited 1, the tree its tests passed on: stopped as its finish",
                       run_wb("watch", "t-src", "--once", "--no-color"))
 
-    def test_a_self_review_whose_opencode_exits_on_a_changed_tree_still_fails(self):
-        # #1270's finish is for the green tree, as every settle is: one left changed failed mid-edit
+    def test_a_self_review_whose_opencode_exits_on_a_tree_it_broke_is_set_aside_for_the_green_tree(self):
+        # #1270's exit on a changed tree failed the task mid-check, a green change lost to a
+        # check left broken: its tests run, and failing there it is set aside (#1572)
         os.environ.update(FAKE_SELF_CRASH="1", FAKE_READS="1", FAKE_SELF_KEEP="1")
         self.start("t-srck", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srck", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"], st["last"]), ("failed", 2, "opencode exited 1"))
-        self.assertFalse([e for e in store.read_jsonl(store.Task("t-srck").dir / "events.jsonl")[0]
-                          if e["kind"] == "settled"])
+        self.assert_set_aside("t-srck", st, "opencode exited 1")
 
     def quiet_self_review(self, name, *flags, **env):
         """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
@@ -8255,13 +8277,12 @@ class Context(Base):
                             rounds=(3, "steer"))                # the nudge wakes no one (#1322)
         self.assertEqual(st["nudges"], 1)
 
-    def test_a_self_review_silent_on_a_changed_tree_is_still_stopped_as_stuck(self):
-        # #1261's finish, like #1168's, is for the green tree: one left changed is stopped
+    def test_a_self_review_silent_on_a_tree_it_broke_is_set_aside_for_the_green_tree(self):
+        # #1261's finish is for the green tree; a silence stop on one left changed was stuck,
+        # and is set aside since its tests fail there (#1572)
         st, rows = self.quiet_self_review("t-sqk", "--silence-timeout", "4", "--think-timeout", "120",
                                           FAKE_SELF_KEEP="1")
-        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
-        self.assertIn("no output for 0 minutes", st["last"])
-        self.assertEqual([r["kind"] for r in rows], ["stuck"])
+        self.assert_set_aside("t-sqk", st, "no output for 0 minutes")
 
     def test_every_guards_stop_settles_on_a_self_reviews_green_tree_and_only_there(self):
         # #1261: one mechanism for any guard (the provider's, the spend cap's, drive's handover
@@ -8281,13 +8302,18 @@ class Context(Base):
         self.assertEqual(out["settled"], "no tool call or word for 7 minutes")
         self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green))  # nothing stopped
         t.set_status(self_review_tree="another tree")
+        # another tree: a nudge stays the guard's; a stop settles to the tests, mid-check (#1572)
+        self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green, "a nudge", stopped=False))
         out = {"stuck": "silence's stop", "guard": "silence"}
-        self.assertFalse(runner.settle(t, 2, out, green))
-        self.assertEqual(out, {"stuck": "silence's stop", "guard": "silence"})
+        self.assertTrue(runner.settle(t, 2, out, green))
+        self.assertEqual(out, {"stuck": None, "guard": None, "settled": "silence's stop",
+                               "mid_check": "another tree"})
+        out = {"stuck": "silence's stop", "guard": "silence"}
         t.set_status(round_for="feedback", self_review_tree=green)
         self.assertFalse(runner.settle(t, 2, out, green))
+        self.assertEqual(out, {"stuck": "silence's stop", "guard": "silence"})
         settled = [e for e in store.read_jsonl(t.dir / "events.jsonl")[0] if e.get("kind") == "settled"]
-        self.assertEqual(len(settled), 7)
+        self.assertEqual(len(settled), 8)
 
     def test_a_self_review_handed_over_past_the_limit_on_its_green_tree_goes_to_review(self):
         # #1261's review (2026-11-24): drive's HANDOVER_MAX stop goes through runner.settle, which

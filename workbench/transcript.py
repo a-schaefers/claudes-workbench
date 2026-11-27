@@ -388,7 +388,8 @@ EVENT_KINDS = frozenset({
     "allow", "interrupted", "fresh", "full", "load", "left_bg", "lingered", "settled", "reading_full",
     "compacted", "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover",
     "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend", "rewound",
-    "schema_fix", "fallback"})  # a report's repair round (#1278); a role's fallback model (#1196)
+    "schema_fix", "fallback",  # a report's repair round (#1278); a role's fallback model (#1196)
+    "set_aside"})  # a self-review's files set aside mid-check, the green tree put back (#1572)
 
 
 # What `wb log` prints, and the web chat's task sheet (#1201): the agent's text, its tool calls,
@@ -458,6 +459,7 @@ def task_entries(task: store.Task) -> list[Entry]:
         elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export",
                       "lingered",  # the agent's turn over, OpenCode still open: stopped (#1160)
                       "settled",  # a self-review at a guard, the tree its tests passed on: stopped (#1168, #1250, #1261)
+                      "set_aside",  # its stop mid-check, the tests failing: the green tree back (#1572)
                       "served",  # served: the keyhole, an API model's provider changed what ran
                       "rate_limited",  # an API provider's wait, the clocks paused (#1020)
                       "schema_fix",  # a report's result didn't hold its schema: asked once again (#1278)

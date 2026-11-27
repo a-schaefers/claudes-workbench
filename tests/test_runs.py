@@ -1395,6 +1395,26 @@ class Runs(Base):
         self.assertEqual([(c["key"], c["task"]) for c in rep["code"] if c.get("phase") == "review"], [("code:1#e1", "esc-code-2")])
         run_wb("discard", "esc-code-2")
 
+    def test_a_code_items_self_review_stopped_on_a_tree_it_broke_is_done_on_the_green_tree_not_escalated(self):
+        # #1572 (bar loop #1030 round 2, M1, 2026-11-26): its stop mid-check was stuck, the
+        # item null, and escalate redid the passing change from the base on the next role
+        flow = {"v": 1, "name": "srx", "params": {}, "stages": [
+            {"id": "code", "kind": "code", "role": "trivial", "escalate": ["significant"], "items": ["the answer"],
+             "prompt": "Write the answer to answer.txt.", "test": test_workbench.TEST_CMD},
+            {"id": "claude", "final": True, "from": "code"}]}
+        os.environ.update(FAKE_SCENARIO="selfreads", FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
+        store.home().joinpath("tuning.json").write_text('{"self_review": 1}')  # Base pins it off
+        run_wb("run", "start", "srx", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("srx", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        st = store.Task("srx-code-1").status
+        self.assertEqual((st["phase"], st["round"], st["tests"]["ok"]), ("review", 2, True), st.get("last"))
+        self.assertIn("2s", st["review_trees"])
+        run = runs.Run("srx")
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "escalated"])
+        self.assertEqual([(c["key"], c["task"]) for c in runs.report_of("srx")["code"] if c.get("phase") == "review"],
+                         [("code:1", "srx-code-1")])
+        run_wb("discard", "srx-code-1")
+
     def test_a_crashed_code_item_checkpoints_claude_once_while_the_runs_other_items_go_on_to_review(self):
         # #1510: one crashed item's checkpoint stopped every other start until wb run resume, so a
         # scheduled fix or build flow sat idle all night and skipped each later night's fire
