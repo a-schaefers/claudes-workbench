@@ -35,7 +35,7 @@ work, and OpenCode subagents via API or GPU write the code.
  │                     ORCHESTRATOR                         │◄──────►│   WEB APP  :1337   │
  │  first time? ─► setup questions                          │        │  tasks · stats ·   │
  │  plans · splits into steps · writes a test for each      │        │  settings · chat   │
- │  reviews each result · merges on your word               │        │  (phone: Tailscale)│
+ │  reviews each result · merges on your word               │        │  from any device   │
  └──────┬──────────────────────────────────────────▲────────┘        └────────────────────┘
         │ one step + its test                      │ report: review / stuck / failed
         ▼                                          │
@@ -164,7 +164,8 @@ model's provider, unless that model is local.
 - Accepted commits carry your name as author and a
   [trailer](ARCHITECTURE.md#git-commits-and-projects) naming the model that wrote the code.
 - The web app has a [chat](ARCHITECTURE.md#the-web-chat) for talking to the orchestrator agent and
-  following tasks. To use it from your phone over Tailscale, ask the orchestrator agent.
+  following tasks. To reach it from your phone or another computer, over Tailscale or any network
+  you choose, ask the orchestrator agent.
 - When a review turns up a lesson, the orchestrator agent records it as a
   [skill](ARCHITECTURE.md#the-skill-library) and gives it to later subagents.
 - The orchestrator agent can also direct local [image](ARCHITECTURE.md#images) and
