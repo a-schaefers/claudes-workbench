@@ -636,9 +636,10 @@ yours to edit: the coding choice is the user's (`wb coding`), never changed by a
   The notice's route change is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it, and so do those queued behind it: they wait on,
   but for one, whose own stop is the next notice. Nothing but the user raises the cap.
-  With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: API tasks already
-  started stop before their next round, and feedback, next, resume and an API `--model` are
-  refused. Ask the user (Agents back to Both or API, then `wb resume`), or takeover or discard.
+  With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: the first API task
+  stops before its next round, the rest wait queued behind its stop and go on by themselves at
+  Both or API, and feedback, next, resume and an API `--model` are refused. Ask the user (Agents
+  back to Both or API, then `wb resume` the stopped one), or takeover or discard.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
@@ -688,7 +689,8 @@ not what your rerun of the task's `--test` or setup writes, nor another build yo
 your edit tools or a command that names them, not with a script that doesn't.
 `note: git ignores N more files … leaves out as build or test output` names the rest you or the
 agent changed there: `wb next`'s stay in the worktree (`git -C <worktree> add -f <file>` keeps one), `wb
-accept`'s are copied to the task's `left-out/` before the worktree goes.
+accept`'s are copied to the task's `left-out/` before the worktree goes. `note: the commit leaves
+out a run's caches` names the `__pycache__/`, `.pytest_cache/`… your test run left that git doesn't ignore.
 When a command says the repo `moved or was deleted`, ask the user where it is now, then
 `wb relocate <name> --repo <dir>`; a removed linked worktree needs nothing (its main one is used).
 

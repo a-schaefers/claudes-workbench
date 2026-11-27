@@ -2593,7 +2593,9 @@ def cmd_next(a):
                     commit = gitops.commit_all(
                         task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} (step {step})"
                         f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a), wrote,
-                        left)
+                        left, dropped := [])
+                    if dropped:  # a test run's __pycache__, said (#1580)
+                        print(gitops.run_caches_line(dropped))
                 if left:  # still in the worktree, for a later commit (#1179's review)
                     print(gitops.left_out_line(left, task.worktree))
         except gitops.GitError as e:
@@ -2675,7 +2677,10 @@ def _to_commit(task: store.Task, wrote=()) -> bool:
     gitlink hides them). Without those, once a wb next had committed a step, a step whose only
     change was in a submodule "had no changes", and wb accept exited 0 and removed the worktree,
     edit and all: #419's refusal only fired with something else to commit (#1307, 2026-11-24)."""
-    return bool(gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote)
+    # a run's caches alone aren't: commit_all leaves them out (#1580), so a step whose only
+    # change was a test run's __pycache__ died on "nothing to commit"
+    caches = gitops.run_caches(task.worktree, wrote) if task.worktree.is_dir() else []
+    return bool(gitops.changed(task.worktree, caches) or gitops.ignored_files(task.worktree, wrote)
                 or gitops.submodule_edits(task.worktree))
 
 
@@ -5153,7 +5158,7 @@ def cmd_accept(a):
     # (#246, the audit of 1.2)
     close = st.get("closing")
     if (not close and was_live and st.get("steps", 1) == 1 and task.worktree.is_dir()
-            and not gitops.changed(task.worktree)):
+            and not gitops.changed(task.worktree, gitops.run_caches(task.worktree))):  # #1580
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
     checked = None if close else verify.note(task)  # before the commit: what Claude accepts it on (#97)
@@ -5186,7 +5191,9 @@ def cmd_accept(a):
                     left = _left_out(task, wrote, a.include)
                     if head == spec["base"] or _to_commit(task, wrote):
                         commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a),
-                                                   wrote, left)
+                                                   wrote, left, dropped := [])
+                        if dropped:  # a test run's __pycache__, said (#1580)
+                            print(gitops.run_caches_line(dropped))
                     else:  # nothing new: the branch's commits past the base are the work (the
                         # steps wb next committed, or Claude's own after a takeover: the audit)
                         commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
@@ -5362,7 +5369,10 @@ def _gained_work(task: store.Task, repo: Path, commit: str) -> bool:
     if not task.worktree.is_dir():
         return False
     try:
-        left = [ln for ln in gitops.changed(task.worktree).splitlines() if ln[:2].strip() != "D"]
+        # not the run caches the commit left out (#1580): a retry refused every accept of a
+        # task whose tests ran in the worktree
+        left = [ln for ln in gitops.changed(task.worktree, gitops.run_caches(task.worktree)).splitlines()
+                if ln[:2].strip() != "D"]
         head = gitops.git(task.worktree, "rev-parse", "HEAD", check=False).strip()
     except gitops.GitError:  # its .git removed (or not what it said): being removed
         return False

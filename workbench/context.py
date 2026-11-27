@@ -1421,7 +1421,9 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               # macOS's ~/.cache (#1194): Go's build cache, pip's, Yarn's, node-gyp's and
               # Playwright's browsers are there, and Seatbelt would refuse every build's write;
               # whole, Apple's Python bytecode in it denied by path (NOT_WRITABLE, write_denied)
-              "Library/Caches")
+              "Library/Caches",
+              # pnpm's store on macOS, ~/Library/pnpm's (pnpm_store, #1583, 2026-11-26)
+              "Library/pnpm/store")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
 # BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches. The second
 # line's were refused where the user moved them, HF_HOME though ENV_KEEP passes it on (#911)
@@ -1431,7 +1433,7 @@ TOOL_HOME_VARS = ("CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE", "GOCACHE"
                   "WORKON_HOME", "CARGO_TARGET_DIR", "NPM_CONFIG_CACHE", "NUGET_PACKAGES",
                   "CCACHE_DIR", "SCCACHE_DIR", "YARN_CACHE_FOLDER", "PRE_COMMIT_HOME", "STACK_ROOT",
                   "CABAL_DIR", "JULIA_DEPOT_PATH", "CONAN_HOME", "PLATFORMIO_CORE_DIR", "HF_HOME",
-                  "TORCH_HOME", "ELM_HOME", "NIMBLE_DIR")
+                  "TORCH_HOME", "ELM_HOME", "NIMBLE_DIR", "PNPM_HOME")
 # the variables whose every entry is a home, not only the first: Julia stacks its depots (#911)
 ALL_ENTRIES = ("JULIA_DEPOT_PATH",)
 # TOOL_HOMES' entries under these follow the variable, as secret_paths does (#911)
@@ -1441,7 +1443,19 @@ XDG_BASES = (("XDG_DATA_HOME", ".local/share/"), ("XDG_STATE_HOME", ".local/stat
 # (#437, the audit of 1.8). Their targets are readable, and so are the SDKs' default places.
 SDK_VARS = ("ANDROID_HOME", "ANDROID_SDK_ROOT", "JAVA_HOME", "FLUTTER_ROOT", "DOTNET_ROOT")
 SDK_DEFAULTS = ("Android/Sdk", "Library/Android/sdk")
-VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
+# PNPM_HOME holds `pnpm setup`'s global bin, on the user's PATH: only its store (#1583)
+VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache", "PNPM_HOME": "store"}
+# pnpm's store, named for the agent (pnpm_store, runner.agent_env: #1583, bar round 3 of 2.2,
+# 2026-11-26, on pnpm 9.15.9): with no store-dir, pnpm first links a file into its data dir
+# (`<data dir>/_tmp_*`), which the lane refuses (only `<data dir>/store` is granted), then takes
+# the first directory down from / it can link in, the worktree, so its store went to
+# `<worktree>/.pnpm-store`: a setup's `pnpm install` failed as unclean before round 1, and an
+# agent's own install put the store in the diff wb accept commits. Only a pnpm project's: npm
+# 12 warns on every call of an env config it doesn't know ("will error in a future major
+# version"). Never where the user set store-dir (their environment, an .npmrc, pnpm's rc)
+PNPM_MARKS = ("pnpm-lock.yaml", "pnpm-workspace.yaml")
+STORE_DIR_SET = re.compile(r"^\s*store[-_]dir\s*=", re.M | re.I)
+STORE_DIR_VARS = ("npm_config_store_dir", "pnpm_config_store_dir")
 # inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
 # what their shell sources, and the toolchains rustup's proxies run (relative to the home, or to
 # CARGO_HOME and RUSTUP_HOME for theirs); no grant reaches them (kept_out, #912), so `cargo
@@ -1803,6 +1817,47 @@ def tool_homes() -> list[Path]:
     return out
 
 
+def pnpm_store(task: store.Task) -> Path | None:
+    """The store the agent's pnpm is given (#1583): `<pnpm's data dir>/store`, the data dir as
+    pnpm 9 finds it (PNPM_HOME, `$XDG_DATA_HOME/pnpm`, `~/Library/pnpm` on macOS,
+    `~/.local/share/pnpm`), from the user's environment, never OpenCode's moved XDG_DATA_HOME.
+    None for a repo that isn't pnpm's (PNPM_MARKS, package.json's packageManager), a data dir
+    that isn't absolute, or a store-dir the user set (STORE_DIR_VARS; the worktree's or the
+    package's .npmrc, the user's, pnpm's rc; pnpm-workspace.yaml's storeDir, pnpm 11's
+    config.yaml's)."""
+    roots = dict.fromkeys((task.worktree, task.workdir))
+    try:
+        manager = str(json.loads((task.workdir / "package.json").read_text()).get("packageManager", ""))
+    except (OSError, ValueError, AttributeError):
+        manager = ""
+    if not manager.startswith("pnpm@") and not any((r / m).is_file() for r in roots for m in PNPM_MARKS):
+        return None
+    if any(k.lower().replace("-", "_") in STORE_DIR_VARS for k in os.environ):
+        return None
+    home, env = Path.home(), os.environ
+    conf = Path(env["XDG_CONFIG_HOME"]) / "pnpm" if env.get("XDG_CONFIG_HOME") else \
+        home / ("Library/Preferences/pnpm" if sys.platform == "darwin" else ".config/pnpm")
+    user = env.get("npm_config_userconfig") or env.get("NPM_CONFIG_USERCONFIG") or home / ".npmrc"
+    for rc in (*(r / ".npmrc" for r in roots), Path(user).expanduser(), conf / "rc"):
+        try:
+            if STORE_DIR_SET.search(rc.read_text(errors="replace")):
+                return None
+        except OSError:
+            pass
+    # pnpm-workspace.yaml's storeDir, and pnpm 11's global config.yaml, where `pnpm config set
+    # store-dir` writes on 11 (#1583's review, 2026-11-26)
+    for yaml in (task.worktree / "pnpm-workspace.yaml", conf / "config.yaml"):
+        try:
+            if re.search(r"^\s*storeDir\s*:", yaml.read_text(errors="replace"), re.M):
+                return None
+        except OSError:
+            pass
+    data = env.get("PNPM_HOME") or (os.path.join(env["XDG_DATA_HOME"], "pnpm") if env.get("XDG_DATA_HOME")
+                                    else home / ("Library/pnpm" if sys.platform == "darwin"
+                                                 else ".local/share/pnpm"))
+    return Path(data) / "store" if os.path.isabs(data) else None
+
+
 def tool_var_homes() -> list[str]:
     """The toolchain homes TOOL_HOME_VARS name, each that is set (its first entry, every one for
     ALL_ENTRIES, its cache for VAR_CACHES' whole homes)."""
@@ -1916,6 +1971,13 @@ def writable(task: store.Task) -> list[str] | None:
         except OSError as e:
             print(f"workbench: can't make OpenCode's directory {d} ({e.strerror}): "
                   f"its first run fails without it", file=sys.stderr)
+    # pnpm's store, made first: the lane writes only what exists, and a pnpm the user never ran
+    # would put its store in the worktree (#1583)
+    if pnpm := pnpm_store(task):
+        try:
+            pnpm.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
     places = [tempfile.gettempdir(), *TEMP_ROOTS, *darwin_cache(), *DEV_NODES, *gpu_nodes(task),
               "/proc", *tool_homes(), *(x for x in xdg if x),
               *flutter_caches(),

@@ -2750,6 +2750,15 @@ class Lifecycle(Base):
         self.assertIn("same call", st["last"])
         self.assertIn("STOPPED", run_wb("report", "t-loop"))
 
+    def test_an_agent_flipping_a_line_with_reads_and_test_runs_between_is_stopped_by_a_guard_not_the_wall(self):
+        # #1584 (the bar loop, 2026-11-26): read, edit 41 -> 43, test, read, edit 43 -> 41, test:
+        # each edit reset the explore count and no block repeated in CYCLE, so every round ran to
+        # its 40-minute wall. The runner judges an edit by the tree it leaves
+        self.start("t-flip", "flip", "--round-timeout", "40")
+        st = wait_phase("t-flip", {"stuck"}, timeout=90)
+        self.assertEqual((st["last"], st["nudges"]),
+                         ("40 tool calls without changing a file in the task, even after a nudge", 1))
+
     def test_silence_is_stopped(self):
         self.start("t-hang", "hang", "--silence-timeout", "2")
         st = wait_phase("t-hang", {"stuck"}, timeout=40)
@@ -3706,6 +3715,31 @@ class Lifecycle(Base):
         self.assertIn("accepted t-pyc", out)
         self.assertNotIn("note: git ignores", out)
         self.assertFalse((t.dir / "left-out").exists())
+
+    def test_accept_leaves_out_the_bytecode_of_a_test_run_in_the_worktree(self):
+        # #1580 (2026-11-26): in a repo that ignores no __pycache__, Claude's `python3 -m
+        # unittest` in the worktree before wb accept had the commit take the run's .pyc, which
+        # neither the review diff ("1 file changed") nor the accept line showed
+        (self.repo / "helper.py").write_text("N = 42\n")
+        (self.repo / "test_a.py").write_text(
+            "import unittest\nimport helper\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_n(self):\n        self.assertEqual(helper.N, 42)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "helper"], check=True)
+        self.start("t-run-pyc", "ok", "--test", TEST_CMD)
+        wait_phase("t-run-pyc", {"review"})
+        t = store.Task("t-run-pyc")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+        subprocess.run([sys.executable, "-m", "unittest", "-q"], cwd=t.worktree, env=env,
+                       check=True, capture_output=True)
+        self.assertTrue(list((t.worktree / "__pycache__").glob("*.pyc")))
+        out = run_wb("accept", "t-run-pyc", "-m", "feat: one")
+        self.assertIn("accepted t-run-pyc", out)
+        self.assertIn("note: the commit leaves out a run's caches, which nobody wrote: "
+                      "__pycache__/ (2 files)", out)
+        files = subprocess.run(["git", "-C", str(self.repo), "show", "--name-only", "--format=",
+                                "delegate/t-run-pyc"], check=True, capture_output=True, text=True)
+        self.assertEqual(files.stdout.split(), ["answer.txt"])
 
     def test_wb_next_names_an_ignored_file_its_step_commit_leaves_out(self):
         # #1179's review (2026-11-24): wb next's commit dropped what hand_written's filters took
@@ -14860,6 +14894,56 @@ class Lane(Base):
             shutil.rmtree(home / ".nimble")
             self.assertEqual(runner.lane_grant(f"{home}/.nimble/pkgs2/x-1.0/x.nim"),
                              f"{home}/.nimble/pkgs2")        # never its bin/
+
+    @home_outside_the_lane
+    def test_a_pnpm_projects_agent_is_given_the_users_store_in_the_lane_unless_they_set_one(self):
+        # #1583 (bar round 3 of 2.2, 2026-11-26): pnpm couldn't link in its data dir, so it put
+        # its store in <worktree>/.pnpm-store, and a setup's `pnpm install --frozen-lockfile`
+        # failed as unclean before round 1; on macOS ~/Library/pnpm/store wasn't in the lane.
+        # Its review: pnpm 11 and 12 read only `pnpm_config_store_dir`, 9 and 10 only `npm_`
+        self.start("t-1583", "ok")
+        wait_phase("t-1583", {"review"})
+        task = store.Task("t-1583")
+        home = self.fake_home()
+        for name in ("npm_config_store_dir", "pnpm_config_store_dir"):
+            self.assertNotIn(name, runner.agent_env(task))             # not pnpm's: npm warns
+        (task.worktree / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+
+        def given():
+            env = runner.agent_env(task)
+            return env.get("npm_config_store_dir"), context.writable(task)
+        for env, where in (({}, ".local/share/pnpm/store"), ({"XDG_DATA_HOME": str(home / "data")},
+                                                              "data/pnpm/store"),
+                           ({"PNPM_HOME": str(home / "pnpmhome"), "XDG_DATA_HOME": str(home / "data")},
+                            "pnpmhome/store")):
+            with mock.patch.dict(os.environ, env):
+                named, w = given()
+            self.assertEqual(named, str(home / where), env)            # made first, then named
+            with mock.patch.dict(os.environ, env):                      # pnpm 11's name too
+                self.assertEqual(runner.agent_env(task)["pnpm_config_store_dir"], named, env)
+            self.assertIn(str(home / where), w, env)
+        self.assertNotIn(str(home / "pnpmhome"), w)                    # its global bin stays out
+        with mock.patch.object(sys, "platform", "darwin"):
+            self.assertEqual(context.pnpm_store(task), home / "Library/pnpm/store")
+        (home / "Library/pnpm/store").mkdir(parents=True)
+        self.assertIn(str(home / "Library/pnpm/store"), context.writable(task))
+        # a store-dir the user set stands: their environment, their .npmrc, the repo's
+        with mock.patch.dict(os.environ, {"npm_config_store_dir": "/srv/pnpm-store"}):
+            self.assertEqual(given()[0], "/srv/pnpm-store")
+        for rc in (home / ".npmrc", task.worktree / ".npmrc"):
+            rc.write_text("registry=https://r.example/\nstore-dir = /srv/store\n")
+            self.assertIsNone(given()[0], rc)
+            rc.unlink()
+        # pnpm 11's global config.yaml, where its `pnpm config set store-dir` writes
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(home / "cfg")}):
+            (home / "cfg/pnpm").mkdir(parents=True)
+            (home / "cfg/pnpm/config.yaml").write_text("storeDir: /srv/store\n")
+            self.assertIsNone(given()[0])
+        with mock.patch.dict(os.environ, {"pnpm_config_store_dir": "/srv/pnpm-store"}):
+            env = runner.agent_env(task)
+            self.assertEqual(env["pnpm_config_store_dir"], "/srv/pnpm-store")
+            self.assertNotIn("npm_config_store_dir", env)
+        self.assertEqual(given()[0], str(home / ".local/share/pnpm/store"))
 
     @home_outside_the_lane
     def test_the_homes_of_the_tools_the_wider_allowlist_added_are_in_the_lane_not_their_settings(self):
@@ -35837,6 +35921,56 @@ class Detector(unittest.TestCase):
         d.feed(tool({"filePath": "/w/b.txt", "content": "41\n"}))
         self.assertEqual(d.since_edit, 0)                        # another file
 
+    def test_an_edit_flipped_back_and_forth_with_reads_and_test_runs_between_is_no_edit_by_its_tree(self):
+        # #1584 (the bar loop, 2026-11-26): read, A->B, test, read, B->A, test: a block of 6 no
+        # CYCLE saw, every edit a real change by its text, so 1200 calls and no stop. The runner
+        # gives each ok edit its tree (gitops.mark): a tree seen this round is no change
+        tool = lambda name, inp: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": name, "state": {"status": "completed", "input": inp}}}, 1)
+        read, run = tool("read", {"filePath": "/w/a.py"}), tool("bash", {"command": "python3 -m unittest"})
+        flip = lambda a, b: {**tool("edit", {"filePath": "/w/a.py", "oldString": a, "newString": b}),  # noqa: E731
+                             "mark": f"tree-{b}"}
+        for block in ([read, flip("x", "y"), run, read, flip("y", "x"), run],
+                      [flip("x", "y"), run, flip("y", "x"), run, read]):
+            d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-x")
+            whys = [d.feed(row) for row in block * 40]
+            stop = next(i for i, why in enumerate(whys) if why)
+            self.assertLess(stop, 100, block)
+            self.assertEqual((d.guard, whys[stop]), ("no_edit", "40 tool calls without changing a file in the task"))
+        # an edit to a tree not seen yet is still a change, a tree undone to the start's is none
+        d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-x")
+        d.feed(flip("x", "y"))
+        self.assertEqual(d.since_edit, 0)
+        d.feed(flip("y", "x"))
+        self.assertEqual(d.since_edit, 1)
+        d.feed(flip("x", "z"))
+        self.assertEqual(d.since_edit, 0)
+
+    def test_an_agent_writing_a_file_git_ignores_with_reads_and_test_runs_between_is_never_stopped(self):
+        # #1584's review (2026-11-26): a repo ignoring lib/ (GitHub's Python template; #1179,
+        # #1259), its agent writing lib/util.py a function more each time: gitops.mark leaves
+        # ignored files out, so every edit left the start's tree, already seen, and the round
+        # was stopped at 40 calls as stuck. An edit leaving the last edit's tree is judged by text
+        tool = lambda name, inp: events.normalize({"type": "tool_use", "part": {  # noqa: E731
+            "tool": name, "state": {"status": "completed", "input": inp}}}, 1)
+        d = events.StuckDetector(no_edit=40, worktree="/w", mark="tree-start")
+        whys = []
+        for i in range(60):
+            text = "".join(f"def f{j}(): return {j}\n" for j in range(i + 1))
+            whys += [d.feed(tool("read", {"filePath": "/w/lib/util.py"})),
+                     d.feed({**tool("write", {"filePath": "/w/lib/util.py", "content": text}),
+                             "mark": "tree-start"}),
+                     d.feed(tool("bash", {"command": f"python3 -m pytest -k f{i}"}))]
+            self.assertEqual(d.since_edit, 1)
+        self.assertEqual([w for w in whys if w], [])
+        # the same text again is still no change, and a tracked edit back to a seen tree none
+        d.feed({**tool("write", {"filePath": "/w/lib/util.py", "content": text}), "mark": "tree-start"})
+        self.assertEqual(d.since_edit, 2)
+        d.feed({**tool("edit", {"filePath": "/w/a.py", "oldString": "x", "newString": "y"}), "mark": "tree-y"})
+        self.assertEqual(d.since_edit, 0)
+        d.feed({**tool("edit", {"filePath": "/w/a.py", "oldString": "y", "newString": "x"}), "mark": "tree-start"})
+        self.assertEqual(d.since_edit, 1)
+
     def test_a_suspend_is_neither_silence_nor_the_rounds_time(self):
         # On the wall clock a laptop shut for 20 minutes woke to a round stopped for silence
         # (the 2026-11-16 audit). The monotonic clock skips a suspend; a frozen pass is cut out.
@@ -44581,6 +44715,50 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertTrue(cli.routes.agents_gpu())
         with mock.patch.object(runner.meter, "for_task", lambda *a, **k: None):
             self.assertTrue(runner._go_on(task, 1, "auto-fix"))
+
+    def test_with_agents_on_gpu_only_the_first_api_task_stops_and_tells_and_the_rest_wait_queued_until_both(self):
+        # #1585 (the bar loop, 2026-11-26): each API task of a fan-out or backlog stopped with its
+        # own stuck notice, the same "Agents back to Both or API" ask, one wake and one wb resume
+        # a task. The first stop tells; the rest wait as queued behind it and go on at Both
+        for name in ("fan-1", "fan-2", "fan-3"):
+            self.start_api(name, "ok", "--no-base-check", spawn=False)
+        routes_json = Path(os.environ["WB_ROUTES"])
+        doc = store.read_json(routes_json)
+        store.write_json(routes_json, {**doc, "use": "gpu"})
+        agents = lambda: [r["task"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]  # noqa: E731
+                          if r.get("guard") == "agents"]
+        self.drive_here("fan-1")
+        self.assertEqual((store.Task("fan-1").status["phase"], agents()), ("stuck", ["fan-1"]))
+        two, three = store.Task("fan-2"), store.Task("fan-3")
+        driver = threading.Thread(target=self.drive_here, args=("fan-2",), daemon=True)  # before round 1
+        lease, went = mock.MagicMock(), []
+        between = threading.Thread(target=lambda: went.append(runner._go_on(three, 1, "auto-fix", lease)),
+                                   daemon=True)                                       # before its next round
+        for t in (driver, between):
+            t.start()
+            self.addCleanup(t.join, 60)
+        deadline = time.time() + 30
+        while not all(t.status.get("phase") == "queued" and str(t.status.get("last") or "").startswith(
+                "waiting: Agents is GPU, so nothing spends; fan-1's stop has asked the user") for t in (two, three)):
+            self.assertLess(time.time(), deadline, (two.status, three.status))
+            self.assertTrue(driver.is_alive() and between.is_alive(), (two.status, three.status))
+            time.sleep(POLL)
+        self.assertEqual(agents(), ["fan-1"])                     # no stop of their own
+        lease.__exit__.assert_called_once()                       # its provider slot let go
+        store.write_json(routes_json, {**doc, "use": "both"})     # the user's answer to fan-1's ask
+        driver.join(60)
+        between.join(60)
+        self.assertFalse(driver.is_alive() or between.is_alive())
+        self.assertEqual(two.status["phase"], "review", two.status)  # with no wb resume
+        self.assertEqual(went, [True])
+        lease.__enter__.assert_called_once()                      # and taken again
+        self.assertEqual(agents(), ["fan-1"])
+        self.assertEqual([r["task"] for r in store.notices() if r["kind"] == "stuck"], ["fan-1"])
+        # a stop told before the last switch holds no new task untold; a resumed one holds none
+        store.write_json(routes_json, {**doc, "use": "gpu"})
+        self.assertEqual((runner._agents_told(two), runner._agents_told(two, "fan-1")), ("", "fan-1"))
+        store.Task("fan-1").set_status(phase="running")
+        self.assertEqual(runner._agents_told(two, "fan-1"), "")
 
 
 # Catalog rows for thinking per task (#1018), shaped as OpenCode 2.3.2's `api model.list` prints

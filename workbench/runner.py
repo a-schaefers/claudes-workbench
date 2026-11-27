@@ -845,6 +845,16 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # be made, so a setup's `poetry install` was refused (#825); the venv ignores itself
         env.setdefault("POETRY_VIRTUALENVS_IN_PROJECT", "true")
         env.setdefault("PIPENV_VENV_IN_PROJECT", "1")
+        # pnpm's store, the user's, granted (context.pnpm_store): without it pnpm put its store
+        # in the worktree, and a setup's `pnpm install` failed as unclean (#1583, 2026-11-26).
+        # Both names (STORE_DIR_VARS): pnpm 9 and 10 read only `npm_config_`, 11 and 12 only
+        # `pnpm_config_` (#1583's review, 2026-11-26: on 11.29.0 the setup still failed with
+        # `.pnpm-store/v11/files/…`); npm 12 warns on neither of the `pnpm_` prefix
+        pnpm = context.pnpm_store(task)
+        if pnpm and any(os.path.realpath(pnpm) == os.path.realpath(p)
+                        or context._under(os.path.realpath(pnpm), os.path.realpath(p)) for p in places):
+            for name in context.STORE_DIR_VARS:
+                env.setdefault(name, str(pnpm))
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)
@@ -2103,8 +2113,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # told at 40 calls on the GPU to "make the first edit now", stopped at 80 (#1489, 2026-11-26).
     # Its repeat and error guards, the wall and silence hold it.
     explore_limit = float("inf") if spec.get("report") else no_edit_limit(st.get("window"), api=api_task(task))
+    edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     detector = StuckDetector(**{"no_edit": explore_limit, **spec.get("stuck", {})},
-                             worktree=task.worktree, workdir=task.workdir)
+                             worktree=task.worktree, workdir=task.workdir, mark=edit_mark)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past its call's `timeout` it does, and
     # the turn ends waiting on it) prints nothing until it is done: a long test suite counted as
@@ -2122,7 +2133,6 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     bg_jobs: list[str] = []  # what OpenCode waits on once the turn is over
     nudged = False
     renudge = renudged(st, n)
-    edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
     prior = float(task.status.get("active_s") or 0)  # earlier rounds' active work
@@ -2320,10 +2330,18 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 provider.on_retry(raw, now)
                 task.set_status(last=f"OpenCode retries a request: {row['text']}"[:200])
             task.event(row)
-            why = detector.feed({**row, "sig": sig}) if sig else None
+            # an ok edit's tree, one git diff an edit: the detector counts a tree it has seen
+            # this round as no change, whatever reads or test runs sit between (#1584)
+            tree = {"mark": gitops.mark(task.worktree)} if sig and row["kind"] == "tool" \
+                and row["tool"] in EDIT_TOOLS and row["ok"] else {}
+            why = detector.feed({**row, "sig": sig, **tree}) if sig else None
             if why:
                 m = gitops.mark(task.worktree)
-                if detector.guard == "no_edit" and m != edit_mark:  # a shell edit: an edit, not a repeat
+                # a shell edit to a new tree: an edit, not a repeat; one back to a tree seen this
+                # round (a flip done with sed) is none (#1584)
+                if detector.guard == "no_edit" and m not in detector.seen:
+                    detector.seen.add(m)
+                    detector.last = m  # the next edit's tree is judged against this one
                     edit_mark, detector.since_edit, why = m, 0, None
             if why and detector.guard == "no_edit":
                 # The first trip in a session nudges (EXPLORE_NUDGE, sent below unless a
@@ -6070,7 +6088,7 @@ def _go_on(task: store.Task, n: int, what: str, lease=None) -> bool:
     if meter.for_task(task) is None:
         return True
     while True:
-        if _agents_gpu(task, n, what):
+        if _agents_gpu(task, n, what, lease):
             return False
         tokens = first_tokens(task)
         if not (why := meter.stop_reason(task, ahead=True, tokens=tokens)):
@@ -6081,20 +6099,67 @@ def _go_on(task: store.Task, n: int, what: str, lease=None) -> bool:
     return False
 
 
-def _agents_gpu(task: store.Task, n: int, what: str) -> bool:
+def _agents_gpu(task: store.Task, n: int, what: str, lease=None) -> bool:
     """Whether an API task stopped before ``what`` (round n's next, or round n itself) for the
     Agents switch on GPU, the user's "nothing spends" (routes.AGENTS_GPU, #1213): only wb start
     read it, so a queued task took its provider slot after the switch and spent. A stop of the
     user's spending, as the cap's (infra and cause `spend`, never the step's), its guard `agents`:
-    the remedy is the switch, not a cap (the mod's AGENTS_NEXT)."""
-    if meter.for_task(task) is None or not routes.agents_gpu():
+    the remedy is the switch, not a cap (the mod's AGENTS_NEXT). With ``lease``, behind another
+    task's Agents stop that has told Claude (_agents_told) it waits as queued instead, its slot
+    let go, and goes on once Agents is Both or API (_agents_wait): each API task of a fan-out or
+    backlog stopped and woke Claude with the same ask, one wake and one wb resume a task (#1585,
+    the bar loop, 2026-11-26). The look and the stop are under one lock, so two tasks at once
+    can't both find none told and both tell."""
+    if meter.for_task(task) is None:
         return False
-    name = task.name
-    _stop_before(task, n, what, routes.AGENTS_GPU, (
-        f"{name} stopped: {routes.AGENTS_GPU}, and it runs on its API model ({task.spec.get('model')}). "
-        f"Its work so far is in the worktree. {routes.AGENTS_BACK}, then wb resume {name}; or wb "
-        f"takeover {name} or wb discard {name}."), guard=AGENTS)
-    return True
+    while routes.agents_gpu():
+        with store.locked(store.home() / "locks" / AGENTS_LOCK):
+            if not (told := _agents_told(task) if lease is not None else ""):
+                name = task.name
+                _stop_before(task, n, what, routes.AGENTS_GPU, (
+                    f"{name} stopped: {routes.AGENTS_GPU}, and it runs on its API model ({task.spec.get('model')}). "
+                    f"Its work so far is in the worktree. {routes.AGENTS_BACK}, then wb resume {name}; or wb "
+                    f"takeover {name} or wb discard {name}."), guard=AGENTS)
+                return True
+        _agents_wait(task, lease, told)  # until the switch, or that stop no longer stands
+    return False
+
+
+AGENTS_LOCK = "agents-stop.lock"  # _agents_gpu's look for a told stop and its own stop (#1585)
+
+
+def _agents_told(task: store.Task, told: str = "") -> str:
+    """Another task's Agents stop (phase `stuck`, guard `agents`) still standing, else '': with
+    ``told``, that one while it is so (a resume, takeover or discard ends it); else any told since
+    routes.json last changed (its `noticed` mark later), so a stop from an earlier switch to GPU,
+    never resumed, holds no new task untold (#1585)."""
+    with contextlib.suppress(OSError):
+        since = os.stat(routes.path()).st_mtime
+        for d in ([store.tasks_dir() / told] if told else store.tasks_dir().iterdir()):
+            if d.name == task.name or not (d / "task.json").is_file():
+                continue
+            st = store.Task(d.name).status
+            if st.get("phase") != "stuck" or st.get("guard") != AGENTS:
+                continue
+            try:
+                if told or float((d / "noticed").read_text() or 0) >= since:
+                    return d.name
+            except (OSError, ValueError):
+                continue
+    return ""
+
+
+def _agents_wait(task: store.Task, lease, told: str) -> None:
+    """Queued behind ``told``'s Agents stop (#1585), its provider slot let go and taken again
+    after, until Agents is Both or API (a watch on routes.json's directory) or that stop no
+    longer stands (looked at every API_WAIT's 30 s): never a wait untold, as the cap's."""
+    with Watcher(routes.path().parent) as w:
+        lease.__exit__(None, None, None)
+        task.set_status(phase="queued", last=f"waiting: {routes.AGENTS_GPU}; {told}'s stop has asked the "
+                                             "user: it goes on once Agents is Both or API (wb stop gives up)")
+        while routes.agents_gpu() and _agents_told(task, told):
+            w.wait(models.API_WAIT[1])
+    lease.__enter__()
 
 
 def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard: str = SPEND) -> None:
@@ -6445,7 +6510,7 @@ def _leased(task: store.Task, m: models.Model, say):
             return _load_failed(task, e)
         n = task.status.get("round", 1)
         while True:
-            if _agents_gpu(task, n, f"round {n}"):  # a queued task's slot came after the switch (#1213)
+            if _agents_gpu(task, n, f"round {n}", lease):  # a queued task's slot came after the switch (#1213)
                 return
             if not _cap_wait(task, lease):  # behind a spend stop Claude was told of (#1249)
                 break

@@ -889,6 +889,7 @@ def state(run: Run) -> dict:
     refixes: dict = {}  # (stage, src key) -> [refix rows]
     fed = {}
     escalated = set()  # (code stage, key): a review's asks left past refix's max sent it on (_take)
+    refused = set()  # tasks whose last resume was the driver's, refused (_held's null)
     for r in rows:
         k = (r.get("stage"), r.get("key"))
         if r.get("kind") == "item":
@@ -905,6 +906,8 @@ def state(run: Run) -> dict:
             fed[r.get("stage")] = r
         elif r.get("kind") == "escalate":  # the trigger; "escalated" is the next role's start
             escalated.add((r.get("stage"), r.get("key")))
+        elif r.get("kind") == "resumed":  # _live's: the driver's own resume refused, its last
+            (refused.add if r.get("by") == "driver" and not r.get("ok") else refused.discard)(r.get("task"))
     skipped = set(spec.get("skip") or ())
     driven = run.status.get("phase") in OPEN  # _live's: what follows may still start
     out: dict = {}
@@ -1029,7 +1032,7 @@ def state(run: Run) -> dict:
             elif v is WAITING:
                 it.state, it.input = "waiting", None
             elif it.task:
-                it.state, it.why, it.output = _live(s, it, driven)
+                it.state, it.why, it.output = _live(s, it, driven, refused=it.task in refused)
             if "#e" not in key and hit not in there:
                 counted.add(one)
             items.append(it)
@@ -1078,13 +1081,17 @@ def _stop_skipped(run: Run) -> list[str]:
     return out
 
 
-def _live(stage: dict, it: Item, driven: bool = False) -> tuple[str, str, object]:
+def _live(stage: dict, it: Item, driven: bool = False, refused: bool = False) -> tuple[str, str, object]:
     """A started item's state from its task, before the driver has taken its end. ``driven``:
     the run is open, its driver starting what follows: there a code item Claude took over is no
     longer the run's (not_run, never an escalation's null), as its review phase read as done and
     the next stage reviewed, approved or sent a refix to the unfinished diff Claude was editing
-    (#1471, the #1373 audit, 2026-11-26). Once the run has ended (stopped, at
-    review, closed) its report keeps the item as it was."""
+    (#1471, the #1373 audit, 2026-11-26), and a code item stopped from outside (_outside) runs on,
+    as _held holds it, unless the driver's last resume of it was refused otherwise (``refused``:
+    its null, Claude's checkpoint). Read as null, an item the day cap stopped mid-round under
+    --overnight ended its stage and the run in the pass that held it for midnight, and in
+    fix-escalate started the next role's attempt beside it (#1581, 2026-11-26). Once the run has
+    ended (stopped, at review, closed) its report keeps the item as it was."""
     task = store.Task(it.task)
     if not task.exists:
         return "pending", "", None  # its wb start not through yet, or never: the driver decides
@@ -1095,6 +1102,8 @@ def _live(stage: dict, it: Item, driven: bool = False) -> tuple[str, str, object
     if is_code(stage):
         if phase in ("review", "accepted"):
             return "done", "", {"task": it.task, "round": st.get("round"), "item": it.input}
+        if phase in ("stuck", "failed") and driven and not refused and _outside(st):
+            return "running", "", None
         if phase in ("stuck", "failed", "discarded"):
             return "null", st.get("last") or phase, None
         return "running", "", None
@@ -1518,6 +1527,14 @@ def _take(run: Run, stage: dict, it: Item) -> None:
                         + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(asks))
                         + "\nApply each, and answer each in your summary: done, or declined with why.")
                 was = code.status.get("round") or 0  # the round reviewed: the next review is after it
+                # a refix is a new paid round the driver starts: held as a start is, the review
+                # retaken each pass until wb run resume (and amend --budget-usd) let it go; sent
+                # past the run's budget, and while the run said it was paused there (#1586, 2026-11-26)
+                if not _going(run.status):
+                    return
+                if over := _budget_stop(run, src_stage, stage_model(src_stage, src_item)):
+                    _pause_at_budget(run, over)
+                    return
                 r = _wb(["feedback", src_item.task, "--text", text], run)
                 if r.returncode == 0:
                     run.log(kind="refix", stage=stage["id"], src=it.src, task=src_item.task,
@@ -1746,6 +1763,14 @@ def _budget_stop(run: Run, stage: dict, m) -> str | None:
     return None
 
 
+def _pause_at_budget(run: Run, why: str) -> None:
+    """The run paused at ``why``, _budget_stop's, and said once: a start's, or a refix's (_take)."""
+    if run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
+        run.notify("run_paused", f"paused at {why}. Done work is kept: wb run report "
+                                 f"{run.name}; wb run amend {run.name} --budget-usd N, then "
+                                 f"wb run resume {run.name}")
+
+
 def tick(run: Run) -> bool:
     """One pass: take the items that ended, start what is ready and has room, raise a checkpoint or
     the end. False once the driver is done."""
@@ -1808,10 +1833,7 @@ def tick(run: Run) -> bool:
                 if _room(run, s, st, m):
                     break
                 if why := _budget_stop(run, s, m):
-                    if run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
-                        run.notify("run_paused", f"paused at {why}. Done work is kept: wb run report "
-                                                 f"{run.name}; wb run amend {run.name} --budget-usd N, then "
-                                                 f"wb run resume {run.name}")
+                    _pause_at_budget(run, why)
                     break
                 n = 1 + max([r.get("n") or 0 for r in run.journal() if r.get("kind") == "item"
                              and r.get("stage") == s["id"]] or [0])
