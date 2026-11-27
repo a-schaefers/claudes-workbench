@@ -1911,7 +1911,9 @@
     // The words carry what it is about ("Help me with Settings › API: …"): an `about` names a
     // task or a take, which the server checks, and Settings is neither
     ask: (text: string) => {
-      go('chat')
+      // the chat shown now, not at hashchange: a focus given while it was still hidden went nowhere
+      // (2026-11-26); hashchange's setView is then a no-op
+      go('chat'); setView('chat')
       input.value = String(text); save(K.draft, input.value); grow(); armSend(); input.focus()
     },
     on: (event: string, fn: (arg: any) => void) => { if (handlers[event] && typeof fn === 'function') handlers[event].add(fn) },

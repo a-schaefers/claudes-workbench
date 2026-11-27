@@ -7463,8 +7463,9 @@ second registration is ignored),
 `toast(text)` (`#toast`, a live region shown with `.on` and hidden by its look, faded and moved down, never
 `display: none`, which some screen readers miss; up `max(3.5 s, 60 ms a character)`, `TOAST_MS`, `TOAST_CHAR_MS`:
 a 236-character refusal went in 3.5 s, #1563; held while hovered or focused: the web app's review, 2026-11-26), `roving(event, items)` (a group's arrow keys: the focus to the next or previous item, round, Home and End to
-the ends, nothing picked), `ask(text)` (the Chat view with its box filled with `text` and focused, sent
-by the user, never by the call: Settings' Ask link), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
+the ends, nothing picked), `ask(text)` (the Chat view, shown at once rather than at `hashchange`, a focus
+given to a hidden box going nowhere, with its box filled with `text` and focused, sent by the user, never by the
+call: Settings' Ask link), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
 **The Stats view** (#1285; `stats.ts`, `stats.css`; it took over the pane's Stats tab, *Seeing
