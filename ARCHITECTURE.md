@@ -5344,7 +5344,9 @@ goes to API (`fallback <id> (<provider>)`). `routes.fallback_of` is the one that
 none while Agents is API. Claude only recommends one, never sets one (the skill). It applies only to
 a task on its role's own API model (never a `--model` one, nor a busy-routed one, whose GPU is its
 own side), at wb start and in the runner (a round's stop, or a mark before a round) and nowhere else, through `routes.fallback_pick` (the API fallback in the
-catalog, on another provider, able to run, within the day cap; the GPU one found and able to run):
+catalog, on another provider, able to run, within the day cap; the GPU one found and able to run, a pin
+by its exact id in `discover()` as `routes.resolve` finds the role's own, never a model its id is a fragment
+of: `… its GPU model <id>, isn't found (not in OpenCode's config now)`, #1573):
 - **At `wb start`** (`cli._fallback_start`): a role's API model whose provider api-health.json marks
   (`no_credit`, `rate_limited` or `unreachable`; a refused key isn't marked there: it reads as no key
   and still exits 3) starts on the fallback instead, after `_busy_api`'s checks too but the slots
@@ -11628,7 +11630,8 @@ OpenRouter's pick, and new backends on a busy role count as newly sent (`routes.
 `gpu` and `none` with neither, the role's own provider or model and OpenRouter refused; a kept one named when its role
 goes to API; at `wb start` a provider marked out of credit starts the API fallback (task.json `fallback`, the line, the
 where-note, the results row) and a held one the GPU fallback, a fallback that can't take it (out of credit too, the
-cap, a repo kept local, commands.json's standing copy) or none leaves the start as before, a busy-routed start and a
+cap, a repo kept local, commands.json's standing copy, a GPU pin gone from the config whose id is a fragment of
+another's, #1573) or none leaves the start as before, a busy-routed start and a
 `--model` never move, and one with its slots full, or a GPU fallback with the GPU busy, queues with `--queue` and
 exits 4 without (the fallback line said), or for a held provider leaves the start on the role's model; in the runner a `quota`
 round (the fake's `WB_FAKE_API`) moves to an API fallback (each keyhole one model, a fresh session that is no

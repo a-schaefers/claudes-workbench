@@ -51330,6 +51330,26 @@ class Fallbacks(Base):
         self.assertIn(" can't take it: the GPU is in use by other: ", out)
         self.assertNotIn(routes.FALLBACK_LINE, out)
 
+    def test_a_gpu_fallbacks_pin_gone_from_the_config_never_runs_a_model_its_id_is_a_fragment_of(self):
+        # #1573 (2026-11-26): #1214's exact-id lookup was resolve's only; fallback_pick's fragment
+        # match ran a retired pin's fallback on ollama/qwen3.8-27b, said as the user's pin
+        self.on_api("gpu")
+        self.set_role("trivial", "--gpu", "qwen")
+        path = Path(os.environ["WB_ROUTES"])
+        doc = json.loads(path.read_text())
+        doc["roles"]["trivial"]["gpu"] = "ollama/qwen3.8"      # only a fragment of ollama/qwen3.8-27b
+        path.write_text(json.dumps(doc))
+        gone = ("the trivial role's GPU fallback, its GPU model ollama/qwen3.8, isn't found (not in "
+                "OpenCode's config now)")
+        got = routes.fallback_pick(routes.read(), "trivial", "trivial", [], "t-x",
+                                   runner.models.lookup("deepseek/deepseek-flash"))
+        self.assertEqual(got, gone)                                       # the runner's path too
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-x", "--role", "trivial")
+        self.assertEqual(code, 3)                                         # as with no fallback
+        self.assertIn(f"note: {gone}", out + err)
+        self.assertFalse(store.Task("t-x").dir.exists())
+
     def test_out_of_credit_onto_a_busy_gpu_fallback_queues_saying_it_was_the_fallback(self):
         # the third review of #1196 (2026-11-24): exit 4 named a GPU model Claude never picked, and
         # not that the role was out of credit or moved; a start queues behind the holders now, as
