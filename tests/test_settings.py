@@ -606,7 +606,8 @@ class SettingsOffers(tw.Base):
             self.change("probe", now - 3 * 86400, help="Offer to set probe up.", label="Agent code navigation",
                         said="probe: on, but not set up")
             self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})
-        self.assertEqual(json.loads(tw.run_wb("settings", "help", "probe", "--json")), {"key": "probe", "help": None})
+            # inside the block: leaving it takes the fake probe off PATH (#1557's CI, 2026-11-26)
+            self.assertEqual(json.loads(tw.run_wb("settings", "help", "probe", "--json")), {"key": "probe", "help": None})
         # retired: with probe gone again it is still never said (a new change would be)
         self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})
 
