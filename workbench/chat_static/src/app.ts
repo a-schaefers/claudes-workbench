@@ -465,7 +465,15 @@
   }
   strip.onclick = () => showTaskSheet(tsheet.hidden)
   strip.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showTaskSheet(tsheet.hidden) } }
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !tsheet.hidden) showTaskSheet(false) })
+  // Focus stays where the user is (#1561, 2026-11-26): it fell to <body> on opening a task, going
+  // back, a redraw and Escape, and a screen reader said nothing. Escape from inside the sheet
+  // hands it to the strip that opened it
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || tsheet.hidden) return
+    const inside = tsheet.contains(document.activeElement)
+    showTaskSheet(false)
+    if (inside) strip.focus()
+  })
   document.addEventListener('pointerdown', e => { if (!tsheet.hidden && !tsheet.contains(e.target as Node) && !strip.contains(e.target as Node)) showTaskSheet(false) })
   const mk = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string | null, text?: string | null) => { const x = document.createElement(tag); if (cls) x.className = cls; if (text != null) x.textContent = text; return x }
   const btn = (cls: string | null, text: string | null, fn: () => void) => { const b = mk('button', cls, text); b.type = 'button'; b.onclick = fn; return b }
@@ -479,17 +487,24 @@
     tsSeen = key
     if (!tsheet.hidden) drawTaskSheet({ quiet: true })
   }
-  function drawTaskSheet({ quiet = false } = {}) {
+  // focusOn: the task whose row takes the focus once drawn (the one just left); else the row that
+  // had it before a quiet redraw keeps it
+  function drawTaskSheet({ quiet = false, focusOn = null as string | null } = {}) {
     tsSeen = sheetKey()
     $('ts-list').hidden = !!tsTask; $('ts-one').hidden = !tsTask
     if (tsTask) return loadPart({ quiet })
-    $('ts-list').replaceChildren(...ranked(state.tasks).map(t => {
-      const row = btn('ts-row', null, () => { tsTask = t.name; tsPart = 'summary'; tsDiff = null; drawTaskSheet() })
+    const list = $('ts-list'), had = list.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.task : null
+    const rows = ranked(state.tasks).map(t => {
+      const row = btn('ts-row', null, () => { tsTask = t.name; tsPart = 'summary'; tsDiff = null; drawTaskSheet(); $('ts-back').focus() })
+      row.dataset.task = t.name
       row.append(mk('b', '', t.name), mk('span', 'ts-phase', ' · ' + t.phase), mk('small', '', taskNote(t)))
       return row
-    }))
+    })
+    list.replaceChildren(...rows)
+    const back = focusOn || had
+    if (back) rows.find(r => r.dataset.task === back)?.focus()
   }
-  $('ts-back').onclick = () => { tsTask = null; tsAsked++; drawTaskSheet() }
+  $('ts-back').onclick = () => { const left = tsTask; tsTask = null; tsAsked++; drawTaskSheet({ focusOn: left }) }
   $('ts-refresh').onclick = () => loadPart({ quiet: true })
   $('ts-reply').onclick = () => { setAbout({ task: tsTask }); showTaskSheet(false); input.focus() }
   // Under Reply, the next steps a task's phase offers (#1339, 2026-11-26): each fills the box,
@@ -509,6 +524,9 @@
   for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.onclick = () => { tsPart = b.dataset.part as string; tsDiff = null; loadPart() }
   async function loadPart({ quiet = false } = {}) {  // quiet: the view stays until the new one comes
     const asked = ++tsAsked, name = tsTask
+    // a ts-link or ts-file pressed: the new view's first button takes the focus; a quiet redraw
+    // gives it back to the button of the same words (#1561)
+    const focused = tsBody.contains(document.activeElement) ? document.activeElement!.textContent : null
     $('ts-name').textContent = name
     drawNext()
     for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.setAttribute('aria-selected', String(b.dataset.part === tsPart))
@@ -530,6 +548,10 @@
     tsBody.replaceChildren(...(tsPart === 'summary' ? drawSummary(j) : tsPart === 'diff' ? drawDiff(j) : drawLog(j)))
     const log = tsBody.querySelector<HTMLElement>('.ts-log')
     if (log && atEnd) log.scrollTop = log.scrollHeight
+    if (focused !== null && !tsBody.contains(document.activeElement)) {
+      const all = [...tsBody.querySelectorAll<HTMLElement>('button, summary')]
+      ;(all.find(b => b.textContent === focused) || all[0])?.focus()
+    }
   }
   // What the sheet leads with (#1339, 2026-11-26): the phase, for a failed or stuck task one plain
   // line of what happened, then the report's own lines (the agent's summary, the files it changed,

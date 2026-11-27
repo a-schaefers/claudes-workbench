@@ -7545,7 +7545,11 @@ one file at a time when it is `cut`; the Log scrolled to its newest row, and kep
 refetch unless the reader scrolled up, #1339). Nothing polls: a change in the stream's `tasks` (`sheetNews`;
 for an open task, its own row's alone, `sheetKey`) re-fetches only the open view, quietly, and Refresh
 asks again; the stream wakes on a task's own status write (`TASK_NEWS`, #1559), so the strip and the
-open sheet follow a task as it moves, and a running task's Log its steps; a task gone says it is no longer
+open sheet follow a task as it moves, and a running task's Log its steps; the focus stays where the user is
+(#1561): opening a row focuses `#ts-back`, Back the row of the task just left (`focusOn`), a quiet
+redraw of the list the row that had it (`dataset.task`), a redraw inside `#ts-body` the button of the
+same words or its first, and Escape from inside the sheet `#tasks` (it fell to `<body>`, and a screen
+reader said nothing); a task gone says it is no longer
 open. Its report, diff and log are agent-written, drawn with `textContent` and `<pre>` alone, never
 markup: the page holds the user's token, which changes their Settings, so markup an agent wrote
 would be a way to both. The Summary leads with the phase, a failed or stuck task's `happened` line,

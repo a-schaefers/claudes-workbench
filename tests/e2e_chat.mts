@@ -718,6 +718,17 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.textContent('#tasks')).includes('fix-sheet'))
       await page.click('#tasks')
       await until(async () => await page.locator('#task-sheet').isVisible())
+      // #1561: the focus stays where the user is: Back after opening a row, the row on coming
+      // back, the strip on Escape from inside the sheet; it fell to <body> each time
+      const focus = () => page.evaluate(() => { const a = document.activeElement as HTMLElement; return a.id || a.dataset.task || a.tagName })
+      await page.focus('.ts-row:has-text("fix-sheet")'); await page.keyboard.press('Enter')
+      await until(async () => (await focus()) === 'ts-back').catch(async () => { throw new Error('the focus is on ' + await focus()) })
+      await page.keyboard.press('Enter')
+      await until(async () => (await focus()) === 'fix-sheet').catch(async () => { throw new Error('the focus is on ' + await focus()) })
+      await page.keyboard.press('Escape')
+      await until(async () => (await focus()) === 'tasks' && await page.locator('#task-sheet').isHidden())
+      await page.keyboard.press('Enter')
+      await until(async () => await page.locator('#task-sheet').isVisible())
       await page.click('.ts-row:has-text("fix-sheet")')
       await until(async () => (await page.textContent('#ts-body')).includes('Changed the README. <b id="bold">not bold</b>'))
       if (await page.locator('#bold').count()) throw new Error('the report was drawn as markup')
@@ -726,8 +737,9 @@ async function run(engine: string, device?: string) {
         throw new Error('the summary says: ' + sum)
       await page.click('#ts-tabs [data-part="diff"]')
       await until(async () => (await page.textContent('#ts-body')).includes('README.md | 1 +'))
-      await page.click('text=Show the whole diff')
+      await page.focus('text=Show the whole diff'); await page.keyboard.press('Enter')
       await until(async () => (await page.locator('.ts-diff .add').count()) > 0)
+      if ((await focus()) === 'BODY') throw new Error('the whole diff took the focus to <body>')  // #1561
       if (!(await page.textContent('.ts-diff')).includes('+world <img src=x onerror="window.pwned=1">')) throw new Error(await page.textContent('.ts-diff'))
       await page.click('#ts-tabs [data-part="log"]')
       await until(async () => (await page.textContent('#ts-body')).includes('r1 bash     pytest -q'))
