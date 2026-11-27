@@ -8473,6 +8473,35 @@ class Context(Base):
         self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "40\n")
         self.assertEqual(t.status["review_trees"]["2s"]["tree"], aside)
 
+    def stopped_on_green(self, name):
+        """wb stop on a self-review whose tree is the green one ("42": it had only read so far),
+        then the user's edit in an editor, "40"."""
+        t = self.mid_check(name)
+        t.worktree.joinpath("answer.txt").write_text("42\n")
+        self.assertNotIn("set aside", run_wb("stop", name))
+        self.assertEqual(sorted(t.status["review_trees"]), ["1"])  # nothing kept: nothing to keep
+        t.worktree.joinpath("answer.txt").write_text("40\n")
+        return t
+
+    def test_accept_force_after_a_stop_on_the_green_tree_commits_the_users_edits(self):
+        # #1596's review, round 2 (2026-11-27): that stop kept nothing, so the round still
+        # counted as live and the wb accept --force wb's refusal names set the user's "40" aside
+        # as 2s, committed "42" under a false "its edits set aside" line and dropped the refs
+        t = self.stopped_on_green("t-rgf")
+        out = run_wb("accept", "t-rgf", "-m", "Write answer", "--force")
+        self.assertNotIn("set aside", out)
+        self.assertEqual(t.status["phase"], "accepted")
+        shown = subprocess.run(["git", "-C", str(self.repo), "show", f"{t.spec['branch']}:answer.txt"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, "40\n")
+
+    def test_a_takeover_after_a_stop_on_the_green_tree_keeps_the_users_edits(self):
+        # #1596's review, round 2: the takeover the same, "40" set aside and "42" put back
+        t = self.stopped_on_green("t-rgt")
+        self.assertNotIn("set aside", run_wb("takeover", "t-rgt"))
+        self.assertEqual(t.worktree.joinpath("answer.txt").read_text(), "40\n")
+        self.assertNotIn("2s", t.status["review_trees"])
+
     def test_a_takeover_of_a_self_review_an_update_stopped_mid_check_puts_the_green_tree_back(self):
         # #1582 (2026-11-26): _stop_aside set aside only a live runner's round, so wb update
         # --stop mid-check left a dead runner, stuck, and the takeover (or the hand-back) left

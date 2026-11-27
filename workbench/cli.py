@@ -3375,15 +3375,29 @@ def _stop_aside(task, how: str, committed: bool = False) -> str:
     (a wb rewind, an editor). Counted live by its phase alone, wb stop then wb rewind <t> 2s
     then the wb accept --force the rewind names committed the green tree, not the one Claude
     chose, under a false "stopped mid-check" line, and a second stop or a takeover set aside
-    the user's own edits over the first 2s (#1596's review, 2026-11-27)."""
-    n = int(task.status.get("round") or 1)
-    steps = task.status.get("steps", 1)
-    done = {k for k, v in (task.status.get("review_trees") or {}).items() if v.get("step") == steps}
-    live = (task.status.get("phase") != "review" or runner_alive(task)) and not {str(n), f"{n}s"} & done
+    the user's own edits over the first 2s (#1596's review, 2026-11-27).
+
+    A round an earlier stop already handled is over too, whatever set_aside made of it (status
+    `aside_done`, its step, round and `round_started_at`, so the next round, or the runner
+    starting this one again, is live once more): a wb stop on the green tree (the self-review had
+    only read) kept nothing, so the user's edits in an editor were set aside as 2s by the
+    wb accept --force wb's refusal names, the green tree committed under a false "its edits"
+    line, and the review refs dropped with them (#1596's review, round 2, 2026-11-27). A round
+    only wb update --stop or a signal ended never gets the mark: its takeover still puts the
+    green tree back (#1582)."""
+    st = task.status
+    n = int(st.get("round") or 1)
+    steps = st.get("steps", 1)
+    mark = {"step": steps, "round": n, "began": st.get("round_started_at")}
+    done = {k for k, v in (st.get("review_trees") or {}).items() if v.get("step") == steps}
+    live = ((st.get("phase") != "review" or runner_alive(task)) and not {str(n), f"{n}s"} & done
+            and st.get("aside_done") != mark)
     _stop_runner(task)
     if not live or not task.worktree.is_dir():
         return ""
-    return runner.set_aside(task, n, None, f"stopped mid-check ({how})", None, committed) or ""
+    line = runner.set_aside(task, n, None, f"stopped mid-check ({how})", None, committed) or ""
+    task.set_status(aside_done=mark)  # handled, on the green tree or not (#1596's review)
+    return line
 
 
 def _open_tasks():
