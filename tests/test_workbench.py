@@ -35701,6 +35701,18 @@ class Detector(unittest.TestCase):
         d = events.StuckDetector(worktree="/w")
         whys = [d.feed(row) for row in [flip("x", "y"), flip("y", "x")] * 4]
         self.assertEqual(whys[-1], "the same 2 calls 4 times in a row: edit /w/a.py; edit /w/a.py")
+        # the same flip with the tests run after each edit: a block of 4 (#1575's 500 cycles)
+        run = tool("bash", {"command": "python3 -m unittest"})
+        d = events.StuckDetector(worktree="/w")
+        whys = [d.feed(row) for row in [flip("x", "y"), run, flip("y", "x"), run] * 4]
+        self.assertEqual(whys[:-1], [None] * 15)
+        self.assertEqual(whys[-1], "the same 4 calls 4 times in a row: edit /w/a.py; "
+                                   "bash python3 -m unittest; edit /w/a.py; bash python3 -m unittest")
+        # and two writes of different text with the tests between them
+        d = events.StuckDetector(worktree="/w")
+        other = tool("write", {"filePath": "/w/answer.txt", "content": "43\n"})
+        whys = [d.feed(row) for row in [write, run, other, run] * 4]
+        self.assertTrue(whys[-1].startswith("the same 4 calls 4 times in a row: write /w/answer.txt;"))
         # three calls in a loop: a block of 3
         d = events.StuckDetector(worktree="/w")
         read = tool("read", {"filePath": "/w/a.py"})

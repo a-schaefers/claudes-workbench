@@ -321,7 +321,10 @@ def _message(err) -> str:
     return str(err.get("message") if isinstance(err, dict) and err.get("message") else err)[:400]
 
 
-CYCLE = (2, 3)  # the block lengths the repeat guard also counts: A B A B …, A B C A B C … (#1575)
+# The block lengths the repeat guard also counts: A B A B …, A B C A B C …, and 4 for an edit
+# flipping a line back and forth with a test after each (A->B, test, B->A, test), which ran 500
+# cycles with no stop: each edit a real change, a block no 2 or 3 sees (#1575, 2026-11-26)
+CYCLE = (2, 3, 4)
 
 
 class StuckDetector:
