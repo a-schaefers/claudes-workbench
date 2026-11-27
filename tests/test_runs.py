@@ -2376,7 +2376,7 @@ class RunsApi(Base):
         self.assertEqual((cli.workflows_mode(), routes.run_side()), ("on", "gpu"))
         self.assertIn("Their items run GPU only (wb deepmode side).", run_wb("deepmode"))
         run, out = self.start("gpuonly")
-        self.assertIn("find significant (GPU) · GPU only (wb deepmode side) · estimate", out)
+        self.assertIn("find significant (GPU), verify significant (GPU) · GPU only (wb deepmode side) · estimate $0", out)
         self.assertIn("· GPU only", runs.report_lines(runs.report_of("gpuonly"))[0])
         # API only: a GPU role's item goes to its API model, said so; never from a model's shell
         with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):

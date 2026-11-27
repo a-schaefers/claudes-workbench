@@ -20,7 +20,7 @@ def expected(key: str, value) -> list[str]:
     """The pane's wb call for each row, written out apart from settings._argv."""
     head, _, rest = key.partition("-")
     fixed = {"agents": ["route", "all", value], "busy": ["route", "busy", value], "coding": ["coding", value],
-             "workflows": ["workflows", value],
+             "workflows": ["workflows", value], "deep-side": ["workflows", "side", value],  # #1627
              "progress": ["progress", value], "splash": ["splash", value],
              "probe": ["experiment", "probe", value], "optimize": ["optimize", "start"],
              "cap": ["route", "cap", value], "driver": ["route", "driver", value]}
