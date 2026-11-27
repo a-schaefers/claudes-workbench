@@ -494,8 +494,9 @@ closed (its `text` the run's flow, phase, stage counts and spend; its choices `s
   (installing nothing without the user's yes); showing it is the Settings view's job. `detail` comes
   with a run's `summary`: `wb run report <run>` (cut past 16,000 characters), its agents' results among it
   (show it as text, never markup); `said` is its first line.
-- 400 `{"error": "no such setting"}` for an unknown `key`; 400 `{"error": "not one of its
-  choices"}` for a value the row doesn't take (nothing runs for either).
+- 400 `{"error": "no such setting"}` for an unknown `key`; 400 `{"error": <why>}` for a value the row doesn't
+  take (`'x' isn't one of coding's choices`, the cap's `a positive number, or off`; `not one of its choices` for
+  a value neither string, number nor null; nothing runs for any).
 - 409 `{"ok": false, "error": <wb's line>, "page"?: <the refusal in the page's words>, "rows": [...]}` when wb
   refused (`page`: by the row's label, with no `wb:` and no command, where the server has the words).
 

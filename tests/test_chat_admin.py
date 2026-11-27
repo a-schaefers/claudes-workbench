@@ -108,8 +108,12 @@ class ChatAdmin(Base):
         # nothing runs for a row that isn't, or a value it doesn't take; neither is recorded
         self.assertEqual(self.call("/api/settings", {"key": "nope", "value": "x"}, token=self.user),
                          (400, {"error": "no such setting", "code": "bad_request"}))
+        # a value it doesn't take: its reason (the day cap's box was told "not one of its choices",
+        # the web app's review, 2026-11-26)
         self.assertEqual(self.call("/api/settings", {"key": "coding", "value": "sometimes"}, token=self.user),
-                         (400, {"error": "not one of its choices", "code": "bad_request"}))
+                         (400, {"error": "'sometimes' isn't one of coding's choices", "code": "bad_request"}))
+        self.assertEqual(self.call("/api/settings", {"key": "cap", "value": "-3"}, token=self.user),
+                         (400, {"error": "a positive number, or off", "code": "bad_request"}))
         self.assertEqual(self.call("/api/settings", {"key": "coding", "value": True}, token=self.user)[0], 400)
         self.assertEqual(len(store.read_jsonl(chat.changes_path())[0]), 1)
 

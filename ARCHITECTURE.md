@@ -7763,8 +7763,10 @@ The chat server's side of the web app's Stats and Settings views, the user's tok
 - `GET /api/settings`: `{rows: settings.rows(fresh=True), ts}` (read afresh: the cache knows only
   this server's writes, and a change made at the terminal was drawn as it had been, #1392). `POST /api/settings` `{key, value}` (a
   string, a number or null; JSON only, 415 otherwise) → `chat.admin_set` → `settings.apply`: 200
-  `{ok: true, said, rows, changes, help?}`; 400 `no such setting` (a `KeyError`) or `not one of its choices`
-  (a `ValueError`, or a value neither string, number nor null); 409 `{ok: false, error: <wb's line>,
+  `{ok: true, said, rows, changes, help?}`; 400 `no such setting` (a `KeyError`), a `ValueError`'s reason
+  (`'<v>' isn't one of <key>'s choices`, the cap's `a positive number, or off`: the box was told "not one of
+  its choices", the web app's review, 2026-11-26), or `not one of its choices` (a value neither string,
+  number nor null); 409 `{ok: false, error: <wb's line>,
   page?: <the refusal in the page's words, settings.page_line>, rows}` when wb refused; a 200 carries
   `page` too when there is a note. `rows` are read again after the write (apply dropped the cache).
 - **The record.** A change that went through is `{ts, key, label, from (the row's value
