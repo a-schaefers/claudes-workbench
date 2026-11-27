@@ -1806,16 +1806,17 @@
   // the server's; the cards said 1337 whatever it was, and `--bg 1337` served nothing, or another
   // account's chat (#1562, 2026-11-26)
   const servePort = () => location.port || '1337'
-  // the way to https names no product: any tunnel or proxy the user trusts, pointed at localhost (#1616)
-  const HTTPS = () => "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
-    `point an https tunnel or proxy you trust at \`localhost:${servePort()}\` on the computer.`
+  // the way to https names no product: any tunnel or proxy the user trusts, pointed at localhost,
+  // its name in chat.json's hosts, as the server answers no other (#1616, 2026-11-27)
+  const TUNNEL = () => `point an https tunnel or proxy you trust at \`localhost:${servePort()}\` on the computer ` +
+    "and add its name to chat.json's hosts."
+  const HTTPS = () => "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " + TUNNEL()
   function drawApp() {
     const box = $('app'); box.replaceChildren()
     $('app-h').textContent = standalone() ? 'The app' : 'Install the app'
     if (standalone()) return para(box, "Installed ✓ — you're using the chat as an app.")
     if (!window.isSecureContext) return paraCode(box, HTTPS(), 'small')
-    if (!https) return paraCode(box, 'The app installs from the https address, so the one app works on every device: ' +
-      `point an https tunnel or proxy you trust at \`localhost:${servePort()}\` on the computer.`, 'small')
+    if (!https) return paraCode(box, 'The app installs from the https address, so the one app works on every device: ' + TUNNEL(), 'small')
     if (installEvt) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'plain'; b.textContent = 'Install this app'
       b.onclick = async () => { installEvt!.prompt(); try { await installEvt!.userChoice } catch {} installEvt = null; drawSettings() }

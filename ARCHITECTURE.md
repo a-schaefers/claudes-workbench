@@ -6823,7 +6823,7 @@ one" sends `Keep take <n>: <name>` with `about: {audio, n}`, and Claude gets `[w
 Claude session in workbench mode while the user is away: messages both ways, Claude Code's
 dialogs, push notifications (installable and notifying over https only). It listens on
 `127.0.0.1` alone (#1616, 2026-11-27): to open it from another device, point any tunnel or proxy at
-`localhost:<port>` and add its name to chat.json's `hosts`; the link's token still applies. On by default (the owner, 2026-11-24, #1281, reversing 2026-11-19's off until `wb chat
+`localhost:<port>` and add its name to chat.json's `hosts` (read again on a change, no restart); the link's token still applies. On by default (the owner, 2026-11-24, #1281, reversing 2026-11-19's off until `wb chat
 on`): `chat.ensure` brings it up, `wb setup` installs its service, `wb doctor` says whether it
 answers; `wb chat off` turns it off, and that choice is kept. The pane's modeline shows its link, or
 why it is down (*Seeing what the agent does*).
@@ -7008,8 +7008,7 @@ and nothing else (the phone link and its QR code went with #1616).
   `failed` (`why`: serve.log's last line). A unit that doesn't answer is followed by `chat.start`
   once (#1343: one that exits 78, stopped for good, left the app down, as only the unit was ever
   started again): `started` with `why` naming the unit, or `failed`. One at a time
-  (`chat/ensure.lock`). `wb chat url` runs it and prints the link (and the phone's on a line of its own, its QR code
-  only at a terminal, #1552; the mod reads `--json`, and plain output only from a wb older than it, which prints the link alone);
+  (`chat/ensure.lock`). `wb chat url` runs it and prints the localhost link alone (the mod reads `--json`);
   `wb chat url --json` prints the dict, exit 0, for the mod. **`wb setup`** installs the service
   (`cli.install_service`; `--no-service` skips it): on Linux, where `systemctl --user
   show-environment` answers with this HOME, it links `systemd/wb-chat.service` into
@@ -7384,8 +7383,10 @@ answer to (`*`: any), a list of strings (a string is one item; anything else is
 whatever the user runs points at localhost, and listening on another address gave plain http,
 so push and the home-screen app never worked there; `wb chat reach`, the Settings row, the phone link
 and its QR code went with it). `--port` picks the port; there is no `--bind` or `--host`. Answered names
-(`chat.plan`, at startup): `chat.LOCAL_NAMES` (localhost, 127.0.0.1, ::1) and `hosts`, where a tunnel's
-name goes (it passes its own as the Host, #448). An address it can't listen on ends `serve` with one line
+(`chat.plan`): `chat.LOCAL_NAMES` (localhost, 127.0.0.1, ::1) and `hosts`, where a tunnel's
+name goes (it passes its own as the Host, #448); read at startup and again by `Handler._hosts_now`
+whenever chat.json's stamp (`chat.config_stamp`: mtime, size, inode) changes, so a name added while
+it runs needs no restart, and a broken file keeps the last good list (#1616, 2026-11-27). An address it can't listen on ends `serve` with one line
 (`can't listen on 127.0.0.1:<port>: the port is taken: …; --port picks another`; `serve` prints its
 address and a warning for `hosts: *`). Every `RELOAD_EVERY` 10 s it stamps its
 `*.py` (`code_stamp`, `watch_code`); changed and then still for a look, it re-execs
@@ -7816,7 +7817,7 @@ still helps with one when the user asks (the owner, 2026-11-24). Every row the p
 entry in `workbench/settings.py`, under the pane's old key and making its old `wb` call, so a new
 setting touches only Python. The chat server draws from it (#1280); nothing in it serves HTTP.
 
-- `GROUPS` (`significant`, `trivial`, `writing`: a card per role, #1553; then `shared`, `web`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental`: display order; `web`, the web app's own rows, #1355), `KINDS`.
+- `GROUPS` (`significant`, `trivial`, `writing`: a card per role, #1553; then `shared`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental`: display order), `KINDS`.
 - `rows(fresh=False) -> list[dict]`: every row, kept `ROWS_CACHE_S` 10 s (`fresh` reads again);
   `reads(fresh=False)`, the same cache's `{routes, models}` (`wb route --json`, `wb models --json`,
   or None); `drop()` forgets it.
@@ -8055,7 +8056,7 @@ alone, and a generic renderer: a new setting touches only Python.
   order with their names: a card per role first (#1553), `significant` "Complex coding", `trivial` "Trivial
   coding", `writing` "English writing" (`routes.LABELS`' words), its `role-<role>` row on top with no label of
   its own (a row whose label is its card's name is drawn without it) and its `more` rows under a closed
-  `details.set-more` "More"; then `shared` "Agents and roles", `web` "Web app" (#1355), `gpu` "GPU", `api` "API", `setup` "What your agents get",
+  `details.set-more` "More"; then `shared` "Agents and roles", `gpu` "GPU", `api` "API", `setup` "What your agents get",
   `workflows` "Deep workflows", `terminal` "Terminal", `experimental` "Experimental"; a group the table adds later follows, under
   its key. **Folded** (the web app's review, 2026-11-26: Settings ran 6 to 8 phone screens, Notifications and
   Spend today 4,000 to 5,000 px down): `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental` and

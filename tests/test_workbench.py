@@ -31470,25 +31470,27 @@ class WebChat(Base):
         self.assertEqual(c.getresponse().status, 401)                # no "Bearer ": no entry
         c.close()
 
-    def test_a_tunnels_host_name_is_answered_once_chat_json_names_it(self):
+    def test_a_tunnels_host_name_is_answered_once_chat_json_names_it_without_a_restart_1616(self):
         # #448 (the 2026-11-20 audit): a tunnel to localhost passes its own name through as the
-        # Host, and the chat answered it 403; chat.json's `hosts` names it (#1616: no product's
-        # name is looked up any more)
-        chat, conf, tok = self.chat, Path(os.environ["WB_CHAT_CONFIG"]), self.chat.token()
+        # Host, and the chat answered it 403; chat.json's `hosts` names it. #1616 (2026-11-27): no
+        # product's name is looked up any more, so that is every tunnel's way in, and a name added
+        # while the server ran stayed 403 until a restart nothing named: read again on a change
+        conf, tok = Path(os.environ["WB_CHAT_CONFIG"]), self.chat.token()
         code, body = self.call("/api/state", token=tok, host="chat.example.org")
         self.assertEqual(code, 403)
         self.assertIn("add it to chat.json's hosts", body["error"])  # says what to do
-        conf.write_text(json.dumps({"hosts": ["chat.example.org"]}))
-        servers, _ = chat.make_servers(0)
-        srv = servers[0]
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        self.addCleanup(srv.RequestHandlerClass.hub.close)
-        self.addCleanup(srv.server_close)
-        self.addCleanup(srv.shutdown)
-        with mock.patch.object(self, "port", srv.server_address[1]):
-            self.assertEqual(self.call("/api/state", token=tok, host="chat.example.org")[0], 200)
-            self.assertEqual(self.call("/", host="CHAT.example.org")[0], 200)
-            self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 403)
+        conf.write_text(json.dumps({"hosts": ["chat.example.org"]}))  # the server already running
+        self.assertEqual(self.call("/api/state", token=tok, host="chat.example.org")[0], 200)
+        self.assertEqual(self.call("/", host="CHAT.example.org")[0], 200)
+        self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 403)
+        for broken in ('{"hosts": ', json.dumps({"hosts": 5}), "[1]"):  # mid-edit or wrong: the last good
+            conf.write_text(broken)
+            self.assertEqual(self.call("/api/state", token=tok, host="chat.example.org")[0], 200, broken)
+        conf.write_text(json.dumps({"hosts": ["*"]}))
+        self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 200)  # any name
+        conf.unlink()                                                 # gone: localhost alone again
+        self.assertEqual(self.call("/api/state", token=tok, host="chat.example.org")[0], 403)
+        self.assertEqual(self.call("/api/state", token=tok)[0], 200)
 
     def test_an_empty_token_file_lets_nobody_in(self):
         Path(os.environ["WB_CHAT_TOKEN"]).write_text("\n")

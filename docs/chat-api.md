@@ -60,7 +60,7 @@ runs the new scripts.
   url` prints the page's link, whose host and port are the base). The server listens on
   `127.0.0.1` only. To reach it from another device, point a tunnel or proxy of your own at
   `localhost:1337` and add the name it passes as the Host to `~/.config/workbench/chat.json`'s
-  `hosts` (`*` for any); the token still applies.
+  `hosts` (`*` for any; read again when the file changes, no restart); the token still applies.
 - **Paths:** every `/api/<x>` below is also served at `/api/v1/<x>`, by the same handler with the
   same rules (an agent's denials too). New clients use `/api/v1/` (workbench 2.1 and later);
   `/api/` stays for the page and older clients, and `ask_workbench.py` keeps it, so it works with

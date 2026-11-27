@@ -2772,6 +2772,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "wb-chat"
     timeout = TIMEOUT  # an idle or half-open connection holds a thread no longer than this
     hosts: set[str] | None = set()  # None: any Host (the user's `hosts: ["*"]`)
+    hosts_seen: tuple | None = None  # chat.json's stat when `hosts` was read (config_stamp)
     secret = ""
     hub: "Hub"
     streams: threading.BoundedSemaphore
@@ -2850,9 +2851,26 @@ class Handler(BaseHTTPRequestHandler):
         host = self._host()
         return (host in ("localhost", "::1") or host.startswith("127.")) and not self._forwarded()
 
+    def _hosts_now(self) -> set[str] | None:
+        """chat.json's `hosts` as it stands, read again whenever the file changed: a tunnel's name
+        added while the server ran was 403 until a restart nothing named, and from #1616 (no
+        product's name looked up) chat.json is every tunnel's way in (2026-11-27). A broken file
+        keeps the last good list, as upload_limits keeps serving (#534)."""
+        cls, stamp = type(self), config_stamp()
+        if stamp != cls.hosts_seen:
+            cls.hosts_seen = stamp
+            try:
+                if stamp is not None:
+                    json.loads(config_path().read_text(encoding="utf-8"))  # half-written: keep
+                cls.hosts = plan()["hosts"]
+            except (OSError, ValueError, ConfigError):
+                pass
+        return cls.hosts
+
     def _allowed(self) -> bool:
         host = self._host()
-        if self.hosts is not None and host not in self.hosts:
+        hosts = self._hosts_now()
+        if hosts is not None and host not in hosts:
             self._json(403, {"error": f"unknown host {host[:100]}: add it to chat.json's hosts",
                              "code": "unknown_host"})
             return False
@@ -3418,6 +3436,15 @@ class Handler(BaseHTTPRequestHandler):
         return msg
 
 
+def config_stamp() -> tuple | None:
+    """chat.json's (mtime_ns, size, inode), None when it is missing: a change rereads `hosts`."""
+    try:
+        st = config_path().stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size, st.st_ino
+
+
 def plan() -> dict:
     """Where to listen and which Host names to answer: {"binds": [BIND], "hosts" (None: any)}.
     Localhost only (#1616, 2026-11-27): a tunnel or proxy of the user's own points at it, and
@@ -3436,9 +3463,10 @@ class _Server(ThreadingHTTPServer):
 
 def make_servers(port: int) -> tuple[list[ThreadingHTTPServer], dict]:
     """The server on 127.0.0.1 (plan's), in a list."""
+    stamp = config_stamp()  # before the read: a change between them is read again
     p = plan()
     handler = type("ChatHandler", (Handler,), {
-        "hosts": p["hosts"], "secret": token(), "hub": Hub(),
+        "hosts": p["hosts"], "hosts_seen": stamp, "secret": token(), "hub": Hub(),
         "streams": threading.BoundedSemaphore(MAX_STREAMS), "waits": threading.BoundedSemaphore(MAX_WAITS),
         "sends": RateLimit(AGENT_SENDS_PER_MIN), "top": TopFeed()})
     servers = []
