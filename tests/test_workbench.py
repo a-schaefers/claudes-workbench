@@ -8298,6 +8298,27 @@ class Context(Base):
         self.assertEqual(t.status["phase"], "stuck")
         self.assert_green_back(t, out, "wb stop")
 
+    def test_a_takeover_of_a_self_review_an_update_stopped_mid_check_puts_the_green_tree_back(self):
+        # #1582 (2026-11-26): _stop_aside set aside only a live runner's round, so wb update
+        # --stop mid-check left a dead runner, stuck, and the takeover (or the hand-back) left
+        # "41" under the green round's tests:ok, which wb accept committed
+        t = self.mid_check("t-rupd")
+        cli._stop_for_update([t])
+        self.assertEqual((t.status["phase"], t.status["last"]), ("stuck", cli.UPDATE_STOP))
+        out = run_wb("takeover", "t-rupd")
+        self.assertEqual(t.status["phase"], "review")
+        self.assert_green_back(t, out, "wb takeover")
+
+    def test_a_takeover_of_a_self_review_whose_runner_a_signal_stopped_mid_check_puts_the_green_tree_back(self):
+        # #1582: a logout's SIGTERM, no `stopping` set: stuck on SIGNAL_STOP, the runner gone,
+        # and the takeover left "41" the same
+        t = self.mid_check("t-rsig")
+        os.kill(t.status["pid"], signal.SIGTERM)
+        st = wait_phase("t-rsig", {"stuck", "failed"}, timeout=30)
+        self.assertEqual(st["last"], runner.SIGNAL_STOP)
+        out = run_wb("takeover", "t-rsig")
+        self.assert_green_back(t, out, "wb takeover")
+
     def quiet_self_review(self, name, *flags, **env):
         """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
         the green tree, no tool call or word after it (#1261)."""

@@ -3352,9 +3352,13 @@ def _stop_aside(task, how: str) -> str:
     stays the green round's: the tests aren't rerun, Claude's Bash stops at 2 minutes) and the
     line naming `wb rewind <task> <n>s`, else "". wb stop, wb stop --all and wb takeover left the
     unfinished tree, a check maybe still commented out, under a tests:ok that wb accept committed
-    without a word (#1582, bar loop #1030 round 3, 2026-11-26). Only a live round's: a review's
-    tree is the self-review's own finish, its tests passing."""
-    live = task.status.get("phase") in LIVE or runner_alive(task)
+    without a word (#1582, bar loop #1030 round 3, 2026-11-26). Any round but one the runner
+    ended in review: only the runner sets review, after its own finish (its tests passing) or its
+    own set_aside, so a stuck or failed self-review is an outside stop. Gated on liveness, a
+    runner already dead (wb update --stop, a logout's SIGTERM: stuck, the runner gone) left the
+    unfinished tree to wb takeover and the hand-back under tests:ok, which wb accept committed
+    (#1582, 2026-11-26)."""
+    live = task.status.get("phase") != "review" or runner_alive(task)
     _stop_runner(task)
     if not live or not task.worktree.is_dir():
         return ""
