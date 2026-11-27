@@ -4062,6 +4062,42 @@ class Lifecycle(Base):
         # a round with no report yet: the worktree's ignored file is an edit too
         self.assertIn("partway", chat.report_lead(t, "", False)["happened"])
 
+    def test_the_task_sheet_leaves_out_the_run_caches_wb_diff_and_accept_leave_out(self):
+        # #1599 (bar loop #1030 round 5, 2026-11-27): #1593 left a test run's caches out of wb
+        # diff and the review, but the web app's task sheet (chat.task_diff) and a run's {diff}
+        # listed the .pyc as the agent's change, and the sheet read #1593's note line as a
+        # changed file: an agent that wrote nothing "stopped partway"
+        from workbench import chat, runs
+        pyc = "mkdir -p __pycache__ && printf '\\0\\1' > __pycache__/f0.cpython-312.pyc"
+        self.start("t-rc", "ok", "--test", f"{pyc} && {TEST_CMD}", "--no-self-review")
+        wait_phase("t-rc", {"review"})
+        t = store.Task("t-rc")
+        self.assertEqual(runner.run_caches(t), ["__pycache__/f0.cpython-312.pyc"])
+        d = chat.task_diff(t)
+        self.assertEqual([f["path"] for f in d["files"]], ["answer.txt"])
+        self.assertEqual(d["stat"], run_wb("diff", "t-rc", "--stat").rstrip("\n"))
+        self.assertNotIn("__pycache__", chat.task_diff(t, full=True)["diff"])
+        self.assertNotIn("__pycache__", runs._task_diff(t))       # a run's {diff} too
+        self.assertIn(gitops.RUN_CACHES_NOTE, t.report(1))         # the report names them
+        self.assertEqual(chat.task_summary(t)["changed"], ["answer.txt"])
+        # an agent that wrote nothing and failed, then a test run in its worktree: the caches
+        # and the report's note on them are no edit
+        os.environ["FAKE_EXIT"] = "1"
+        self.start("t-rc0", "say")
+        self.assertEqual(wait_phase("t-rc0", {"review", "stuck", "failed"})["phase"], "failed")
+        t0 = store.Task("t-rc0")
+        subprocess.run(pyc, shell=True, cwd=t0.worktree, check=True)
+        caches = runner.run_caches(t0)
+        self.assertEqual(caches, ["__pycache__/f0.cpython-312.pyc"])
+        self.assertEqual(chat.task_diff(t0)["files"], [])
+        report = t0.report(1)
+        self.assertTrue(report.endswith("files changed:\n(none)"), report)
+        report += "\n" + gitops.run_caches_line(caches)      # as summary_text names them
+        lead = chat.report_lead(t0, report, True)
+        self.assertEqual(lead["changed"], [])
+        self.assertIn("before writing anything", lead["happened"])
+        self.assertNotIn("partway", chat.report_lead(t0, "", False)["happened"])
+
     def test_wb_verify_and_wb_shot_run_the_candidate_with_the_ignored_files_accept_commits(self):
         # #1275 (the 2.0 bar loop, 2026-11-24): #1259 put the agent's lib/util.py, under
         # Python.gitignore's lib/, in the review diff but not in verify's candidate: wb verify

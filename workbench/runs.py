@@ -1334,9 +1334,10 @@ def _task_diff(t: store.Task) -> str:
     """A code item's change since its base as wb accept --include commits it: the gitignored files
     the coder wrote too (runner.ignored_to_commit), as the review notice and wb diff show them. The
     reviewer's {diff} and the chooser's {diffs} left a lib/util.py out, judged on part of the change
-    (#1547, 2026-11-26)."""
+    (#1547, 2026-11-26). The run caches accept leaves out (runner.run_caches) aren't in it: a test
+    run's .pyc read as the coder's change (#1599, 2026-11-27)."""
     from . import runner
-    return gitops.diff(t.worktree, t.spec["base"], force=runner.ignored_to_commit(t))
+    return gitops.diff(t.worktree, t.spec["base"], force=runner.ignored_to_commit(t), skip=runner.run_caches(t))
 
 
 def _diffs_of(run: Run, stage: dict, it: Item) -> str:

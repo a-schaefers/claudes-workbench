@@ -1513,7 +1513,9 @@ un-ignored venv's 30,000 `.pyc` (#1593). The review leaves the same paths out (`
 `accept_writes` are kept): the round report's "files changed" and its closing diffstat (its
 `(none)` then said `1 file changed`: #1593's review) and the check-in's, the review
 snapshots (`review_snapshot`'s and `restore_tree`'s `skip`, so a rewind or a self-review's
-set-aside leaves them as they are), the review diff, `wb diff` and `wb verify`'s candidate; the
+set-aside leaves them as they are), the review diff, `wb diff`, `wb verify`'s candidate, the web
+app's task sheet (`chat.task_diff`; `chat.report_lead` ends the report's files at the note's opening,
+`gitops.RUN_CACHES_NOTE`) and a run's `{diff}`/`{diffs}` (`runs._task_diff`: #1599); the
 report names them in one `run_caches_line`. Shown, the `.pyc` `wb next` left read as the agent's
 new binary file in every later review notice (#1593).
 
@@ -7453,18 +7455,19 @@ address (#534).
   writes: `agent_summary`, `changed` (the files' paths, `[]` for `(none)`, then the ignored files
   `--include` commits, `runner.ignored_to_commit`, as the Diff tab lists them: a failed task whose agent
   wrote only those said `before writing anything` and `No files changed.` above 'Discard it', #1591;
-  null with no report),
+  never the run caches' note, `gitops.RUN_CACHES_NOTE`, read as a file: #1599; null with no report),
   `tests` (its `tests: PASS|FAIL …` line) and, for a failed or stuck task, `happened`: one plain line
   (`The agent stopped before writing anything (OpenCode exited).`, `The agent was stopped partway:
   what it changed so far is in the worktree (<the STOPPED reason>).`, and with no report for the
   round `The task stopped partway (<last>): what the agent changed so far is in the worktree.` when
-  `gitops.changed` or `runner.ignored_to_commit` lists any, else `The task stopped before the agent ran (<last>).` for status
+  `gitops.changed` (less `runner.run_caches`, #1599) or `runner.ignored_to_commit` lists any, else `The task stopped before the agent ran (<last>).` for status
   `infra` setup, repo or model, else `The task stopped (<last>).`; the cause cut at `LEAD_CAUSE_CHARS`
   160). A reaped runner (a restart, a dead runner) or a round failing after an earlier round's work
   leaves no report either: the sheet said the agent never ran, under 'Discard it'. Never runner.log's tail: OpenCode's
   raw stderr, which Claude reads when asked.
   `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), with the
-  ignored files `--include` commits (`force=runner.ignored_to_commit`, as `wb diff`: #1548), `stat`
+  ignored files `--include` commits (`force=runner.ignored_to_commit`, as `wb diff`: #1548) and without
+  the run caches accept leaves out (`skip=runner.run_caches`: a test run's `.pyc` read as the agent's, #1599), `stat`
   and `files` (numstat); `full=1` the diff instead (`path=` one of `files`, `:(literal)`, else 404 "no
   such file in the diff"), each line cut at `transcript.JSON_LINE_CHARS` (`lines_cut`), `diff: null`
   and `cut` past `TASK_DIFF_CHARS` 256 KB (`gitops.diff`'s `limit`: never held whole); no worktree or
@@ -10178,7 +10181,8 @@ an object of `runs.PARAM_KEYS` `{type, description, default, choices, optional}`
 default `{item}`; `runs.render` only substitutes, an object as fenced JSON, each place cut at `runs.CUTS`, said).
 Over a code stage (`runs.CODE_PLACES`) a report's prompt may carry `{diff}` and `{report}`: the change since the
 task's base with the ignored files `--include` commits (`runs._task_diff`, `runner.ignored_to_commit`; `{diffs}`'s
-too: both left a coder's `lib/util.py` out, #1547), and the reviewed round's
+too: both left a coder's `lib/util.py` out, #1547) and without the run caches accept leaves out
+(`runner.run_caches`, #1599), and the reviewed round's
 report (`store.Task.report`: the coder's summary and test line, `runs._code_report`), so a review after a refix
 reads the coder's "done, or declined with why" (the shipped build, fix and best-of reviews carry it; #1134's
 study found reasoned declines asked again until `max` ran out). **A batch** (`batch` N): each member is

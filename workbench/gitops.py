@@ -1032,6 +1032,12 @@ def cache_specs(worktree: Path, caches: list[str]) -> list[str]:
     return list(dict.fromkeys(specs))
 
 
+# run_caches_line's opening, which the web app's task sheet (chat.report_lead) reads as the end of
+# a report's files: read as one more changed file, the sheet of a task whose agent wrote nothing
+# listed it (#1599, 2026-11-27)
+RUN_CACHES_NOTE = "note: the commit leaves out a run's caches, which nobody wrote: "
+
+
 def run_caches_line(paths: list[str]) -> str:
     """The note for the run caches a commit left out (run_caches), each cache directory once with
     its count: an accept line that named only the commit hid them (#1580)."""
@@ -1042,8 +1048,7 @@ def run_caches_line(paths: list[str]) -> str:
     groups = Counter(where(p) for p in paths)
     named = [f"{d} ({n:,} file{'s' if n != 1 else ''})" if d.endswith("/") else d
              for d, n in sorted(groups.items())]
-    return ("note: the commit leaves out a run's caches, which nobody wrote: "
-            + ", ".join(brief(named)))
+    return RUN_CACHES_NOTE + ", ".join(brief(named))
 
 
 def shown(path) -> str:
