@@ -4054,7 +4054,9 @@ def settings_lines(rows: list[dict]) -> list[str]:
                 out.append(f"      {r['says']}")
         # an API row lists every catalog model now, a group per provider (#1617, 2026-11-27): here only
         # the ones in use, as 111 models four times over was 444 lines for Claude to read
-        rest = [c for c in choices if r.get("other") and c.get("group") not in (None, settings.IN_USE, "GPU")]
+        # never the row's own value: a pin outside In use kept its `*` line (#1617's review, 2026-11-27)
+        rest = [c for c in choices if r.get("other") and c["value"] != r["value"]
+                and c.get("group") not in (None, settings.IN_USE, "GPU")]
         for c in choices:  # an API model's line is its name, provider and price: its says only repeat them
             if c in rest:
                 continue

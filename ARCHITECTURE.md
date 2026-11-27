@@ -7953,7 +7953,9 @@ ask before an offer over an hour old (#1557's review): a key added to `HELP` nee
   (#1316, after the roles' rows) → `wb route driver <id>|session`: with the OpenCode plugin
   installed (`ocplugin.installs`) a choice, `other` (any id), of `session` (each session's own
   `/models`), the GPU models (group `GPU`), then the API models (`_api_stops`, grouped as an API row's, each
-  saying where the conversation goes), the pin added when not listed; without it an info row, `Claude Code
+  saying where the conversation goes; its own pin, an API one, and the roles' API models lead `In use`: the pin had
+  sunk into its provider's group, and `wb settings` printed no `*` line for it, #1617's review), the pin added when
+  not listed; without it an info row, `Claude Code
   (fixed)` (`settings.DRIVER_CLAUDE`); `coding` → `wb coding
   only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`, its note today's spend once a role is
   on API or any is spent (`_spent_today`: `API tasks stop for the day at $5 of spend: ≈$0.12 so far today.`, #1339;
@@ -8007,8 +8009,8 @@ gated as Claude's. `tests/test_settings.py` covers it.
 **Claude's writes** (#1287; the owner, 2026-11-24: "claude is an interactive assistant to the web
 panel, in case a user gets confused about the options", then "We trust Claude"). `wb settings`
 lists every row (`cli.settings_lines`: by group, `key: label: value`, each choice with its line and
-`*` on the current one, an API model's by its label alone, of an API row only those in use (`In use`, and the
-driver's GPU ones) and a count of the rest, which `wb models` lists: every model four times was 444 lines, #1617;
+`*` on the current one, an API model's by its label alone, of an API row only those in use (`In use`, the
+driver's GPU ones, and the row's own value wherever it is) and a count of the rest, which `wb models` lists: every model four times was 444 lines, #1617;
 `--json`, the rows). `wb settings set
 <key> <value>` (`cli.cmd_settings`) runs `settings.apply(key, value, by="claude")`, the one writer
 the web app uses too, and prints wb's line and the row's `help` when it came back; its child logs

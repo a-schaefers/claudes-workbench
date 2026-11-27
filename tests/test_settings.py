@@ -463,6 +463,21 @@ class ApiMenu(unittest.TestCase):
                                       "    * deepinfra/ds: DS · DeepInfra (160K) · $0.1/$0.2 per M",
                                       "      xai/grok-3: Grok 3 · xAI (160K)",
                                       "      or any of the 14 other API models' exact provider/model id (wb models lists them)"])
+        # a value outside In use keeps its `*` line, and leaves the count (#1617's review, 2026-11-27)
+        lines = cli.settings_lines([{**row, "value": "xai/grok-4"}])
+        self.assertIn("    * xai/grok-4: Grok 4 · xAI (160K)", lines)
+        self.assertIn("      or any of the 13 other API models' exact provider/model id (wb models lists them)", lines)
+
+    def test_the_driver_rows_api_pin_and_the_roles_api_models_lead_its_list_and_wb_settings_marks_the_pin_1617(self):
+        # #1617's review (2026-11-27): the driver's list passed no model of its own, so a pin sank into
+        # its provider's group and wb settings, which lists only In use, printed no `*` line for it
+        r = {"driver": "anthropic/c-v", "roles": {"significant": {"api": "deepinfra/ds"}, "trivial": {}}}
+        with mock.patch.object(settings, "_opencode_path", lambda: True):
+            row = settings._driver_row(r, {**MENU, "gpu": [{"id": "gpu/a", "label": "A"}]})
+        lead = [(c["value"], c.get("group")) for c in row["choices"][:5]]
+        self.assertEqual(lead, [("session", None), ("gpu/a", "GPU"), ("anthropic/c-v", settings.IN_USE),
+                                ("deepinfra/ds", settings.IN_USE), ("xai/grok-3", settings.IN_USE)])
+        self.assertIn("    * anthropic/c-v: Claude v · Anthropic (160K)", cli.settings_lines([row]))
 
 
 class RunRows(Rows):

@@ -440,7 +440,13 @@ def _driver_row(r: dict, m: dict | None) -> dict:
         stops.append((g["id"], f"{g.get('label') or g['id']}{_window(g.get('window'))} · GPU",
                       f"/workbench in OpenCode switches its session to {g['id']}, on this machine's GPU.", "GPU"))
     api = {x["id"]: x for x in (m or {}).get("api") or [] if isinstance(x, dict) and x.get("id")}
-    for mid, label, _, group in _api_stops("The driver", m, "", []):
+    # its own pin and the roles' API models lead its In use group, as on the roles' rows: with
+    # every catalog model listed a pin sank into its provider's group, and wb settings lost its
+    # `*` line (#1617's review, 2026-11-27)
+    own = pin if pin != routes.DRIVER_SESSION and pin not in {s[0] for s in stops} else ""
+    roles_api = [x.get("api") for x in ((r.get("roles") or {}).get(n) or {} for n in routes.ROLES)
+                 if isinstance(x, dict) and x.get("api")]
+    for mid, label, _, group in _api_stops("The driver", m, own, roles_api):
         x = api.get(mid) or {}
         who = x.get("provider_name") or x.get("provider") or mid.split("/", 1)[0]
         stops.append((mid, label, f"/workbench in OpenCode switches its session to {mid}; that "
