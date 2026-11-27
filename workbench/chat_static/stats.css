@@ -30,7 +30,7 @@
 .st-list li { display: block; padding: 5px 0 5px 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }
 .st-list li + li { border-top: 1px solid var(--line); }
 .st-mark { display: inline-block; width: 1.4em; text-indent: 0; }
-.st-mark.dim { color: var(--faint); }
+.st-mark.dim { color: var(--dim); }
 .st-run b { font-weight: 600; }
 .st-fold { font-size: 13px; }
 

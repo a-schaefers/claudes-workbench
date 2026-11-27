@@ -74,7 +74,7 @@ export function ringContrast(el: Element, outside = false) {
 }
 
 // In the page, of an element's text: its colour's contrast against the nearest fill behind it
-// (WCAG's ratio; text needs 4.5:1), as ringContrast reckons it (#1556)
+// (WCAG's ratio; text needs 4.5:1), as ringContrast reckons it (#1556, #1560)
 export function textContrast(el: Element) {
   const rgb = (s: string) => { const n = (s.match(/[\d.]+/g) || []).map(Number); return s.startsWith('color(') ? n.map(x => x * 255) : n }
   const lum = (c: number[]) => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * r + 0.7152 * g + 0.0722 * b }
