@@ -1218,15 +1218,28 @@ def newest_ts(path: Path) -> float:
 
 def mark_trials(names: set[str]) -> list[str]:
     """Mark closed tasks' rows as trial runs; the names that had an unmarked row."""
+    return _mark_rows(names, "trial")
+
+
+def mark_not_chosen(names: set[str]) -> list[str]:
+    """Mark discarded compare attempts' rows `not_chosen` once wb accept took a sibling (#1568,
+    2026-11-26): a loser discarded before the pick was accepted was scored as the model's rejected
+    work. The names that had an unmarked row."""
+    return _mark_rows(names, "not_chosen", lambda r: r.get("outcome") == "discarded")
+
+
+def _mark_rows(names: set[str], field: str, which=lambda r: True) -> list[str]:
+    """results.jsonl's rows of ``names`` (that ``which`` takes) given ``field`` true, rewritten whole
+    under its lock; the names that had an unmarked row."""
     path = home() / "results.jsonl"
     with locked(path.with_name(path.name + ".lock")):
         rows = read_jsonl(path)[0]
-        hit = [r["task"] for r in rows if r.get("task") in names and not r.get("trial")]
+        hit = {id(r) for r in rows if r.get("task") in names and not r.get(field) and which(r)}
         if hit:
-            replace_bytes(path, "".join(json.dumps({**r, "trial": True} if r.get("task") in names
-                                                   else r, ensure_ascii=False) + "\n"
+            replace_bytes(path, "".join(json.dumps({**r, field: True} if id(r) in hit else r,
+                                                   ensure_ascii=False) + "\n"
                                         for r in rows).encode("utf-8"))  # #734
-    return sorted(set(hit))
+    return sorted({r["task"] for r in rows if id(r) in hit})
 
 
 def read_jsonl(path: Path, offset: int = 0):

@@ -1296,6 +1296,58 @@ class Runs(Base):
         self.assertEqual(router.score(m, lost["size"]).tries, 1)
         self.assertIn("closed bo2", run_wb("run", "close", "bo2"))
 
+    def test_best_of_losers_discarded_before_the_pick_is_accepted_are_not_scored_as_rejected_work(self):
+        # #1568 (bar loop #1030, 2026-11-26): not_chosen read only an accepted sibling, so the
+        # losers discarded first (then the pick accepted) were judged discards, the model 1 of 3
+        from workbench import router, tuning
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Review this": {"verdict": "approve", "must_fix": [], "nits": [], "summary": "good"},
+            "Pick the best attempt": {"best": "a2", "ranking": ["a2", "a1", "a3"], "why": "a2"}})
+        run_wb("run", "start", "bod", "--flow", "best-of", "--param", "request=Write the answer to answer.txt.",
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("bod", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        run_wb("discard", "bod-code-3", "--reason", "not chosen")  # the chooser named another
+        run_wb("discard", "bod-code-2", "--reason", "worse than a1")  # the chooser's own pick
+        rows = {r["task"]: r for r in store.results()}
+        self.assertTrue(rows["bod-code-3"].get("not_chosen"))
+        self.assertNotIn("not_chosen", rows["bod-code-2"])
+        run_wb("accept", "bod-code-1", "-m", "feat: the answer")  # its siblings lost to it after all
+        rows = {r["task"]: r for r in store.results()}
+        for n in ("bod-code-2", "bod-code-3"):
+            self.assertTrue(rows[n].get("not_chosen"), n)
+            self.assertFalse(tuning.judged(rows[n]), n)
+        self.assertNotIn("not_chosen", rows["bod-code-1"])
+        m = runner.models.resolve(rows["bod-code-1"]["model"])
+        self.assertEqual(router.score(m, rows["bod-code-1"]["size"]).tries, 1)
+        self.assertIn("closed bod", run_wb("run", "close", "bod"))
+
+    def test_a_run_started_on_a_repo_with_uncommitted_changes_says_its_items_start_without_them(self):
+        # #1570 (bar loop #1030, 2026-11-26): every item starts from the base, and the driver drops
+        # each wb start's own note, so a whole run of paid items worked on the tree without the edits
+        note = "note: the repo has uncommitted changes; every item starts from HEAD without them"
+        start = ("run", "start", "dty", "--flow", "build", "--param", "request=Write the answer.", "--repo",
+                 str(self.repo))
+        (self.repo / "untracked.txt").write_text("scratch\n")  # untracked alone says nothing (#1322)
+        with mock.patch.object(runs, "spawn", return_value=0):
+            for argv in (start + ("--dry-run",), start):
+                code, out, err = wb(*argv)
+                self.assertEqual(code, 0, err)
+                self.assertNotIn("uncommitted", out)
+                if "--dry-run" not in argv:
+                    shutil.rmtree(runs.run_dir("dty"))
+            tracked = subprocess.run(["git", "-C", str(self.repo), "ls-files"], capture_output=True, text=True,
+                                     check=True).stdout.split()[0]
+            with open(self.repo / tracked, "a") as fh:
+                fh.write("wip\n")
+            code, out, err = wb(*start, "--dry-run")
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"\nestimate ", out)
+            self.assertIn(note, out.split("\nestimate ", 1)[1])  # after the estimate
+            code, out, err = wb(*start)
+            self.assertEqual(code, 0, err)
+            self.assertTrue(out.split("\n")[1] == note, out)  # under the run's line, its estimate
+            self.assertTrue(out.startswith("run dty: flow build"), out)
+
     def test_a_review_item_starts_on_the_change_it_reviews_and_a_chooser_on_the_runs_base(self):
         # #1503 (2026-11-26): every review started at the run's base, the change only a diff in
         # its prompt, so reviewers searched for it and retyped it to run a test, on the base

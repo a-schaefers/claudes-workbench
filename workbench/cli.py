@@ -800,8 +800,10 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
     Agents GPU, a --model asked for, a role with no API model: it queues as before); a
     line saying why the role's API model can't take it now, which never changes the start either.
     Only here, at a start: a running task never moves, and nothing goes from API to the GPU, but
-    by the role's fallback, the user's explicit exception (_fallback_start, #1196)."""
-    if a.model:
+    by the role's fallback, the user's explicit exception (_fallback_start, #1196). Never a run's
+    item (--run): the run sequences its own GPU items, and its estimate and budget are the GPU
+    side's, so item 2 went to the paid API model behind item 1 on a "$0" run (#1567, 2026-11-26)."""
+    if a.model or getattr(a, "run", None):
         return ""
     try:
         doc = routes.read()
@@ -2377,6 +2379,23 @@ def _drop_reviews(task: store.Task) -> None:
         task.set_status(review_trees=None, rewound_to=None)
 
 
+def _round_key(key: str):
+    """A review_trees key in round order: "2", "2h" (edits by hand on round 2, #1566), "10"."""
+    m = re.match(r"\d+", key)
+    return (int(m.group()) if m else 0, key)
+
+
+def _hand_label(trees: dict, on) -> str:
+    """The key edits by hand made on round ``on``'s files are kept as: "<N>h", then "<N>h2"
+    when that holds other edits, kept too (#1566)."""
+    m = re.match(r"\d+", str(on))
+    label = base = f"{m.group() if m else on}h"
+    k = 2
+    while label in trees:
+        label, k = f"{base}{k}", k + 1
+    return label
+
+
 @one_at_a_time
 def cmd_rewind(a):
     """Put the worktree back to the tree an earlier review notice of this step showed (#1198)."""
@@ -2394,7 +2413,7 @@ def cmd_rewind(a):
     trees = {k: v for k, v in (st.get("review_trees") or {}).items() if v.get("step") == steps}
     want = trees.get(str(a.round))
     if not want:
-        have = ", ".join(sorted(trees, key=int)) or "none yet"
+        have = ", ".join(sorted(trees, key=_round_key)) or "none yet"
         die(f"{a.name} has no review of round {a.round} in step {steps} (its reviewed rounds: "
             f"{have}; a rewind never goes back past wb next's commit)")
     if not gitops.has_tree(wt, want["tree"]):  # its ref deleted by hand, and gc pruned it
@@ -2417,8 +2436,16 @@ def cmd_rewind(a):
         saved = (f"\nround {now_round}'s files (not reviewed) are kept: wb rewind {a.name} "
                  f"{now_round} brings them back")
     elif now not in {v["tree"] for v in trees.values()}:
-        # no round ran since (it would be a new round): edits by hand, in the stat above
-        saved = "\nyour edits since the last review or rewind are undone too, and kept nowhere"
+        # no round ran since (it would be a new round): edits by hand, in the stat above. Kept
+        # as round "<N>h", N the round they were made on: they were undone and kept nowhere, so
+        # a hand fix SKILL.md asks for, or the user's own in an editor, was lost to a rewind
+        # asked to undo the agent's rounds (#1566, the bar loop of 2026-11-26)
+        hand = _hand_label(trees, st.get("rewound_to") or now_round)
+        trees[hand] = {"step": steps, "tree": now, "left": now_left, "keep": now_keep,
+                       "reviewed": False, "hand": True}
+        gitops.keep_review(wt, a.name, hand, now)
+        saved = (f"\nyour edits since the last review are kept: wb rewind {a.name} {hand} "
+                 "brings them back")
     task.set_status(review_trees=trees)
     if now == want["tree"]:
         print(f"{a.name}'s files are round {a.round}'s already")
@@ -2433,8 +2460,8 @@ def cmd_rewind(a):
                         f"--stat-count={gitops.CHANGED_SHOWN}", want["tree"], now, "--", ".",
                         *(f":(exclude,literal){p}" for p in done["left"]), check=False).rstrip()
     # the next review's diff counts from here; the next round starts a fresh session (feedback)
-    task.set_status(reviewed={"step": steps, "tree": want["tree"]}, rewound_to=a.round,
-                    context="fresh")
+    task.set_status(reviewed={"step": steps, "tree": want["tree"]},
+                    rewound_to=int(a.round) if a.round.isdigit() else a.round, context="fresh")
     task.event({"ts": store.now(), "round": now_round, "kind": "rewound",
                 "text": f"Claude rewound the files to round {a.round}'s"})
     _ack_all(task)
@@ -5191,6 +5218,8 @@ def cmd_accept(a):
                     unrecorded={"outcome": "accepted", "step": measured, "extra": extra}, closing=None)
     row = results.record(task, "accepted", measured, **extra)
     task.set_status(unrecorded=None)
+    # a best-of attempt's siblings discarded before this pick: their rows lost (#1568, 2026-11-26)
+    store.mark_not_chosen(runs.discarded_siblings(task))
     _ack_all(task)
     _closed(task)
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
@@ -9625,7 +9654,8 @@ def parser() -> argparse.ArgumentParser:
     _image_flag(s)
     s.set_defaults(f=cmd_feedback)
     s = sub.add_parser("rewind", help="put the worktree back to an earlier review round's files")
-    s.add_argument("name"); s.add_argument("round", type=int, help="the review round, as its notice says")
+    s.add_argument("name"); s.add_argument("round", help="the review round, as its notice says, "
+                                           "or <N>h: edits by hand a rewind kept")
     s.set_defaults(f=cmd_rewind)
     s = sub.add_parser("next", help="commit the approved step and send the same agent the next one")
     s.add_argument("name"); s.add_argument("--spec", required=True, help="the next step's spec file, or - for stdin")
