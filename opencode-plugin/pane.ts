@@ -17,7 +17,7 @@
 // Workbench agent (`session.switchAgent`, the mode, #1315's agent), and the request, when one was
 // typed after it, sent on to that agent. The TUI opens the panel when the session's agent
 // becomes Workbench, whichever way it did (pane.tsx). Nothing runs at import time.
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Registration, RpcDefinition, RpcHandlers } from './host.d.ts'
 import { applyPin, wbRunner, type DriverHost, type Run } from './driver.ts'
@@ -267,28 +267,21 @@ export interface PaneHost {
 
 export const DESCRIPTION = 'Workbench mode: hand coding to OpenCode agents through wb (the Workbench agent and its panel)'
 
-// What a fresh install's /workbench alone sends, the mod's FIRSTRUN_NOTE word for word (the
-// story's): the procedure's *First task* reads its `[workbench-firstrun]` tag and runs *First run*
+// What a fresh install's /workbench sends, the mod's FIRSTRUN_NOTE word for word (the story's):
+// the procedure's *First task* reads its `[workbench-firstrun]` tag and runs *First run*
 export const FIRSTRUN_NOTE: string = SAY['firstrun.note']
 
 /** Whether the install at ``home`` is fresh (core.ts's `freshInstall`, the mod's rule): its reads
- * as the mod's, the roles through `wb route --json` (a role naming an API model is set up), one
- * that fails read as none, as the mod reads a routes.json it can't parse. */
-export const freshAt = (home: string, run: Run): Promise<boolean> => freshInstall({
+ * as the mod's, from the same files: setup.json (`wb setup --done`'s), tasks/, results.jsonl.
+ * The roles no longer count (#1606, 2026-11-27). */
+export const freshAt = (home: string): Promise<boolean> => freshInstall({
+  done: async () => existsSync(join(home, 'setup.json')),
   tasks: async () => { try { return readdirSync(join(home, 'tasks')).length } catch { return 0 } },
   results: async () => statSync(join(home, 'results.jsonl'), { throwIfNoEntry: false })?.size ?? 0,
-  api: async () => {
-    const r = await run(['route', '--json'])
-    if (r.code !== 0) return false
-    try {
-      const roles: Partial<RouteJson['roles']> = (JSON.parse(r.stdout) as Partial<RouteJson>).roles ?? {}
-      return Object.values(roles).some(role => !!role?.api)
-    } catch { return false }
-  },
 })
 
-/** /workbench, run: the pin, the Workbench agent, then the request typed after it, if any; alone
- * on a fresh install, FIRSTRUN_NOTE (#1574).
+/** /workbench, run: the pin, the Workbench agent, then the request typed after it, if any; on a
+ * fresh install, FIRSTRUN_NOTE, after the request when there is one (#1574, #1606).
  * ``opened`` tells the TUI it ran (the RPC's `open` event), for a session already on Workbench. */
 export async function workbench(host: PaneHost, input: CommandInvocation, run: Run,
                                 opened?: (sessionID: string) => void): Promise<void> {
@@ -311,12 +304,16 @@ export async function workbench(host: PaneHost, input: CommandInvocation, run: R
   const prompt = input.prompt ?? {}, text = prompt.text ?? ''
   const attached = [prompt.files, prompt.agents, prompt.skills].some(x => x !== undefined && x.length > 0)
   if (!session.prompt) return
+  // on a fresh install, the note that starts *First run* at once, as the mod's /workbench carries
+  // it (#1190): without it the agent switched and nothing ran, though `wb setup --opencode` had
+  // said to run /workbench (#1574, 2026-11-26). With a request too, after it in the same prompt
+  // (its mentions' offsets still hold), kept for after First run: typed with the command, it
+  // skipped setup (#1606, 2026-11-27)
+  const first = await freshAt(wbHome(wbEnv(host.options))).catch(() => false)
   if (text.trim() || attached)
-    await session.prompt({ ...prompt, sessionID: input.sessionID, text, delivery: input.delivery })
-  // alone on a fresh install, the note that starts *First run* at once, as the mod's /workbench
-  // carries it (#1190): without it the agent switched and nothing ran, though `wb setup --opencode`
-  // had said to run /workbench (#1574, 2026-11-26)
-  else if (await freshAt(wbHome(wbEnv(host.options)), run).catch(() => false))
+    await session.prompt({ ...prompt, sessionID: input.sessionID, text: first ? `${text}\n\n${FIRSTRUN_NOTE}` : text,
+      delivery: input.delivery })
+  else if (first)
     await session.prompt({ sessionID: input.sessionID, text: FIRSTRUN_NOTE, delivery: input.delivery })
 }
 

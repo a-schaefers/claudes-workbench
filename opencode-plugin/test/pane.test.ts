@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AGENT, capOf, COMMAND, diffLines, FIRSTRUN_NOTE, LINK_MS, LIVE_MS, linkOf, PaneData, parseLines, ROLES_MS, scanTasks, startPane, workbench,
@@ -166,7 +166,7 @@ test('/workbench applies the pin, switches the session to the Workbench agent, t
   rmSync(home, { recursive: true, force: true })
 })
 
-test('/workbench alone on a fresh install sends the mod\'s first-run note; a task, a result, an API role or a request sends none (#1574)', async () => {
+test('/workbench on a fresh install sends the mod\'s first-run note, after a request when there is one; setup done, a task or a result sends none, an API role still does (#1574, #1606)', async () => {
   const home = mkdtempSync(join(tmpdir(), 'wb-fresh-'))
   const sent: { text: string; delivery?: string }[] = []
   const host = {
@@ -178,7 +178,7 @@ test('/workbench alone on a fresh install sends the mod\'s first-run note; a tas
       prompt: async (i: { text: string; delivery?: string }) => { sent.push(i) },
     },
   }
-  let roles: object = {}
+  const roles = { trivial: { via: 'api', api: 'prov/model' } }  // set before setup finished: no longer read
   const run: Run = async args => ({ code: 0, stderr: '',
     stdout: args[1] === 'driver' ? '{}' : JSON.stringify({ roles }) })
   const alone = async (text = '') => {
@@ -187,25 +187,29 @@ test('/workbench alone on a fresh install sends the mod\'s first-run note; a tas
     return sent.map(s => s.text)
   }
   try {
-    // no tasks/, no results.jsonl, no API role: the mod's note, the story's bytes, as the session's prompt
+    // no setup.json, no tasks/, no results.jsonl: the mod's note, the story's bytes, as the session's prompt
     expect(FIRSTRUN_NOTE.startsWith('[workbench-firstrun] A fresh install')).toBe(true)
+    expect(FIRSTRUN_NOTE.includes('`wb setup --done`')).toBe(true)
     expect(await alone()).toEqual([FIRSTRUN_NOTE])
     expect(sent[0]).toEqual({ sessionID: 'ses_1', text: FIRSTRUN_NOTE, delivery: 'steer' } as never)
     expect(await alone('  ')).toEqual([FIRSTRUN_NOTE])      // blank is alone, as the mod trims it
-    // with a request, the request is the work: no note
+    // with a request (#1606: it skipped setup), one prompt: the request as typed, then the note
+    expect(await alone('add a high-score screen')).toEqual([`add a high-score screen\n\n${FIRSTRUN_NOTE}`])
+    // setup done (`wb setup --done`'s marker): the request alone, and nothing alone
+    writeFileSync(join(home, 'setup.json'), '{"done": "2026-11-27T10:00:00+00:00", "version": "2.2"}\n')
     expect(await alone('add a high-score screen')).toEqual(['add a high-score screen'])
-    // a role naming an API model (on API, or kept beside the GPU): set up already
-    roles = { trivial: { via: 'gpu', gpu: 'auto', api: 'prov/model' } }
     expect(await alone()).toEqual([])
-    roles = {}
+    rmSync(join(home, 'setup.json'), { recursive: true, force: true })
     // one accepted and cleaned up since: results.jsonl has its row
     writeFileSync(join(home, 'results.jsonl'), '{"task": "fix-it"}\n')
     expect(await alone()).toEqual([])
     writeFileSync(join(home, 'results.jsonl'), '')       // empty is none, as the mod reads it
     expect(await alone()).toEqual([FIRSTRUN_NOTE])
-    // a task ran here: /workbench alone only switches
+    // a task ran here, from before the marker: /workbench alone only switches, and nothing is written
     mkdirSync(join(home, 'tasks', 'fix-it'), { recursive: true })
     expect(await alone()).toEqual([])
+    expect(await alone('add a high-score screen')).toEqual(['add a high-score screen'])
+    expect(existsSync(join(home, 'setup.json'))).toBe(false)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
