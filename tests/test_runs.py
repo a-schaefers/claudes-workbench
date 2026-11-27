@@ -797,6 +797,35 @@ class ScheduledFlows(Base):
         self.assertIn("wb run amend nightly-1 --budget-min N, then wb run resume nightly-1", schedule.held_why(r))
         self.assertNotIn("next fire starts", schedule.held_why(r))
 
+    def test_a_gpu_only_flows_fire_is_never_skipped_for_a_role_it_does_not_use(self):
+        # #1621 (2026-11-27): spend_skip checked every role on API, so significant on a provider
+        # with no day cap (or its key unset in the timer's environment, or the cap spent) skipped
+        # a trivial-only night on every fire
+        from workbench import schedule
+        tmp = Path(self.tmp.name)
+        gpu = {**self.NIGHT, "name": "gpunight",
+               "stages": [{"id": "triage", "card": "judge", "role": "trivial", "items": "{params.areas}"},
+                          {"id": "claude", "final": True, "from": "triage"}]}
+        esc = {**gpu, "name": "escnight", "stages": [  # a GPU stage escalating to significant uses it
+            {"id": "code", "kind": "code", "role": "trivial", "escalate": ["significant"], "items": "{params.areas}",
+             "prompt": "Fix {item}."}, {"id": "claude", "final": True, "from": "code"}]}
+        for f in (gpu, esc):
+            (tmp / "flows" / f"{f['name']}.json").write_text(json.dumps(f))
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"significant": {"via": "api", "api": "deepinfra/x"}}}))
+        for sched, flow, outcome in (("gpun", "gpunight", "started"), ("escn", "escnight", "skipped"),
+                                     ("sign", "night", "skipped")):
+            with self.subTest(flow=flow):
+                run_wb("schedule", "add", sched, "--flow", flow, "--repo", str(self.repo), "--at", "Sun 02:00",
+                       "--budget-usd", "0")
+                with redirect_stdout(io.StringIO()):
+                    schedule.fire(sched)
+                row = schedule.runs(sched)[-1]
+                self.assertEqual(row["outcome"], outcome, row)
+                if outcome == "skipped":
+                    self.assertIn("significant role", row["why"])
+                else:
+                    self.wait_ended(row["run"])
+
     def wait_ended(self, name):
         deadline = time.time() + 60
         while time.time() < deadline and runs.Run(name).status.get("phase") in runs.OPEN:
@@ -1148,7 +1177,11 @@ class Runs(Base):
         self.assertEqual(st["phase"], "paused")
         self.assertIn("the run's GPU budget: 0 of 0 minutes used", st["why"])
         self.assertEqual(runs.run_tasks(runs.Run("bud")), [])
-        self.assertIn("Run `bud` is paused", self.run_notices("bud")[-1]["text"])
+        told = self.run_notices("bud")[-1]["text"]
+        self.assertIn("Run `bud` is paused", told)
+        # #1620 (bar loop #1030, 2026-11-27): it named --budget-usd, which lifts no GPU minutes
+        self.assertIn("wb run amend bud --budget-min N, then wb run resume bud", told)
+        self.assertNotIn("--budget-usd", told)
         self.assertIn("amended bud: GPU budget 100 min. It is paused: wb run resume bud",
                       run_wb("run", "amend", "bud", "--budget-min", "100"))
         run_wb("run", "resume", "bud")
@@ -2545,9 +2578,10 @@ class RunsApi(Base):
         self.assertEqual(runs.report_of("ovc")["null"], [])
         run_wb("discard", task.name)
 
-    def test_a_held_code_item_whose_drivers_resume_fails_otherwise_is_still_its_null_and_claudes_checkpoint(self):
+    def test_a_held_code_item_whose_drivers_resume_fails_otherwise_is_held_at_claudes_checkpoint_never_null(self):
         # #1581's gate: held while _outside says so, an item whose resume wb refused (exit 1) ran
-        # on unseen, the run never ended and each pass resumed it again
+        # on unseen, the run never ended and each pass resumed it again; #1623 (bar loop #1030,
+        # 2026-11-27): no refused resume nulls an item, so it waits held at Claude's checkpoint
         run, _ = self.start("ovf", "--budget-usd", "1", "--overnight", flow={**self.OVERNIGHT_CODE, "stages": [
             {k: v for k, v in self.OVERNIGHT_CODE["stages"][0].items() if k != "escalate"},
             self.OVERNIGHT_CODE["stages"][1]]})
@@ -2558,12 +2592,63 @@ class RunsApi(Base):
         with mock.patch.object(runs, "_wb", side_effect=lambda argv, *a, **k:
                                refused if argv[0] == "resume" else real(argv, *a, **k)):
             runs.tick(run)
-        self.assertEqual([(r["by"], r["ok"]) for r in run.journal() if r.get("kind") == "resumed"],
-                         [("driver", False)])
-        self.assertEqual([(i.state, i.why) for i in runs.state(run)["code"]], [("null", "rate_limited: 429")])
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "resumed"])
+        self.assertEqual([(r["by"], r["code"]) for r in run.journal() if r.get("kind") == "held"], [("driver", 1)])
+        self.assertEqual([(i.state, i.why) for i in runs.state(run)["code"]], [("running", "")])
+        self.assertFalse([r for r in run.journal() if r.get("kind") == "null"])
         self.assertEqual(run.status["phase"], "checkpoint")
+        self.assertIn("ovf-code-1's resume was refused (resume: no); its work is kept", run.status["why"])
         self.assertEqual([r["kind"] for r in self.notices("ovf")], ["run_checkpoint"])
+        runs.tick(run)                                                   # at the checkpoint: no loop
+        self.assertEqual(len([r for r in run.journal() if r.get("kind") == "held"]), 1)
+        self.assertEqual(task.status["phase"], "stuck")                  # its work kept
+        with mock.patch.object(runs, "driver_alive", return_value=True):  # Claude's wb run resume tries again
+            self.assertEqual(wb("run", "resume", "ovf")[0], 0)
+        self.assertEqual([r["by"] for r in run.journal() if r.get("kind") == "resumed"], ["resume"])
+        self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
         run_wb("discard", task.name)
+
+    def test_a_wb_run_stop_item_whose_run_resume_is_refused_at_the_day_cap_is_held_never_null_nor_escalated(self):
+        # #1623 (bar loop #1030, 2026-11-27): wb run resume's refused resume (exit 3, the cap)
+        # journalled `resumed` ok false, which ended wb run stop's hold, so the next tick took a
+        # report item as null (its paid work dropped, the run at review) and read a code item as
+        # null, escalating it to the dearer role while the stopped try was never taken up again
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_BY=json.dumps(
+            {"Audit area": {"findings": [], "covered": ["README.md"]}}))
+        for name, flow, stage in (("rsa", AUDIT, "find"), ("rsc", self.OVERNIGHT_CODE, "code")):
+            self.roles(SPEND_FLASH, 50)
+            run, _ = self.start(name, "--budget-usd", "1", flow=flow)
+            item = f"{name}-{stage}-1"
+            os.environ["FAKE_SLEEP"] = "600"
+            runs.tick(run)
+            self.wait_item(item, lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+            self.assertEqual(wb("run", "stop", name)[0], 0)
+            os.environ["FAKE_SLEEP"] = "0"
+            self.spent(5.03)
+            self.roles(SPEND_FLASH, 5)                                   # today at the cap
+            with mock.patch.object(runs, "spawn", return_value=0):
+                self.assertEqual(wb("run", "resume", name)[0], 0)
+            self.assertEqual(runs._resume_items(run), [])                # as the new driver starts: refused
+            self.assertEqual(run.status["phase"], "paused")
+            self.assertEqual([(r["by"], r["code"]) for r in run.journal() if r.get("kind") == "held"],
+                             [("resume", 3)])
+            for _ in range(2):
+                self.assertTrue(runs.tick(run))
+            self.assertFalse([r for r in run.journal() if r.get("kind") in ("resumed", "null", "escalate",
+                                                                            "escalated")])
+            self.assertEqual([(i.key, i.state) for i in runs.state(run)[stage]], [("1", "running")])
+            self.assertEqual((store.Task(item).status["phase"], store.Task(item).status["last"]),
+                             ("stuck", runs.STOPPED_BY_CLAUDE))          # held where it stopped
+            self.roles(SPEND_FLASH, 50)                                  # the cap raised
+            with mock.patch.object(runs, "driver_alive", return_value=True):
+                self.assertEqual(wb("run", "resume", name)[0], 0)        # the live driver's resume
+            self.assertEqual([r["by"] for r in run.journal() if r.get("kind") == "resumed"], ["resume"])
+            self.wait_item(item, lambda st: st.get("phase") in ("review", "stuck", "failed"))
+            self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
+            self.assertEqual(runs.report_of(name)["null"], [])
+            self.assertEqual([r["task"] for r in run.journal() if r.get("kind") == "item"], [item])  # no escalation
+            if stage == "code":
+                run_wb("discard", item)
 
     def test_without_overnight_the_cap_pauses_the_run_and_wb_run_resume_takes_the_item_up(self):
         os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_BY=json.dumps(

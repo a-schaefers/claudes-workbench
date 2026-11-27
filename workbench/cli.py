@@ -2988,7 +2988,8 @@ def cmd_wait(a):
                     print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
                     return
         elif batch and (left := _batch_left(batch)):
-            die(f"nothing left running in backlog {batch}: {left} wait on you; the batch is done", 2)
+            die(f"nothing left running in backlog {batch}: {left} wait on you; the batch is done"
+                + (", the held left for the morning" if "(held for the user:" in left else ""), 2)
         elif not any(t.status.get("phase") not in store.CLOSED and t.name not in theirs
                      for t in store.all_tasks()) and (batch or not any(
                          r.open() for r in runs._runs_in_scope(a))):
@@ -2996,6 +2997,10 @@ def cmd_wait(a):
                 + (f" in backlog {batch}" if batch else
                    " in this session (--all-sessions waits on every session's)" if theirs else ""), 2)
         if deadline and time.time() > deadline:
+            if batch:  # what still goes on, never "timed out" while it does (#1622, 2026-11-27)
+                going = ", ".join(f"{t.name} ({t.status.get('phase')})" for t in store.all_tasks()
+                                  if t.spec.get("backlog") == batch and t.status.get("phase") not in store.CLOSED)
+                die(f"still going in backlog {batch}: {going}; wb wait --backlog {batch} again", 2)
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
         watcher.wait(min(60.0, deadline - time.time()) if deadline else 60.0)
@@ -3008,17 +3013,31 @@ def _batch_left(batch: str) -> str:
     what is left for the morning. Review, stuck and failed aren't CLOSED, so a task left in
     review with `wb note`, as driving.md says, kept the fire's `wb wait --backlog` saying "timed
     out" every 280 s, a paid turn each, until FIRE_HOURS stopped it with no summary posted (#1613,
-    bar loop #1030 round 6, M4, 2026-11-27)."""
+    bar loop #1030 round 6, M4, 2026-11-27). A task queued with infra `spend` (runner._cap_wait's,
+    _agents_wait's: behind the day cap or the Agents switch, which only the user, or midnight for
+    the cap, lifts) is held for the user, its live runner and all: such a batch never ended, and
+    headless Claude waited out its 12 h (#1622, bar loop #1030 round 7, M4, 2026-11-27)."""
     open_ = [t for t in store.all_tasks() if t.spec.get("backlog") == batch
              and t.status.get("phase") not in store.CLOSED]
-    if not open_ or any(t.status.get("phase") not in ("review", "stuck", "failed") or runner_alive(t)
+    if not open_ or any(not _held_for_user(t) and (t.status.get("phase") not in ("review", "stuck", "failed")
+                                          or runner_alive(t))
                         # another wb reaping it writes the phase before the notice (as cmd_wait's
                         # named wait, the 0.90 review)
                         or t.status.get("last") == RUNNER_DIED
                         and time.time() - (t.status.get("updated_at") or 0) < 10
                         for t in open_):
         return ""
-    return ", ".join(f"{t.name} ({t.status['phase']})" for t in open_)
+    return ", ".join(f"{t.name} (held for the user: {why})" if (why := _held_for_user(t))
+                     else f"{t.name} ({t.status['phase']})" for t in open_)
+
+
+def _held_for_user(t: store.Task) -> str:
+    """Why ``t`` is queued behind a stop only the user (or the cap's midnight) lifts, its status
+    last's first clause ("the day's API spend cap is reached: …"), else ""."""
+    st = t.status
+    if st.get("phase") != "queued" or st.get("infra") != runner.SPEND:
+        return ""
+    return str(st.get("last") or "").removeprefix("waiting: ").split("; ")[0] or "waiting"
 
 
 def _wait_run(a, deadline) -> None:
@@ -4633,7 +4652,8 @@ def _route_fallback(a) -> None:
 
     def changed(doc) -> routes.Change:
         try:
-            return routes.change(doc, role, fallback=fb, who=_who)
+            # free and thinks as a role's own model's change (#1619)
+            return routes.change(doc, role, fallback=fb, who=_who, free=_free, thinks=_thinks)
         except routes.RoutesError as e:
             die(str(e), 3)
 

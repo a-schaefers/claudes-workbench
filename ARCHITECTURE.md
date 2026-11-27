@@ -1223,15 +1223,18 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   `backlog` = the batch) with their phases, the closed ones' API dollars (`savings.api_totals`),
   Claude's usage parsed as `wb bench self` parses it (`bench._self_result`, `_self_usage`).
 - **Headless Claude** gets no wakes (`mem.person` is false under `claude -p`): driving.md's
-  *Headless: a scheduled run* has it drive with `wb wait --backlog <batch> --timeout 280` loops
-  (`schedule._fire_env` sets `BASH_DEFAULT_TIMEOUT_MS` 300000 and `BASH_MAX_TIMEOUT_MS` 600000 unless the
-  user's are set, `schedule.BASH_TIMEOUT_MS`: one turn per 280 s idle inside the prompt cache, where 100 s
-  polls under Bash's two minutes ran a long GPU night out of `TURNS`, #1602; its batch alone, never the repo's daytime tasks by directory; done at `no open tasks` or, the rest at review, stuck or failed, `nothing left running`, #1613), accept without `--merge`, leave hard calls as `wb note`, and end with `wb backlog` and
+  *Headless: a scheduled run* has it drive with `wb wait --backlog <batch>` loops, no `--timeout`
+  (`schedule._fire_env` sets `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` to the whole `FIRE_HOURS` unless the
+  user's are set, `schedule.BASH_TIMEOUT_MS`: one call blocks outside Claude until a task needs it, where 100 s
+  polls under Bash's two minutes ran a long GPU night out of `TURNS`, #1602, and 280 s polls paid ~140 idle turns
+  for a batch held at the day cap, #1622; its batch alone, never the repo's daytime tasks by directory; done at `no open tasks` or, the rest at review, stuck or failed, or held for the user, `nothing left running`, #1613), accept without `--merge`, leave hard calls as `wb note`, and end with `wb backlog` and
   `wb chat reply --to user`. Every consent gate fails closed with no dialog to answer: no route
   change, no API `--model`, no patch send (`cli.start_gate`, route-ok.json, send-ok.json). The
   morning session claims the tasks by directory once headless Claude's process is gone (`cli._scope`).
 - **A flow, with no driver** (`wb schedule add <name> --flow <flow> [--param K=V…] [--budget-usd N]`, #1295):
-  each fire, under the same lock and after `spend_skip`, runs `wb run start <name>-YYMMDD --flow <flow> --repo
+  each fire, under the same lock and after `spend_skip` on the roles its stages and their escalations run on
+  (`runs.flow_roles`: every role on API, one the flow never used without its key or at the cap, skipped a GPU-only
+  night on every fire, #1621; a backlog's checks every role, its Claude may start any), runs `wb run start <name>-YYMMDD --flow <flow> --repo
   <repo> --overnight --budget-usd N [--param …]` itself (`schedule._fire_flow`; the run's name `schedule.run_name`,
   `-2` … `-99` once `runs.taken` has one, hence `FLOW_NAME_MAX` 14 for its 24), no `claude -p`: on the
   OpenCode-only path every fire of a backlog failed for want of claude. The run's own driver, budget and
@@ -5457,7 +5460,11 @@ that case needs nothing new): `routes._fallback_check`, also when the role's API
 onto the fallback's provider. Its change line names where the code goes (`routes._fallback_part`:
 `trivial: fallback none → anthropic/<id>: your code goes to Anthropic when its API model's provider
 is down or out of credit · thinking off · cap $5/day`) and takes the dialog's yes and a day cap
-(the suggested one with no cap yet, `routes._NoCap`, #1322); `gpu` (`fallback none → GPU (the router's pick) when …`) and `none` spend nothing and
+(the suggested one with no cap yet, `routes._NoCap`, #1322); its thinking is what the fallback
+model does with the role's (`routes.role_thinks` through `cli._thinks`, as a role's own model is
+said: `thinking on (it can't turn off)` for one that can't), and a free one says
+`privacy.FREE_LINE` and takes no cap, as a free role's own model (`cli._free`, #1193; the line
+said `thinking off` and no training clause for either, #1619); `gpu` (`fallback none → GPU (the router's pick) when …`) and `none` spend nothing and
 send nothing off the machine, so they take neither. A kept API fallback is named again when its role
 goes to API (`fallback <id> (<provider>)`). `routes.fallback_of` is the one that applies: `gpu` is
 none while Agents is API. Claude only recommends one, never sets one (the skill). It applies only to
@@ -5480,7 +5487,9 @@ of: `… its GPU model <id>, isn't found (not in OpenCode's config now)`, #1573)
   holders; a fallback start says `<id>: <why>: on the role's fallback, as you set (<fallback>)`
   (`routes.FALLBACK_LINE`) under its model line (`… · trivial role's fallback · …`,
   `routes.said_part`); task.json gets `fallback: true` and `fallback_from` (`routes.fallback_routed`,
-  through `cli._routed_keys`), and its `route` ends with the line. A fallback
+  through `cli._routed_keys`, with `thinking_shown`, the fallback model's own, as `busy_routed`'s:
+  the model line and `route` said `thinking off` for one that can't turn it off, #1619), and its
+  `route` ends with the line. A fallback
   that can't take it either leaves the start as before after `note: the <role> role's fallback <id>
   can't …`. This keeps an overnight `--queue` backlog draining.
 - **In the runner** (`runner._fallback_move`, `FALLBACK_STOPS`): a round stopped as `quota`, or held
@@ -10318,12 +10327,16 @@ round, a provider's rate limit, outage or refusal, a repo made local-only, `wb s
 `resumed` `by: driver`, unless past the run's budget, *Budgets*; never Claude's own `wb stop <item>`, `last` `runs.STOPPED_BY_CLAUDE`, whatever `infra`
 it left: one made while the item waited behind a told cap kept the wait's `spend`, and the driver resumed it, #1588's). The rest of `cli.stopped_outside`'s, a model that failed, a setup, a crash, a full disk,
 the repo gone, OpenCode unusable, end the item as its own failure (its stage's `on_failure`, `null` by default),
-as `wb resume --all` leaves them (`cli.INTERRUPTED`). A resume refused with exit 3
-(the cap, local-only, Agents on the GPU) holds the item (journal `held`) and pauses the run, or under
-`--overnight` with the cap's `meter.RESETS` is tried again each pass, so past midnight it goes on; any other
-refusal is its null. While the run is open a held code item reads `running` (`runs._live`), so its stage stays
-incomplete and no escalate role's attempt starts beside it, unless the driver's last resume of it was refused
-(journal `resumed` `by: driver`, `ok: false`: its null); read as null, a code item the cap stopped mid-round under
+as `wb resume --all` leaves them (`cli.INTERRUPTED`). No refused resume, the driver's or `wb run resume`'s
+(`runs._resume_held`, one path for both), drops or nulls the item: it stays held where it stopped, journal `held`
+(`by`, `code`, `why`), until a resume that runs it (journal `resumed`, `ok` true, the only row that ends `wb run
+stop`'s hold). Refused with exit 3 (the cap, local-only, Agents on the GPU) the run pauses, or under
+`--overnight` with the cap's `meter.RESETS` the item is tried again each pass, so past midnight it goes on; refused
+otherwise it is Claude's item checkpoint, tried again only by `wb run resume`. `wb run resume`'s refusal at the cap
+ended `wb run stop`'s hold, so the next tick took a report item as null, its paid work dropped, and escalated a code
+item to the dearer role; the driver's other refusals were the item's null (#1623). While the run is open a held code
+item reads `running` (`runs._live`), so its stage stays incomplete and no escalate role's attempt starts beside it;
+read as null, a code item the cap stopped mid-round under
 `--overnight` ended the run in the pass that held it (#1581). A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
 Claude's, its work kept; while the run isn't `running` the item waits for `wb run resume`. It takes each report item that ended (`_take`: its object to `outputs/`,
 through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fix` list, at most `max`, the review
@@ -10363,7 +10376,8 @@ crash adopts the item.
 **Budgets.** Dollars: `--budget-usd`, else the flow's, else today's cap left (said at start); the cap itself
 still checks every start. Before each API start `meter.run_total` (one pass over the ledger for the run's tasks)
 plus `meter.request_floor` past the budget pauses the run (`run_paused`); plan and free models count $0. GPU
-minutes: `--budget-min`, the items' `active_s`. `--overnight` (needs `--budget-usd`) keeps trying past the day
+minutes: `--budget-min`, the items' `active_s`. The pause's notice names the amend that lifts the budget hit
+(`runs._pause_at_budget`: `--budget-min` for the GPU one, else `--budget-usd`, as `schedule.held_why`; #1620). `--overnight` (needs `--budget-usd`) keeps trying past the day
 cap's midnight instead of pausing. A stage on an API role with no cap refuses the start (`meter.no_cap`).
 The run's budgets are checked before each start only, and a review's refix counts as one (`runs._take`: past the
 budget it pauses the run as a start does, and while the run isn't going, `runs._going`, the review waits, retaken
@@ -10371,7 +10385,7 @@ each pass, so the first pass after `wb run amend --budget-usd N` and `wb run res
 refix paid a coding round past the budget, while the run read `paused`, #1586), and so does a resume of a held
 item, the driver's (`runs._held`) and `wb run resume`'s (`runs._resume_items`): past the budget the item stays
 held, its work kept, and the run pauses (`--overnight` waits past the day cap only, never past the run's own
-budget). Held means `wb run stop`'s items too (`runs._held_stop`, journal `stopped` not yet `resumed`; `_live`
+budget). Held means `wb run stop`'s items too (`runs._held_stop`, journal `stopped` not yet `resumed` `ok`; `_live`
 reads such a code item `running` while the run is open): only the ones stopped from outside were, so a resume
 held at the budget let the next tick take a stopped report item as null, its paid work discarded, and read a
 stopped code item as null, escalated to the paid role unasked (#1612). Each is priced by `runs.paid_model(stage, it)`: the item's task's own model once it has one (a resume or
@@ -10417,7 +10431,7 @@ the drivers of the runs whose items it stops first (`runs.stop`, `items=False`).
 stop or an interruption left (`runs._resume_items`, `_resumable`: `wb run stop`'s, journal `stopped`, and not
 Claude's own `wb stop <item>`, which leaves the same `last`; and those failed or stuck from outside, `_outside`;
 a live runner reaped first, quietly) `wb resume`d, journal `resumed` `by:
-resume`: by the new driver as it starts, alive so their notices are its, or by `_resume` under a live one. A
+resume` (refused, held as the driver's are, `runs._resume_held`): by the new driver as it starts, alive so their notices are its, or by `_resume` under a live one. A
 closed run, or one at `review`, never goes on (`runs._ended`; `wb run feed` asks before it writes the inbox).
 **Close** refuses while a code item is open. `wb stop --all` and `wb takeover --all` (the hand-back) stop runs' drivers (#1471); while a run is open, a code item Claude took over (status `taken_over`) is `not_run` (`runs.TAKEN_OVER`, `runs._live`), never done, so no next stage reviews, refixes or approves the diff Claude is editing; once the run has ended, its report keeps the item as it was. `wb gc` archives closed runs.
 `wb top --json`'s `runs` (`runs.snapshot`) is the pane's and the web's seam. **A slash command as a flow**: `wb
@@ -10501,7 +10515,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Watching
 | Command | Flags | What it does |
 |---|---|---|
-| `wb wait [<task>]` | `--timeout S` (0 none); unnamed: `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` (that batch's tasks alone, whichever session's: a scheduled run's headless Claude, which would otherwise take the repo's daytime tasks by directory, #1204) | Reaps, blocks (inotify), prints `[<kind>] <task>\n<text>`, claiming it (`cli.claim_ack`: one waiter or the mod wins, #696); skips notices no longer true. Named: closed exits 2; taken elsewhere "(already delivered once)"; no notice `[<phase>] <task> (no notice: <last>)`. Bare, no open task: exit 2. `--backlog`, its open tasks all at review, stuck or failed with no runner (none queued, `--after` too, running, testing or asking; every notice claimed by then): exit 2, `nothing left running in backlog <b>: <task> (<phase>), … wait on you; the batch is done` (`cli._batch_left`: a task left in review with `wb note` had every wait say "timed out" until the fire's 12 h stop, #1613). A run named (#1278, `cli._wait_run`): its next notice still true (`runs.due`), `[<kind>] run <run>`; unnamed, the caller's runs' notices (`runs._runs_in_scope`) come before its tasks'. |
+| `wb wait [<task>]` | `--timeout S` (0 none); unnamed: `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` (that batch's tasks alone, whichever session's: a scheduled run's headless Claude, which would otherwise take the repo's daytime tasks by directory, #1204) | Reaps, blocks (inotify), prints `[<kind>] <task>\n<text>`, claiming it (`cli.claim_ack`: one waiter or the mod wins, #696); skips notices no longer true. Named: closed exits 2; taken elsewhere "(already delivered once)"; no notice `[<phase>] <task> (no notice: <last>)`. Bare, no open task: exit 2. `--backlog`, its open tasks all at review, stuck or failed with no runner (none queued, `--after` too, running, testing or asking; every notice claimed by then): exit 2, `nothing left running in backlog <b>: <task> (<phase>), … wait on you; the batch is done` (`cli._batch_left`: a task left in review with `wb note` had every wait say "timed out" until the fire's 12 h stop, #1613); a task queued with status `infra` `spend` (behind a told day-cap or Agents stop: `runner._cap_wait`, `_agents_wait`), its runner alive, counts as `<task> (held for the user: <why>)`, and the line ends `, the held left for the morning` (`cli._held_for_user`, #1622). `--backlog`'s `--timeout` passed says `still going in backlog <b>: <task> (<phase>), …; wb wait --backlog <b> again`, never "timed out" (#1622). A run named (#1278, `cli._wait_run`): its next notice still true (`runs.due`), `[<kind>] run <run>`; unnamed, the caller's runs' notices (`runs._runs_in_scope`) come before its tasks'. |
 | `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` | Reaps. A line per open task; `?` when its runner died within `REAP_GRACE`; a `via` column (`gpu`, `api`) before the model, 24 wide (`cli.status_model`: an API task's `provider/model`, the provider never cut, a vendor segment between cut to `…/` and the model's own name, the id's last segment, kept, its end when it alone overflows, `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash` as `deepinfra/…ek-V4.1-Flash`: two models of one vendor read apart, #1117; a GPU task's last segment, #1016). Named: `worktree:`, `cli.use_line`, `experiments_off`. Parked tasks fold into one `parked by wb stop --all …` line without `--all` (#541); scoped, `open elsewhere (other sessions'): …`, from an OpenCode driver ending with `cli.OPENCODE_WAY_BACK` when a live OpenCode session holds one (`/sessions` goes back to it, #1498; `cli._elsewhere_line`), and a task whose session is gone (`_owner_gone`) on its own line, `open elsewhere (a gone Claude Code session's): <t> (<repo>; wb adopt <t> takes it here)` (OpenCode's alike; under Claude Code the adopt names `--session`), as the directory rule never crosses drivers and a switch from Claude Code to OpenCode left those reviews unwoken (`cli._others_line`, #1482). Unnamed, a line per run in the scope after the tasks (`cli._run_lines`, `runs.status_line`), a dead driver reaped first. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden, the pane's), `--last N` (hidden), `--export` (hidden, the OpenCode plugin's child sessions) | `transcript.follow`; default the latest open task, never a bench replay (#555). The header's `routed:` line, and with `--json` a `routed` row after `meta` (`transcript.routed_text`, #1016). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The events, one line per `transcript.LOG_KINDS` kind (`EVENT_KINDS`, `text`, `tool`; `transcript.log_body`, which the web chat's task sheet shows too, #1201) (#861); `-n` counts printed lines, `step` rows dropped first (#861); `-f` follows until it needs Claude, reaping, flushing (#90, #545). |
@@ -10543,7 +10557,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb schedule list` | | Each schedule (`when · repo · file`), `running since …` while a fire holds its lock, and its last runs.jsonl row (`schedule.summary`: outcome, batch, tasks by phase, API dollars, Claude's turns and tokens), or `never fired yet`. |
 | `wb schedule rm <name>` | | Refused while its fire runs; else the timer disabled and its files, `schedules/<name>/` and its lock removed. The tasks it started stay. |
 | `wb schedule run <name>` | | A fire now, detached (`cli.detach`; its output to `schedules/<name>/fire.log`), refused while one runs. |
-| `wb schedule fire <name>` | | The unit's command (`schedule.fire`): skips while the last fire holds its lock, or for money or an exported key its environment lacks (`schedule.spend_skip`, #1495), each a `skipped` row; else `claude -p` headless on the backlog and one row, or a flow's `wb run start` (`schedule._fire_flow`; skipped while its last run's driver lives, the row saying why: `schedule.held_why`). Exit 1 on an error row. *Scheduled runs*. |
+| `wb schedule fire <name>` | | The unit's command (`schedule.fire`): skips while the last fire holds its lock, or for money or an exported key its environment lacks (`schedule.spend_skip`, #1495; a flow's, only for the roles it runs on: `runs.flow_roles`, #1621), each a `skipped` row; else `claude -p` headless on the backlog and one row, or a flow's `wb run start` (`schedule._fire_flow`; skipped while its last run's driver lives, the row saying why: `schedule.held_why`). Exit 1 on an error row. *Scheduled runs*. |
 | `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, claude, self_est, saved, wh, cost, score, price, api}` (the same totals as the web chat's Savings, `chat.week_saved`); `--api`: the day ledger's spend, today's, by provider and by day, open tasks and bench replays in (`savings.spent`, #1094), and the closed API tasks counted, trials in, `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022), only the models of `model_lines`' `lines` and `(+N more models: wb stats --all)` (`--all`: every model), or every model when `lines` is empty (none configured now or recent, or OpenCode's config unreadable: the table said `no finished tasks yet` under a headline of N tasks, #1400); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). Beneath the table one line, `left out: N trials, N report tasks, N spec gaps, N outside stops, N never ran` (a report task's row, #1278, never a trial), each kind counted apart and only the nonzero ones (`results.table`, #817, #1245; one line, no `claude` or `≈` footnote, #1322). |
 | `wb gc` | `--days N` (`ARCHIVE_DAYS` 30) | `cli.gc`, writing `gc.json`: archives tasks closed N days (`store.archive`); old handled notices to `notify.old.jsonl` (`_rotate_notices`; `_cap_old_notices` at `NOTIFY_OLD_MAX` 8 MiB); rules of gone tasks (`RULES_GRACE` 1 h); `context.drop_stale_runtime_dirs`; `store.SCRATCH_PREFIXES` scratches (named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`; `wb bench add`'s `.<case>.<pid>.tmp`) `SCRATCH_AGE` old whose maker is gone (`_drop_scratches`, `_maker_alive`: a reused pid with another start is gone, #532; `_scratch_homes`, #589; another machine's after `FAR_SCRATCH_AGE`, as its pid isn't in this process table, #876); half-made starts (`_dead_start`, `_drop_start`: worktree unlocked and removed, and the branch only when `starting.json` says this start made it and it still points at `branch_at`, `delete_branch(at=)`, #416, #376); chat uploads (`chat.drop_old_uploads`); landed `delegate/` branches (`_merged_branches`, `gitops.drop_landed_branch`, never one checked out, `gitops.checked_out_in`, nor one moved past the recorded tip, #930; status `branch_gone`, #686; one squash-merged elsewhere holds commits its target lacks and stays); accepted refs (`_released_refs`, `gitops.drop_accepted`, `accepted_ref_gone`: deleted when the tip is in `base_branch`, else moved into `steps.bundle` first; a `steps.bundle` stays as long as its task, #940); archived tasks past `store.SLIM_DAYS` 90 slimmed (`store.slim_archive`, `SLIM_GLOBS`: logs, test outputs, old exports, shot PNGs with shots.json marked `pruned` first, #821; task.json, status, prompts, summaries, events and asks stay: names stay taken, bench add and the lessons read them); `_drop_leftovers` (old `imports/`, dead `claude-sessions/<pid>`). Then (not in `cli.gc`) `bench.sweep` (#511). Accept and discard run it without the branches once per `GC_EVERY`. Runs closed N days to `runs/.archive/<run>` (`runs.archive`; gc.json `runs`), their names still taken. |
@@ -11828,6 +11842,7 @@ OpenRouter's pick, and new backends on a busy role count as newly sent (`routes.
 
 **A fallback per role** (`Fallbacks`, `FallbackMoves`, #1196): routes.json's `fallback` read and checked, said in
 `routes.summary` (register.test.tsx's fixture too); `wb route <role> fallback <API id>` on the dialog's yes and a cap,
+the fallback model's own thinking in its line and start line and a free one's training clause with no cap (#1619),
 `gpu` and `none` with neither, the role's own provider or model and OpenRouter refused; a kept one named when its role
 goes to API; at `wb start` a provider marked out of credit starts the API fallback (task.json `fallback`, the line, the
 where-note, the results row) and a held one the GPU fallback, a fallback that can't take it (out of credit too, the
@@ -11894,7 +11909,7 @@ doc needs its own `!/` line).
 ## Couplings: change one, change the other
 
 - **The README's bold opening line and the sentence after it** → the GitHub repository's About description, word for word, the Markdown (bold, backticks) aside (the owner, 2026-11-24, on #1357: keep the two in sync while iterating). `tests/test_docs.py` pins the README side; the About side is set by hand (`gh repo edit --description`).
-- **What a scheduled fire lets headless Claude use** (`schedule.TOOLS`, `ALLOWED`, `DENIED`, the permission mode) and `schedule.PROMPT`'s section names → driving.md's *Headless: a scheduled run* (a spec on stdin, `wb wait --backlog <batch> --timeout 280` loops, inside `schedule.BASH_TIMEOUT_MS`, done at its `no open tasks` or `nothing left running` exit, `cli._batch_left`, #1613), and `tests.test_workbench.ScheduledRuns`. The fire's batch name (`<name>-YYYY-MM-DD[-N]`, `schedule.batch_name`, N up to `SAME_DAY` 99) → `schedule.NAME_RE`'s 34 against `store.NAME_RE`'s 48 (#1204).
+- **What a scheduled fire lets headless Claude use** (`schedule.TOOLS`, `ALLOWED`, `DENIED`, the permission mode) and `schedule.PROMPT`'s section names → driving.md's *Headless: a scheduled run* (a spec on stdin, `wb wait --backlog <batch>` loops with no `--timeout`, inside `schedule.BASH_TIMEOUT_MS` (the whole `FIRE_HOURS`, #1622), done at its `no open tasks` or `nothing left running` exit, `cli._batch_left`, #1613, held tasks included, #1622), and `tests.test_workbench.ScheduledRuns`. The fire's batch name (`<name>-YYYY-MM-DD[-N]`, `schedule.batch_name`, N up to `SAME_DAY` 99) → `schedule.NAME_RE`'s 34 against `store.NAME_RE`'s 48 (#1204).
 - **`launchd/workbench.chat.plist`, in a release** → the release before's sha256 into `cli.SHIPPED_PLISTS`, or `wb setup` keeps a copy of it as the user's (#1406).
 - **SKILL.md or a reference file reworded** (`skill/workbench/`) → `opencode-plugin/skill.ts`'s
   `HOST_LINES`, which match Claude Code's exact wording (`skill.test.ts` names a rule that no longer

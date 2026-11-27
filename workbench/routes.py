@@ -387,8 +387,13 @@ def fallback_routed(doc: dict, role: str, m, primary: str) -> dict:
     if m.kind != "api":
         return {"via": "gpu", "role": role, "fallback": True, "fallback_from": primary}
     row = doc["roles"][role]
+    # what the fallback model does with the role's thinking, as busy_routed says it: without it
+    # the start line and task.json's route said `thinking off` for a fallback that can't turn
+    # thinking off (#1619, 2026-11-27)
     return {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
-            "thinking": row["thinking"], **_review(row), "said": row.get("said") or "", "said_ts": row.get("ts"),
+            "thinking": row["thinking"],
+            "thinking_shown": thinking_of(m, row["thinking"], row.get("thinking_review")),
+            **_review(row), "said": row.get("said") or "", "said_ts": row.get("ts"),
             "fallback": True, "fallback_from": primary}
 
 
@@ -446,11 +451,15 @@ def fallback_pick(doc: dict, role: str, size: str, stack, name: str | None, prim
 
 
 def _fallback_part(old: dict, row: dict, cap, who: Callable[[str], str],
-                   thinks: Callable[[str, str], str] = plain_thinks) -> tuple[list, bool]:
+                   thinks: Callable[[str, str], str] = plain_thinks,
+                   free: Callable[[str], bool] = lambda mid: False) -> tuple[list, bool]:
     """A role's fallback clauses (#1196) and whether they take the user's yes: an API fallback set
     or changed sends the role's code to its provider whenever the role's own is down or out of
     credit, so it takes the yes and a day cap (DAY_USD_SUGGEST when none, #1322); `gpu` or none
-    sends nothing anywhere new."""
+    sends nothing anywhere new. Its thinking is what the fallback model does with the role's
+    (role_thinks, as a role's own model is said) and a free one says FREE_LINE and takes no cap,
+    as _priced: the line said `thinking off` for a model that can't turn it off and never that a
+    free provider may train on the code (#1619, 2026-11-27)."""
     was, now = old.get("fallback"), row.get("fallback")
     if was == now:
         return [], False
@@ -460,10 +469,12 @@ def _fallback_part(old: dict, row: dict, cap, who: Callable[[str], str],
     if now == FALLBACK_GPU:
         return [f"fallback {before} → {fallback_name(now, row['gpu'])} when its API model's provider is down "
                 "or out of credit"], False
-    if cap is None:
+    priced = not free(now)
+    if cap is None and priced:
         raise _NoCap()
     return [f"fallback {before} → {now}: your code goes to {who(now)} when its API model's provider is down "
-            "or out of credit", thinks(now, row["thinking"]), f"cap {money(cap)}/day"], True
+            "or out of credit", *([] if priced else [FREE_LINE]), role_thinks({**row, "api": now}, thinks),
+            *([f"cap {money(cap)}/day"] if priced else [])], True
 
 
 def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda mid: False,
@@ -635,7 +646,7 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
     if row.get("order") and old.get("order") != row["order"] and not (moved and on_api):
         clauses.append(f"backends {', '.join(old.get('order') or ['none'])} → {', '.join(row['order'])}")
         gated = True  # where the code goes, within OpenRouter (#1021)
-    more, g = _fallback_part(old, row, cap, who, thinks)
+    more, g = _fallback_part(old, row, cap, who, thinks, free)
     return clauses + more, gated or g
 
 

@@ -23755,20 +23755,21 @@ class ScheduledRuns(Base):
         self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
         self.assertTrue(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
 
-    def test_a_fires_claude_waits_a_whole_turn_long_inside_bash_timeouts_the_fire_sets_and_the_users_own_stay(self):
+    def test_a_fires_claude_waits_the_whole_fire_long_in_one_bash_call_and_the_users_own_timeouts_stay(self):
         # #1602 (2026-11-27): driving.md's 100 s polls under Bash's 120 s default spent a paid turn
-        # each, and a long GPU night ran out of --max-turns before its reviews and summary
+        # each, and a long GPU night ran out of --max-turns before its reviews and summary; #1622
+        # (2026-11-27): polled every 280 s, a batch held at the day cap paid ~140 idle turns
         from workbench import schedule
         os.environ.pop("BASH_DEFAULT_TIMEOUT_MS", None)
         os.environ.pop("BASH_MAX_TIMEOUT_MS", None)
         env = schedule._fire_env("night")
         default_ms = int(env["BASH_DEFAULT_TIMEOUT_MS"])
-        self.assertGreaterEqual(default_ms, 290_000)
+        self.assertGreaterEqual(default_ms, schedule.FIRE_HOURS * 3600_000)
         self.assertGreaterEqual(int(env["BASH_MAX_TIMEOUT_MS"]), default_ms)
         driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
-        wait = int(re.search(r"`wb wait --backlog <batch> --timeout (\d+)`", driving).group(1))
-        self.assertTrue(200 <= wait <= 290 and wait * 1000 < default_ms, wait)
-        self.assertIn("the fire sets Bash's timeout to 5 minutes", driving)
+        self.assertIn("`wb wait --backlog <batch>`, no `--timeout`", driving)
+        self.assertNotIn("--backlog <batch> --timeout", driving)
+        self.assertIn("the fire sets Bash's timeout to its whole 12 hours", driving)
         os.environ["BASH_DEFAULT_TIMEOUT_MS"] = "400000"  # the user's own stays
         self.assertEqual(schedule._fire_env("night")["BASH_DEFAULT_TIMEOUT_MS"], "400000")
 
@@ -23812,7 +23813,8 @@ class ScheduledRuns(Base):
         self.start("t-bd3", "hang", "--backlog", "night-c", "--queue")
         running("t-bd3")
         err, _ = self.backlog_wait("night-c", "1")              # one still running: wait on
-        self.assertIn("timed out waiting", err)
+        self.assertIn("still going in backlog night-c: t-bd2 (review), t-bd3 (running); wb wait --backlog "
+                      "night-c again", err)                     # never "timed out" (#1622)
         run_wb("stop", "t-bd3")                                 # stuck, its notice acknowledged
         err, took = self.backlog_wait("night-c")
         self.assertIn("nothing left running in backlog night-c: ", err)
@@ -46601,6 +46603,37 @@ class ApiSpend(Base):
         stops = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["kind"] == "stuck"]
         self.assertEqual([r["task"] for r in stops], ["t-q0"])  # one wake, one ask of the user
 
+    def test_wait_on_a_backlog_whose_tasks_wait_behind_a_told_cap_stop_says_the_batch_is_done(self):
+        # #1622 (bar loop #1030 round 7, M4, 2026-11-27): a waiter queued behind the told stop, its
+        # runner alive, counted as running, so the fire's every wb wait --backlog said "timed out",
+        # a paid turn each, until the 12 h stop, with no morning summary
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, behind = (self.api_task(n, SPEND_M, "ok", "--backlog", "night-h") for n in ("t-ha", "t-hb"))
+        runner.drive(first)
+        self.assertEqual((first.status["phase"], first.status["infra"]), ("stuck", "spend"))
+        said = []
+
+        def waits():
+            try:
+                for _ in range(2):
+                    err = io.StringIO()
+                    try:
+                        with redirect_stderr(err):
+                            said.append(run_wb("wait", "--backlog", "night-h", "--timeout", "2"))
+                    except SystemExit as e:
+                        said.append((e.code, err.getvalue()))
+            finally:
+                self.cap(100, api=("significant",))             # the user's morning: it goes on
+        self.assertIsNotNone(self.drive_until_waiting(behind, waits))
+        self.assertTrue(said[0].startswith("[stuck] t-ha"), said)
+        code, err = said[1]
+        self.assertEqual(code, 2)
+        self.assertIn("nothing left running in backlog night-h: t-ha (stuck), t-hb (held for the user: the "
+                      "day's API spend cap is reached", err)
+        self.assertIn("the batch is done, the held left for the morning", err)
+        self.assertNotIn("timed out", err)
+
     def test_a_task_waiting_at_the_cap_goes_on_to_its_own_stop_once_the_told_one_no_longer_stands(self):
         # #1249: the wait is only behind a stop Claude was told of; taken over (or resumed, or
         # discarded) it no longer stands, and the waiter's own stop is the notice: never untold
@@ -52011,6 +52044,45 @@ class Fallbacks(Base):
         self.set_role("trivial", "fallback", HAIKU)
         line = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "api")[1])["change"]
         self.assertIn(f"fallback {HAIKU} (Anthropic)", line)
+
+    def test_an_api_fallback_that_cant_turn_thinking_off_says_so_in_its_dialog_and_start_line(self):
+        # #1619 (2026-11-27): the fallback's line and its start said `thinking off` for a model
+        # that can't turn it off, so the user agreed to no reasoning and paid for it on a fallback
+        deep = "thinkco/deep-1"
+        caps = {"tools": True, "input": ["text"], "output": ["text"], "temperature": True, "reasoning": {}}
+        self.catalog([*ROLE_CATALOG, api_entry("thinkco", "deep-1", capabilities=caps, variants=[])],
+                     [*ROLE_AUTH, key_row("thinkco", "Thinkco", STORED)])
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", deep)[1])
+        self.assertEqual(asked["change"], f"trivial: fallback none → {deep}: your code goes to Thinkco when its "
+                                          "API model's provider is down or out of credit · thinking on (it can't "
+                                          "turn off) · cap $5/day")
+        self.set_role("trivial", "fallback", deep)
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-fb-think", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"model: {deep} · API (Thinkco) · trivial role's fallback · thinking on (it can't turn off)", out)
+        sp = store.Task("t-fb-think").spec
+        self.assertIn("thinking on (it can't turn off)", sp["route"])
+        self.assertNotIn("thinking off", sp["route"])
+
+    def test_a_free_fallback_says_the_provider_may_keep_or_train_on_the_code(self):
+        # #1619 (2026-11-27): a free fallback's line never said what #1193 has a free role's own
+        # model say, and took a day cap a free model has nothing for
+        from workbench import privacy
+        free = "opencode/big-pickle-free"
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", free)[1])
+        self.assertEqual(asked["change"], f"trivial: fallback none → {free}: your code goes to opencode when its "
+                                          f"API model's provider is down or out of credit · {privacy.FREE_LINE} · "
+                                          "thinking off")
+        self.assertTrue(asked["gate"])                      # still the user's yes: the code goes there
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"trivial": {"api": "deepseek/deepseek-flash"}}}))
+        code, out, err = self.wb("route", "trivial", "fallback", free)   # no cap: none taken for it
+        self.assertEqual(code, 0, err)
+        self.assertIn(privacy.FREE_LINE, out)
+        self.assertNotIn("cap", out)
+        self.assertIsNone(routes.read()["day_usd"])
 
     def test_a_provider_out_of_credit_at_start_starts_the_task_on_the_roles_api_fallback(self):
         from workbench import results
