@@ -305,7 +305,7 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
   heartbeat of it taken since the claim leaves the session out (one deleted there).
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
 - `spend`: the week's `wb spend` (#1618; `savings` before it, with a score): `tasks`, every task's;
-  `claude`, Claude's weighted tokens on them; `wh` and `cost`, the GPU's energy and its cost at the
+  `claude`, the driver's weighted tokens on them (Claude Code's, from its transcripts); `wh` and `cost`, the GPU's energy and its cost at the
   user's price (null with none); and `api`: the week's API tasks (`tasks`, `cost` in dollars,
   `unknown`, `plan`, `trials`, `claude`, `by_provider`, `by_day`, `prices`: `catalog` (an estimate,
   shown `≈`), `yours` or `provider`, the total's and each provider's, and `names`: each provider's name).
