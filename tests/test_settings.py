@@ -577,6 +577,19 @@ class SettingsOffers(tw.Base):
         # without --if-due nothing is spent
         self.assertEqual([n["key"] for n in self.offers("--if-due")["notes"]], ["splash"])
 
+    def test_an_offer_made_with_no_driver_up_waits_past_the_hour_until_its_setting_changes_again(self):
+        # #1557 (2026-11-26): the page promises "your driver will offer to set it up", and an
+        # offer over OFFER_MAX_AGE_S old was dropped, so a driver started later never offered
+        now = store.now()
+        self.change("probe", now - 3700, help="Offer to set probe up.", label="Agent code navigation")
+        self.change("reach", now - 9000, help="Offer to run tailscale serve.")
+        self.change("reach", now - 8000, by="terminal")  # changed again since: that offer is retired
+        self.change("splash", now - 3700)                # a note that old is still no news
+        got = self.offers("--if-due")
+        self.assertEqual([o["key"] for o in got["offers"]], ["probe"])
+        self.assertEqual(got["notes"], [])
+        self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})  # once
+
     def test_with_nothing_changed_there_is_nothing_to_offer(self):
         self.assertEqual(self.offers("--if-due"), {"offers": [], "notes": []})
         self.assertEqual(tw.run_wb("settings", "offers"), "")

@@ -101,7 +101,7 @@ const POLL_MS = 1500 // the clock's redraw while a task runs
 const SAFETY_MS = 30_000 // a poll at least this often, whatever the watcher says
 const KEEP_CLOSED_MS = 30 * 60 * 1000 // closed tasks stay in the pane for half an hour
 // a settings change from the web app older than an hour is no news, as a notice that old wakes
-// no one (the kernel's noticesDue)
+// no one (the kernel's noticesDue); one that asks for help is due however old (#1557, settingsTurns)
 const OLDEST_WAKE_MS = 60 * 60 * 1000
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
@@ -2402,9 +2402,13 @@ async function chatLink($: any): Promise<void> {
 // [workbench] turn that asks Claude to offer to set it up, queued (mem.queued) as the pane's
 // Settings once queued it; any other as a row Claude reads, starting no turn. The roles, Claude
 // coding and Dynamic workflows aren't said twice: their own rows say every change (unsaid). A row
-// older than OLDEST_WAKE_MS is no news. While the user is away on the web chat the offer's turn says
-// to answer there (#1555, 2026-11-26: it was made in the terminal they had left). The newest
-// delivered is kept in $.store, every session's, so a reload or another session never says it again.
+// without help older than OLDEST_WAKE_MS is no news; one with help is due however old while it is
+// its setting's newest row (#1557, 2026-11-26: the page promises "your driver will offer to set it
+// up", and a change made from the phone with no session up lapsed after the hour, so a session
+// started later never offered; a later change of the same setting, anyone's, retires it). While the
+// user is away on the web chat the offer's turn says to answer there (#1555: it was made in the
+// terminal they had left). The newest delivered is kept in $.store, every session's, so a reload or
+// another session never says it again.
 const SETTINGS_CHANGES = 'settings-changes.jsonl'
 const SETTINGS_TAIL = 64 << 10
 const SAID_ELSEWHERE = /^(?:agents|busy|cap|coding|workflows|(?:role|gpu|api|think)-[a-z]+)$/
@@ -2432,12 +2436,16 @@ async function settingsTurns($: any, now: number) {
   try { mark = Number(await $.store.get('settingsSeen')) || 0 } catch { /* no store: this load's set alone */ }
   const notes: string[] = []
   let newest = mark
-  for (const r of parseLines(got.text)) {
+  const rows = parseLines(got.text)
+  const latest = new Map<string, number>() // each setting's newest row, by anyone (#1557)
+  for (const r of rows) latest.set(String(r.key ?? ''), Math.max(latest.get(String(r.key ?? '')) ?? 0, Number(r.ts) || 0))
+  for (const r of rows) {
     const ts = Number(r.ts) || 0, id = `${ts}:${String(r.key ?? '')}`
-    if (r.by !== 'web' || ts <= mark || mem.settingsSeen.has(id) || ts * 1000 < now - OLDEST_WAKE_MS) continue
+    if (r.by !== 'web' || ts <= mark || mem.settingsSeen.has(id)) continue
+    const help = typeof r.help === 'string' && r.help.trim()
+    if (help ? ts < (latest.get(String(r.key ?? '')) ?? 0) : ts * 1000 < now - OLDEST_WAKE_MS) continue
     mem.settingsSeen.add(id)
     newest = Math.max(newest, ts)
-    const help = typeof r.help === 'string' && r.help.trim()
     if (help) {
       $.ui.toast(`workbench: ${one(r.label, 80) || one(r.key, 80)} changed on the web app: Claude will offer to set it up`)
       mem.queued.push(await awayToo($, SETTING_HELP(r)))

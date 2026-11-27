@@ -957,7 +957,7 @@ def rev() -> dict | None:
 # and words in register.tsx with its mark in its own store, so each host offers a row once.
 OFFERED = "settings-offered.json"  # under $WB_HOME: {ts}, the newest row `wb settings offers --if-due` gave
 OFFER_TAIL = 64 << 10  # the mod's SETTINGS_TAIL
-OFFER_MAX_AGE_S = 3600  # the mod's OLDEST_WAKE_MS: a row older is no news
+OFFER_MAX_AGE_S = 3600  # the mod's OLDEST_WAKE_MS: a row without help older is no news
 SAID_ELSEWHERE = re.compile(r"(?:agents|busy|cap|coding|workflows|(?:role|gpu|api|think)-[a-z]+)")
 
 
@@ -980,23 +980,32 @@ def change_said(r: dict) -> str:
 def offers(spend: bool, now: float | None = None) -> dict:
     """The web changes due a word (`wb settings offers`): {"offers": [{ts, key, label, text,
     toast}], "notes": [{ts, key, text}]}, from settings-changes.jsonl's rows `by: "web"` newer
-    than settings-offered.json's mark and under OFFER_MAX_AGE_S old. ``spend`` (--if-due) moves
-    the mark past them under its lock, so one host's servers say each once."""
+    than settings-offered.json's mark: a note under OFFER_MAX_AGE_S old, an offer however old
+    while it is its setting's newest row (#1557, 2026-11-26: the page promises "your driver will
+    offer to set it up", and a change made with no driver up lapsed after the hour; a later change
+    of the same setting, anyone's, retires it). ``spend`` (--if-due) moves the mark past them under
+    its lock, so one host's servers say each once."""
     now = store.now() if now is None else now
     mark_path = store.home() / OFFERED
     with store.locked(store.home() / "locks" / "settings-offered.lock"):
         mark = float((store.read_json(mark_path, {}) or {}).get("ts") or 0)
         got: dict = {"offers": [], "notes": []}
         newest = mark
-        for r in store.read_jsonl_tail(chat.changes_path(), OFFER_TAIL):
-            if not isinstance(r, dict) or r.get("by") != "web":
+        rows = [r for r in store.read_jsonl_tail(chat.changes_path(), OFFER_TAIL)
+                if isinstance(r, dict) and isinstance(r.get("ts"), (int, float))]
+        latest: dict[str, float] = {}  # each setting's newest row, by anyone
+        for r in rows:
+            k = _one(r.get("key"), 80)
+            latest[k] = max(latest.get(k, 0.0), float(r["ts"]))
+        for r in rows:
+            ts = r["ts"]
+            if r.get("by") != "web" or ts <= mark:
                 continue
-            ts = r.get("ts")
-            if not isinstance(ts, (int, float)) or ts <= mark or ts < now - OFFER_MAX_AGE_S:
-                continue
-            newest = max(newest, float(ts))
             key, label = _one(r.get("key"), 80), _one(r.get("label"), 80) or _one(r.get("key"), 80)
             help = r.get("help").strip() if isinstance(r.get("help"), str) else ""
+            if (ts < latest[key]) if help else (ts < now - OFFER_MAX_AGE_S):
+                continue
+            newest = max(newest, float(ts))
             if help:
                 got["offers"].append({
                     "ts": ts, "key": key, "label": label,
