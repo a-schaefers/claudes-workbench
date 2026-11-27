@@ -65,22 +65,11 @@ claude plugin install workbench@workbench
 Open Claude Code in your project, choose the strongest Claude model with `/model`, and type
 `/workbench`.
 
-## Your first task
+## Using it
 
-After `/workbench`, say `do a trial run`. The orchestrator checks for OpenCode, a model server, a
-model the agents can use and any API keys you have connected, offers to set up what is missing, then
-runs a small sample task. For an API model, it recommends one of your provider's models and a daily
-spending cap of $5. From here on the orchestrator runs Workbench's `wb` command for you.
-
-Then ask for what you want in plain words, for example "add a dark mode switch to the settings
-page". Your project needs to be a git repository, and the orchestrator can create one. Before the
-first real task it writes a short CLAUDE.md with notes for the agents and commits it; an existing
-AGENTS.md becomes that CLAUDE.md, so your notes are kept, and AGENTS.md links to it for OpenCode.
-
-You can follow the agents in the Workbench pane (Claude Code) or panel (OpenCode). When their work
-has passed its review, the orchestrator commits each change on its own branch and reports back. Read
-the report, then say "merge it" to bring the change into your branch, or say what to change. When
-you are done, `/workbench-quit` stops the agents and keeps their work for later.
+After `/workbench`, work with the orchestrator as you normally would. The first time, it asks a few
+questions to set things up. Workbench shows a link to its web app, `http://localhost:1337/#token=…`,
+where you can follow the agents, see your stats and change settings.
 
 ## Models and cost
 
@@ -110,8 +99,7 @@ The agents never touch your checkout, and their work is merged only when you say
 in a [sandbox](ARCHITECTURE.md#what-the-agent-knows), Landlock on Linux and Seatbelt on macOS, that
 keeps its writes inside its copy of the project, lets it use git only to read, allows only listed
 commands, and keeps your API key out of reach. These limits, and the spending cap, are enforced by
-code, never left to a model. On a kernel without Landlock, only OpenCode's permission rules apply,
-and `wb doctor` says so.
+code, never left to a model. On a kernel without Landlock, only OpenCode's permission rules apply.
 
 Agents on your own GPU send your code to no provider, though the orchestrator still sees what it
 reviews unless it is local too. With an API model, whatever the agent reads goes to that provider.
@@ -130,8 +118,8 @@ To keep a repository off every API, [mark it](ARCHITECTURE.md#privacy-for-api-ro
   from sleeping](ARCHITECTURE.md#kept-awake). After a reboot, ask the orchestrator to resume them.
 - Accepted commits carry your name as author and a
   [trailer](ARCHITECTURE.md#git-commits-and-projects) naming the model that wrote the code.
-- A web app shows your settings and stats, and its [chat](ARCHITECTURE.md#the-web-chat) lets you
-  talk to the orchestrator and follow tasks from your phone over Tailscale, once you ask for it.
+- The web app's [chat](ARCHITECTURE.md#the-web-chat) lets you talk to the orchestrator and follow
+  tasks from your phone over Tailscale, once you ask for it.
 - When a review turns up a lesson, the orchestrator records it as a
   [skill](ARCHITECTURE.md#the-skill-library) and gives it to later agents.
 - The orchestrator can also direct local [image](ARCHITECTURE.md#images) and
@@ -144,7 +132,7 @@ Every command, setting and file is described in [ARCHITECTURE.md](ARCHITECTURE.m
 
 ## Contributing
 
-Report bugs in the issue tracker. If you fix one yourself, `wb patch` keeps your fix across updates
+Report bugs in the issue tracker. If you fix one yourself, Workbench keeps your fix across updates
 and can send it upstream as a pull request, or as a .zip you email if you'd rather not use GitHub.
 [CONTRIBUTING.md](CONTRIBUTING.md) shows how to set it up.
 

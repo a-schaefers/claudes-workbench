@@ -493,9 +493,10 @@ class DocsForTheWebApp(unittest.TestCase):
     the settings' home, with Claude helping on a clear ask."""
 
     def test_the_readme_names_the_web_apps_settings_and_stats_and_its_phone_chat(self):
-        # #1288, and the rewrite of 2026-11-27: one line, the detail in *The web chat*
+        # #1288, and the rewrite of 2026-11-27: the web app's link and what it holds in *Using it*,
+        # its phone chat one line, the detail in *The web chat*
         readme = " ".join((ROOT / "README.md").read_text().split())
-        self.assertIn("A web app shows your settings and stats", readme)
+        self.assertIn("`http://localhost:1337/#token=…`, where you can follow the agents, see your stats and change settings", readme)
         self.assertIn("(ARCHITECTURE.md#the-web-chat)", readme)
 
     def test_what_people_and_claude_read_names_no_pane_tab(self):
