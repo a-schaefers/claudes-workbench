@@ -7595,7 +7595,7 @@ still helps with one when the user asks (the owner, 2026-11-24). Every row the p
 entry in `workbench/settings.py`, under the pane's old key and making its old `wb` call, so a new
 setting touches only Python. The chat server draws from it (#1280); nothing in it serves HTTP.
 
-- `GROUPS` (`shared`, `web`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental`: display order; `web`, the web app's own rows, #1355), `KINDS`.
+- `GROUPS` (`significant`, `trivial`, `writing`: a card per role, #1553; then `shared`, `web`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental`: display order; `web`, the web app's own rows, #1355), `KINDS`.
 - `rows(fresh=False) -> list[dict]`: every row, kept `ROWS_CACHE_S` 10 s (`fresh` reads again);
   `reads(fresh=False)`, the same cache's `{routes, models}` (`wb route --json`, `wb models --json`,
   or None); `drop()` forgets it.
@@ -7635,7 +7635,8 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   first, never `said`), each key's newest within `CHANGED_FOR` (7 days; `rows()` puts it on its row as
   `changed`), and the stamp (*The Settings view (settings.ts)*, who changed what).
 
-**A row** is JSON-safe: `key`, `group`, `label`, `kind` and by kind: `choice` (`value`, `choices`
+**A row** is JSON-safe: `key`, `group`, `label`, `kind`, `more` (true: drawn under its card's More, a role's
+GPU and API model and thinking, #1553) and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd`; `off`, `""` and null clear it); `info` (`text`); `action`
 (`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
@@ -7649,14 +7650,20 @@ chosen (`HELP`: `probe` on with no probe set up, `PROBE_HELP` with wb's line, as
 in which Claude offers to set it up and installs nothing without a yes (#1283; #1279's addendum).
 
 **The rows** (the pane's choices and sentences, moved; each `→` its wb call):
+- *a role's card* (`significant`, `trivial`, `writing`, #1553: one role's settings were spread over three cards,
+  its API model 2,000 px below the choice that needed it): `role-<role>` → `wb route <role> gpu|api` (a role on
+  API whose `api_status` says it can't run says `<Label> can't run on <id>: <why>.`, #1529); then, `more`:
+  `gpu-<role>` → `wb route <role> --gpu <id>|auto` (with GPU models); `api-<role>` (the role's model, the
+  others', those used, then the catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`,
+  `think-<role>` (the pane's `thinkStops`) → `wb route <role> --thinking on|off` and `review-<role>`, only
+  for a role with an API model (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off` (these three
+  with a provider connected or a role's API model, as the *api* group's rows).
 - *shared*: `agents` → `wb route all gpu|api|both`; `busy` → `wb route busy wait|api`; `driver`
   (#1316, after the roles' rows) → `wb route driver <id>|session`: with the OpenCode plugin
   installed (`ocplugin.installs`) a choice, `other` (any id), of `session` (each session's own
   `/models`), the GPU models, then the API models (`_api_stops`, each saying where the
   conversation goes), the pin added when not listed; without it an info row, `Claude Code
-  (fixed)` (`settings.DRIVER_CLAUDE`);
-  `role-<significant|trivial|writing>` → `wb route <role> gpu|api` (a role on API whose `api_status` says
-  it can't run says `<Label> can't run on <id>: <why>.`, #1529); `coding` → `wb coding
+  (fixed)` (`settings.DRIVER_CLAUDE`); `coding` → `wb coding
   only|ask|decide`; `cap` (number, usd) → `wb route cap <v>|off`;
   `progress` → `wb progress on|off` (On names an `--after` threshold). *web* (the web app's own, "Web
   app" on the page and in `wb settings`, #1355): `reach` ("Web app reach", phone reach) → `wb chat reach local|tailnet` (`REACH`; a bind of the user's own reads
@@ -7668,16 +7675,13 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   `every` or `price` row: #1322 took Stats recording, Live view, Live refresh and the electricity
   price from the pane's Settings (recording is always on; `wb stats set` and `wb savings --price`
   keep the rest).
-- *gpu*: `gpu-<role>` → `wb route <role> --gpu <id>|auto`; `size-<id>` for every discovered model
+- *gpu*: `size-<id>` for every discovered model
   (no six-row cap) → `wb model sizes <id> [size]`; `optimize`, an action (`start`) beside its
   status line → `wb optimize start`; `media-image|speech|sfx|music`, each only with two or more
   engines → `wb image|audio --default <name>`.
 - *api* (one `api-none` note, `NO_PROVIDER`, with no stored key and no role's API model; with
   `wb route --json`'s `catalog_error` set, `CATALOG_FAILED` naming it instead, #1342):
-  `api-connected` (info); `api-<role>` (the role's model, the others', those used, then the
-  catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`; `think-<role>` (the
-  pane's `thinkStops`) → `wb route <role> --thinking on|off`; `review-<role>`, only for a role with an
-  API model (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`; `api-spend` (info).
+  `api-connected` (info); `api-spend` (info).
 - *setup*, "What your agents get" (#1295 P1, `setup_rows`): read-only `info` rows from
   `context.agent_setup()` and `setup_said`: `setup-instructions`, `setup-skills` (with the
   library's line), `setup-plugins` (each plugin and its tools: allowed, the user's own),
@@ -7787,7 +7791,10 @@ alone, and a generic renderer: a new setting touches only Python.
   own write (`by: "web"` while a POST waits or within 5 s of one). The first state only sets the
   mark. Last writer wins: no lock.
 - **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
-  order with their names: `shared` "Agents and roles", `web` "Web app" (#1355), `gpu` "GPU", `api` "API", `setup` "What your agents get",
+  order with their names: a card per role first (#1553), `significant` "Complex coding", `trivial` "Trivial
+  coding", `writing` "English writing" (`routes.LABELS`' words), its `role-<role>` row on top with no label of
+  its own (a row whose label is its card's name is drawn without it) and its `more` rows under a closed
+  `details.set-more` "More" (kept open across redraws once opened); then `shared` "Agents and roles", `web` "Web app" (#1355), `gpu` "GPU", `api` "API", `setup` "What your agents get",
   `workflows` "Deep workflows", `terminal` "Terminal", `experimental` "Experimental"; a group the table adds later follows, under
   its key. The runs strip's tap (app.ts, a `wb-settings-group` event) brings the `workflows` card into view. A
   `note` row is a muted line in its place, and the group's other rows are drawn beside it (with the
@@ -11219,7 +11226,8 @@ the queue); shown out of reach, `Not updated` with Try again, read again at the 
 Where the server answers neither `/api/stats` nor `/api/top`, the page's `fetch` stands in (the
 real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's routes stop holding
 requests once the worker registers (#1223). The Settings
-view's (#1286): the groups in order, "Agents and roles" first, above the device cards (the gear's old cards are
+view's (#1286): the groups in order, a card per role first, its role row unlabelled and the rest of the role under a
+closed More, then "Agents and roles" (#1553), above the device cards (the gear's old cards are
 `#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given

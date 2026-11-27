@@ -1014,12 +1014,15 @@ components:
           type: string
         group:
           type: string
-          enum: [shared, gpu, api, setup, workflows, terminal, experimental]
+          enum: [significant, trivial, writing, shared, web, gpu, api, setup, workflows, terminal, experimental]
         label:
           type: string
         kind:
           type: string
           enum: [choice, number, info, action, note]
+        more:
+          type: boolean
+          description: drawn under its card's More (a role's GPU and API model and thinking, #1553)
         help:
           type: string
       additionalProperties: true

@@ -3909,7 +3909,7 @@ def cmd_splash(a):
 # to explain the options and, on the user's clear ask and yes in the conversation, change one
 # through the same writer the web app uses (the owner, 2026-11-24: "claude is an interactive
 # assistant to the web panel, in case a user gets confused about the options"; "We trust Claude")
-SETTINGS_GROUPS = {"shared": "Shared", "web": "Web app", "gpu": "GPU", "api": "API", "terminal": "Terminal",
+SETTINGS_GROUPS = {**routes.LABELS, "shared": "Shared", "web": "Web app", "gpu": "GPU", "api": "API", "terminal": "Terminal",
                    "experimental": "Experimental"}
 SETTINGS_SET = "wb settings set <key> <value> changes one, on the user's clear ask and yes"
 

@@ -93,6 +93,23 @@ class Settings(Rows):
         self.assertEqual(by["api-trivial"]["value"], "deepseek/deepseek-flash")
         self.assertEqual(by["role-trivial"]["says"], "Trivial coding runs on this machine's GPU.")
 
+    def test_each_role_has_a_card_of_its_own_its_gpu_and_api_model_and_thinking_under_more_1553(self):
+        # #1553 (2026-11-26): a role's GPU|API, GPU model, API model and thinking were in three
+        # cards, the API model 2,000 px below the choice that needed it
+        rows = settings.rows()
+        self.assertEqual(settings.GROUPS[:3], routes.ROLES)
+        for name in routes.ROLES:
+            mine = [r for r in rows if r["group"] == name]
+            self.assertEqual(mine[0]["key"], f"role-{name}")
+            self.assertFalse(mine[0].get("more"))
+            self.assertEqual({r["key"].partition("-")[0] for r in mine[1:]} - {"gpu", "api", "think", "review"}, set())
+            self.assertTrue(all(r.get("more") for r in mine[1:]))
+        by = {r["key"]: r for r in rows}
+        for key in ("gpu-trivial", "api-trivial", "think-trivial", "review-trivial"):
+            self.assertEqual(by[key]["group"], "trivial", key)
+        self.assertEqual([r["group"] for r in rows if r["key"].startswith(("size-", "optimize"))],
+                         ["gpu"] * len([k for k in by if k.startswith(("size-", "optimize"))]))
+
     def test_what_your_agents_get_is_a_read_only_group_of_what_reaches_them(self):
         # #1295 P1: a global OpenCode skill reached every agent, shown nowhere
         home = Path(self.tmp.name) / "home"

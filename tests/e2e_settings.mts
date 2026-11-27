@@ -139,16 +139,21 @@ export async function check(page: any, ctx: E2eCtx) {
     return got
   }
   try {
-    await ctx.check('Settings lists the admin rows above the device cards, the shared group first as "Agents and roles"', async () => {
+    await ctx.check('Settings lists the admin rows above the device cards, a card per role first, its GPU model under More, then "Agents and roles" (#1553)', async () => {
       await reshow()
       await until(async () => (await page.locator('#settings-rows .set-card[data-group]').count()) > 0)
         .catch(async () => { throw new Error('no rows: ' + await view().textContent()) })
       const got = await page.evaluate(() => ({
         groups: [...document.querySelectorAll<HTMLElement>('#settings-rows .set-card')].map(c => c.dataset.group + ':' + c.querySelector('h3')!.textContent),
         above: !!(document.getElementById('settings-rows')!.compareDocumentPosition(document.getElementById('settings')!) & Node.DOCUMENT_POSITION_FOLLOWING),
-        coding: !!document.querySelector('#settings-rows .set-card[data-group="shared"] .set-row[data-key="coding"] [role="radio"]') }))
-      if (got.groups[0] !== 'shared:Agents and roles' || !got.coding || !got.above) throw new Error(JSON.stringify(got))
-      const order = ['shared', 'web', 'gpu', 'api', 'setup', 'workflows', 'terminal', 'experimental']  // settings.GROUPS (web: #1355)
+        coding: !!document.querySelector('#settings-rows .set-card[data-group="shared"] .set-row[data-key="coding"] [role="radio"]'),
+        // the role's own row unlabelled (its card says it), the rest of the role under a closed More
+        role: !!document.querySelector('#settings-rows .set-card[data-group="significant"] > .set-row[data-key="role-significant"] [role="radio"]')
+          && !document.querySelector('.set-row[data-key="role-significant"] .set-label'),
+        more: [...document.querySelectorAll<HTMLElement>('#settings-rows .set-card[data-group="significant"] details.set-more:not([open]) .set-row')].map(r => r.dataset.key) }))
+      if (got.groups.slice(0, 4).join() !== 'significant:Complex coding,trivial:Trivial coding,writing:English writing,shared:Agents and roles'
+        || !got.coding || !got.above || !got.role || got.more.some((k: string) => !/^(gpu|api|think|review)-significant$/.test(k))) throw new Error(JSON.stringify(got))
+      const order = ['significant', 'trivial', 'writing', 'shared', 'web', 'gpu', 'api', 'setup', 'workflows', 'terminal', 'experimental']  // settings.GROUPS (web: #1355; the roles: #1553)
       const idx = got.groups.map((g: string) => order.indexOf(g.split(':')[0]))
       if (idx.some((v: number, i: number) => v < 0 || (i && v <= idx[i - 1]))) throw new Error('the groups out of order: ' + got.groups.join())
     })

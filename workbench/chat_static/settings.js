@@ -12,7 +12,10 @@
 // again with no reload, a draft kept, and a change this page didn't make is toasted on any view.
 (() => {
     'use strict';
-    const GROUPS = [['shared', 'Agents and roles'], ['web', 'Web app'], ['gpu', 'GPU'], ['api', 'API'],
+    // a card per role first, named as routes.LABELS names it (#1553: Couplings), its GPU|API on top and
+    // the rest of the role under More; then the rows for every role, and the power groups
+    const GROUPS = [['significant', 'Complex coding'], ['trivial', 'Trivial coding'], ['writing', 'English writing'],
+        ['shared', 'Agents and roles'], ['web', 'Web app'], ['gpu', 'GPU'], ['api', 'API'],
         ['setup', 'What your agents get'], ['workflows', 'Deep workflows'], ['terminal', 'Terminal'],
         ['experimental', 'Experimental']];
     const SEG_MAX = 4; // a segmented control up to this many choices, a <select> past it
@@ -36,6 +39,7 @@
     // agent-written results among it, so text alone, never markup
     const details = new Map();
     let focusGroup = ''; // a group to bring into view at the next draw (the runs strip's tap)
+    const opened = new Set(); // the role cards whose More is open: a redraw keeps it so
     // who made a change, as settings-changes.jsonl's `by` says (store.caller_kind, or the web's click)
     const BY = { web: 'the web app', claude: 'Claude', opencode: 'OpenCode', terminal: 'the terminal', agent: 'an agent' };
     const byWord = (by) => BY[by] || by || 'someone';
@@ -264,7 +268,7 @@
         if (detail)
             box.append(el('pre', 'small set-detail', detail));
     }
-    function drawRow(row) {
+    function drawRow(row, title = '') {
         const box = el('div', 'set-row');
         box.dataset.key = row.key;
         box.dataset.kind = row.kind;
@@ -278,8 +282,8 @@
             box.append(el('p', 'small set-note', row.text || row.label));
             return box;
         }
-        if (row.label)
-            box.append(el('div', 'set-label', row.label));
+        if (row.label && row.label !== title)
+            box.append(el('div', 'set-label', row.label)); // a role's own row: its card's name
         if (row.kind === 'choice')
             choice(row, box);
         else if (row.kind === 'number')
@@ -328,7 +332,21 @@
                 card.dataset.group = g;
                 card.append(el('h3', '', title));
                 for (const r of mine)
-                    card.append(drawRow(r));
+                    if (!r.more)
+                        card.append(drawRow(r, title));
+                const more = mine.filter(r => r.more);
+                if (more.length) {
+                    const fold = el('details', 'set-more');
+                    fold.open = opened.has(g);
+                    fold.append(el('summary', '', 'More'));
+                    fold.addEventListener('toggle', () => { if (fold.open)
+                        opened.add(g);
+                    else
+                        opened.delete(g); });
+                    for (const r of more)
+                        fold.append(drawRow(r, title));
+                    card.append(fold);
+                }
                 out.append(card);
             }
             if (changes.length) {

@@ -7,7 +7,8 @@ by kind: a `choice` its `value`, `choices` [{value, label, says}] and `says` (th
 current value), with `other: true` where any model id goes (the role command checks it); a
 `number` its `value` (a float, or None for off) and `unit` (`usd`); an `info` its
 `text`; an `action` its `text` and its `choices`, which are buttons; a `note` one line for the group
-(NO_PROVIDER or CATALOG_FAILED, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows. A row may
+(NO_PROVIDER or CATALOG_FAILED, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows.
+`more: true`, a row the page draws under its card's More (a role's GPU and API model and thinking). A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,
@@ -43,7 +44,10 @@ from pathlib import Path
 
 from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savings, store
 
-GROUPS = ("shared", "web", "gpu", "api", "setup", "workflows", "terminal", "experimental")  # display order (`web`: the web app's own, #1355)
+# display order (`web`: the web app's own, #1355). A card per role first (#1553, 2026-11-26): its
+# GPU or API, then its GPU model, API model and thinking under More (`more`), where one role's
+# settings were spread over three cards, its API model 2,000 px below its GPU|API choice
+GROUPS = (*routes.ROLES, "shared", "web", "gpu", "api", "setup", "workflows", "terminal", "experimental")
 KINDS = ("choice", "number", "info", "action", "note")
 ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_apply)
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
@@ -493,7 +497,7 @@ def _build() -> dict:
         out.append(_choice("agents", "shared", LABELS["agents"], AGENTS, r.get("use") or "both"))
         out.append(_choice("busy", "shared", LABELS["busy"], BUSY, r.get("busy") or "wait"))
         for name, label, row in roles:
-            c = _choice(f"role-{name}", "shared", label_of(f"role-{name}"),
+            c = _choice(f"role-{name}", name, label_of(f"role-{name}"),
                         _role_stops(label, row.get("api"), api_name.get(row.get("api"))), row.get("via") or "gpu")
             # a role on an API model that can't run says why: with no key for its provider the
             # rows said it runs there, and nothing said it couldn't (#1529, 2026-11-26)
@@ -536,7 +540,8 @@ def _build() -> dict:
     else:
         for name, label, row in roles:
             gpu = row.get("gpu") or routes.AUTO
-            out.append(_choice(f"gpu-{name}", "gpu", label_of(f"gpu-{name}"), _gpu_stops(label, m["gpu"], gpu), gpu))
+            out.append(_choice(f"gpu-{name}", name, label_of(f"gpu-{name}"), _gpu_stops(label, m["gpu"], gpu), gpu,
+                               more=True))
         for g in m["gpu"]:  # every discovered model: the pane's six-row cap went with the pane
             sizes = g.get("sizes") or []
             out.append(_choice(f"size-{g['id']}", "gpu", f"{g.get('label') or g['id']} tasks", SIZES,
@@ -563,17 +568,18 @@ def _build() -> dict:
                 others = [x.get("api") for n, _, x in roles if n != name and x.get("api")]
                 api = row.get("api") or ""
                 stops = _api_stops(label, m, api, others)
-                c = _choice(f"api-{name}", "api", label_of(f"api-{name}"), stops, api or None, other=True)
+                c = _choice(f"api-{name}", name, label_of(f"api-{name}"), stops, api or None, other=True, more=True)
                 if not api:
                     c["says"] = f"{label} has no API model: it runs on the GPU."
                 out.append(c)
             for name, label, row in roles:
-                out.append(_choice(f"think-{name}", "api", label_of(f"think-{name}"),
-                                   _think_stops({"api": None, "thinking": "off", **row}), row.get("thinking") or "off"))
+                out.append(_choice(f"think-{name}", name, label_of(f"think-{name}"),
+                                   _think_stops({"api": None, "thinking": "off", **row}), row.get("thinking") or "off",
+                                   more=True))
             for name, label, row in roles:
                 if row.get("api"):
-                    out.append(_choice(f"review-{name}", "api", label_of(f"review-{name}"), REVIEW,
-                                       row.get("thinking_review") or "off"))
+                    out.append(_choice(f"review-{name}", name, label_of(f"review-{name}"), REVIEW,
+                                       row.get("thinking_review") or "off", more=True))
             out.append(_info("api-spend", "api", "Spend today", _spend_line(r)))
 
     out += setup_rows()

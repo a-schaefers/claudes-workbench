@@ -468,7 +468,9 @@ sent for it (to every device, or with `endpoint` to that one) → `{}`.
 
 ### `GET /api/settings` (user only)
 The web app's Settings: `{"rows": [...], "changes": [...], "ts": <seconds>}`. Each row is `{key, group, label, kind,
-…}`: `group` one of `shared`, `gpu`, `api`, `setup`, `workflows`, `terminal`, `experimental` (in that order); `kind` one
+…}`: `group` one of `significant`, `trivial`, `writing` (a card per role, #1553), `shared`, `web`, `gpu`, `api`, `setup`,
+`workflows`, `terminal`, `experimental` (in that order); `more: true`, a row shown under its card's More (a role's GPU
+and API model and thinking); `kind` one
 of `choice` (`value`, `choices: [{value, label, says}]`, `says`, `other`: any id is taken),
 `number` (`value`: a number or null for off, `unit`: `usd`, `says`), `info`
 (`text`), `action` (`text`, `choices` as buttons) or `note` (`text`, standing where its group's
