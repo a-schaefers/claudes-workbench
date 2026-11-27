@@ -25458,7 +25458,7 @@ class DynamicWorkflows(Base):
         self.assertIn("Off (default)", run_wb("deepmode"))
         said = run_wb("deepmode", "--moved")
         self.assertEqual(said, cli.story.text("moved.deepmode") + "\n")
-        self.assertIn("/deepmode on", said)
+        self.assertIn("/workbench-deepmode on", said)
         self.assertEqual(json.loads(path.read_text())["deepmode"], "off")
         self.assertEqual(run_wb("deepmode", "--moved"), "")            # once
         self.assertEqual(cli.workflows_mode(), "off")
