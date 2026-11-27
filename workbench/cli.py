@@ -4979,7 +4979,7 @@ def cmd_takeover(a):
                       f"or wb discard {t.name}")
                 continue
             try:
-                task, aside = _take_over(t.name, a.user)
+                task, aside = _take_over(t.name, a.user, hand_back=True)
             except SystemExit as e:
                 refused = max(refused, e.code if isinstance(e.code, int) else 1)
                 continue
@@ -5011,7 +5011,7 @@ def cmd_takeover(a):
     _say(aside)
 
 
-def _take_over(name: str, user: bool) -> tuple[store.Task, str]:
+def _take_over(name: str, user: bool, hand_back: bool = False) -> tuple[store.Task, str]:
     """One task stopped and made Claude's (wb takeover <name>, and each of --all's), and
     _stop_aside's line ("" for none)."""
     task = need(name)
@@ -5033,8 +5033,11 @@ def _take_over(name: str, user: bool) -> tuple[store.Task, str]:
     # /workbench-quit-and-hand-back-claude read every try as review, and the escalated item's
     # line had Claude discard the reviewed cheap try, maybe holding Claude's own edits by then,
     # for the crashed escalation (#1592's second hand-back, 2026-11-27)
+    # A by-name takeover is Claude choosing to write that try: it counts as at review, so a
+    # later hand-back keeps it (Claude's own edits are in its worktree), never the cheap try
+    # (#1592's review, 2026-11-27); only --all's own takeover records the phase it found
     prior = (task.status.get("prior_phase") if task.status.get("taken_over") else None) \
-        or task.status.get("phase")
+        or (task.status.get("phase") if hand_back else "review")
     task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
                     parked=None, prior_phase=prior)  # Claude's now (#698)
     _ack_all(task)

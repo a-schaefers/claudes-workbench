@@ -1572,6 +1572,28 @@ class Runs(Base):
             if store.Task(n).status.get("phase") not in store.CLOSED:
                 run_wb("discard", n)
 
+    def test_a_hand_back_after_claude_took_over_the_crashed_escalation_by_name_keeps_that_try(self):
+        # #1592's review (2026-11-27): a by-name takeover saved the try's phase before it, failed,
+        # so the hand-back that followed had Claude keep the cheap try and discard the escalation,
+        # the worktree holding Claude's own edits by then
+        asks = {"verdict": "changes", "must_fix": ["handle the empty file"], "nits": [], "summary": "close"}
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Review this fix": asks})
+        os.environ["FAKE_SCENARIO_BY_TASK"] = json.dumps({"fxe-code-2": "crash"})
+        run_wb("run", "start", "fxe", "--flow", "fix-escalate", "--param", "findings=answer.txt is missing",
+               "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("fxe", ("review", "failed", "checkpoint", "paused"))["phase"], "checkpoint")
+        self.assertEqual(store.Task("fxe-code-2").status["phase"], "failed")
+        run_wb("takeover", "fxe-code-2")                                  # Claude chose to fix this one
+        self.assertEqual(store.Task("fxe-code-2").status.get("prior_phase"), "review")
+        out = run_wb("takeover", "--all", "--user", "--repo", str(self.repo))
+        (alts,) = [ln for ln in out.splitlines() if "alternatives" in ln]
+        self.assertIn("Finish fxe-code-2 in its worktree and wb accept only it", alts)
+        self.assertTrue(alts.endswith("then wb discard fxe-code-1"), alts)
+        self.assertNotIn("wb discard fxe-code-2", out)
+        for n in ("fxe-code-1", "fxe-code-2"):
+            if store.Task(n).status.get("phase") not in store.CLOSED:
+                run_wb("discard", n)
+
     def test_an_items_role_follows_its_escalation_and_escalate_takes_distinct_roles(self):
         st = [{"id": "code", "kind": "code", "items": ["x"], "escalate": ["significant", "writing"]},
               {"id": "review", "card": "review", "from": "code", "refix": {"path": "must_fix", "max": 1},
