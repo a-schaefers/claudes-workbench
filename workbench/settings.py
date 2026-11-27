@@ -7,7 +7,17 @@ by kind: a `choice` its `value`, `choices` [{value, label, says}] and `says` (th
 current value), with `other: true` where any model id goes (the role command checks it); a
 `number` its `value` (a float, or None for off) and `unit` (`usd`); an `info` its
 `text`; an `action` its `text` and its `choices`, which are buttons; a `note` one line for the group
-(NO_PROVIDER or CATALOG_FAILED, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows. A row may
+(NO_PROVIDER or CATALOG_FAILED, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows.
+`more: true`, a row the page draws under its card's More (a role's GPU and API model and thinking);
+`hidden: true`, a row the page doesn't draw while it can do nothing (`wb settings` still lists it); `fixed:
+true`, a choice the page draws as its `says` alone (a role's GPU|API with no API provider); a choice's
+`needs`, the row whose value it needs first (a role's API, its `api-<role>`: the page opens that row's
+list under it instead of sending); `ask`, a row
+that carries a problem or a request, which the page gives an "Ask <driver>" link filling the chat's box
+(true: "Help me with Settings › <its card>: <its line>"; a string: that request); a note, or a row with
+`help`, gets the link without it. `brief`, what a folded card's one-line summary says of the row ("" for
+nothing; without it, a choice's `<label>: <its choice>`); `phone` (the reach row), the web app's address on
+the tailnet, "" while it isn't there. A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,
@@ -43,7 +53,10 @@ from pathlib import Path
 
 from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savings, store
 
-GROUPS = ("shared", "web", "gpu", "api", "setup", "workflows", "terminal", "experimental")  # display order (`web`: the web app's own, #1355)
+# display order (`web`: the web app's own, #1355). A card per role first (#1553, 2026-11-26): its
+# GPU or API, then its GPU model, API model and thinking under More (`more`), where one role's
+# settings were spread over three cards, its API model 2,000 px below its GPU|API choice
+GROUPS = (*routes.ROLES, "shared", "web", "gpu", "api", "setup", "workflows", "terminal", "experimental")
 KINDS = ("choice", "number", "info", "action", "note")
 ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_apply)
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
@@ -57,7 +70,16 @@ NO_PROVIDER = "No API provider connected: /connect in OpenCode adds one; every r
 # in NO_PROVIDER's place when OpenCode's catalog couldn't be read: /connect was no fix for a
 # server that couldn't find OpenCode, whose keys were stored (#1342)
 CATALOG_FAILED = "OpenCode's catalog couldn't be read, so no API provider shows: {why}"
-NO_GPU = "No GPU model found (wb models)"
+# With no model discover() finds: a next step, where "No GPU model found (wb models)" left a first
+# `wb start` to exit 3 with the page never saying why (the web app's review, 2026-11-26). {who}: the
+# driver to ask, as GPU_ONLY's; the note's Ask link asks for the local one (NO_GPU_ASK)
+NO_GPU = "No GPU model yet: pick an API model for a role above (its More), or ask {who} to set up a local one."
+NO_GPU_ASK = "Help me set up a local model"
+# With no API provider, the one line that stands for every API control (the roles' API choice, Agents,
+# When the GPU is busy, the day cap), which the page then hides (`hidden`, `fixed`): six API controls
+# came before the line saying there was no provider, on the GPU-only path (the web app's review,
+# 2026-11-26). The rows stay, for `wb settings`. {who}: the driver to ask
+GPU_ONLY = "Every role runs on your GPU. To add an API model: /connect in OpenCode, or ask {who}."
 
 _WRITE = threading.Lock()  # one write at a time: two clicks never interleave their wb calls
 _READ = threading.Lock()  # one read of the rows at a time: the others wait for it, then share it
@@ -84,7 +106,10 @@ WORKFLOWS = [("off", "Off (default)", "Claude runs one task at a time."),
 RUN_STOP = ("stop", "Stop", "Stops the run (wb run stop): done work is kept, and the session that started it is told.")
 RUN_SUMMARY = ("summary", "Summary", "What the run has returned so far (wb run report), shown below.")
 RUN_DETAIL_CHARS = 16_000  # the Summary's text past this is cut: wb run report <run> has it all
-NOT_RECORDED = ("run-",)  # key prefixes whose action changes no setting (record)
+# key prefixes whose action changes no setting (record): a run's Stop or Summary, and Optimize's
+# Measure now, a button logged "Optimize: off → start", from a value that never was (the web app's
+# review, 2026-11-26)
+NOT_RECORDED = ("run-",)
 FLOWS_SAY = "Ask for one by name, or put deepcode in a message with your request."
 PROGRESS_OFF = ("off", "Off (default)", "No progress checks: each one wakes Claude, which spends its tokens.")
 THINK = [("off", "Off (default)", "Faster and cheaper; for tasks started after this."),
@@ -161,6 +186,26 @@ def _reach_help(value, said: str) -> str | None:
 # key -> (value, wb's line) -> the note for Claude, or None: a setting whose chosen value can need
 # Claude's help to work names it here
 HELP = {"probe": _probe_help, "reach": _reach_help}
+
+
+def help_now(key: str) -> str | None:
+    """The note HELP gives ``key`` as it stands now (its value and wb's line for it now), else None:
+    an offer older than OFFER_MAX_AGE_S is made only while this still says one (#1557's review,
+    2026-11-26: a help row days old was offered after probe was set up, or `tailscale serve` run,
+    outside the offer, an untrue offer that started a paid turn). `wb settings help` prints it for
+    the mod. A key added to HELP needs its own case here, or its old offers are never made."""
+    try:
+        if key == "probe":
+            return _probe_row().get("help")
+        if key == "reach":
+            value, port = chat.reach(), chat.port()
+            if value == "tailnet" and not chat.https_served(port):  # as `wb chat reach tailnet` says it
+                return _reach_help(value, cli.not_served_line(port))
+            if value == "local" and (still := cli.still_served(port)):
+                return _reach_help(value, cli.still_serves_line(still))
+    except (chat.ConfigError, OSError, ValueError):
+        return None
+    return None
 
 
 BY = ("web", "claude")  # apply()'s writers: the web app's click, Claude's `wb settings set`
@@ -258,10 +303,12 @@ def _window(n) -> str:
     return f" ({round(n / 1024)}K)" if isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0 else ""
 
 
-def _role_stops(label: str, api: str | None, name: str | None) -> list:
-    return [("gpu", "GPU", f"{label} runs on this machine's GPU."),
-            ("api", f"API ({name or api})" if api else "API (set its model under API first)",
-             f"{label} runs on {api}; your code goes to its provider." if api else "Pick its API model under API first.")]
+def _role_stops(label: str, api: str | None, name: str | None, no_gpu: bool = False) -> list:
+    """A role's GPU|API; ``no_gpu``: discover() finds no model, so a task on the GPU can't start."""
+    return [("gpu", "GPU", f"{label} runs on the GPU, which has no model yet: its tasks can't start."
+             if no_gpu else f"{label} runs on this machine's GPU."),
+            ("api", f"API ({name or api})" if api else "API (pick its model)",
+             f"{label} runs on {api}; your code goes to its provider." if api else "Pick its API model first.")]
 
 
 def _gpu_stops(label: str, gpu: list, pinned: str) -> list:
@@ -318,18 +365,29 @@ def _think_stops(row: dict) -> list:
              "after this.") if on.startswith("thinking off") else THINK[1]]
 
 
-def _spend_line(r: dict) -> str:
+def _spend_brief(r: dict) -> str:
+    """Today's API spend for the API card's summary: `today ≈$0.07 of $5`."""
     s = r.get("spend_today") or {}
-    total = s.get("usd") or 0
-    names = r.get("providers") or {}
-    by = [f"{(names.get(p) or {}).get('name') or p} {savings.usd(v)}"
-          for p, v in (s.get("by_provider") or {}).items() if isinstance(v, (int, float)) and v > 0]
-    basis = s.get("prices") or "catalog"
-    # the `≈` alone says the basis: a "(catalog prices)" note after it said it twice (#1322)
-    each = f" ({' · '.join(by)})" if by else ""
-    spent = savings.money(total, basis)
     cap = r.get("day_usd")
-    return f"Spend today: {spent}" + (f" of {routes.money(cap)}{each}" if cap is not None else f"{each} · no day cap")
+    return f"today {savings.money(s.get('usd') or 0, s.get('prices') or 'catalog')}" + \
+        (f" of {routes.money(cap)}" if cap is not None else "")
+
+
+def _spent_today(r: dict) -> str | None:
+    """Today's API spend, the ledger's (`wb route --json`'s `spend_today`), as the cap row's note
+    says it (`≈$0.12`), or None while it says nothing: no role on API and nothing spent. Its own
+    "Spend today" row sat 3.4k px down the page from the cap it is checked against (#1339's UX
+    review, 2026-11-26); the Stats view's Now says it too, and the API card's folded line
+    (`_spend_brief`, on its Connected row)."""
+    s = r.get("spend_today") or {}
+    total = s.get("usd") if isinstance(s.get("usd"), (int, float)) else 0
+    on_api = isinstance(r.get("roles"), dict) and any(
+        (r.get("use") if r.get("use") in ("gpu", "api") else (row or {}).get("via")) == "api"
+        for row in r["roles"].values() if isinstance(row, dict))  # routes.effective_via
+    if not total and not on_api:
+        return None
+    # the `≈` alone says the basis: a "(catalog prices)" note after it said it twice (#1322)
+    return savings.money(total, s.get("prices") or "catalog")
 
 
 def _connected_line(r: dict) -> str:
@@ -370,8 +428,8 @@ def _driver_row(r: dict, m: dict | None) -> dict:
     """The Driver row: an `other` choice (any OpenCode id, `#variant` allowed) of each session's
     own, the GPU models, then API models as the API rows list them; else, without the OpenCode
     plugin, an info row reading Claude Code (fixed)."""
-    if not _opencode_path():
-        return _info("driver", "shared", LABELS["driver"], DRIVER_CLAUDE)
+    if not _opencode_path():  # the page shows the line only under OpenCode, where it is a choice
+        return {**_info("driver", "shared", LABELS["driver"], DRIVER_CLAUDE), "hidden": True}
     pin = r.get("driver") or routes.DRIVER_SESSION
     stops = [DRIVER_SESSION]
     for g in (m or {}).get("gpu") or []:
@@ -433,8 +491,9 @@ def _optimize_row(m: dict) -> dict:
         state = f"measured {n} model{'' if n == 1 else 's'}{when}"
     else:
         state = "not run yet"
+    n = len(m.get("gpu") or [])
     return {"key": "optimize", "group": "gpu", "label": LABELS["optimize"], "kind": "action",
-            "text": f"Optimize: {state}",
+            "text": f"Optimize: {state}", "brief": f"{n} model{'' if n == 1 else 's'}, {state}",
             "choices": [{"value": "start", "label": "Measure now",
                          "says": "Measures this machine for its models (wb optimize start)."}]}
 
@@ -466,13 +525,14 @@ def _run_rows() -> list[dict]:
     for r in snap:
         stops = ([RUN_STOP] if r.get("phase") in runs.OPEN else []) + [RUN_SUMMARY]
         out.append({"key": f"run-{r['run']}", "group": "workflows", "label": f"Run {r['run']}", "kind": "action",
-                    "text": run_text(r), "choices": [{"value": v, "label": lab, "says": says} for v, lab, says in stops]})
+                    "text": run_text(r), "brief": f"run {r['run']} {r.get('phase') or '?'}", "choices": [{"value": v, "label": lab, "says": says} for v, lab, says in stops]})
     try:
         names = [f["name"] for f in runs.flow_rows() if f.get("where") != "repo"]
     except (OSError, ValueError):
         names = []
     if names:
-        out.append(_info("flows", "workflows", "Flows", f"Flows: {', '.join(names)}. {FLOWS_SAY}"))
+        out.append({**_info("flows", "workflows", "Flows", f"Flows: {', '.join(names)}. {FLOWS_SAY}"), "ask": True,
+                    "brief": f"{len(names)} flow{'' if len(names) == 1 else 's'}"})
     return out
 
 
@@ -485,21 +545,46 @@ def _build() -> dict:
     out: list[dict] = []
     roles = [(name, routes.LABELS[name], (r or {}).get("roles", {}).get(name) or {}) for name in routes.ROLES]
     api_name = {x.get("id"): x.get("name") for x in (m or {}).get("api") or [] if isinstance(x, dict)}
+    provs = (r or {}).get("providers") or {}
+    # a key that runs tasks: a stored one, Ollama cloud's login, Copilot's sign-in, which the
+    # keyhole holds as a key (#1191), or an exported one it can read (`runs`, #1189)
+    stored = any(p.get("key") in ("stored", "ollama", "copilot") or p.get("runs") is True
+                 for p in provs.values() if isinstance(p, dict))
+    any_api = any(row.get("api") for _, _, row in roles)
+    # no API provider (the api group's note alone): GPU_ONLY stands for every API control, which
+    # wait until they can do something; not when the catalog couldn't be read (CATALOG_FAILED says why)
+    gpu_only = r is not None and not stored and not any_api and not r.get("catalog_error")
+    quiet = {"hidden": True} if gpu_only else {}
+    no_gpu = m is not None and not m.get("gpu")  # discover() finds none: a GPU role's tasks can't start
+    who = "OpenCode" if _opencode_path() else "Claude"
 
-    # shared
+    # the roles, then the rows for every role (shared)
     if r is None:
         out.append(_note("roles-why", "shared", why or OLDER_WB))
     else:
-        out.append(_choice("agents", "shared", LABELS["agents"], AGENTS, r.get("use") or "both"))
-        out.append(_choice("busy", "shared", LABELS["busy"], BUSY, r.get("busy") or "wait"))
+        if gpu_only:
+            out.append(_note("gpu-only", "shared", GPU_ONLY.format(who=who)))
+        out.append({**_choice("agents", "shared", LABELS["agents"], AGENTS, r.get("use") or "both"), **quiet})
+        # only once a role has an API model: before it, "Use the role's API model" did nothing but
+        # set a cap (the web app's review, 2026-11-26)
+        out.append({**_choice("busy", "shared", LABELS["busy"], BUSY, r.get("busy") or "wait"),
+                    **({} if any_api else {"hidden": True})})
         for name, label, row in roles:
-            c = _choice(f"role-{name}", "shared", label_of(f"role-{name}"),
-                        _role_stops(label, row.get("api"), api_name.get(row.get("api"))), row.get("via") or "gpu")
+            c = _choice(f"role-{name}", name, label_of(f"role-{name}"),
+                        _role_stops(label, row.get("api"), api_name.get(row.get("api")), no_gpu), row.get("via") or "gpu")
             # a role on an API model that can't run says why: with no key for its provider the
             # rows said it runs there, and nothing said it couldn't (#1529, 2026-11-26)
             st = row.get("api_status")
             if row.get("via") == "api" and isinstance(st, dict) and st.get("available") is False:
                 c["says"] = f"{label} can't run on {row.get('api')}: {st.get('why') or 'wb route says why'}."
+                c["ask"] = True  # the fix is a terminal's: the page's Ask link hands it to the driver
+            if gpu_only:
+                c["fixed"] = True  # its says alone: GPU_ONLY stands for its API choice
+            elif not row.get("api"):
+                # API with no model: the page opens api-<role>'s list under the row, a pick sends it
+                # and then the role's API, where the tap was refused and the list was 2,000 px away,
+                # under another card (the web app's review, 2026-11-26; #1558)
+                c["choices"][1]["needs"] = f"api-{name}"
             out.append(c)
     if r is not None:
         out.append(_driver_row(r, m))
@@ -508,9 +593,10 @@ def _build() -> dict:
     out.extend(_run_rows())
     if r is not None:
         cap = r.get("day_usd")
-        out.append(_number("cap", "shared", LABELS["cap"], float(cap) if cap is not None else None, "usd",
-                           "Needed before an API role; $5 suggested." if cap is None else
-                           f"API tasks stop for the day at {routes.money(cap)} of spend."))
+        out.append({**_number("cap", "shared", LABELS["cap"], float(cap) if cap is not None else None, "usd",
+                              "Needed before an API role; $5 suggested." if cap is None else
+                              f"API tasks stop for the day at {routes.money(cap)} of spend" +
+                              (f": {spent} so far today." if (spent := _spent_today(r)) else ".")), **quiet})
     # Stats recording, Live view, Live refresh and the electricity price had rows here, as the
     # pane's Settings tab did until #1322 dropped them (recording always on; wb stats set and wb
     # savings --price keep the rest): a `recording` row read a key stats.settings() no longer has
@@ -523,8 +609,10 @@ def _build() -> dict:
     except chat.ConfigError as e:
         out.append(_note("reach-why", "web", str(e)))
     else:
+        # `phone`: its address on the tailnet (chat.phone_base, no token: the page adds its own), ""
+        # while it isn't there; the page's Open on your phone line
         out.append(_choice("reach", "web", LABELS["reach"], [*REACH, *([REACH_CUSTOM] if reach == "custom" else [])],
-                           reach))
+                           reach, phone=chat.phone_base(chat.port()) if reach == "tailnet" else ""))
 
     # gpu
     if r is None:
@@ -532,15 +620,16 @@ def _build() -> dict:
     elif m is None:
         out.append(_note("gpu-why", "gpu", mwhy or OLDER_WB))
     elif not m["gpu"]:
-        out.append(_note("gpu-none", "gpu", NO_GPU))
+        out.append({**_note("gpu-none", "gpu", NO_GPU.format(who=who)), "ask": NO_GPU_ASK, "brief": "no model yet"})
     else:
         for name, label, row in roles:
             gpu = row.get("gpu") or routes.AUTO
-            out.append(_choice(f"gpu-{name}", "gpu", label_of(f"gpu-{name}"), _gpu_stops(label, m["gpu"], gpu), gpu))
+            out.append(_choice(f"gpu-{name}", name, label_of(f"gpu-{name}"), _gpu_stops(label, m["gpu"], gpu), gpu,
+                               more=True))
         for g in m["gpu"]:  # every discovered model: the pane's six-row cap went with the pane
             sizes = g.get("sizes") or []
             out.append(_choice(f"size-{g['id']}", "gpu", f"{g.get('label') or g['id']} tasks", SIZES,
-                               sizes[0] if len(sizes) == 1 else "all"))
+                               sizes[0] if len(sizes) == 1 else "all", brief=""))
         out.append(_optimize_row(m))
     out.extend(_media_rows(m))
 
@@ -548,33 +637,41 @@ def _build() -> dict:
     if r is None:
         out.append(_note("api-why", "api", why or OLDER_WB))
     else:
-        provs = r.get("providers") or {}
-        # a key that runs tasks: a stored one, Ollama cloud's login, Copilot's sign-in, which the
-        # keyhole holds as a key (#1191), or an exported one it can read (`runs`, #1189)
-        stored = any(p.get("key") in ("stored", "ollama", "copilot") or p.get("runs") is True
-                     for p in provs.values() if isinstance(p, dict))
-        if not stored and not any(row.get("api") for _, _, row in roles):
+        if not stored and not any_api:
             err = r.get("catalog_error")
-            out.append(_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER))
+            out.append({**_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER),
+                        "brief": "catalog not read" if err else "no provider connected"})
         else:
             if provs:
-                out.append(_info("api-connected", "api", "Connected", _connected_line(r)))
+                c = {**_info("api-connected", "api", "Connected", _connected_line(r)),
+                     # and today's spend: its Spend today row went to the cap row's note (#1339), and
+                     # this card's folded line still says it
+                     "brief": " · ".join(x for x in (", ".join(str(p.get("name")) for p in provs.values()
+                                                               if isinstance(p, dict) and p.get("name")),
+                                                     _spend_brief(r)) if x)}
+                if any(isinstance(p, dict) and p.get("key") not in ("stored", "ollama", "copilot") and p.get("runs") is not True
+                       for p in provs.values()):
+                    c["ask"] = True  # a provider with no key it can run on
+                out.append(c)
             for name, label, row in roles:
                 others = [x.get("api") for n, _, x in roles if n != name and x.get("api")]
                 api = row.get("api") or ""
                 stops = _api_stops(label, m, api, others)
-                c = _choice(f"api-{name}", "api", label_of(f"api-{name}"), stops, api or None, other=True)
+                c = _choice(f"api-{name}", name, label_of(f"api-{name}"), stops, api or None, other=True, more=True)
                 if not api:
                     c["says"] = f"{label} has no API model: it runs on the GPU."
                 out.append(c)
-            for name, label, row in roles:
-                out.append(_choice(f"think-{name}", "api", label_of(f"think-{name}"),
-                                   _think_stops({"api": None, "thinking": "off", **row}), row.get("thinking") or "off"))
+            # thinking is an API model's alone: a role with none got a switch that did nothing (the
+            # web app's review, 2026-11-26), so its row comes with the model, as review-<role>'s does
             for name, label, row in roles:
                 if row.get("api"):
-                    out.append(_choice(f"review-{name}", "api", label_of(f"review-{name}"), REVIEW,
-                                       row.get("thinking_review") or "off"))
-            out.append(_info("api-spend", "api", "Spend today", _spend_line(r)))
+                    out.append(_choice(f"think-{name}", name, label_of(f"think-{name}"),
+                                       _think_stops({"api": None, "thinking": "off", **row}), row.get("thinking") or "off",
+                                       more=True))
+            for name, label, row in roles:
+                if row.get("api"):
+                    out.append(_choice(f"review-{name}", name, label_of(f"review-{name}"), REVIEW,
+                                       row.get("thinking_review") or "off", more=True))
 
     out += setup_rows()
     out.append(_choice("splash", "terminal", LABELS["splash"], SPLASH, "on" if cli.splash_on() else "off"))
@@ -602,8 +699,9 @@ def setup_rows() -> list[dict]:
     out = [_info(key, "setup", label, f"{label}: {', '.join(got)}" + (f"; {tail}." if tail else ".")
                  if got else f"{label}: {tail.removeprefix('and ')}.")
            for key, label, got, tail in lines if got or key in ("setup-instructions", "setup-skills")]
-    out.append(_info("setup-size", "setup", "Size", f"About {said['tokens'] / 1000:.1f}K tokens, with "
-                     "OpenCode's own prompt and tools, before a task's project files and spec."))
+    out.append({**_info("setup-size", "setup", "Size", f"About {said['tokens'] / 1000:.1f}K tokens, with "
+                        "OpenCode's own prompt and tools, before a task's project files and spec."),
+                "brief": f"about {said['tokens'] / 1000:.1f}K tokens"})
     return out
 
 
@@ -720,7 +818,8 @@ def _row(key: str) -> dict:
 
 
 def apply(key: str, value, by: str = "web") -> dict:
-    """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?, "detail"?}
+    """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?, "detail"?, "page"?}
+    (`page`: a refusal in the page's words, or a note to a change that went through: page_line)
     (`detail`: a run's Summary, its report, cut at RUN_DETAIL_CHARS). KeyError for no
     such row, ValueError for a value it doesn't take (nothing runs for either); `ok` false is wb's
     refusal, `said` its line. `help`, when the value chosen needs Claude's help to work (HELP).
@@ -734,6 +833,8 @@ def apply(key: str, value, by: str = "web") -> dict:
         finally:
             drop()
     result = {"ok": ok, "said": _said(argv, ok, out, err)}
+    if line := page_line(key, result["said"], ok):
+        result["page"] = line
     if ok and argv[:2] == ["run", "report"]:  # a run's Summary: its report, drawn under the row
         text = out.strip()
         result["said"] = text.splitlines()[0] if text else "nothing in yet"
@@ -742,6 +843,34 @@ def apply(key: str, value, by: str = "web") -> dict:
     if ok and key in HELP and (note := HELP[key](argv[-1], result["said"])):
         result["help"] = note
     return result
+
+
+# what wb's line says after a role or a value it names, cut at the first command it suggests: a
+# `…` span, or a `wb …` (the page's toast has no command: the driver reads wb's whole line)
+_COMMAND = re.compile(r"[\s:;,(]+(?:`|wb [a-z]|run\s+`)")
+_ROLE_WORD = re.compile(r"\b(" + "|".join(routes.ROLES) + r")\b")
+
+
+def page_line(key: str, said: str, ok: bool = False) -> str:
+    """wb's line as the web app says it: in the page's words, by the row's label and the roles'
+    (routes.LABELS), with no `wb:` and no command; wb's whole line stays `said`, which the driver
+    reads (settings-changes.jsonl, Recent changes, the mods' relay). A refusal always has one; a
+    change that went through only a note the page adds to its own words ("" for none). A role put
+    on API before it had a model was told `wb route trivial <provider/model>`, a gated command
+    naming the key the row calls Trivial coding (#1558), and every refusal was wb's stdout, `wb:`
+    and its commands too (the web app's review, 2026-11-26)."""
+    head, _, rest = key.partition("-")
+    if ok:  # a role moved while Agents isn't Both: kept, applied once it is
+        return "Set Agents to Both for this to apply." if "once Agents is Both" in said else ""
+    if head == "role" and rest in routes.LABELS and "has no API model" in said:
+        return f"Pick {routes.LABELS[rest]}'s API model first: tap API, or under More."
+    if m := re.search(r"the day cap stays while (.+?) can spend on API", said):
+        names = _ROLE_WORD.sub(lambda r: routes.LABELS[r.group(1)], m.group(1)).replace("busy", "When the GPU is busy")
+        return f"The day cap stays while {names} can spend on API: put {'it' if ',' not in names else 'them'} on the GPU first."
+    text = said.strip().removeprefix("wb: ").strip()
+    text = _COMMAND.split(text, 1)[0].strip(" :;,.")
+    text = _ROLE_WORD.sub(lambda r: routes.LABELS[r.group(1)], text)
+    return f"{label_of(key)} wasn't changed: {text}." if text else f"{label_of(key)} wasn't changed."
 
 
 def dry_run(key: str, value) -> tuple[int, str, str]:
@@ -776,9 +905,12 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
     written, for a choice or a number set to the value it had: no change to tell anyone of."""
     if before.get("kind") in ("choice", "number") and _same(before.get("value"), value):
         return None
-    if key.startswith(NOT_RECORDED):  # a run's Stop or Summary: no setting changed (its stop is a notice)
+    if key.startswith(NOT_RECORDED):  # a run's Stop or Summary: no setting changed (a run's stop is a notice)
         return None
-    entry = {"ts": store.now(), "key": key, "label": before.get("label") or key, "from": before.get("value"),
+    # an action (Optimize's Measure now) is pressed, never changed from a value: logged with no
+    # `from`, drawn "Optimize: started", never "off → start" (the web app's review, 2026-11-26)
+    was = None if before.get("kind") == "action" else before.get("value")
+    entry = {"ts": store.now(), "key": key, "label": before.get("label") or key, "from": was,
              "to": value, "said": done["said"], **({"help": done["help"]} if done.get("help") else {}), "by": by}
     store.append_jsonl(chat.changes_path(), entry)
     store.write_json(chat.chat_dir() / REV, {k: entry[k] for k in ("ts", "key", "label", "to", "by")})
@@ -957,7 +1089,7 @@ def rev() -> dict | None:
 # and words in register.tsx with its mark in its own store, so each host offers a row once.
 OFFERED = "settings-offered.json"  # under $WB_HOME: {ts}, the newest row `wb settings offers --if-due` gave
 OFFER_TAIL = 64 << 10  # the mod's SETTINGS_TAIL
-OFFER_MAX_AGE_S = 3600  # the mod's OLDEST_WAKE_MS: a row older is no news
+OFFER_MAX_AGE_S = 3600  # the mod's OLDEST_WAKE_MS: a row without help older is no news
 SAID_ELSEWHERE = re.compile(r"(?:agents|busy|cap|coding|workflows|(?:role|gpu|api|think)-[a-z]+)")
 
 
@@ -980,23 +1112,35 @@ def change_said(r: dict) -> str:
 def offers(spend: bool, now: float | None = None) -> dict:
     """The web changes due a word (`wb settings offers`): {"offers": [{ts, key, label, text,
     toast}], "notes": [{ts, key, text}]}, from settings-changes.jsonl's rows `by: "web"` newer
-    than settings-offered.json's mark and under OFFER_MAX_AGE_S old. ``spend`` (--if-due) moves
-    the mark past them under its lock, so one host's servers say each once."""
+    than settings-offered.json's mark: a note under OFFER_MAX_AGE_S old, an offer however old
+    while it is its setting's newest row (#1557, 2026-11-26: the page promises "your driver will
+    offer to set it up", and a change made with no driver up lapsed after the hour; a later change
+    of the same setting, anyone's, retires it), one older than the hour only while help_now still
+    gives a note (else it is retired too). ``spend`` (--if-due) moves the mark past them under its
+    lock, so one host's servers say each once."""
     now = store.now() if now is None else now
     mark_path = store.home() / OFFERED
     with store.locked(store.home() / "locks" / "settings-offered.lock"):
         mark = float((store.read_json(mark_path, {}) or {}).get("ts") or 0)
         got: dict = {"offers": [], "notes": []}
         newest = mark
-        for r in store.read_jsonl_tail(chat.changes_path(), OFFER_TAIL):
-            if not isinstance(r, dict) or r.get("by") != "web":
+        rows = [r for r in store.read_jsonl_tail(chat.changes_path(), OFFER_TAIL)
+                if isinstance(r, dict) and isinstance(r.get("ts"), (int, float))]
+        latest: dict[str, float] = {}  # each setting's newest row, by anyone
+        for r in rows:
+            k = _one(r.get("key"), 80)
+            latest[k] = max(latest.get(k, 0.0), float(r["ts"]))
+        for r in rows:
+            ts = r["ts"]
+            if r.get("by") != "web" or ts <= mark:
                 continue
-            ts = r.get("ts")
-            if not isinstance(ts, (int, float)) or ts <= mark or ts < now - OFFER_MAX_AGE_S:
-                continue
-            newest = max(newest, float(ts))
             key, label = _one(r.get("key"), 80), _one(r.get("label"), 80) or _one(r.get("key"), 80)
             help = r.get("help").strip() if isinstance(r.get("help"), str) else ""
+            if (ts < latest[key]) if help else (ts < now - OFFER_MAX_AGE_S):
+                continue
+            newest = max(newest, float(ts))
+            if help and ts < now - OFFER_MAX_AGE_S and not help_now(key):
+                continue  # what it asked for is done, or moot: retired, said never (#1557's review)
             if help:
                 got["offers"].append({
                     "ts": ts, "key": key, "label": label,

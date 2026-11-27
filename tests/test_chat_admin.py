@@ -108,8 +108,12 @@ class ChatAdmin(Base):
         # nothing runs for a row that isn't, or a value it doesn't take; neither is recorded
         self.assertEqual(self.call("/api/settings", {"key": "nope", "value": "x"}, token=self.user),
                          (400, {"error": "no such setting", "code": "bad_request"}))
+        # a value it doesn't take: its reason (the day cap's box was told "not one of its choices",
+        # the web app's review, 2026-11-26)
         self.assertEqual(self.call("/api/settings", {"key": "coding", "value": "sometimes"}, token=self.user),
-                         (400, {"error": "not one of its choices", "code": "bad_request"}))
+                         (400, {"error": "'sometimes' isn't one of coding's choices", "code": "bad_request"}))
+        self.assertEqual(self.call("/api/settings", {"key": "cap", "value": "-3"}, token=self.user),
+                         (400, {"error": "a positive number, or off", "code": "bad_request"}))
         self.assertEqual(self.call("/api/settings", {"key": "coding", "value": True}, token=self.user)[0], 400)
         self.assertEqual(len(store.read_jsonl(chat.changes_path())[0]), 1)
 
@@ -153,7 +157,7 @@ class ChatAdmin(Base):
                          (403, {"error": "agent tokens can't use /api/settings", "code": "agent_forbidden"}))
         self.assertEqual(cli.coding_mode(), "decide")
         # every path the handler answers, by every method it takes: outside AGENT_MAY is 403
-        paths = set(re.findall(r'"(/api/[a-z]+/?)', (ROOT / "workbench" / "chat.py").read_text()))
+        paths = set(re.findall(r'"(/api/[a-z][a-z.-]*/?)', (ROOT / "workbench" / "chat.py").read_text()))
         self.assertTrue({"/api/settings", "/api/stats", "/api/top", "/api/push", "/api/upload/"} <= paths)
         self.assertFalse({"/api/answer", "/api/ask/", "/api/prefs"} & paths)  # no dialog answered from the chat (#1350)
         refused = 0
@@ -207,6 +211,15 @@ class AdminSet(Base):
                 mock.patch.object(settings, "apply", return_value={"ok": False, "said": "wb: no"}):
             self.assertEqual(chat.admin_set("coding", "ask"), (409, {"ok": False, "error": "wb: no", "rows": rows}))
         self.assertFalse(chat.changes_path().exists())
+
+    def test_a_refusal_carries_its_line_in_the_pages_words_beside_wbs_1563(self):
+        # #1563 and the web app's review (2026-11-26): the page toasted wb's stdout
+        rows = [{"key": "role-trivial", "label": "Trivial coding", "kind": "choice", "value": "gpu"}]
+        done = {"ok": False, "said": "wb: trivial has no API model yet: wb route trivial <provider/model>",
+                "page": "Pick Trivial coding's API model first: tap API, or under More."}
+        with mock.patch.object(settings, "rows", return_value=rows), mock.patch.object(settings, "apply", return_value=done):
+            self.assertEqual(chat.admin_set("role-trivial", "api"),
+                             (409, {"ok": False, "error": done["said"], "rows": rows, "page": done["page"]}))
 
     def test_a_change_needing_claudes_help_carries_it_to_the_page_and_leaves_the_record_to_wbs_child(self):
         # #1355: one writer logs every Settings write, cli.main around the row's own wb (the

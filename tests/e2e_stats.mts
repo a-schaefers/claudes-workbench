@@ -42,7 +42,8 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
     window.fetch = async (u: RequestInfo | URL, o: RequestInit = {}) => {
       const path = new URL(String(u), location.href).pathname
       if (path === '/api/stats' && top.statsDown) throw new TypeError('Failed to fetch')   // out of reach (#1412)
-      if (path === '/api/stats' && !real) return new Response(JSON.stringify({ feed: JSON.parse(await window.e2eFeed()), routes: null, models: null }),
+      // top.routes: a fixed `wb route --json` in place of the server's, whichever is under test
+      if (path === '/api/stats' && (!real || top.routes)) return new Response(JSON.stringify({ feed: JSON.parse(await window.e2eFeed()), routes: top.routes ?? null, models: null }),
         { status: 200, headers: { 'Content-Type': 'application/json' } })
       if (path !== '/api/top') return realFetch(u, o)
       top.opened++
@@ -93,7 +94,8 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
       const say = () => JSON.stringify(got)
       const of = (label: string) => (got.find((r: any) => r.label === label) || {}).text
       if (!/^3 tasks · 2 landed \(67%\)/.test(of('This week'))) throw new Error(say())
-      if (of('By size') !== 'complex 1 (100%) · trivial 2 (50%)') throw new Error(say())
+      // one name per role, Settings' (routes.LABELS), not the pane's `complex` (#1339)
+      if (of('By size') !== 'Complex coding 1 (100%) · Trivial coding 2 (50%)') throw new Error(say())
       if (of('What stopped agents') !== 'the API day cap 1') throw new Error(say())
       for (let i = 1; i < got.length; i++) if (rank(got[i].label) < rank(got[i - 1].label)) throw new Error('out of order: ' + say())
       // #1322: no score, saving, streak or 30 days (the feed has none of them)
@@ -162,9 +164,55 @@ export async function check(page: any, { desktop, home, wb, until, check, sleep,
       if (!s.meters[0].includes('20.0/24.0 GiB') || !s.meters.some((m: string) => /Busy.*%/.test(m)) || !s.meters.some((m: string) => m.includes('30.0/64.0 GiB'))) throw new Error(say())
       if (!s.text.includes('211 W')) throw new Error(say())
       if (!s.running[0].includes('fix-nav fake-coder 30B · running · round 2 · 3m10s · 61 tok/s · context 34%')) throw new Error(say())
-      if (!s.running[1].includes('fix-api API deepinfra Fast-Coder-1 · running · round 1 · 12s · ≈$0.12')) throw new Error(say())
+      // an API model as the task sheet's note says it (taskNote, #1339)
+      if (!/fix-api API · Fast-Coder-1 · (deepinfra|DeepInfra) · running · round 1 · 12s · ≈\$0\.12/.test(s.running[1])) throw new Error(say())
       if (s.rack.length !== 2 || !s.rack[0].includes('← fix-nav') || !s.rack[1].includes('+3 more (wb top)')) throw new Error(say())
       if (s.queue.join() !== '◌fix-later waits for the GPU (1m15s)') throw new Error(say())
+    })
+
+    await check('Stats: a Running row is a button that asks the shell to open the task sheet on its task (#1339)', async () => {
+      // #1339's UX review (2026-11-26): the ▶ read as a disclosure and did nothing, a task 3 taps from Stats
+      await page.evaluate(() => {
+        const w = window as any
+        w.e2eOpened = []
+        if (!w.e2eOpenSeen) { w.e2eOpenSeen = true; addEventListener('wb:open-task', (e: Event) => w.e2eOpened.push((e as CustomEvent).detail)) }
+      })
+      // the row's look: no button face, and its ▶ hangs at the card's edge, under the title, as before
+      const look = await page.evaluate(() => { const b = document.querySelector<HTMLElement>('#stats-body .st-run button')!, s = getComputedStyle(b)
+        return { bg: s.backgroundColor, border: s.borderTopWidth, align: s.textAlign,
+          mark: Math.round(b.querySelector('.st-mark')!.getBoundingClientRect().left), title: Math.round(document.querySelector('#stats-body .st-running h3')!.getBoundingClientRect().left) } })
+      if (look.border !== '0px' || look.align !== 'left' || !/rgba\(0, 0, 0, 0\)|transparent/.test(look.bg) || Math.abs(look.mark - look.title) > 1) throw new Error(JSON.stringify(look))
+      // a tap, then Enter on the focused row: each asks once, and the shell's listener (app.ts's
+      // openTask) shows the Chat view with the sheet on that task, so the row is found again on
+      // Stats for the key (the a22-ux-int merge, 2026-11-26: written before that listener, the
+      // Enter went to a hidden row)
+      const sheetOn = async () => await page.evaluate(() => WB.current()) === 'chat' && (await page.textContent('#ts-name')) === 'fix-api'
+      const row = () => page.locator('#stats-body .st-run button').nth(1)
+      await row().click()
+      await until(sheetOn).catch(async () => { throw new Error('the sheet not on fix-api: ' + await page.evaluate(() => WB.current())) })
+      await goTo('stats')
+      await until(async () => (await page.locator('#stats-body .st-run button').count()) > 1)
+      await row().focus()
+      await page.keyboard.press('Enter')
+      await until(sheetOn).catch(async () => { throw new Error('Enter left the sheet off fix-api: ' + await page.evaluate(() => WB.current())) })
+      const got = await page.evaluate(() => (window as any).e2eOpened)
+      if (JSON.stringify(got) !== JSON.stringify([{ task: 'fix-api' }, { task: 'fix-api' }])) throw new Error(JSON.stringify(got))
+      await goTo('stats')
+    })
+
+    await check('Stats: Now says today\'s API spend against the day cap once a role is on API, and nothing of it on the GPU alone (#1339)', async () => {
+      // #1339's UX review (2026-11-26): the figure that decides whether API tasks stop sat 3.4k px down Settings
+      const today = () => page.evaluate(() => (document.querySelector('#stats-body .st-now-box .st-today') || {}).textContent ?? null)
+      const routes = (via: string, usd: number) => ({ use: 'both', day_usd: 5, spend_today: { usd, prices: 'catalog', by_provider: {} },
+        roles: { significant: { via: 'gpu' }, trivial: { via }, writing: { via: 'gpu' } }, providers: {} })
+      try {
+        await page.evaluate((r: unknown) => { window.e2eTop.routes = r }, routes('api', 0.6))
+        await again()
+        await until(async () => (await today()) === 'API today ≈$0.60 of $5').catch(async () => { throw new Error(String(await today())) })
+        await page.evaluate((r: unknown) => { window.e2eTop.routes = r }, routes('gpu', 0))
+        await again()
+        await until(async () => (await today()) === null).catch(async () => { throw new Error('a spend line on the GPU alone: ' + await today()) })
+      } finally { await page.evaluate(() => { delete window.e2eTop.routes }) }
     })
 
     await check(`Stats: the view fits ${desktop ? 1280 : 'a phone\'s'} width with no sideways scroll${desktop ? ', its cards two columns' : ''}`, async () => {

@@ -19,8 +19,8 @@ const STORY_DRIVERS: Record<string, Record<string, string>> = {
     "prompts": "a permission, a question, an MCP server's form"
   },
   "any": {
-    "who": "your driver",
-    "app": "your driver",
+    "who": "Claude or OpenCode",
+    "app": "Claude Code or OpenCode",
     "listen": "and run /workbench",
     "grant": "",
     "reply": "`wb chat reply`",
@@ -29,12 +29,10 @@ const STORY_DRIVERS: Record<string, Record<string, string>> = {
 }
 const STORY_TEXTS: Record<string, string> = {
   "purpose": "Message {who} from anywhere: most work can run from here. A prompt {who} raises waits in its terminal (`ssh` + `tmux`); run {who} with permissions granted to skip those. Your settings live here too.",
-  "rule.terminal": "The terminal is where {who} lives, on this machine or over `ssh` + `tmux`: a prompt {who} raises is answered there, never in the chat.",
-  "rule.chat": "Most work can still run from the chat, more so with {who} run with permissions granted.",
+  "rule.terminal": "The terminal is where {who} lives, on this machine or over `ssh` + `tmux`: a prompt {who} raises (a permission, a question, a plan) is answered there, never here, and the line at the top of the chat says while one waits.",
   "rule.settings": "The web app's Settings are the source of truth: {who} changes one only when you ask and say yes.",
   "receipt.blocked": "Waiting behind the prompt in the terminal",
-  "prompts": "{Who}'s prompts (a permission, a question, a plan) are answered in the terminal, never here. While one waits, the line at the top of the chat says so. Run {who} with permissions granted to work from the chat.",
-  "lane": "A second lane to {who}, not a copy of the terminal. What you send here reaches the session listening on your computer; {who} answers here with what matters: results, questions, its plans. Its prompts wait in the terminal, and the terminal's full output stays on the computer. Ask {who} to keep you posted here, and it will."
+  "lane": "This chat is a second lane to {who}, not a copy of the terminal: {who} answers here with what matters, and most work can run from here, more so with {who} run with permissions granted."
 }
 function storyFill(t: string, fields: Record<string, string>, partial = false): string {
   return t.replace(/\{([A-Za-z_]+)\}/g, (all: string, name: string) => {

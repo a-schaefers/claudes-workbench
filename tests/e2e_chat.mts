@@ -110,10 +110,14 @@ async function run(engine: string, device?: string) {
     await page.goto(base + '#token=' + token)
     await until(async () => (await page.textContent('#presence-text')).includes('no session listening'))
     if (page.url().includes('token')) throw new Error('token still in the URL: ' + page.url())
+    // #1339: no driver known yet, so the box and the story name both, never "your driver"
+    await until(async () => (await page.getAttribute('#input', 'placeholder')) === 'Message Claude or OpenCode'
+      && (await page.textContent('#intro p')).includes('Message Claude or OpenCode from anywhere'))
   })
   await check('shows a listening session at once', async () => {
     listen(false)
     await until(async () => (await page.textContent('#presence-text')).includes('listening in ~/project'))
+    await until(async () => (await page.getAttribute('#input', 'placeholder')) === 'Message Claude')  // the listener's (#1339)
   })
   // #1341: the chat says what it is for, in the empty state, and over a thread as a hint until
   // dismissed, naming the driver that listens (#1355: the story's `purpose`, story.ts)
@@ -121,6 +125,9 @@ async function run(engine: string, device?: string) {
   await check('the empty state says what the chat is for, and no hint repeats it', async () => {
     if (!(await page.textContent('#intro p')).replace(/\s+/g, ' ').includes(PURPOSE)) throw new Error(await page.textContent('#intro p'))
     if (await page.locator('#hint').isVisible()) throw new Error('the hint shows over the empty state')
+    // #1339: the starter chips, the first tap on the simple path, are 44 px to tap
+    const chips = await page.$$eval('#intro .chip', (x: Element[]) => x.map(c => Math.round(c.getBoundingClientRect().height)))
+    if (!chips.length || chips.some((h: number) => h < 44)) throw new Error('the chips: ' + chips)
   })
   await check('a sent message lands once, with its tick', async () => {
     await page.fill('#input', 'hello from the phone')
@@ -128,12 +135,28 @@ async function run(engine: string, device?: string) {
     await until(() => messages().length === 1)
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Delivered'))
     if (await page.inputValue('#input')) throw new Error('the box was not cleared')
+    // #1339: a row says whose it is and when; its tick is drawn, not read out
+    const named = await page.evaluate(() => { const r = [...document.querySelectorAll('.row.user')].at(-1)!
+      return { role: r.getAttribute('role'), label: r.getAttribute('aria-label'), tick: r.querySelector('.tick')!.getAttribute('aria-hidden') } })
+    if (named.role !== 'group' || !/^You, \d/.test(named.label || '') || named.tick !== 'true') throw new Error(JSON.stringify(named))
+    // #1339: what the chat is for is known once a message is sent: the hint goes, for good
+    if (await page.locator('#hint').isVisible() || await page.evaluate(() => localStorage.getItem('wb-chat-hint')) !== 'true')
+      throw new Error('the hint stayed after the first message sent')
   })
-  await check('over a thread the hint shows once, dismisses, and stays dismissed after a reload', async () => {
+  await check('over a thread the hint shows once, hides while the state line says the same, dismisses, and stays dismissed after a reload', async () => {
+    await page.evaluate(() => localStorage.removeItem('wb-chat-hint'))  // this device never sent: as another one's thread
+    await page.reload()
     await until(async () => await page.locator('#hint').isVisible())
+    // no session listening: the state line says how to start one, and the hint, the same, hides (#1339)
+    writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+    await until(async () => (await page.locator('#driver-state').isVisible()) && await page.locator('#hint').isHidden())
+    listen(false)
+    await until(async () => (await page.locator('#driver-state').isHidden()) && await page.locator('#hint').isVisible())
     const said = (await page.textContent('#hint-text')).replace(/\s+/g, ' ')
     for (const want of [PURPOSE, 'waits in its terminal', 'permissions granted', 'settings live here'])
       if (!said.includes(want)) throw new Error(said)
+    const x = await page.evaluate(() => document.getElementById('hint-x')!.getBoundingClientRect().toJSON())
+    if (x.width < 44 || x.height < 44) throw new Error('the hint\'s ✕: ' + JSON.stringify(x))  // #1339
     await page.click('#hint-x')
     await until(async () => await page.locator('#hint').isHidden())
     if (await page.evaluate(() => localStorage.getItem('wb-chat-hint')) !== 'true') throw new Error('the dismissal was not kept')
@@ -170,6 +193,9 @@ async function run(engine: string, device?: string) {
     await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('make test passes'))
     await until(async () => (await page.locator('.row.claude .bubble strong').count()) === 1)
     if (await page.locator('.thread .working').count()) throw new Error('still shows working')
+    const named = await page.evaluate(() => { const r = [...document.querySelectorAll('.row.claude')].at(-1)!
+      return { label: r.getAttribute('aria-label'), copy: r.querySelector('.meta button')!.getAttribute('aria-label') } })
+    if (!/^Claude, \d/.test(named.label || '') || named.copy !== 'Copy this reply') throw new Error(JSON.stringify(named))  // #1339
   })
   await check("Claude's reply copies over plain http at a LAN address, where navigator.clipboard is missing", async () => {
     // #745 (the 2026-11-21 audit, finding 104): navigator.clipboard exists only in a secure
@@ -329,7 +355,8 @@ async function run(engine: string, device?: string) {
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
     const heads = await page.$$eval('#settings .card h3', (h: Element[]) => h.map(x => x.textContent).join(' | '))
-    if (heads !== 'How the chat works | While away | Notifications | Install the app | This chat | This device') throw new Error(heads)
+    // what the chat is, once: This chat went into How the chat works (the web app's review, 2026-11-26)
+    if (heads !== 'How the chat works | While away | Notifications | Install the app | This device') throw new Error(heads)
     if (await page.locator('[data-away]').count()) throw new Error('"Let Claude go ahead" is back')
     const r = await fetch(base + 'api/prefs', { method: 'POST', headers: { Authorization: 'Bearer ' + token,
       'Content-Type': 'application/json' }, body: '{"away":"allow"}' })
@@ -343,14 +370,15 @@ async function run(engine: string, device?: string) {
                         'until you type or answer a prompt in the terminal again',
                         "Stats and Settings don't count, nor this page opened on the computer itself"])  // #1374
       if (!said.includes(want)) throw new Error(said)
-    const prompts = await page.textContent('#away-prompts')
-    for (const want of ['are answered in the terminal, never here', 'Run Claude with permissions granted to work from the chat.'])
-      if (!prompts.includes(want)) throw new Error(prompts)
-    // the three rules, the story's words for the driver listening (#1355)
+    // the prompts said once, in How the chat works, not again under While away (the web app's review, 2026-11-26)
+    if (await page.locator('#away-prompts').count() || said.includes('prompts')) throw new Error('While away says the prompts again')
+    // its three lines, the story's words for the driver listening (#1355)
     const how = (await page.textContent('#how')).replace(/\s+/g, ' ')
-    for (const want of ['The terminal is where Claude lives', 'a prompt Claude raises is answered there, never in the chat',
+    for (const want of ['This chat is a second lane to Claude', 'The terminal is where Claude lives',
+                        'a prompt Claude raises (a permission, a question, a plan) is answered there, never here, and the line at the top of the chat says while one waits',
                         'more so with Claude run with permissions granted', "Settings are the source of truth: Claude changes one only when you ask and say yes"])
       if (!how.includes(want)) throw new Error(how)
+    if ((how.match(/answered there|in the terminal/g) || []).length !== 1) throw new Error('said more than once: ' + how)
     await goTo('chat')
     await until(async () => await page.locator('#settings').isHidden())
   })
@@ -460,6 +488,10 @@ async function run(engine: string, device?: string) {
     if (!(await line.locator('.dstate-grant').textContent()).includes('claude --permission-mode auto')) throw new Error(await line.textContent())
     if ((await line.locator('button').count()) !== 1 || (await line.locator('button').textContent()) !== 'Copy') throw new Error('a button besides Copy')
     if ((await line.getAttribute('role')) !== 'status') throw new Error('not a status')
+    // #1339: Copy is 44 px to tap, though the line is no taller: a tap 5 px over or under it lands on it
+    const lands = await page.evaluate(() => { const b = document.querySelector('.dstate-copy')!, r = b.getBoundingClientRect()
+      return [r.top - 5, r.bottom + 5].map(y => b.contains(document.elementFromPoint(r.left + r.width / 2, y))) })
+    if (lands.join() !== 'true,true') throw new Error('Copy\'s hit area: ' + lands)
     if (!(await page.textContent('#presence-text')).includes('waiting for you in the terminal')) throw new Error(await page.textContent('#presence-text'))
     if (await page.locator('.row.notice').count()) throw new Error('a thread row for a wait')
     if (await page.locator('.row.ask, .card .choices').count()) throw new Error('an answer card on the page')
@@ -494,17 +526,27 @@ async function run(engine: string, device?: string) {
     await goTo('stats')
     await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18.'))
     if ((await page.textContent('#saved')).includes('$')) throw new Error('a currency sign: ' + await page.textContent('#saved'))
-    // #1022: an API task's dollars carry a `$` (OpenCode's unit), apart from the saving, while the
-    // energy's cost still has none (#845)
+    // #1022: an API task's dollars carry a `$` (OpenCode's unit), apart from the saving: History's
+    // This week says them, and What it saved no longer does (#1339: spend read under "saved", and
+    // counted trials, 3 tasks against History's 2), while the energy's cost still has none (#845)
+    const week = () => page.evaluate(() => [...document.querySelectorAll('#stats-body .st-row')]
+      .filter(r => r.querySelector('dt')!.textContent === 'This week').map(r => r.querySelector('dd')!.textContent).join(''))
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepseek',
-        model: 'deepseek/deepseek-flash', api: { cost: 0.42, source: 'opencode' } }) + '\n')
+        model: 'deepseek/deepseek-flash', rounds: 1, api: { cost: 0.42, source: 'opencode' } }) + '\n')
+    await page.reload()
+    await goTo('stats')
+    // one provider: no split, which said the total twice (#1339)
+    await until(async () => /API ≈\$0\.42$/.test(await week())).catch(async () => { throw new Error(await week()) })
+    // its model line: a mean of one round is `1 round`, never `1 rounds` (#1339)
+    const lines = await page.evaluate(() => [...document.querySelectorAll('#stats-body .st-row dd')].map(d => d.textContent).join(' | '))
+    if (!/1 task · 100% landed · 1 round · /.test(lines) || /\b1 rounds\b/.test(lines)) throw new Error(lines)
     // #1135: at the catalog's prices a figure is an estimate (≈); at the user's own (wb model price) it isn't
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepinfra',
         model: 'deepinfra/acme-flash', api: { cost: 0.1, source: 'metered', prices: 'yours' } }) + '\n')
     await page.reload()
     await goTo('stats')
-    await until(async () => (await page.textContent('#saved')).includes('API models: 2 tasks, ≈$0.52 (deepseek ≈$0.42, deepinfra $0.10).'))
-    if (!(await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18. API')) throw new Error(await page.textContent('#saved'))
+    await until(async () => /API ≈\$0\.52 \(.+ ≈\$0\.42 · .+ \$0\.10\)$/.test(await week())).catch(async () => { throw new Error(await week()) })
+    if ((await page.textContent('#saved')) !== 'The GPU used 600 Wh, cost 0.18.') throw new Error(await page.textContent('#saved'))
     writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
     // #101: the badge, its number and its words, legible at phone width
     if (await page.locator('#badge').isHidden()) throw new Error('no badge')
@@ -522,9 +564,10 @@ async function run(engine: string, device?: string) {
     await until(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())))
     await until(() => page.evaluate(async () => (await (await caches.open('wb-chat')).match('/key')) !== undefined))
     if (!(await page.textContent('#app')).includes('installs from the https address')) throw new Error('install offered over http')
-    // its command as code, never its backticks as text (#1323)
+    // its command as code, never its backticks as text (#1323), on the port this chat runs on: this
+    // test's 13371, where the card said 1337 whatever the port (#1562)
     const cmd = await page.$$eval('#app code', (c: Element[]) => c.map(x => x.textContent))
-    if (JSON.stringify(cmd) !== '["tailscale serve --bg 1337"]' || (await page.textContent('#app')).includes('`'))
+    if (JSON.stringify(cmd) !== JSON.stringify([`tailscale serve --bg ${PORT}`]) || (await page.textContent('#app')).includes('`'))
       throw new Error('the install card: ' + await page.textContent('#app'))
     const notify = await page.textContent('#notify')
     if (engine === 'webkit' ? !notify.includes('installed app') : !(await page.locator('#push').count())) throw new Error('notifications: ' + notify)
@@ -614,7 +657,7 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('After the update.'))
     } finally { utimesSync(css, was.atime, was.mtime) }
   })
-  await check('the strip over the thread names each open task\'s model, GPU or API and whose (#1016)', async () => {
+  await check('the strip over the thread names each open task\'s model, GPU or API, by the web app\'s one name for it (#1016, #1339)', async () => {
     const t = join(home, 'state/tasks/fix-auth')
     mkdirSync(t, { recursive: true })
     writeFileSync(join(t, 'task.json'), JSON.stringify({ name: 'fix-auth', model: 'deepseek/deepseek-flash', via: 'api',
@@ -622,7 +665,9 @@ async function run(engine: string, device?: string) {
     writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'running', round: 1, updated_at: Date.now() / 1000 }))
     try {
       wb('chat', 'reply', '--text', 'Started fix-auth.')  // a chat change wakes the stream
-      await until(async () => (await page.textContent('#tasks')) === 'Running: fix-auth · API deepseek-flash (DeepSeek)')
+      // #1339: no catalog here names it, so the id's last part; the provider is the sheet's note
+      // a phone's strip is one line of counts and names, the model left to the sheet (#1339)
+      await until(async () => (await page.textContent('#tasks')) === (desktop ? 'Running: fix-auth · API · deepseek-flash' : '1 running: fix-auth'))
       if (await page.locator('#tasks').isHidden()) throw new Error('the strip is hidden')
       const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
       if (!width) throw new Error('the page scrolls sideways')
@@ -647,13 +692,15 @@ async function run(engine: string, device?: string) {
     task('old-parked', 'review', -1, { parked: Date.now() / 1000 })
     try {
       wb('chat', 'reply', '--text', 'Started the backlog.')
-      await until(async () => (await page.textContent('#tasks')).startsWith('2 running, 1 waiting on Claude, 22 queued: backlog-step-03 · '))
-      const text = await page.textContent('#tasks')
-      if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('; backlog-step-05 (asking) · '))
-        throw new Error('the strip says: ' + text)
+      if (desktop) {
+        await until(async () => (await page.textContent('#tasks')).startsWith('2 running, 1 waiting on Claude, 22 queued: backlog-step-03 · '))
+        const text = await page.textContent('#tasks')
+        if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('; backlog-step-05 (asking) · '))
+          throw new Error('the strip says: ' + text)
+      } else await until(async () => (await page.textContent('#tasks')) === '2 running, 1 need Claude, 22 queued: backlog-step-03, backlog-step-04, backlog-step-05 +22')
       const got = await page.evaluate(() => ({ strip: document.getElementById('tasks')!.getBoundingClientRect().height,
         thread: document.getElementById('scroll')!.getBoundingClientRect().height, height: innerHeight, line: parseFloat(getComputedStyle(document.getElementById('tasks')!).lineHeight) || 18 }))
-      if (got.strip > got.line * 3 + 16) throw new Error(`the strip is ${got.strip} px tall`)
+      if (got.strip > got.line * (desktop ? 3 : 1) + 16) throw new Error(`the strip is ${got.strip} px tall`)
       if (got.thread < got.height * 0.4) throw new Error(`the thread has ${got.thread} of ${got.height} px`)
     } finally { for (const t of made) rmSync(t, { recursive: true, force: true }) }
     wb('chat', 'reply', '--text', 'Backlog done.')
@@ -669,32 +716,95 @@ async function run(engine: string, device?: string) {
     const base = git('rev-parse', 'HEAD').trim()
     mkdirSync(t, { recursive: true }); git('worktree', 'add', '-q', '-b', 'wb/fix-sheet', join(t, 'worktree'), base)
     writeFileSync(join(t, 'worktree/README.md'), 'hello\nworld <img src=x onerror="window.pwned=1">\n')
-    writeFileSync(join(t, 'task.json'), JSON.stringify({ name: 'fix-sheet', model: 'qwen3-coder-30b', repo, base,
+    writeFileSync(join(t, 'task.json'), JSON.stringify({ name: 'fix-sheet', model: 'qwen3-coder-30b', model_label: 'Qwen3 Coder 30B', repo, base,
       branch: 'wb/fix-sheet', created_at: Date.now() / 1000 - 300 }))
     writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'review', round: 1, last: 'tests pass', updated_at: Date.now() / 1000 - 60 }))
     mkdirSync(join(t, 'rounds/1'), { recursive: true })
     writeFileSync(join(t, 'rounds/1/summary.md'), 'Changed the README. <b id="bold">not bold</b>\n')
-    writeFileSync(join(t, 'events.jsonl'), JSON.stringify({ kind: 'tool', round: 1, tool: 'bash', brief: 'pytest -q', ok: true, ts: Date.now() / 1000 }) + '\n')
+    // more rows than the Log's box holds, the worktree's path in each (#1339: written away, and
+    // the Log opens at its newest row)
+    writeFileSync(join(t, 'events.jsonl'), Array.from({ length: 40 }, (_, i) => JSON.stringify({ kind: 'tool', round: 1, tool: 'read',
+      brief: join(t, 'worktree', `src/f${i}.py`), ok: true, ts: Date.now() / 1000 }) + '\n').join('')
+      + JSON.stringify({ kind: 'tool', round: 1, tool: 'bash', brief: 'pytest -q', ok: true, ts: Date.now() / 1000 }) + '\n')
     try {
       wb('chat', 'reply', '--text', 'Started fix-sheet.')
       await until(async () => (await page.textContent('#tasks')).includes('fix-sheet'))
       await page.click('#tasks')
       await until(async () => await page.locator('#task-sheet').isVisible())
+      // #1561: the focus stays where the user is: Back after opening a row, the row on coming
+      // back, the strip on Escape from inside the sheet; it fell to <body> each time
+      const focus = () => page.evaluate(() => { const a = document.activeElement as HTMLElement; return a.id || a.dataset.task || a.tagName })
+      await page.focus('.ts-row:has-text("fix-sheet")'); await page.keyboard.press('Enter')
+      await until(async () => (await focus()) === 'ts-back').catch(async () => { throw new Error('the focus is on ' + await focus()) })
+      await page.keyboard.press('Enter')
+      await until(async () => (await focus()) === 'fix-sheet').catch(async () => { throw new Error('the focus is on ' + await focus()) })
+      await page.keyboard.press('Escape')
+      await until(async () => (await focus()) === 'tasks' && await page.locator('#task-sheet').isHidden())
+      await page.keyboard.press('Enter')
+      await until(async () => await page.locator('#task-sheet').isVisible())
       await page.click('.ts-row:has-text("fix-sheet")')
       await until(async () => (await page.textContent('#ts-body')).includes('Changed the README. <b id="bold">not bold</b>'))
       if (await page.locator('#bold').count()) throw new Error('the report was drawn as markup')
+      if (desktop) {
+        // #1554: from 1100 px the sheet is a column beside the chat, the thread and the box not under
+        // it, and a tap in the chat leaves it open
+        const g = await page.evaluate(() => { const r = (q: string) => document.querySelector(q)!.getBoundingClientRect().toJSON()
+          return { sheet: r('#task-sheet'), thread: r('#thread'), composer: r('#composer'), view: r('#view-chat') } })
+        const near = (a: number, b: number) => Math.abs(a - b) <= 2
+        if (g.sheet.left < g.thread.right - 1 || g.sheet.left < g.composer.right - 1 || !near(g.sheet.right, g.view.right)
+            || !near(g.sheet.top, g.view.top) || !near(g.sheet.bottom, g.view.bottom)) throw new Error('not docked: ' + JSON.stringify(g))
+        await page.click('#input')
+        await sleep(300)  // a claim that the tap closes nothing
+        if (await page.locator('#task-sheet').isHidden()) throw new Error('a tap in the chat closed the docked sheet')
+      }
       const sum = await page.textContent('#ts-body')
-      if (!sum.includes('review · round 1 · GPU qwen3-coder-30b') || !sum.includes('tests pass') || !sum.includes('started 5m ago'))
+      if (!sum.includes('review · round 1 · GPU Qwen3 Coder 30B') || !sum.includes('tests pass') || !sum.includes('started 5m ago'))
         throw new Error('the summary says: ' + sum)
       await page.click('#ts-tabs [data-part="diff"]')
       await until(async () => (await page.textContent('#ts-body')).includes('README.md | 1 +'))
-      await page.click('text=Show the whole diff')
+      await page.focus('text=Show the whole diff'); await page.keyboard.press('Enter')
       await until(async () => (await page.locator('.ts-diff .add').count()) > 0)
+      if ((await focus()) === 'BODY') throw new Error('the whole diff took the focus to <body>')  // #1561
       if (!(await page.textContent('.ts-diff')).includes('+world <img src=x onerror="window.pwned=1">')) throw new Error(await page.textContent('.ts-diff'))
       await page.click('#ts-tabs [data-part="log"]')
       await until(async () => (await page.textContent('#ts-body')).includes('r1 bash     pytest -q'))
+      const log = await page.evaluate(() => { const l = document.querySelector<HTMLElement>('.ts-log')!
+        return { text: l.textContent, end: l.scrollHeight - l.scrollTop - l.clientHeight, over: l.scrollHeight > l.clientHeight } })
+      if (!log.text!.includes('r1 read     src/f39.py\n') || log.text!.includes('/worktree/')) throw new Error('the log says: ' + log.text!.slice(0, 200))
+      if (!log.over || log.end > 2) throw new Error('the log is not at its newest row: ' + JSON.stringify(log))
+      // #1559: a task's own status write wakes the stream, no chat write needed, and the open Log
+      // follows its new rows, still at its end
+      appendFileSync(join(t, 'events.jsonl'), JSON.stringify({ kind: 'tool', round: 1, tool: 'bash', brief: 'pytest -q again', ok: true, ts: Date.now() / 1000 }) + '\n')
+      writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'review', round: 1, last: 'tests pass', updated_at: Date.now() / 1000 }))
+      await until(async () => (await page.textContent('#ts-body')).includes('r1 bash     pytest -q again'), 10000)
+      if (await page.evaluate(() => { const l = document.querySelector<HTMLElement>('.ts-log')!; return l.scrollHeight - l.scrollTop - l.clientHeight }) > 2)
+        throw new Error('the Log left its newest row')
+      // #1559's review (2026-11-26): a reader scrolled up the Log stays there through a step's
+      // refetch; the new <pre> started at the top, the oldest row, on every tool call
+      const up = await page.evaluate(() => { const l = document.querySelector<HTMLElement>('.ts-log')!
+        l.scrollTop = Math.floor((l.scrollHeight - l.clientHeight) / 2); return l.scrollTop })
+      appendFileSync(join(t, 'events.jsonl'), JSON.stringify({ kind: 'tool', round: 1, tool: 'bash', brief: 'pytest -q third', ok: true, ts: Date.now() / 1000 }) + '\n')
+      writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'review', round: 1, last: 'tests pass', updated_at: Date.now() / 1000 + 1 }))
+      await until(async () => (await page.textContent('#ts-body')).includes('r1 bash     pytest -q third'), 10000)
+      const kept = await page.evaluate(() => document.querySelector<HTMLElement>('.ts-log')!.scrollTop)
+      if (up < 20 || Math.abs(kept - up) > 1) throw new Error(`the Log's scroll went from ${up} to ${kept}`)
       if (await page.evaluate(() => window.pwned)) throw new Error('agent text ran as markup')
       if (!(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))) throw new Error('the page scrolls sideways')
+      // #1339: Reply is pinned to the sheet's foot, and under it the next steps of a task in review
+      await page.click('#ts-tabs [data-part="summary"]')
+      await until(async () => (await page.textContent('#ts-body')).includes('Full report, round 1'))
+      const foot = await page.evaluate(() => ({ reply: document.getElementById('ts-reply')!.getBoundingClientRect().bottom,
+        sheet: document.getElementById('task-sheet')!.getBoundingClientRect().bottom, h: innerHeight,
+        next: [...document.querySelectorAll('#ts-next .chip')].map(c => c.textContent) }))
+      if (foot.reply > Math.min(foot.sheet, foot.h) + 1 || foot.next.join() !== 'Review it') throw new Error('the foot: ' + JSON.stringify(foot))
+      // the tabs are one Tab stop, the arrows moving between them and showing each (#1339)
+      const tabs = () => page.evaluate(() => ({ at: (document.activeElement as HTMLElement).dataset.part,
+        stops: [...document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')].map(b => b.tabIndex).join() }))
+      await page.focus('#ts-tabs [data-part="summary"]'); await page.keyboard.press('ArrowRight')
+      await until(async () => { const t = await tabs(); return t.at === 'diff' && t.stops === '-1,0,-1' && (await page.textContent('#ts-body')).includes('README.md | ') })
+        .catch(async () => { throw new Error(JSON.stringify(await tabs())) })
+      await page.keyboard.press('Home')
+      await until(async () => { const t = await tabs(); return t.at === 'summary' && t.stops === '0,-1,-1' && (await page.textContent('#ts-body')).includes('Full report') })
       await page.click('#ts-reply')
       await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-sheet')
       if (await page.locator('#task-sheet').isVisible()) throw new Error('the sheet stayed open')
@@ -703,6 +813,30 @@ async function run(engine: string, device?: string) {
       await until(() => { const r = messages().at(-1); return r && r.text === 'is it on track?' && r.about })
       if (JSON.stringify(messages().at(-1).about) !== JSON.stringify({ task: 'fix-sheet' })) throw new Error(JSON.stringify(messages().at(-1).about))
       await until(async () => (await page.$$eval('.about-tag', (x: Element[]) => x.at(-1)?.textContent)) === 'About fix-sheet')
+      // a failed task leads with what happened, and its next steps fill the box, tagged (#1339)
+      writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'failed', round: 1, last: 'opencode exited 1', updated_at: Date.now() / 1000 }))
+      writeFileSync(join(t, 'rounds/1/summary.md'), `task fix-sheet\nopencode exited 1 (see ${t}/runner.log)\n\nagent's summary:\n(the agent wrote no final message)\n\nfiles changed:\n(none)\n`)
+      wb('chat', 'reply', '--text', 'fix-sheet failed.')
+      await page.click('#tasks')
+      await until(async () => (await page.textContent('.ts-row:has-text("fix-sheet")')).includes('· failed'))
+      await page.click('.ts-row:has-text("fix-sheet")')
+      await until(async () => (await page.textContent('.ts-happened')) === 'The agent stopped before writing anything (OpenCode exited).')
+      // what happened says the cause, so the status's last line, its same words, isn't said again (#1339)
+      const lead = await page.evaluate(() => [...document.querySelectorAll('#ts-body > *:not(.ts-full)')].map(e => e.textContent).join('\n'))
+      if (lead.includes('opencode exited 1')) throw new Error('the cause said twice: ' + lead)
+      const next = await page.$$eval('#ts-next .chip', (x: Element[]) => x.map(c => c.textContent).join())
+      if (next !== 'Why did it fail?,Try it again,Discard it') throw new Error('the next steps: ' + next)
+      await page.click('#ts-next .chip:has-text("Why did it fail?")')
+      await until(async () => (await page.inputValue('#input')) === 'Why did it fail?' && (await page.textContent('#about-text')) === 'Replying about fix-sheet')
+      if (await page.locator('#task-sheet').isVisible()) throw new Error('the sheet stayed open')
+      await page.click('#about-x'); await page.fill('#input', '')
+      // another view opens a task's sheet by the window event `wb:open-task` (#1339: Stats' Running rows)
+      await goTo('stats')
+      await page.evaluate(() => dispatchEvent(new CustomEvent('wb:open-task', { detail: { task: 'fix-sheet' } })))
+      await until(async () => (await page.evaluate(() => document.body.dataset.view)) === 'chat' && await page.locator('#task-sheet').isVisible()
+        && (await page.textContent('#ts-name')) === 'fix-sheet' && (await page.textContent('#ts-body')).includes('The agent stopped'))
+      await page.keyboard.press('Escape')
+      await until(async () => await page.locator('#task-sheet').isHidden())
     } finally {
       rmSync(t, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true })
     }
@@ -1378,14 +1512,14 @@ async function run(engine: string, device?: string) {
     try {
       wb('chat', 'reply', '--to', sent.message.id, '--text', 'One more nit.')
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('One more nit.'))
-      if (await page.title() !== 'Workbench') throw new Error('counted unread: ' + await page.title())
+      if (await page.title() !== 'Chat · Workbench') throw new Error('counted unread: ' + await page.title())
       wb('chat', 'reply', '--to', 'user', '--text', 'The agent has its review.')
-      await until(async () => await page.title() === '(1) Workbench')
+      await until(async () => await page.title() === '(1) Chat · Workbench')
       if ((await page.locator('.row.claude .meta').last().textContent()).includes(' to ')) throw new Error('the user\'s reply named an addressee')
     } finally {
       await page.evaluate(() => { delete (document as any).hidden; document.dispatchEvent(new Event('visibilitychange')) })
     }
-    await until(async () => await page.title() === 'Workbench')
+    await until(async () => await page.title() === 'Chat · Workbench')
   })
   await check("the mic shows only with a listener; a clip recorded, or a voice memo picked over plain http, comes back as words in the box and nothing is sent; one that meets a busy GPU or a proxy's 502 waits (#1203)", async () => {
     if (await page.locator('#mic').isVisible()) throw new Error('a mic with no listener')
@@ -1528,6 +1662,25 @@ async function run(engine: string, device?: string) {
       writeFileSync(join(home, 'state/chat/listener.json'), '{}')
     }
   })
+  await check('jump-to-newest goes at once for a reader who prefers less motion (#1339)', async () => {
+    // #1339 (2026-11-26): the one motion the stylesheet's reduce block can't reach, a smooth
+    // scroll of 2.5 s over a long thread
+    for (let i = 0; i < 30; i++) wb('chat', 'reply', '--text', `Line ${i} of a long thread.\n\nAnd its second paragraph.`)
+    const rc = await browser.newContext({ ...ctxFor(device), reducedMotion: 'reduce', serviceWorkers: 'block' })
+    const p = await rc.newPage()
+    try {
+      await p.goto(base + '#token=' + token)
+      await until(async () => (await p.locator('.row.claude .bubble').last().textContent()).includes('Line 29'))
+      await p.evaluate(() => { const m = document.getElementById('scroll')!; m.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); m.scrollTop = 0 })
+      await until(async () => await p.locator('#jump').isVisible())
+      const end = await p.evaluate(() => new Promise(r => {
+        const m = document.getElementById('scroll')!
+        document.getElementById('jump')!.click()
+        requestAnimationFrame(() => r(m.scrollHeight - m.scrollTop - m.clientHeight))
+      }))
+      if (Number(end) > 2) throw new Error(`still ${end} px from the end a frame after the tap`)
+    } finally { await rc.close() }
+  })
   await finish()
 
   async function finish() {
@@ -1551,7 +1704,7 @@ async function run(engine: string, device?: string) {
       })
       const say = () => JSON.stringify(g)
       if (g.tabs.map((t: any) => `${t.view}:${t.label}:${t.icon}`).join() !== 'chat:Chat:true,stats:Stats:true,settings:Settings:true') throw new Error(say())
-      if (g.tabs.map((t: any) => t.current).join() !== 'true,,') throw new Error('the current tab: ' + say())
+      if (g.tabs.map((t: any) => t.current).join() !== 'page,,') throw new Error('the current tab: ' + say())
       const near = (a: number, b: number) => Math.abs(a - b) <= 2
       if (desktop) {
         if (!near(g.nav.left, 0) || !near(g.nav.width, 76) || !near(g.nav.top, 0) || !near(g.nav.height, g.h)) throw new Error('the rail: ' + say())
@@ -1582,6 +1735,20 @@ async function run(engine: string, device?: string) {
         if (g.tabs.some((t: any) => t.w < 44 || t.cut || t.icon > g.rail) || g.pads.join() !== '16px,16px,12px') throw new Error(JSON.stringify(g))
       } finally { await sc.close() }
     })
+    if (desktop) await check('a short window has a short header, and with the keyboard up the rail gives its column back (#1339)', async () => {
+      // #1339 (2026-11-26): held sideways a phone's thread had 41% of the screen, and none with
+      // the keyboard up, the hidden rail's 76 px column still kept
+      const sc = await browser.newContext({ viewport: { width: 844, height: 390 }, serviceWorkers: 'block' })
+      const p = await sc.newPage()
+      try {
+        await p.goto(base + '#token=' + token)
+        await until(async () => await p.evaluate(() => getComputedStyle(document.body).display === 'grid'))
+        const head = await p.evaluate(() => document.querySelector('.top')!.getBoundingClientRect().height)
+        if (head > 44) throw new Error(`the header is ${head} px tall`)
+        const cols = await p.evaluate(() => { document.body.classList.add('kb-open'); return getComputedStyle(document.body).gridTemplateColumns })
+        if (!cols.startsWith('0px')) throw new Error('the columns: ' + cols)
+      } finally { await sc.close() }
+    })
     await check('the card views\' styles stay out of the chat: a plan card\'s text and code, and the intro\'s code, as before', async () => {
       // the #1284 review: `.view .card p` and `.view code` matched #view-chat, a .view too, and
       // shrank a plan's <p> (its margins 0 and 8px) and code, and the intro's code, to 13px
@@ -1597,18 +1764,72 @@ async function run(engine: string, device?: string) {
       })
       if (got.p !== got.card || got.margins !== `${got.p} ${got.p}` || got.code !== got.p || got.introCode !== got.intro) throw new Error(JSON.stringify(got))
     })
-    if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px', async () => {
+    await check('text drawn green, amber, in the accent or as secondary stands 4.5:1 or more on what is under it, light and dark (#1556, #1560)', async () => {
+      // #1556, #1560 (2026-11-26): in light the task sheet's links (the accent, 2.81:1), the diff's
+      // added lines (--ok, 3.72:1) and Stats' state words were drawn in the fills' colours, and the
+      // day divider, the about tag, captions and "Changed by" in --faint (2.35:1; 3.29:1 dark).
+      // Each as the page draws it, in its own place, so what is under it is the page's, read with
+      // its view shown: WebKit kept a hidden view's light colours after the switch to dark
+      await page.evaluate(() => {
+        const put = (where: string, html: string) => {
+          const box = document.createElement('div'); box.innerHTML = html
+          box.dataset.e2eProbe = where.startsWith('#view-') ? where.slice(6, where.indexOf(' ')) : 'chat'
+          document.querySelector(where)!.append(box)
+        }
+        put('#ts-body', '<button class="ts-link" data-e2e-text="ts-link">Show the whole diff</button>'
+          + '<pre><span class="add" data-e2e-text="diff add">+world</span></pre>'
+          + '<details class="ts-full"><summary data-e2e-text="ts-full">The whole diff</summary></details>')
+        put('#thread', '<div class="day" data-e2e-text="day">Today</div>'
+          + '<div class="row"><span class="about-tag" data-e2e-text="about-tag">About fix</span><div class="meta"><span class="tick" data-e2e-text="tick">✓</span></div></div>'
+          + '<div class="shots"><figure><div class="missing" data-e2e-text="shots missing">Expired</div></figure></div>'
+          + '<div class="shots-of" data-e2e-text="shots-of">Two screenshots</div>'
+          + '<div class="takes"><figure class="take"><span class="take-line" data-e2e-text="take-line">-14 LUFS</span>'
+          + '<span class="missing" data-e2e-text="take missing">Gone</span></figure></div>')
+        put('#view-stats .view-in', '<div class="card"><span class="ok" data-e2e-text="stats ok">resident</span>'
+          + '<span class="warn" data-e2e-text="stats warn">split</span><span class="claude" data-e2e-text="stats claude">fix-nav</span>'
+          + '<p class="st-note" data-e2e-text="st-note">Not updated</p>'
+          + '<ul class="st-list"><li><span class="st-mark dim" data-e2e-text="st-mark dim">•</span></li></ul></div>')
+        put('#view-settings .view-in', '<div class="card"><p class="small set-changed" data-e2e-text="set-changed">Changed by the web app · just now</p></div>')
+      })
+      try {
+        const names: [string, string][] = [['#ts-back', 'chat'], ['#ts-refresh', 'chat'], ...await page.$$eval('[data-e2e-text]',
+          (x: HTMLElement[]) => x.map(e => [`[data-e2e-text="${e.dataset.e2eText}"]`, e.closest<HTMLElement>('[data-e2e-probe]')!.dataset.e2eProbe]))]
+        if (names.length !== 18) throw new Error('probes: ' + JSON.stringify(names))
+        const low: string[] = []
+        for (const scheme of ['light', 'dark']) {
+          await page.emulateMedia({ colorScheme: scheme })
+          for (const view of ['chat', 'stats', 'settings']) {
+            await goTo(view)
+            for (const [sel] of names.filter(([, v]) => v === view)) {
+              const got = await page.locator(sel).evaluate(settingsView.textContrast)
+              if (got.ratio < 4.5) low.push(`${scheme} ${sel}: ${JSON.stringify(got)}`)
+            }
+          }
+        }
+        if (low.length) throw new Error(low.join('; '))
+      } finally {
+        await page.emulateMedia({ colorScheme: 'light' })  // Playwright's default, as the checks after expect
+        await page.evaluate(() => document.querySelectorAll('[data-e2e-probe]').forEach(e => e.remove()))
+        await goTo('chat')
+      }
+    })
+    if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px, Settings\' as CSS columns, short cards under short ones', async () => {
       await goTo('settings')
+      // CSS columns, not a grid: a grid row as tall as its taller card left 1,000 px empty (the web app's review, 2026-11-26)
       const got = await page.evaluate(() => ({ w: document.querySelector('#view-settings .view-in')!.getBoundingClientRect().width,
-        cols: getComputedStyle(document.getElementById('settings')!).gridTemplateColumns.split(' ').length }))
+        cols: Number(getComputedStyle(document.getElementById('settings')!).columnCount) || 1 }))
       if (got.w > 1041 || got.cols !== 2) throw new Error(JSON.stringify(got))
       await goTo('chat')
     })
     await check('the hash picks the view, Back walks back through them, anything else is the chat, and a notification\'s click opens it', async () => {
       const at = () => page.evaluate(() => ({ view: document.body.dataset.view, hash: location.hash,
         shown: ['chat', 'stats', 'settings'].filter(v => getComputedStyle(document.getElementById('view-' + v)!).display !== 'none'),
-        current: [...document.querySelectorAll<HTMLElement>('#tabbar .tab[aria-current="true"]')].map(b => b.dataset.view) }))
-      const is = async (v: string) => until(async () => { const a = await at(); return a.view === v && a.shown.join() === v && a.current.join() === v })
+        current: [...document.querySelectorAll<HTMLElement>('#tabbar .tab[aria-current="page"]')].map(b => b.dataset.view),
+        title: document.title, h1: [...document.querySelectorAll('h1')].filter(h => h.closest('.view')!.id === 'view-' + document.body.dataset.view).map(h => h.textContent) }))
+      // #1339: the tab's title and the view's (hidden) heading name the view too
+      const NAMES: Record<string, string> = { chat: 'Chat', stats: 'Stats', settings: 'Settings' }
+      const is = async (v: string) => until(async () => { const a = await at(); return a.view === v && a.shown.join() === v && a.current.join() === v
+        && a.title === `${NAMES[v]} · Workbench` && a.h1.join() === NAMES[v] })
         .catch(async () => { throw new Error(JSON.stringify(await at())) })
       await goTo('stats'); await is('stats')
       if ((await at()).hash !== '#stats') throw new Error(JSON.stringify(await at()))
@@ -1662,6 +1883,8 @@ async function run(engine: string, device?: string) {
         await kb(true)
         await until(async () => { const a = await at(); return a.kb && a.nav === 'none' && Math.abs(a.foot - a.h) <= 2 })
           .catch(async () => { throw new Error(JSON.stringify(await at())) })
+        // and the hint with it (#1339)
+        if (await page.evaluate(() => getComputedStyle(document.getElementById('hint')!).display) !== 'none') throw new Error('the hint stayed up')
       } finally { await kb(false) }
       await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
     })
@@ -1681,7 +1904,7 @@ async function run(engine: string, device?: string) {
       await page.evaluate(() => document.getElementById('input')!.blur())
       await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
     })
-    await check('window.WB gives the views the key, the API, the view and its changes, the state and a toast', async () => {
+    await check('window.WB gives the views the key, the API, the view and its changes, the state, a toast and the chat\'s box', async () => {
       const got = await page.evaluate(async () => {
         const seen: string[] = []
         window._states = 0
@@ -1696,9 +1919,9 @@ async function run(engine: string, device?: string) {
         WB.toast('Saved.')
         const t = document.getElementById('toast')!
         return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, timed: [q.status, JSON.stringify(await q.json())], cur: WB.current(), seen,
-          token: WB.token().length > 20, toast: !t.hidden && t.textContent }
+          token: WB.token().length > 20, toast: t.classList.contains('on') && t.textContent }
       })
-      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,current,on,post,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
+      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,ask,current,on,post,roving,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
         cur: 'settings', seen: ['settings'], token: true, toast: 'Saved.' })) throw new Error(JSON.stringify(got))
       const was = await page.evaluate(() => window._states)
       wb('chat', 'reply', '--text', 'A state for the views.')

@@ -4450,8 +4450,10 @@ def setup_said(items: list[dict]) -> dict:
         elif k in ("runs", "mcp"):
             out["runs"].append(it["name"])
     if denied_skills_n:
-        out["kept"].insert(0, f"{denied_skills_n} skill{'s' * (denied_skills_n != 1)} denied by name "
-                              "(Claude's, ~/.agents', `workbench`)")
+        # in plain words: "(Claude's, ~/.agents', `workbench`)" read as a stray quote and a backtick
+        # on the web app (the web app's review, 2026-11-26)
+        out["kept"].insert(0, f"{denied_skills_n} skill{'s' * (denied_skills_n != 1)} kept out by name "
+                              "(Claude's, ~/.agents and workbench's own)")
     out["tokens"] = sum(it["bytes"] for it in items if it["state"] == "reaches" and it["prompt"]
                         and it["bytes"]) // CHARS_PER_TOKEN
     out["library"] = next((it["name"] for it in items if it["kind"] == "library"), "")

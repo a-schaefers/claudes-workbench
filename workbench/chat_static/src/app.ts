@@ -35,8 +35,10 @@
   // what the chat is for (#1341), one wording: the empty state's, and over a thread the same words
   // as a hint until dismissed on this device. load and save catch a storage that throws: there the
   // hint shows on each open, and a dismissal holds until the page is left
+  // It gives the thread its screen back (#1339, 2026-11-26): hidden while the state line shows,
+  // which says the same, and for good once a message is sent from here (send)
   let hintGone = load(K.hint, false) === true
-  function drawHint() { $('hint').hidden = hintGone || !$('intro').hidden || !!document.querySelector('.keyless') }
+  function drawHint() { $('hint').hidden = hintGone || !$('intro').hidden || !!document.querySelector('.keyless') || !$('driver-state').hidden }
   $('hint-x').onclick = () => { hintGone = true; save(K.hint, true); drawHint() }
 
   // ---- the key ----
@@ -131,7 +133,9 @@
     if (curView && curView !== 'chat') { if (force) follow = true; return }
     if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; follow = true; jump.hidden = true }
   }
-  jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }))
+  // at once for a reader who prefers less motion: the one motion the stylesheet's reduce block
+  // can't reach, 2.5 s over a long thread (#1339, 2026-11-26)
+  jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: reduced.matches ? 'auto' : 'smooth' }))
 
   // ---- text → DOM, never HTML from the thread ----
   function inline(parent: HTMLElement, text: string) {
@@ -285,7 +289,8 @@
       const who = nameOf(m.driver) || 'Claude'  // its writer's; none: Claude Code's, or before 2.2
       if (forUser(m)) meta.append(span('', who + ' · ' + clock(m.ts) + ' · '))
       else meta.append(span('', who + ' to '), span('agent-name', m.to!.join(', ')), span('', ' · ' + clock(m.ts) + ' · '))
-      const c = document.createElement('button'); c.textContent = 'copy'
+      // named for a screen reader: 'copy copy copy' said nothing of what each copies (#1339)
+      const c = document.createElement('button'); c.textContent = 'copy'; c.setAttribute('aria-label', 'Copy this reply')
       c.onclick = async () => {
         c.textContent = await copyText(m.text) ? 'copied' : 'copy failed'
         setTimeout(() => { c.textContent = 'copy' }, 1500)
@@ -319,7 +324,7 @@
     }
     // one short line, one time: the receipt's once the driver has it (#103)
     const who = driverName()
-    if (m.received) meta.append(span('tick', '✓✓'), span('', (m.received.how === 'queued'
+    if (m.received) meta.append(tick('✓✓'), span('', (m.received.how === 'queued'
       ? `Queued for ${readBy(m)} · ` : `Read by ${readBy(m)} · `) + clock(m.received.ts)))
     else if (m.expired) {  // unread too long: no session is given it, so never "Delivered" (#536)
       const h = Math.round((state.expire || 21600) / 3600)
@@ -327,9 +332,13 @@
       const b = document.createElement('button'); b.textContent = 'send again'
       b.onclick = () => { b.disabled = true; b.dataset.cid = newId(); resend(m, b.dataset.cid) }
       meta.append(b)
-    } else meta.append(span('tick', '✓'), span('', delivered(who) + clock(m.ts)))
+    } else meta.append(tick('✓'), span('', delivered(who) + clock(m.ts)))
     return meta
   }
+  // the ticks are the words beside them, drawn: a screen reader hears the words alone (#1339)
+  const tick = (mark: string) => { const t = span('tick', mark); t.setAttribute('aria-hidden', 'true'); return t }
+  // whose a row is and when, for a screen reader (#1339): the user's messages were never named theirs
+  const rowName = (m: Msg) => (m.role === 'agent' ? m.from : m.from === 'user' ? 'You' : nameOf(m.driver) || 'Claude') + ', ' + clock(m.ts)
   // an unread message's line: delivered, behind a prompt in the terminal (the driver can't read it
   // until that is answered, #1355), or waiting for a session
   const delivered = (who: string) => !state.listener ? `Waiting for ${aSession(who)} · `
@@ -359,24 +368,47 @@
   const RUNNING = ['running', 'testing'], TASKS_SHOWN = 3
   const rank = (t: OpenTask) => RUNNING.includes(t.phase) ? 0 : t.phase === 'queued' ? 2 : 1
   const ranked = (tasks?: OpenTask[]) => Array.isArray(tasks) ? [...tasks].sort((a, b) => rank(a) - rank(b)) : []
-  const taskOn = (t: { model?: string; via?: string; provider_name?: string }) => {  // the model it runs on, as the pane's row says it
-    const short = String(t.model || '').split('/').pop()
-    return t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`
+  // The model a task runs on, by the one name the web app gives it (#1339, 2026-11-26): the
+  // server's `label` (chat.model_label: a GPU model's label, as Stats names it; an API model's
+  // catalog name), else the id's last part. `GPU Qwen 27B`, `API · DeepSeek V4.1 Flash`; the
+  // provider goes in the note (`taskNote`) on the sheet, never the strip: the raw ids and their
+  // providers were most of what pushed a phone's strip to three lines
+  type OnModel = { model?: string; label?: string; via?: string; provider_name?: string }
+  const taskOn = (t: OnModel) => {
+    const name = t.label || String(t.model || '').split('/').pop()
+    return t.via === 'api' ? `API · ${name}` : `GPU ${name}`
   }
+  const taskNote = (t: OnModel) => taskOn(t) + (t.via === 'api' && t.provider_name ? ` · ${t.provider_name}` : '')
   function tasksLine(tasks?: OpenTask[]) {
     const all = ranked(tasks)
     if (!all.length) return ''
-    const named = all.slice(0, TASKS_SHOWN).map(t => `${t.name}${RUNNING.includes(t.phase) ? '' : ` (${t.phase})`} · ${taskOn(t)}`)
+    // every open task on one model: said once, at the end, not after each name
+    const one = all.every(t => t.via === all[0]!.via && t.model === all[0]!.model)
+    const named = all.slice(0, TASKS_SHOWN).map(t => `${t.name}${RUNNING.includes(t.phase) ? '' : ` (${t.phase})`}${one ? '' : ` · ${taskOn(t)}`}`)
     if (all.length > TASKS_SHOWN) named.push(`+${all.length - TASKS_SHOWN} more`)
     const n = (r: number) => all.filter(t => rank(t) === r).length
     const counts = [[n(0), 'running'], [n(1), `waiting on ${driverName()}`], [n(2), 'queued']].filter(([c]) => c)
     const head = counts.length === 1 && n(0) && all.length <= TASKS_SHOWN ? 'Running'
       : counts.map(([c, what]) => `${c} ${what}`).join(', ')
-    return head + ': ' + named.join('; ')
+    return head + ': ' + named.join('; ') + (one ? ` · ${taskOn(all[0]!)}` : '')
+  }
+  // On a phone, below about 500 px of height and with the keyboard up, one line: the counts and
+  // the names, `4 need Claude: fix-parser, add-login, rename-flag +1`, the models left to the
+  // sheet. Three lines of it left the thread 26 to 34% of a portrait phone, and none in landscape
+  // with the keyboard up (#1339, 2026-11-26)
+  const narrow = matchMedia('(max-width: 600px), (max-height: 500px)')
+  function tasksShort(tasks?: OpenTask[]) {
+    const all = ranked(tasks)
+    if (!all.length) return ''
+    const n = (r: number) => all.filter(t => rank(t) === r).length
+    const head = [[n(0), 'running'], [n(1), `need ${driverName()}`], [n(2), 'queued']].filter(([c]) => c)
+      .map(([c, what]) => `${c} ${what}`).join(', ')
+    return `${head}: ${all.slice(0, TASKS_SHOWN).map(t => t.name).join(', ')}${all.length > TASKS_SHOWN ? ` +${all.length - TASKS_SHOWN}` : ''}`
   }
   function drawTasks() {
-    const el = $('tasks'), text = tasksLine(state.tasks)
-    el.textContent = text
+    const el = $('tasks'), short = narrow.matches || kbOpen, text = short ? tasksShort(state.tasks) : tasksLine(state.tasks)
+    el.classList.toggle('short', short)
+    if (el.textContent !== text) el.replaceChildren(span('tasks-text', text))
     el.hidden = !text
     if (!text) showTaskSheet(false)
     sheetNews()
@@ -417,48 +449,121 @@
   // ---- the task sheet (#1201): a tap on the strip lists the open tasks; a tap on one shows its
   // summary (GET /api/task: wb status's row and wb report), its Diff and Log tabs fetched when
   // opened. Nothing polls: a change in the stream's `tasks` re-fetches only the view that is open,
-  // and Refresh asks again. Its report, diff and log are agent-written text, drawn with
+  // and Refresh asks again. The server wakes the stream on a task's own status write (#1559, the
+  // hub's TASK_NEWS), each row carrying its `updated_at`, so the strip and the open sheet follow a
+  // task as it moves, and a running task's Log follows its steps. Its report, diff and log are agent-written text, drawn with
   // textContent alone, never as markup: this page holds the user's key and changes their
   // Settings, so markup an agent wrote would be a way to both. Steering is Claude's: "Reply about this task" tags the
   // next message with the task (`about: {task}`), and Claude decides on wb steer.
+  narrow.addEventListener('change', drawTasks)
   const strip = $('tasks'), tsheet = $('task-sheet'), tsBody = $('ts-body')
   let tsTask: string | null = null, tsPart = 'summary', tsDiff: { path: string } | null = null, tsSeen = '', tsAsked = 0  // tsDiff: null (the stat) or {path}
+  // At 1100 px and wider the sheet docks beside the chat as a column (#1554, 2026-11-26: over the
+  // chat it covered the thread, the screen empty on both sides): `body.ts-open` pads the chat for
+  // it, and a tap in the chat leaves it open, as the thread and the sheet are both in view
+  const docked = matchMedia('(min-width: 1100px)')
   function showTaskSheet(on: boolean | string) {  // string: `hidden`'s 'until-found', never set here
     if (on === !tsheet.hidden) return
     tsheet.hidden = !on; strip.setAttribute('aria-expanded', String(on))
+    document.body.classList.toggle('ts-open', !!on)
     if (on) { tsTask = null; drawTaskSheet() }
   }
   strip.onclick = () => showTaskSheet(tsheet.hidden)
   strip.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showTaskSheet(tsheet.hidden) } }
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !tsheet.hidden) showTaskSheet(false) })
-  document.addEventListener('pointerdown', e => { if (!tsheet.hidden && !tsheet.contains(e.target as Node) && !strip.contains(e.target as Node)) showTaskSheet(false) })
+  // Focus stays where the user is (#1561, 2026-11-26): it fell to <body> on opening a task, going
+  // back, a redraw and Escape, and a screen reader said nothing. Escape from inside the sheet
+  // hands it to the strip that opened it
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || tsheet.hidden) return
+    const inside = tsheet.contains(document.activeElement)
+    showTaskSheet(false)
+    if (inside) strip.focus()
+  })
+  document.addEventListener('pointerdown', e => { if (!tsheet.hidden && !docked.matches && !tsheet.contains(e.target as Node) && !strip.contains(e.target as Node)) showTaskSheet(false) })
   const mk = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string | null, text?: string | null) => { const x = document.createElement(tag); if (cls) x.className = cls; if (text != null) x.textContent = text; return x }
   const btn = (cls: string | null, text: string | null, fn: () => void) => { const b = mk('button', cls, text); b.type = 'button'; b.onclick = fn; return b }
   const agoSecs = (s: number) => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d`
-  // the stream's `tasks` changed: the list redrawn, or the open task's view fetched again
+  // the stream's `tasks` changed: the list redrawn, or the open task's view fetched again, only
+  // for a change of its own row: another task's steps fetched this one's diff again (#1559).
+  // `updated_at` (a write on every tool call) counts only with the Log open, the one view that
+  // follows each step: in the rest it re-ran git diff and redrew the Summary and Diff on every
+  // tool call, and in the list re-focused the row a screen reader then announced again (#1559's
+  // review, 2026-11-26)
+  const rowKey = (t: OpenTask) => tsTask && tsPart === 'log' ? t : { ...t, updated_at: undefined }
+  const sheetKey = () => {
+    if (!tsTask) return JSON.stringify((state.tasks || []).map(rowKey))
+    const t = (state.tasks || []).find(x => x.name === tsTask)
+    return JSON.stringify(t ? rowKey(t) : null)
+  }
   function sheetNews() {
-    const key = JSON.stringify(state.tasks || [])
+    const key = sheetKey()
     if (key === tsSeen) return
     tsSeen = key
     if (!tsheet.hidden) drawTaskSheet({ quiet: true })
   }
-  function drawTaskSheet({ quiet = false } = {}) {
+  // focusOn: the task whose row takes the focus once drawn (the one just left); else the row that
+  // had it before a quiet redraw keeps it
+  function drawTaskSheet({ quiet = false, focusOn = null as string | null } = {}) {
+    tsSeen = sheetKey()
     $('ts-list').hidden = !!tsTask; $('ts-one').hidden = !tsTask
     if (tsTask) return loadPart({ quiet })
-    $('ts-list').replaceChildren(...ranked(state.tasks).map(t => {
-      const row = btn('ts-row', null, () => { tsTask = t.name; tsPart = 'summary'; tsDiff = null; drawTaskSheet() })
-      row.append(mk('b', '', t.name), mk('span', 'ts-phase', ' · ' + t.phase), mk('small', '', taskOn(t)))
+    const list = $('ts-list'), had = list.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.task : null
+    const rows = ranked(state.tasks).map(t => {
+      const row = btn('ts-row', null, () => { tsTask = t.name; tsPart = 'summary'; tsDiff = null; drawTaskSheet(); $('ts-back').focus() })
+      row.dataset.task = t.name
+      row.append(mk('b', '', t.name), mk('span', 'ts-phase', ' · ' + t.phase), mk('small', '', taskNote(t)))
       return row
-    }))
+    })
+    list.replaceChildren(...rows)
+    const back = focusOn || had
+    if (back) rows.find(r => r.dataset.task === back)?.focus()
   }
-  $('ts-back').onclick = () => { tsTask = null; tsAsked++; drawTaskSheet() }
+  $('ts-back').onclick = () => { const left = tsTask; tsTask = null; tsAsked++; drawTaskSheet({ focusOn: left }) }
   $('ts-refresh').onclick = () => loadPart({ quiet: true })
   $('ts-reply').onclick = () => { setAbout({ task: tsTask }); showTaskSheet(false); input.focus() }
-  for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.onclick = () => { tsPart = b.dataset.part as string; tsDiff = null; loadPart() }
+  // Under Reply, the next steps a task's phase offers (#1339, 2026-11-26): each fills the box,
+  // tagged with the task, for the user to send or change; what to do stays Claude's call
+  const NEXT: Record<string, string[]> = { failed: ['Why did it fail?', 'Try it again', 'Discard it'],
+    stuck: ['Why did it fail?', 'Try it again', 'Discard it'], review: ['Review it'] }
+  function drawNext() {
+    const box = $('ts-next'), t = (state.tasks || []).find(x => x.name === tsTask), says = (t && NEXT[t.phase]) || []
+    box.hidden = !says.length
+    if (box.dataset.key === tsTask + ':' + says.join()) return
+    box.dataset.key = tsTask + ':' + says.join()
+    box.replaceChildren(...says.map(text => btn('chip', text, () => {
+      setAbout({ task: tsTask }); showTaskSheet(false)
+      input.value = text; save(K.draft, text); grow(); armSend(); input.focus()
+    })))
+  }
+  const tsTabs = [...document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')]
+  for (const b of tsTabs) b.onclick = () => { tsPart = b.dataset.part as string; tsDiff = null; loadPart() }
+  // the tabs one Tab stop, the arrows (and Home, End) moving the focus between them (`roving`, as
+  // Settings' radio groups: every tab was a stop of its own and the arrows did nothing, the web
+  // app's review, 2026-11-26), and here showing each, as a tablist does (#1339)
+  $('ts-tabs').addEventListener('keydown', e => {
+    const was = document.activeElement
+    roving(e, tsTabs)
+    const now = document.activeElement as HTMLElement
+    if (now !== was && tsTabs.includes(now)) now.click()
+  })
+  // Another view opens a task's sheet (#1339: Stats' Running rows, stats.ts): a window event
+  // `wb:open-task` {task}, the Chat view shown and the sheet open on that task, as a tap on the
+  // strip and then its row would leave it; a task no longer open says so there
+  function openTask(name: string) {
+    go('chat'); setView('chat')
+    showTaskSheet(true)
+    tsTask = name; tsPart = 'summary'; tsDiff = null; drawTaskSheet(); $('ts-back').focus()
+  }
+  addEventListener('wb:open-task', e => { const name = e.detail && e.detail.task; if (typeof name === 'string' && name) openTask(name) })
   async function loadPart({ quiet = false } = {}) {  // quiet: the view stays until the new one comes
     const asked = ++tsAsked, name = tsTask
+    tsSeen = sheetKey()  // a tab's own key: the Log's has `updated_at`, the rest not
+    // a ts-link or ts-file pressed: the new view's first button takes the focus; a quiet redraw
+    // gives it back to the button of the same words (#1561)
+    const focused = tsBody.contains(document.activeElement) ? document.activeElement!.textContent : null
     $('ts-name').textContent = name
-    for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.setAttribute('aria-selected', String(b.dataset.part === tsPart))
+    drawNext()
+    for (const b of tsTabs) { b.setAttribute('aria-selected', String(b.dataset.part === tsPart)); b.tabIndex = b.dataset.part === tsPart ? 0 : -1 }
     if (!quiet || !tsBody.childElementCount) tsBody.replaceChildren(mk('span', 'ts-note', 'Loading…'))
     const extra = tsPart === 'diff' && tsDiff ? '&full=1' + (tsDiff.path ? '&path=' + encodeURIComponent(tsDiff.path) : '') : ''
     let r: Response | null, j!: TaskPart
@@ -470,16 +575,48 @@
     if (!r) return tsBody.replaceChildren(mk('span', 'ts-note', 'Not loaded: try again'))
     if (r.status === 404 && !tsDiff) return tsBody.replaceChildren(mk('span', 'ts-note', `${name} is no longer open (accepted, discarded or parked).`))
     if (!r.ok) return tsBody.replaceChildren(mk('span', 'ts-note', j.error || `Not loaded (HTTP ${r.status}): try again`))
+    // the Log opens at its newest row, and a quiet refetch keeps it there unless the reader
+    // scrolled up: "now" is at the bottom, six rows of a screen away on a phone (#1339, 2026-11-26).
+    // A quiet redraw (the same view) keeps where the reader was in each box, the Log, the diff,
+    // the report, and an opened 'Full report': the new <pre>s started at the top, and a reader
+    // scrolled up the Log was thrown to its oldest row on each step (#1559's review, 2026-11-26)
+    const was = tsBody.querySelector<HTMLElement>('.ts-log')
+    const atEnd = !quiet || !was || was.scrollHeight - was.scrollTop - was.clientHeight < 24
+    const tops = quiet ? [...tsBody.querySelectorAll('pre')].map(x => x.scrollTop) : []
+    const opened = quiet ? [...tsBody.querySelectorAll('details')].map(x => x.open) : []
     tsBody.replaceChildren(...(tsPart === 'summary' ? drawSummary(j) : tsPart === 'diff' ? drawDiff(j) : drawLog(j)))
+    tsBody.querySelectorAll('details').forEach((x, i) => { if (i < opened.length) x.open = opened[i]! })  // before the tops: a closed box has none
+    tsBody.querySelectorAll('pre').forEach((x, i) => { if (i < tops.length) x.scrollTop = tops[i]! })
+    const log = tsBody.querySelector<HTMLElement>('.ts-log')
+    if (log && atEnd) log.scrollTop = log.scrollHeight
+    if (focused !== null && !tsBody.contains(document.activeElement)) {
+      const all = [...tsBody.querySelectorAll<HTMLElement>('button, summary')]
+      ;(all.find(b => b.textContent === focused) || all[0])?.focus()
+    }
   }
+  // What the sheet leads with (#1339, 2026-11-26): the phase, for a failed or stuck task one plain
+  // line of what happened, then the report's own lines (the agent's summary, the files it changed,
+  // the tests' PASS or FAIL: chat.report_lead), the rest under "Full report". It showed only
+  // `opencode exited 1 (see <path>/runner.log)`, with Reply below the fold. Never runner.log's
+  // tail: OpenCode's raw stderr, which Claude reads when asked "Why did it fail?"
   function drawSummary(j: TaskPart) {
-    const out: HTMLElement[] = [mk('p', '', `${j.phase} · round ${j.round}${j.step! > 1 ? ` · step ${j.step}` : ''} · ${taskOn(j)}`)]
+    const out: HTMLElement[] = [mk('p', '', `${j.phase} · round ${j.round}${j.step! > 1 ? ` · step ${j.step}` : ''} · ${taskNote(j)}`)]
     const times = [j.created_at && `started ${agoSecs(j.now - j.created_at)} ago`, j.updated_at && `last change ${agoSecs(j.now - j.updated_at)} ago`].filter(Boolean)
     if (times.length) out.push(mk('p', 'ts-dim', times.join(' · ')))
-    if (j.last) out.push(mk('p', '', j.last))
-    out.push(mk('h4', '', `Report, round ${j.round}`), mk('pre', '', j.report))
-    if (j.report_cut) out.push(mk('span', 'ts-note', `Cut here: wb report ${j.task} on the computer has it all.`))
-    if (j.verify && j.verify.length) out.push(mk('h4', '', 'Regression check'), mk('pre', '', j.verify.join('\n')))
+    // `last` only when it says more than what happened does: `opencode exited 1` under "The agent
+    // stopped … (OpenCode exited)." said the cause twice (#1339)
+    if (j.happened) out.push(mk('p', 'ts-happened', j.happened))
+    if (j.last && !(j.happened && (j.happened.includes(j.last) || /^opencode exited /.test(j.last)))) out.push(mk('p', '', j.last))
+    const lead = !!(j.agent_summary || j.changed || j.tests)
+    if (j.agent_summary) out.push(mk('h4', '', "The agent's summary"), mk('p', 'ts-said', j.agent_summary))
+    if (j.changed) out.push(mk('p', '', j.changed.length ? 'Files changed: ' + j.changed.join(', ') : 'No files changed.'))
+    if (j.tests) out.push(mk('p', /^tests: FAIL/.test(j.tests) ? 'ts-fail' : '', j.tests))
+    // a report with none of those lines (a round still running, an older server's): open
+    const full = mk('details', 'ts-full'); full.open = !lead
+    full.append(mk('summary', '', `Full report, round ${j.round}`), mk('pre', '', j.report))
+    if (j.report_cut) full.append(mk('span', 'ts-note', `Cut here: wb report ${j.task} on the computer has it all.`))
+    if (j.verify && j.verify.length) full.append(mk('h4', '', 'Regression check'), mk('pre', '', j.verify.join('\n')))
+    out.push(full)
     return out
   }
   function drawDiff(j: TaskPart) {
@@ -547,6 +684,7 @@
         nodes.set(w.key, el)
       }
       if (w.m) {
+        if (el.getAttribute('aria-label') !== rowName(w.m)) { el.setAttribute('role', 'group'); el.setAttribute('aria-label', rowName(w.m)) }
         el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.m.from === 'claude' && !forUser(w.m) ? ' to-agent' : ''}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}`
         // a row's line made anew only when it says something new: one made on every update was
         // read out again and took the focus from its buttons (#1408, #1409)
@@ -647,7 +785,7 @@
     if (m.files && m.files.length) row.append(makeFiles(m.files))
     if (m.from === 'user' || m.role === 'agent') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
-      if (!seen.has(m.id) && !firstVisit && document.hidden && forUser(m)) { unread++; document.title = `(${unread}) Workbench` }
+      if (!seen.has(m.id) && !firstVisit && document.hidden && forUser(m)) { unread++; drawTitle() }
       rich(b, m.text)
       if (!seen.has(m.id) && !firstVisit) say(m.text)
       seen.add(m.id); save(K.seen, [...seen].slice(-500))
@@ -704,6 +842,7 @@
     const d = state.driver
     const show = !!token && live && reachable && !!d && (d.state === 'waiting' || d.state === 'none' || d.state === 'off')
     stateLine.hidden = !show
+    drawHint()
     if (!show || !d) { stateLine.dataset.key = ''; return }
     const key = JSON.stringify([d.state, d.line, d.next, d.waiting && d.waiting.what, d.grant && d.grant.line])
     if (stateLine.dataset.key === key) return
@@ -742,6 +881,9 @@
     if (kind === storyFor) return
     storyFor = kind
     for (const el of document.querySelectorAll<HTMLElement>('[data-story]')) storyInto(el, storyText(el.dataset.story!, kind))
+    // the box names whom it messages in the story's word: `Message Claude or OpenCode` before a
+    // driver is known, beside the story's own (#1339, 2026-11-26: "your driver" beside "Message Claude")
+    input.placeholder = 'Message ' + (STORY_DRIVERS[kind] || STORY_DRIVERS['any']!).who
   }
 
   // ---- the connection ----
@@ -917,7 +1059,7 @@
       hiddenTimer = setTimeout(() => { if (document.hidden && conn) { conn.abort(); conn = null } }, HIDDEN_GRACE_MS)
     } else {
       clearTimeout(hiddenTimer)
-      unread = 0; document.title = 'Workbench'
+      unread = 0; drawTitle()
       if (!conn) { failures = 0; connect() } else freshen()
       flush(true)
     }
@@ -966,7 +1108,7 @@
       document.body.style.height = document.body.style.transform = ''
       if (scrollX || scrollY) scrollTo(0, 0)    // the page never scrolls: its thread does
     }
-    document.body.classList.toggle('kb-open', kbOpen)
+    if (document.body.classList.contains('kb-open') !== kbOpen) { document.body.classList.toggle('kb-open', kbOpen); drawTasks() }
     toEnd()
   }
   // the keyboard takes ~300 ms to stand or fall, and iOS scrolls the page after it has: fit again
@@ -1487,6 +1629,7 @@
     }
     outbox = outItems()
     setAbout(null)
+    if (!hintGone) { hintGone = true; save(K.hint, true); drawHint() }  // what the chat is for: known now (#1339)
     clearTray(files)
     input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true
     render(); toEnd(true); flush(true)
@@ -1574,32 +1717,16 @@
       n.textContent = String(s.score); n.append(Object.assign(document.createElement('small'), { textContent: ' / 100' }))
       $('badge-s').textContent = t!.saved >= 0 ? `~${tokens(t!.saved)} Claude tokens saved this week` : `~${tokens(-t!.saved)} more Claude tokens this week`
     }
-    const api = apiSaved(t && t.api)
+    // no API line: History's This week says the week's API money, and spend read under "saved"
+    // (counting trials, so 3 tasks against History's 2) misled (#1339's UX review, 2026-11-26)
     if (!t || !t.tasks) {
-      $('saved').textContent = api || 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.'
+      $('saved').textContent = 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.'
       return
     }
     const gpu = t.wh ? `The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''  // no currency sign: the price is the user's, in theirs (#845, as #609)
     // no badge (nothing written to compare against, only discards): the saving here instead
     const saved = s ? '' : t.saved >= 0 ? `~${tokens(t.saved)} Claude tokens saved this week.` : `~${tokens(-t.saved)} more Claude tokens this week.`
-    $('saved').textContent = [saved, gpu, api].filter(Boolean).join(' ')
-  }
-  // The week's API tasks, apart from the saving (#1022): dollars, OpenCode's unit, so a `$`;
-  // a task with no price is counted, never shown as $0
-  function apiSaved(a?: ApiWeek | null) {
-    if (!a || !a.tasks) return ''
-    // meter.usd's rule: $0.42, `<$0.01` under a cent, $0 for none (#1322)
-    const usd = (x: number) => x === 0 ? '$0' : Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
-    // ≈: at the catalog's prices, an estimate, unless the user set the model's (wb model price, #1135);
-    // the `≈` alone says it, no "(catalog prices)" after it (#1322)
-    const est = (v: ApiCost) => ((v.prices || 'catalog') === 'catalog' && v.cost ? '≈' : '') + usd(v.cost)
-    const provs = Object.entries(a.by_provider || {}).filter(([, v]) => v.tasks > v.unknown + (v.plan || 0))
-      .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${(a.names || ({} as Record<string, string>))[p] || p} ${est(v)}`)
-    const known = a.tasks - a.unknown - (a.plan || 0)
-    const inside = provs.join(', ')
-    const parts = [known ? `${est(a)}${inside ? ` (${inside})` : ''}` : '',
-      a.unknown ? `${a.unknown} with no known cost` : '', a.plan ? `${a.plan} on plan usage` : ''].filter(Boolean)
-    return `API models: ${a.tasks} task${a.tasks === 1 ? '' : 's'}, ${parts.join(', ')}.`
+    $('saved').textContent = [saved, gpu].filter(Boolean).join(' ')
   }
   function drawSettings() {
     drawApp(); drawNotify()
@@ -1647,22 +1774,24 @@
     } catch {}
     drawShown()
   }
-  async function setPush(on: boolean) {
+  async function setPush(on: boolean) {  // a failure in the page's words is a Refused (uploads' too), shown as it is
     pushBusy = true; pushNote = ''; drawSettings()
     try {
       if (on) {
-        if (Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted') throw new Error('Notifications were not allowed.')
+        if (Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted') throw new Refused('Notifications were not allowed.')
         let sub = await swReg!.pushManager.getSubscription()
         if (!sub) sub = await swReg!.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(state.push.key!) })
         const r = await post('/api/push', { endpoint: sub.endpoint, on: true })
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'The computer refused it.')
+        if (!r.ok) throw new Refused((await r.json().catch(() => ({}))).error || 'The computer refused it.')
         pushOn = true; pushEndpoint = sub.endpoint
       } else {
         const sub = await swReg!.pushManager.getSubscription()
         if (sub) { await post('/api/push', { endpoint: sub.endpoint, on: false }).catch(() => {}); await sub.unsubscribe() }
         pushOn = false; pushEndpoint = ''
       }
-    } catch (e) { pushNote = String((e && (e as Error).message) || e) }
+    // our own words (`Refused`), else one next step: the browser's raw error ("Registration failed -
+    // push service error") said nothing a user could act on (the web app's review, 2026-11-26)
+    } catch (e) { pushNote = e instanceof Refused ? e.message : "Notifications couldn't be turned on here: reload the page and try again." }
     pushBusy = false; drawSettings()
   }
   const para = (box: HTMLElement, text: string, cls?: string) => { const p = document.createElement('p'); if (cls) p.className = cls; p.textContent = text; box.append(p); return p }
@@ -1673,15 +1802,19 @@
     text.split(/`([^`]+)`/).forEach((part, i) => p.append(i % 2 ? Object.assign(document.createElement('code'), { textContent: part }) : part))
     return p
   }
-  const HTTPS = "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
-    'on the computer, `tailscale serve --bg 1337` gives the chat an https address on your tailnet.'
+  // the port this chat runs on: both lines show only over plain http, where the page's own port is
+  // the server's; the cards said 1337 whatever it was, and `--bg 1337` served nothing, or another
+  // account's chat (#1562, 2026-11-26)
+  const servePort = () => location.port || '1337'
+  const HTTPS = () => "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
+    `on the computer, \`tailscale serve --bg ${servePort()}\` gives the chat an https address on your tailnet.`
   function drawApp() {
     const box = $('app'); box.replaceChildren()
     $('app-h').textContent = standalone() ? 'The app' : 'Install the app'
     if (standalone()) return para(box, "Installed ✓ — you're using the chat as an app.")
-    if (!window.isSecureContext) return paraCode(box, HTTPS, 'small')
+    if (!window.isSecureContext) return paraCode(box, HTTPS(), 'small')
     if (!https) return paraCode(box, 'The app installs from the https address, so the one app works on every device: ' +
-      'on the computer, `tailscale serve --bg 1337` gives the chat one on your tailnet.', 'small')
+      `on the computer, \`tailscale serve --bg ${servePort()}\` gives the chat one on your tailnet.`, 'small')
     if (installEvt) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'plain'; b.textContent = 'Install this app'
       b.onclick = async () => { installEvt!.prompt(); try { await installEvt!.userChoice } catch {} installEvt = null; drawSettings() }
@@ -1693,7 +1826,8 @@
   }
   function drawNotify() {
     const box = $('notify'); box.replaceChildren()
-    if (!window.isSecureContext) return para(box, 'They need the page over https too (see above).', 'small')
+    // the https line is Install the app's, below this card: "(see above)" pointed at nothing (2026-11-26)
+    if (!window.isSecureContext) return para(box, 'They need the page over https too: Install the app, below, says how.', 'small')
     if (ios && !standalone()) return para(box, 'On iPhone and iPad, notifications come only to the installed app: install it above in Safari, open it from its icon, and turn them on here.', 'small')
     if (!canPush) return para(box, "This browser can't take notifications from a page.", 'small')
     if (Notification.permission === 'denied') return para(box, "Notifications are blocked for this page: allow them in the browser's site settings, then come back here.", 'small')
@@ -1811,6 +1945,11 @@
     tabBadge.textContent = n > 99 ? '99+' : String(n)
     chatTab.setAttribute('aria-label', n ? `Chat, ${n > 99 ? '99+' : n} new` : 'Chat')
   }
+  // The tab's title names the view, after the unread count (#1339, 2026-11-26): a screen reader
+  // user couldn't tell which view they were in; each view has its hidden <h1> too, and the nav's
+  // current tab is aria-current="page"
+  const VIEW_TITLES: Record<string, string> = { chat: 'Chat', stats: 'Stats', settings: 'Settings' }
+  function drawTitle() { document.title = `${unread ? `(${unread}) ` : ''}${VIEW_TITLES[curView || 'chat']} · Workbench` }
   let chatTop = 0
   function setView(name: string) {
     if (!VIEWS.includes(name)) name = 'chat'
@@ -1821,7 +1960,8 @@
     if (name !== 'chat') showTaskSheet(false)  // the task sheet is the chat's (#1201)
     curView = name
     document.body.dataset.view = name
-    for (const b of tabs) b.dataset.view === name ? b.setAttribute('aria-current', 'true') : b.removeAttribute('aria-current')
+    for (const b of tabs) b.dataset.view === name ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current')
+    drawTitle()
     if (name === 'chat') {
       leftAt = null
       // shown again: at the newest line if it was following, else where the reader left it
@@ -1842,12 +1982,33 @@
   for (const b of tabs) b.addEventListener('click', () => go(b.dataset.view as string))
   addEventListener('hashchange', () => setView(location.hash.slice(1)))
   document.addEventListener('visibilitychange', () => { if (document.hidden) modHide(curView); else modShow(curView) })
-  let toastTimer = 0
-  function toast(text: unknown) {
-    const t = $('toast')
-    t.textContent = String(text); t.hidden = false
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true }, 3500)
+  // A group's arrow keys (a radio group, a tab list): the focus moves to the next or previous one,
+  // round at the ends, Home and End to the first and last; nothing is picked (Enter or Space does)
+  function roving(e: KeyboardEvent, items: HTMLElement[]) {
+    const at = items.indexOf(document.activeElement as HTMLElement)
+    if (at < 0) return
+    const to = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? (at + 1) % items.length
+      : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? (at - 1 + items.length) % items.length
+      : e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : -1
+    if (to < 0) return
+    e.preventDefault()
+    items[to].focus()
   }
+  // A short word from a view (WB.toast). Hidden by its look (`.toast` without `.on`: faded, moved
+  // down), never display:none: some screen readers miss a live region that starts out of the tree.
+  // Up for as long as its words need, 60 ms a character and 3.5 s at least (a 236-character refusal
+  // went in 3.5 s, #1563), and held while hovered or focused (the web app's review, 2026-11-26)
+  const TOAST_MS = 3500, TOAST_CHAR_MS = 60
+  let toastTimer = 0, toastHeld = false, toastFor = 0
+  const toastEl = $('toast')
+  const toastGo = () => { clearTimeout(toastTimer); if (!toastHeld) toastTimer = setTimeout(() => toastEl.classList.remove('on'), toastFor) }
+  function toast(text: unknown) {
+    toastEl.textContent = String(text); toastEl.classList.add('on')
+    toastFor = Math.max(TOAST_MS, TOAST_CHAR_MS * toastEl.textContent.length)
+    toastGo()
+  }
+  for (const [on, held] of [['mouseenter', true], ['mouseleave', false], ['focusin', true], ['focusout', false]] as const)
+    toastEl.addEventListener(on, () => { toastHeld = held; if (held) clearTimeout(toastTimer); else if (toastEl.classList.contains('on')) toastGo() })
   // The view-module API: stats.js and settings.js build against exactly this (#1284)
   window.WB = Object.freeze({
     token: () => token,
@@ -1872,6 +2033,21 @@
       if (curView === name) modShow(name)
     },
     toast,
+    roving,
+    // a request for the driver, from a Settings row with a problem (its Ask link): the chat's box
+    // filled and focused, sent by the user; it waits like any message, so no listener is needed.
+    // The words carry what it is about ("Help me with Settings › API: …"): an `about` names a
+    // task or a take, which the server checks, and Settings is neither
+    ask: (text: string) => {
+      // the chat shown now, not at hashchange: a focus given while it was still hidden went nowhere
+      // (2026-11-26); hashchange's setView is then a no-op
+      go('chat'); setView('chat')
+      // what the box holds is kept, the request after it, as the outbox's edit keeps it: a message
+      // typed before the tap was replaced, its saved draft with it (#1563, 2026-11-26; #958's rule)
+      const typed = input.value.trim()
+      input.value = typed ? input.value.replace(/\s*$/, '\n\n') + String(text) : String(text)
+      save(K.draft, input.value); grow(); armSend(); input.focus()
+    },
     on: (event: string, fn: (arg: any) => void) => { if (handlers[event] && typeof fn === 'function') handlers[event].add(fn) },
     current: () => curView || 'chat',
   })

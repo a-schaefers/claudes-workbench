@@ -106,7 +106,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   `verify.py`, `optimize.py`, `top.py` (API tasks under RUNNING, never in rack or queue), `images.py`, `audio.py` (`media.py`, what those two
   share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the web
   app's Stats, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
-  inotify and pidfd waits. `chat.py` + `chat_static/` (its scripts built from `src/*.ts` by `scripts/web.py`), `webpush.py`: the web chat; `story.py`, every sentence it and the docs tell of the driver (`scripts/gen_story.py` copies them, #1355); `settings.py`,
+  inotify and pidfd waits. `chat.py` + `chat_static/` (its scripts built from `src/*.ts` by `scripts/web.py`), `webpush.py`: the web chat (`qr.py`, the phone link's QR code); `story.py`, every sentence it and the docs tell of the driver (`scripts/gen_story.py` copies them, #1355); `settings.py`,
   its admin rows and their wb calls (*The admin table (settings.py)*). `try/`:
   `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`; or a flow's run, no Claude).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:

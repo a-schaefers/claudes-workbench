@@ -130,7 +130,7 @@ export type ChatOpen = { messages?: Record<string, ChatMsg> }
 export type ChatLink = { state: 'up' | 'started' | 'off' | 'blocked' | 'failed'; url?: string; why?: string }
 
 /** chat.open_tasks: the strip's and the task sheet's */
-export type OpenTask = { name: string; phase: string; model?: string; via?: string; provider_name?: string }
+export type OpenTask = { name: string; phase: string; model?: string; label?: string; via?: string; provider_name?: string; updated_at?: number }
 /** chat.open_runs: the runs strip's (runs.snapshot's rows, #1278): each stage's counts by state */
 export type OpenRun = {
   run: string; flow?: string | null; phase?: string | null; why?: string
@@ -165,22 +165,34 @@ export type Patch = Omit<Snapshot, 'messages'> & { messages?: { put?: ChatMsg[];
 
 /** GET /api/task: one open task's summary, diff or log (chat.task_summary, task_diff, task_log) */
 export type TaskPart = {
-  error?: string; task?: string; phase?: string; round?: number; step?: number; model?: string; via?: string
+  error?: string; task?: string; phase?: string; round?: number; step?: number; model?: string; label?: string; via?: string
   provider_name?: string; now: number; created_at?: number; updated_at?: number; last?: string; report?: string
   report_cut?: boolean; verify?: string[]; base?: string; note?: string; stat?: string; cut?: boolean; diff: string
   lines_cut?: number; files: { path: string; added: number | null; deleted?: number }[]
   rows: { ok?: boolean; ts?: number; round?: number; text: string }[]; more?: boolean
+  /** the summary's lead (chat.report_lead, #1339): what happened to a failed or stuck task, the
+   * agent's summary, the files it changed (null with no report), the tests' line */
+  happened?: string; agent_summary?: string | null; changed?: string[] | null; tests?: string
 }
 
 // ---- settings (workbench/settings.py, #1279)
 
-export type SettingChoice = { value: string; label: string; says?: string }
+/** `needs`: the row whose value this choice needs first (a role's API, its api-<role>, #1558) */
+export type SettingChoice = { value: string; label: string; says?: string; needs?: string }
 /** one of settings.rows() (GET /api/settings, `wb settings --json`): `kind` choice, number (`value`
  * a float or null for off, `unit` usd or per_kwh), info (`text`), action (its choices buttons) or
- * note (one line for the whole group); `other`: any model id is taken */
+ * note (one line for the whole group); `other`: any model id is taken; `group` a role's name for its
+ * card (#1553), `more` a row drawn under that card's More; `hidden` a row the page doesn't draw while it
+ * can do nothing, `fixed` a choice drawn as its `says` alone; `ask` a row with a problem or a request, given
+ * an "Ask <driver>" link (true: the page words it; a string: that request) */
 export type SettingRow = {
   key: string; group: string; kind: string; label: string; value?: string | number | null; text?: string
-  says?: string; choices?: SettingChoice[]; other?: boolean; unit?: string
+  says?: string; choices?: SettingChoice[]; other?: boolean; unit?: string; more?: boolean; hidden?: boolean; fixed?: boolean
+  ask?: boolean | string; help?: string
+  /** what a folded card's one-line summary says of it ("" nothing; without it a choice's `label: choice`) */
+  brief?: string
+  /** the reach row's: the web app's address on the tailnet (no token), "" while it isn't there */
+  phone?: string
   /** its newest change within a week (settings.changed, #1355): when, and who (web, claude, opencode, terminal, agent) */
   changed?: { ts: number; by: string }
 }
@@ -192,6 +204,9 @@ export type SettingsOffers = {
   offers?: { ts: number; key: string; label: string; text: string; toast: string }[]
   notes?: { ts: number; key: string; text: string }[]
 }
+/** `wb settings help <key> --json` (settings.help_now): the note the setting needs its driver's help
+ * with now, or null; the mod asks it before an old web offer (#1557's review) */
+export type SettingsHelp = { key?: string; help?: string | null }
 
 // ---- wb's JSON outputs the panes read
 

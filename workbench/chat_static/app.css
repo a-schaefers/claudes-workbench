@@ -2,6 +2,10 @@
   --bg: #f5f3ec; --panel: #fbfaf6; --fg: #23211e; --dim: #6c6962; --faint: #a3a097;
   --line: #e4e0d4; --accent: #d97757; --accent-fg: #23211e; --on-bad: #fff; --accent-soft: #f3dfd4;
   --claude: #fffefb; --claude-line: #e9e5da; --ok: #4c8a59; --warn: #b07f22; --bad: #b3462f;
+  /* text in the green, amber and accent: the fills read 2.8 to 4:1 on the page in light, under
+     the 4.5:1 text needs (#1556, 2026-11-26); fills, meters and marks keep --ok, --warn, --accent.
+     --faint is for borders and decoration only, never text: 2.35:1 light, 3.29:1 dark (#1560) */
+  --ok-text: #3b7448; --warn-text: #86600f; --accent-text: #a94f2c;
   --shadow: 0 1px 2px rgb(40 30 20 / .06), 0 4px 16px rgb(40 30 20 / .05);
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Source Serif Pro", Georgia, ui-serif, serif;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -13,6 +17,7 @@
     --bg: #1c1b19; --panel: #23221f; --fg: #ece9e1; --dim: #a29e94; --faint: #6f6c65;
     --line: #34322e; --accent: #d97757; --accent-fg: #1c1b19; --on-bad: #1c1b19; --accent-soft: #4a3026;
     --claude: #262522; --claude-line: #34322e; --ok: #7dbb88; --warn: #d8ae5c; --bad: #e07a63;
+    --ok-text: var(--ok); --warn-text: var(--warn); --accent-text: var(--accent);  /* past 4.9:1 already */
     --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 6px 20px rgb(0 0 0 / .25);
     color-scheme: dark;
   }
@@ -59,6 +64,12 @@ body[data-view="stats"] #view-stats, body[data-view="settings"] #view-settings {
 .cards { display: grid; gap: 12px; align-items: start; }
 #stats-body:not(:empty), #settings-rows:not(:empty) { margin-bottom: 12px; }
 @media (min-width: 1100px) { .cards { grid-template-columns: 1fr 1fr; } }
+/* Settings' cards in two CSS columns, short ones under short ones: a grid row as tall as its taller
+   card left about 1,000 px empty beside Agents and roles (the web app's review, 2026-11-26) */
+@media (min-width: 1100px) {
+  #view-settings .cards { display: block; columns: 2; column-gap: 12px; }
+  #view-settings .cards > .card { break-inside: avoid; margin-bottom: 12px; }
+}
 /* the card views' own: scoped to .view-in, never .view, since #view-chat is a .view too and its
    rows, their <p> and <code>, and the intro's <code> kept their sizes (#1284 review) */
 .view-in .card { min-width: 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line);
@@ -85,17 +96,17 @@ body[data-view="stats"] #view-stats, body[data-view="settings"] #view-settings {
 .tab svg { width: 24px; height: 24px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8;
   stroke-linecap: round; stroke-linejoin: round; transition: transform .15s ease-out; }
 .tab-lbl { max-width: 100%; font: 500 11px/1.2 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tab[aria-current="true"] { color: var(--accent); }
-.tab[aria-current="true"] .tab-lbl { color: var(--fg); }
-.tab[aria-current="true"] svg { transform: translateY(-1px); }
+.tab[aria-current="page"] { color: var(--accent); }
+.tab[aria-current="page"] .tab-lbl { color: var(--fg); }
+.tab[aria-current="page"] svg { transform: translateY(-1px); }
 .tab:focus-visible { outline: 2px solid var(--fg); outline-offset: -4px; border-radius: 10px; }  /* the accent: under 3:1 (#1410) */
 .tab-badge { position: absolute; top: 4px; left: calc(50% + 5px); min-width: 18px; height: 18px; padding: 0 5px;
   border-radius: 9px; background: var(--accent); color: var(--accent-fg); font: 600 11px/18px var(--sans);
   text-align: center; box-shadow: 0 0 0 2px var(--panel); }
 .tab-badge[hidden] { display: none; }
 @media (hover: none) { #tabbar { -webkit-user-select: none; user-select: none; } }
-/* the keyboard up: the composer sits on it, the nav out of the way */
-body.kb-open #tabbar { display: none; }
+/* the keyboard up: the composer sits on it, the nav out of the way, and the hint too (#1339) */
+body.kb-open #tabbar, body.kb-open .purpose { display: none; }
 
 @media (min-width: 601px) {
   /* the rail takes the left notch's inset on top of its 76px: inside them, an iPhone held sideways
@@ -108,13 +119,24 @@ body.kb-open #tabbar { display: none; }
     width: calc(76px + env(safe-area-inset-left)); height: auto; padding: calc(12px + env(safe-area-inset-top)) 0 calc(12px + env(safe-area-inset-bottom)) env(safe-area-inset-left);
     border-top: 0; border-right: 1px solid var(--line); }
   .tab { flex: none; height: 64px; }
+  /* the rail hidden under the keyboard gives its 76 px column back (#1339) */
+  body.kb-open { grid-template-columns: 0 minmax(0, 1fr); }
+}
+/* a short window (a phone held sideways): a shorter header, its name and state on one line (#1339) */
+@media (max-height: 419px) {
+  .top { padding-top: calc(4px + env(safe-area-inset-top)); padding-bottom: 4px; gap: 10px; }
+  .mark { width: 26px; height: 26px; padding: 5px; border-radius: 8px; }
+  .who { display: flex; align-items: baseline; gap: 8px; }
 }
 
-/* a short word from a view (WB.toast), over the nav */
-.toast { position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 5;
+/* a short word from a view (WB.toast), over the nav. Shown with .on; without it faded out and moved
+   down, never display:none, so it stays in the accessibility tree (the web app's review, 2026-11-26) */
+.toast { position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom)); transform: translate(-50%, 8px); z-index: 5;
   max-width: min(90vw, 420px); padding: 9px 14px; border-radius: 12px; background: var(--fg); color: var(--bg);
-  font: 14px/1.4 var(--sans); box-shadow: var(--shadow); animation: rise .2s ease-out; }
-.toast[hidden] { display: none; }
+  font: 14px/1.4 var(--sans); box-shadow: var(--shadow); opacity: 0; pointer-events: none;
+  transition: opacity .2s ease-out, transform .2s ease-out; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.toast:empty { padding: 0; }
 /* what a screen reader hears of the thread (#1408): there, never seen */
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; }
@@ -138,8 +160,10 @@ body.kb-open #tabbar { display: none; }
 .dstate .dstate-what { flex-basis: 100%; max-width: 100%; overflow-wrap: anywhere; white-space: pre-wrap; font: 12.5px var(--mono); }
 .dstate .dstate-next, .dstate .dstate-grant { color: var(--dim); }
 .dstate code { font: 12.5px var(--mono); overflow-wrap: anywhere; }
-.dstate .dstate-copy { min-height: 32px; padding: 0 12px; font: inherit; color: var(--fg); background: var(--bg);
+.dstate .dstate-copy { position: relative; min-height: 32px; padding: 0 12px; font: inherit; color: var(--fg); background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+/* 44 px to tap, the line no taller (#1339): its hit area reaches past its border, as .meta's buttons' do */
+.dstate .dstate-copy::after { content: ""; position: absolute; inset: -7px -1px; }
 .presence.waiting .dot { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
 
 /* the open tasks and their models, over the thread (#1016): while away, all the user sees of them;
@@ -154,6 +178,11 @@ body.kb-open #tabbar { display: none; }
 .tasks { cursor: pointer; }
 .tasks::after { content: " ▾"; }
 .tasks[aria-expanded="true"] { color: var(--fg); background: var(--accent-soft); }
+/* one line of counts and names on a phone, below 500 px of height and with the keyboard up
+   (app.ts's tasksShort, #1339): the ▾ kept outside the ellipsis */
+.tasks.short:not([hidden]) { display: flex; justify-content: center; white-space: nowrap; }
+.tasks.short .tasks-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tasks.short::after { flex: none; white-space: pre; }
 /* the runs not closed (#1278's S12), over the tasks' strip: one line each, two at most; a tap
    opens Settings at the workflows group (each run's Stop and Summary) */
 .runs {
@@ -168,6 +197,16 @@ body.kb-open #tabbar { display: none; }
   background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: 0 10px 24px rgb(0 0 0 / .12);
   animation: drop .2s ease-out; }
 .tasksheet[hidden], .tasksheet [hidden] { display: none; }
+/* docked beside the chat from 1100 px (#1554): a column at the view's right, the chat padded for
+   it; narrower it stays under the strip, over the thread */
+@media (min-width: 1100px) {
+  #view-chat { position: relative; }
+  body.ts-open #view-chat { padding-right: var(--dock); }
+  body.ts-open .tasksheet { position: absolute; top: 0; right: 0; bottom: 0; width: var(--dock); max-height: none;
+    border-bottom: 0; border-left: 1px solid var(--line); box-shadow: none; animation: none; }
+  body.ts-open .jump { right: calc(var(--dock) + 16px); }
+}
+:root { --dock: 400px; }
 .tasksheet > div { max-width: 760px; margin: 0 auto; }
 .ts-row { display: block; width: 100%; min-height: 44px; padding: 8px 2px; text-align: left; border: 0;
   border-bottom: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 14.5px;
@@ -177,7 +216,7 @@ body.kb-open #tabbar { display: none; }
 .ts-row small { display: block; color: var(--dim); font-size: 13px; }
 .ts-head { display: flex; align-items: center; gap: 8px; }
 .ts-head b { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 15px; text-align: center; }
-.ts-head button, .ts-link { min-height: 44px; padding: 0 4px; border: 0; background: none; color: var(--accent);
+.ts-head button, .ts-link { min-height: 44px; padding: 0 4px; border: 0; background: none; color: var(--accent-text);
   font: inherit; font-size: 14px; cursor: pointer; }
 .ts-tabs { grid-template-columns: repeat(3, 1fr); }
 .ts-tabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-fg); }
@@ -187,7 +226,7 @@ body.kb-open #tabbar { display: none; }
 .ts-body h4 { margin: 12px 0 4px; font: 600 13.5px/1.3 var(--sans); }
 .ts-body pre { margin: 6px 0; padding: 8px 10px; max-height: 50vh; overflow-y: auto; background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.ts-body .add { color: var(--ok); }
+.ts-body .add { color: var(--ok-text); }
 .ts-body .del { color: var(--bad); }
 .ts-body .hunk, .ts-body .meta { color: var(--dim); }
 .ts-note { display: block; margin: 6px 0; color: var(--dim); font-size: 13px; }
@@ -195,15 +234,24 @@ body.kb-open #tabbar { display: none; }
 .ts-file { min-height: 40px; padding: 6px 2px; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: none;
   color: var(--fg); font: 12.5px/1.4 var(--mono); overflow-wrap: anywhere; cursor: pointer; }
 div.ts-file { cursor: default; color: var(--dim); }
-.ts-reply { width: 100%; min-height: 44px; margin-top: 10px; border: 1px solid var(--line); border-radius: 12px;
+.ts-reply { width: 100%; min-height: 44px; border: 1px solid var(--line); border-radius: 12px;
   background: var(--bg); color: var(--fg); font: inherit; font-size: 14.5px; cursor: pointer; }
+/* what the sheet leads with, and Reply with the next steps pinned to its foot (#1339): Reply was
+   below the fold under a long report */
+.ts-body .ts-happened { font-weight: 600; }
+.ts-body .ts-said { white-space: pre-wrap; }
+.ts-body .ts-fail { color: var(--bad); }
+.ts-full { margin-top: 10px; }
+.ts-full > summary { min-height: 44px; display: flex; align-items: center; color: var(--accent-text); cursor: pointer; font-size: 14px; }
+.ts-foot { position: sticky; bottom: -12px; margin: 10px 0 -12px; padding: 8px 0 12px; background: var(--panel); }
+.ts-next { margin-top: 8px; }
 
 /* what the chat is for, over a thread until dismissed on this device (#1341): a hint, not a warning */
 .purpose { display: flex; align-items: flex-start; gap: 6px; max-width: 760px; width: 100%; margin: 0 auto;
   padding: 6px 8px 6px 16px; font-size: 13px; line-height: 1.4; color: var(--dim); }
 .purpose p { margin: 0; flex: 1; padding-top: 4px; }
 .purpose code { font: 12px var(--mono); }
-.purpose button { flex: none; min-width: 36px; min-height: 36px; font: inherit; color: var(--dim); background: none; border: 0; cursor: pointer; }
+.purpose button { flex: none; min-width: 44px; min-height: 44px; font: inherit; color: var(--dim); background: none; border: 0; cursor: pointer; }
 .purpose[hidden] { display: none; }
 
 /* thread */
@@ -213,7 +261,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 .intro { margin: 18vh auto 0; max-width: 340px; text-align: center; color: var(--dim); font-size: 14.5px; }
 .intro-mark { width: 44px; height: 44px; margin: 0 auto 14px; color: var(--accent); }
 .intro-mark svg { fill: currentColor; }
-.day { align-self: center; margin: 14px 0 10px; font-size: 12px; color: var(--faint); letter-spacing: .04em; text-transform: uppercase; }
+.day { align-self: center; margin: 14px 0 10px; font-size: 12px; color: var(--dim); letter-spacing: .04em; text-transform: uppercase; }
 
 .row { display: flex; flex-direction: column; margin-top: 10px; animation: rise .32s cubic-bezier(.2, .8, .2, 1); }
 .row.same { margin-top: 3px; }
@@ -258,14 +306,14 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 .bubble strong { font-weight: 650; }
 .meta { font-size: 12.5px; color: var(--dim); margin: 4px 6px 0; display: flex; flex-wrap: wrap; gap: 0 5px; align-items: center; }
 .meta span { white-space: nowrap; }
-.meta .tick { color: var(--ok); }
+.meta .tick { color: var(--ok-text); }
 .meta button { font: inherit; color: var(--fg); background: none; border: 0; padding: 10px 8px; margin: -10px -4px; cursor: pointer; text-decoration: underline; }
 
 /* Claude at work */
 .working span:last-child { font-variant-numeric: tabular-nums; }
 .chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
 .chip { font: 14px var(--sans); color: var(--fg); background: var(--panel); border: 1px solid var(--line);
-  border-radius: 999px; padding: 7px 14px; cursor: pointer; box-shadow: var(--shadow); }
+  border-radius: 999px; padding: 7px 14px; min-height: 44px; cursor: pointer; box-shadow: var(--shadow); }  /* 44 px: the first tap on the simple path (#1339) */
 .chip:active { transform: scale(.96); }
 .working { display: flex; align-items: center; gap: 10px; margin-top: 10px; color: var(--dim); font-size: 13.5px; animation: rise .32s ease-out; }
 .working .dots { display: inline-flex; gap: 4px; padding: 12px 14px; background: var(--claude); border: 1px solid var(--claude-line);
@@ -280,6 +328,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
   width: 38px; height: 38px; padding: 9px; border-radius: 50%; border: 1px solid var(--line);
   background: var(--panel); color: var(--fg); box-shadow: var(--shadow); cursor: pointer; animation: rise .2s ease-out;
 }
+.jump::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; }  /* 44 px to tap, 38 seen (#1339) */
 .jump svg, .composer button svg { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* the savings badge (#101): the number and the sentence say it, the colour only underlines it */
@@ -299,19 +348,19 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 .shots img { display: block; width: 100%; height: auto; }
 .shots figcaption { padding: 6px 10px; font: 13px/1.4 var(--sans); color: var(--fg); }
 .shots figcaption b { font-weight: 600; }
-.shots .missing { padding: 18px 10px; font: 13px/1.4 var(--sans); color: var(--faint); }
-.shots-of { margin-top: 6px; font: 13px/1.4 var(--sans); color: var(--faint); }
+.shots .missing { padding: 18px 10px; font: 13px/1.4 var(--sans); color: var(--dim); }
+.shots-of { margin-top: 6px; font: 13px/1.4 var(--sans); color: var(--dim); }
 /* Claude's shortlist of wb audio's takes (#397): one take a row, its player the row's width */
 .takes { display: grid; gap: 8px; margin-top: 8px; width: min(100%, 560px); }
 .take { margin: 0; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; min-width: 0; }
 .take figcaption { font: 13px/1.4 var(--sans); color: var(--fg); overflow-wrap: anywhere; }
 .take figcaption b { font-weight: 600; }
 .take audio { display: block; width: 100%; margin: 6px 0; }
-.take .take-line { display: block; font: 12px/1.4 var(--mono); color: var(--faint); overflow-wrap: anywhere; }
-.take .missing { display: block; padding: 10px 0; font: 13px/1.4 var(--sans); color: var(--faint); }
+.take .take-line { display: block; font: 12px/1.4 var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+.take .missing { display: block; padding: 10px 0; font: 13px/1.4 var(--sans); color: var(--dim); }
 .take .keep { font: 13px/1.4 var(--sans); color: var(--fg); background: none; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-top: 6px; cursor: pointer; }
 .shots-of button, .about button { font: inherit; color: var(--fg); background: none; border: 0; padding: 8px 4px; text-decoration: underline; cursor: pointer; }
-.about-tag { font: 12.5px/1.4 var(--sans); color: var(--faint); margin-bottom: 3px; }
+.about-tag { font: 12.5px/1.4 var(--sans); color: var(--dim); margin-bottom: 3px; }
 .about { display: flex; align-items: center; gap: 6px; max-width: 760px; width: 100%; margin: 0 auto; padding: 0 16px; font: 13.5px/1.4 var(--sans); color: var(--fg); }
 .about[hidden] { display: none; }
 

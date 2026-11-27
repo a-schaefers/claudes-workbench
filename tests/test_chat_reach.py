@@ -173,6 +173,26 @@ class Reach(Base):
         row = next(r for r in settings.rows(fresh=True) if r["key"] == "reach")
         self.assertEqual((row["value"], row["says"]), ("custom", settings.REACH_CUSTOM[2]))
 
+    def test_once_reach_is_the_tailnet_the_phones_link_is_its_https_name_else_its_tailnet_name_and_wb_chat_url_prints_it(self):
+        # the web app's review (2026-11-26): the phone needed a terminal trip, a host edited by hand
+        # and the 40-character token carried over some other way
+        settings.drop()
+        self.addCleanup(settings.drop)
+        with self.with_tailscale(FAKE_TS_SERVE="1400"):
+            self.assertEqual(chat.phone_base(1400), "")                       # reach local: none
+            run_wb("chat", "reach", "tailnet", "--port", "1400")
+            self.assertEqual(chat.phone_base(1400), f"https://{NAME}")        # tailscale serve in front
+        with self.with_tailscale():
+            self.assertEqual(chat.phone_base(1400), f"http://{NAME}:1400")    # its tailnet name
+            with mock.patch.object(chat, "port", return_value=1400):
+                row = next(r for r in settings.rows(fresh=True) if r["key"] == "reach")
+            self.assertEqual(row["phone"], f"http://{NAME}:1400")             # no token: the page adds its own
+            with mock.patch.object(chat, "ensure", return_value={"url": f"http://localhost:1400/#token={chat.token()}", "state": "up"}):
+                out = run_wb("chat", "url", "--port", "1400").splitlines()
+        self.assertEqual(out, [f"http://localhost:1400/#token={chat.token()}", f"on your phone: http://{NAME}:1400/#token={chat.token()}"])
+        with self.with_tailscale(FAKE_TS="down"):
+            self.assertEqual(chat.phone_base(1400), "")                       # Tailscale down: none
+
     def test_chat_on_and_doctor_point_at_the_phones_way_in_only_while_it_opens_here_alone(self):
         from workbench import cli
         with self.with_tailscale():
@@ -205,6 +225,80 @@ class Reach(Base):
                              f"web app reach: local, but tailnet https via tailscale serve (https://{NAME}/)\n")
             self.assertEqual(cli.still_served(1400)[1], "tailscale.exe serve --https=443 off")
             self.assertEqual(cli.reach_hint(), "")                                 # never advised where refused
+
+    def test_the_phone_link_is_serves_https_else_the_tailnet_name_and_none_while_local_1552(self):
+        # #1552 (2026-11-26): the link a phone's camera opens, the token in it, as the QR code draws it
+        with self.with_tailscale():
+            self.assertEqual(chat.phone_url(1400), "")                             # reach local: none
+        with self.with_tailscale(FAKE_TS_SERVE="1400"):                            # serve in front: its https
+            self.assertEqual(chat.phone_url(1400), f"https://{NAME}/#token={chat.token()}")
+        self.conf.write_text(json.dumps({"bind": chat.TAILNET_BIND}))
+        with self.with_tailscale():
+            self.assertEqual(chat.phone_url(1400), f"http://{NAME}:1400/#token={chat.token()}")
+        with self.with_tailscale(FAKE_TS="down"):
+            self.assertEqual(chat.phone_url(1400), "")
+        with self.without_tailscale():
+            self.assertEqual(chat.phone_url(1400), "")
+
+    def test_wb_chat_url_draws_the_phone_links_qr_code_at_a_terminal_and_never_for_the_mod_1552(self):
+        from contextlib import redirect_stdout
+        from workbench import cli, qr
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        here = "http://localhost:1400/#token=t"
+        self.conf.write_text(json.dumps({"bind": chat.TAILNET_BIND}))
+        phone = f"http://{NAME}:1400/#token={chat.token()}"
+        with self.with_tailscale(), mock.patch.object(chat, "ensure", return_value={"url": here, "state": "up"}):
+            # a pipe: the phone's line, never its code (the mod reads --json)
+            self.assertEqual(run_wb("chat", "url", "--port", "1400"), f"{here}\non your phone: {phone}\n")
+            self.assertEqual(json.loads(run_wb("chat", "url", "--json", "--port", "1400"))["url"], here)
+            out = Terminal()
+            with redirect_stdout(out):
+                cli.main(["chat", "url", "--port", "1400"])
+        self.assertEqual(out.getvalue(), f"{here}\non your phone: {phone}\n{qr.half_blocks(phone)}\n")
+        self.conf.write_text("{}")
+        out = Terminal()
+        with self.with_tailscale(), mock.patch.object(chat, "ensure", return_value={"url": here, "state": "up"}), \
+                redirect_stdout(out):
+            cli.main(["chat", "url", "--port", "1400"])
+        self.assertEqual(out.getvalue(), here + "\n")                              # no phone link: no code
+
+    def test_get_phone_qr_svg_is_the_phone_links_code_for_the_users_token_alone_1552(self):
+        import http.client
+        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        srv = servers[0]
+        port = srv.server_address[1]
+        import threading
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        def stop():
+            srv.shutdown()
+            srv.server_close()
+            srv.RequestHandlerClass.hub.close()
+        self.addCleanup(stop)
+
+        def get(path, token):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("GET", path, headers={"Host": f"localhost:{port}", "Authorization": f"Bearer {token}"})
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+            return r.status, r.getheader("Content-Type"), r.getheader("Cache-Control"), body
+        from workbench import qr
+        user = chat.token()
+        with self.with_tailscale():
+            code, ctype, _, body = get("/api/phone-qr.svg", user)                 # reach local: no link
+            self.assertEqual((code, json.loads(body)["code"]), (404, "not_found"))
+        with self.with_tailscale(FAKE_TS_SERVE=str(port)):
+            for path in ("/api/phone-qr.svg", "/api/v1/phone-qr.svg"):
+                code, ctype, cache, body = get(path, user)
+                self.assertEqual((code, ctype, cache), (200, "image/svg+xml", "no-store"))  # the token is in it
+                self.assertEqual(body.decode(), qr.svg(f"https://{NAME}/#token={user}"))
+            self.assertEqual(get("/api/phone-qr.svg", "nope")[0], 401)
+            code, _, _, body = get("/api/phone-qr.svg", chat.agent_add("helper"))
+            self.assertEqual((code, json.loads(body)["code"]), (403, "agent_forbidden"))  # the user's token: never an agent's
 
 
 if __name__ == "__main__":

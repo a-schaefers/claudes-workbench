@@ -1880,6 +1880,15 @@ def task_label(m: Model) -> str:
     return f"{m.id} ({provider_name(m)}" + (")" if m.cloud else ", API)")
 
 
+def catalog_title(model_id: str) -> str:
+    """An API model's name in OpenCode's catalog (hosted.json's `title`: "DeepSeek V4.1 Flash"),
+    from hosted.json as it is, never rebuilt (the web chat asks on every state it builds); ""
+    when the catalog names it nothing. The web app's one name for it (#1339, 2026-11-26): the
+    raw id was most of what pushed the phone's task strip to three lines."""
+    row = _dict(_read_hosted().get("models")).get(model_id)
+    return row["title"] if isinstance(row, dict) and isinstance(row.get("title"), str) else ""
+
+
 def provider_name(m: Model) -> str:
     """How a provider is named to the user: its name in OpenCode's auth list or config."""
     if m.cloud:

@@ -6173,8 +6173,8 @@ class AgentSetup(Base):
         self.assertTrue(lines[0].startswith("agents get the handbook "), lines)
         self.assertIn("skill oc-skill", lines[0])
         self.assertIn("plugin lint.js (tools lintcheck)", lines[0])
-        self.assertEqual(lines[1], "kept from agents: 2 skills denied by name (Claude's, ~/.agents', "
-                                   f"`workbench`), ~/.claude/CLAUDE.md, {own} (OPENCODE_CONFIG), "
+        self.assertEqual(lines[1], "kept from agents: 2 skills kept out by name (Claude's, ~/.agents and "
+                                   f"workbench's own), ~/.claude/CLAUDE.md, {own} (OPENCODE_CONFIG), "
                                    "reference bare, MCP server github")
         buf = io.StringIO()
         with redirect_stdout(buf), contextlib.suppress(SystemExit):
@@ -32004,6 +32004,45 @@ class WebChat(Base):
                 time.sleep(0.05)
         self.assertTrue(execs)                                           # re-exec'd, not exit 75
 
+    def test_the_stream_sends_a_tasks_new_phase_at_once_and_wakes_for_nothing_on_its_steps(self):
+        # #1559 (2026-11-26): the hub watched chat/ alone, so a task gone from running to review
+        # reached the page's strip and open sheet at the 60 s idle bump, 57 s late; it watches
+        # each task's status.json and task.json now, never its events.jsonl (every step)
+        import http.client
+        t = store.Task("fix-hub")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "fix-hub", "model": "m", "created_at": store.now()})
+        t.set_status(phase="running", round=1)
+        tok, hub = self.chat.token(), self.srv.RequestHandlerClass.hub
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/api/stream", headers={"Host": "localhost", "Authorization": f"Bearer {tok}"})
+        r = c.getresponse()
+
+        def event():
+            lines = []
+            while True:
+                line = r.fp.readline().decode().rstrip("\n")
+                if not line:
+                    if lines:
+                        return lines
+                    continue
+                if not line.startswith(":"):  # a ping
+                    lines.append(line)
+        first = event()
+        self.assertEqual([x["phase"] for x in json.loads(first[1][6:])["tasks"]], ["running"])
+        time.sleep(0.3)                                  # the hub's watches are in place
+        seen = hub.version
+        t.event({"kind": "tool", "round": 1, "tool": "read", "brief": "x", "ts": store.now()})
+        time.sleep(0.5)                                  # a claim that a step wakes nothing
+        self.assertEqual(hub.version, seen)
+        began = time.monotonic()
+        t.set_status(phase="review")
+        patch = event()
+        self.assertEqual(patch[0], "event: patch")
+        self.assertEqual([x["phase"] for x in json.loads(patch[1][6:])["tasks"]], ["review"])
+        self.assertLess(time.monotonic() - began, 5)     # not the idle bump's 60 s
+        c.close()
+
     def test_the_stream_sends_the_whole_state_then_what_changed(self):
         import http.client
         tok = self.chat.token()
@@ -32645,6 +32684,27 @@ class WebChat(Base):
         self.assertEqual(sorted(t["name"] for t in self.chat.open_tasks()), ["t-queued", "t-review"])
         self.assertEqual(sorted(t["name"] for t in self.chat.snapshot()["tasks"]), ["t-queued", "t-review"])
 
+    def test_the_chats_task_strip_names_each_model_once_as_stats_does_a_gpu_label_or_an_api_catalog_name(self):
+        # #1339 (2026-11-26): the strip sent the raw id, and the page drew `API deepseek-flash
+        # (DeepSeek)` where Stats said the label: the web app's one name is a GPU model's label
+        # (task.json `model_label`) and an API model's catalog name, from hosted.json as it is
+        from workbench import models
+        store.write_json(models.hosted_path(), {"v": 1, "providers": {"deepinfra": {"name": "DeepInfra"}},
+                                                "models": {"deepinfra/v/flash": {"name": "flash", "title": "V Flash"}}})
+
+        def task(name, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase="running", round=1)
+        task("t-gpu", model="qwen-27b", model_label="Qwen 27B")
+        task("t-api", model="deepinfra/v/flash", model_label="deepinfra/v/flash (DeepInfra, API)", via="api",
+             provider_name="DeepInfra")
+        task("t-unlisted", model="deepinfra/v/gone", via="api", provider_name="DeepInfra")
+        got = {t["name"]: t["label"] for t in self.chat.open_tasks()}
+        self.assertEqual(got, {"t-gpu": "Qwen 27B", "t-api": "V Flash", "t-unlisted": ""})
+        self.assertEqual(self.chat.task_summary(store.Task("t-api"))["label"], "V Flash")
+
     # ---- the task sheet (#1201) ----
 
     def _sheet_task(self, name="fix-auth", phase="review", **status):
@@ -32710,6 +32770,75 @@ class WebChat(Base):
         self.assertFalse(lg["more"])
         code, lg = self.call(q + "log&n=1", token=tok)
         self.assertEqual(([r["kind"] for r in lg["rows"]], lg["more"]), (["tool"], True))
+
+    def test_the_task_sheets_log_and_summary_name_paths_relative_to_the_worktree(self):
+        # #1339 (2026-11-26): each Log row carried the worktree's 70-character path before the
+        # file, wrapping to two lines on a phone, a path the phone can't open
+        t = self._sheet_task()
+        tree, real = str(t.worktree), os.path.realpath(t.worktree)
+        t.set_status(last=f"read {tree}/src/f0.py")
+        t.round_dir(2).mkdir(parents=True)
+        (t.round_dir(2) / "summary.md").write_text(f"files changed:\n{real}/new.py\nran in {tree}\n")
+        t.event({"kind": "tool", "round": 2, "tool": "read", "brief": f"{tree}/src/f0.py", "ok": True, "ts": store.now()})
+        t.event({"kind": "tool", "round": 2, "tool": "bash", "brief": f"ls {tree} {tree}-other/x", "ok": True,
+                 "ts": store.now()})
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part="
+        s = self.call(q + "summary", token=tok)[1]
+        self.assertEqual((s["last"], s["report"]), ("read src/f0.py", "files changed:\nnew.py\nran in .\n"))
+        rows = [r["text"] for r in self.call(q + "log", token=tok)[1]["rows"]]
+        self.assertEqual(rows, ["read     src/f0.py", f"bash     ls . {tree}-other/x"])
+
+    def test_the_task_sheet_leads_with_what_happened_and_the_reports_own_lines_never_runner_logs_tail(self):
+        # #1339 (2026-11-26): a failed task's sheet showed only `opencode exited 1 (see
+        # <path>/runner.log)`; it leads with one plain line, then the agent's summary, the files
+        # and the tests, read from the report (chat.report_lead), and no runner.log text
+        t = self._sheet_task(phase="failed")
+        (t.dir / "runner.log").write_text("Error: raw stderr of OpenCode\n")
+        t.round_dir(2).mkdir(parents=True)
+        report = t.round_dir(2) / "summary.md"
+        report.write_text(f"task fix-auth · m · round 2\nopencode exited 1 (see {t.dir}/runner.log)\n\n"
+                          "agent's summary:\n(the agent wrote no final message)\n\nfiles changed:\n(none)\n")
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part=summary"
+        s = self.call(q, token=tok)[1]
+        self.assertEqual({k: s[k] for k in ("happened", "agent_summary", "changed", "tests")},
+                         {"happened": "The agent stopped before writing anything (OpenCode exited).",
+                          "agent_summary": "(the agent wrote no final message)", "changed": [], "tests": ""})
+        self.assertNotIn("raw stderr", json.dumps(s))
+        t.set_status(phase="stuck")
+        report.write_text("task fix-auth · m · round 2\nSTOPPED: 40 tool calls without changing a file.\n"
+                          "tests: FAIL (`pytest`, exit 1)\n```\nE assert 1 == 2\n```\n\nagent's summary:\nTried twice.\n\n"
+                          "Gave up.\n\nfiles changed:\n M README.md\n?? new.py\nNOTE: x\n2 files changed, 2 insertions(+)")
+        s = self.call(q, token=tok)[1]
+        self.assertEqual({k: s[k] for k in ("happened", "agent_summary", "changed", "tests")},
+                         {"happened": "The agent was stopped partway: what it changed so far is in the worktree "
+                                      "(40 tool calls without changing a file).",
+                          "agent_summary": "Tried twice.\n\nGave up.", "changed": ["README.md", "new.py"],
+                          "tests": "tests: FAIL (`pytest`, exit 1)"})
+        t.set_status(phase="review")
+        self.assertEqual(self.call(q, token=tok)[1]["happened"], "")      # nothing went wrong to say
+        report.unlink()
+        subprocess.run(["git", "-C", str(t.worktree), "checkout", "-q", "--", "README.md"], check=True)
+        (t.worktree / "new.py").unlink()          # a setup that failed before the agent: a clean tree
+        t.set_status(phase="failed", last="setup: npm ci exited 1", infra="setup", failed_before="setup")
+        s = self.call(q, token=tok)[1]
+        self.assertEqual((s["happened"], s["agent_summary"], s["changed"]),
+                         ("The task stopped before the agent ran (setup: npm ci exited 1).", None, None))
+
+    def test_a_task_reaped_mid_round_with_the_agents_edits_never_reads_as_the_agent_never_ran(self):
+        # #1339's review (2026-11-26): a runner reaped mid-round (a restart, an OOM kill) leaves
+        # the round no summary.md, and the sheet said 'The task stopped before the agent ran'
+        # above 'Discard it', which removes the worktree and the agent's edits with it
+        t = self._sheet_task(phase="failed")     # its worktree: README.md changed, new.py added
+        t.round_dir(2).mkdir(parents=True)
+        t.set_status(last=cli.RESTARTED, infra="restart", pid=None)
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part=summary"
+        self.assertEqual(self.call(q, token=tok)[1]["happened"],
+                         f"The task stopped partway ({cli.RESTARTED}): what the agent changed so far is in the worktree.")
+        subprocess.run(["git", "-C", str(t.worktree), "checkout", "-q", "--", "README.md"], check=True)
+        (t.worktree / "new.py").unlink()
+        t.set_status(last=cli.RUNNER_DIED, infra="runner died")   # reaped with nothing changed yet
+        self.assertEqual(self.call(q, token=tok)[1]["happened"],
+                         "The task stopped (the runner died (see runner.log)).")
 
     def test_the_task_sheet_is_the_users_and_only_for_an_open_task(self):
         # the diff and report are the user's work: an agent's token reads none of it (AGENT_UNREAD)
@@ -49447,8 +49576,10 @@ class RoleResolution(Base):
                       self.wb("watch", "t-api", "--once", "--no-color")[1])
         # the chat's snapshot: the open task, its model and provider
         from workbench import chat
+        # the fields it names (the rows carry more since #1339: label, updated_at)
+        keys = ("name", "phase", "model", "via", "provider_name")
         self.assertIn({"name": "t-api", "phase": "queued", "model": "deepseek/deepseek-flash", "via": "api",
-                       "provider_name": "DeepSeek"}, chat.snapshot()["tasks"])
+                       "provider_name": "DeepSeek"}, [{k: t.get(k) for k in keys} for t in chat.snapshot()["tasks"]])
         self.assertEqual(self.begin("t-api2", "--role", "trivial")[0], 0)
 
     def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):

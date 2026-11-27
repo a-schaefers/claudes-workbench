@@ -9,7 +9,7 @@ interface Window {
 interface Document { _hasFocus: () => boolean }
 interface Window {
   e2eRealFetch: typeof fetch; e2eFeed: () => Promise<string>; e2eDown: boolean
-  e2eTop: { opened: number; closed: number; mode: string; ticks: unknown[]; n: number; statsDown?: boolean }
+  e2eTop: { opened: number; closed: number; mode: string; ticks: unknown[]; n: number; statsDown?: boolean; routes?: unknown }
   __wbFetch?: typeof fetch; __wbSettings: (method: string, body: unknown) => Promise<[number, unknown] | null>
 }
 // what e2e_chat.mts hands each view's check(page, ctx) (e2e_stats.mts, e2e_settings.mts)

@@ -125,7 +125,7 @@ change a setting for you). From its chat you message the lead from anywhere: fro
 Tailscale (your tailnet), once the lead runs `wb chat reach tailnet` or you set the Web app reach
 row in Settings.
 <!-- story:doc.rule -->
-The terminal is where your driver lives (locally, or over `ssh` + `tmux`), and a prompt it raises is answered there. Most work can still run from the web app's chat, more so with your driver run with permissions granted. The web app's Settings are the source of truth: your driver changes one only on your ask and yes, and never undoes a change you made.
+The terminal is where Claude or OpenCode lives (locally, or over `ssh` + `tmux`), and a prompt it raises is answered there. Most work can still run from the web app's chat, more so with Claude or OpenCode run with permissions granted. The web app's Settings are the source of truth: Claude or OpenCode changes one only on your ask and yes, and never undoes a change you made.
 <!-- /story -->
 
 ## What it does

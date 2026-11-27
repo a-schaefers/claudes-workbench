@@ -150,7 +150,8 @@ AGENT_CANT = {"/api/push": "change notifications", "/api/active": "mark the user
               "/api/seen": "mark what the user has seen", "/api/latest": "read the user's notifications",
               "/api/shot": "read screenshots", "/api/audio": "read audio takes",
               "/api/transcribe/": "transcribe the user's voice clips",  # #1203
-              "/api/task": "read tasks"}  # a task's diff and report are the user's work (#1201)
+              "/api/task": "read tasks",  # a task's diff and report are the user's work (#1201)
+              "/api/phone-qr.svg": "read the user's phone link"}  # it carries the user's token (#1552)
 
 
 def _covers(rule: str, path: str) -> bool:
@@ -422,6 +423,39 @@ def served_site(port: int) -> str | None:
     return ""
 
 
+def _served_base(port: int) -> str:
+    """`https://<name>[:<port>]` while `tailscale serve` serves this chat's ``port`` (served_site),
+    else "": phone_base's and phone_url's first answer."""
+    site = served_site(port)
+    if not site:
+        return ""
+    name, _, https = site.rpartition(":") if ":" in site else (site, "", "")
+    return f"https://{name}" + ("" if https in ("", "443") else f":{https}")
+
+
+def _on_tailnet() -> bool:
+    try:
+        return reach() == "tailnet"
+    except ConfigError:
+        return False
+
+
+def _tailnet_http(port: int) -> str:
+    """http://<this machine's tailnet name, else its IP>:<port>, "" while Tailscale isn't up."""
+    ts = tailscale()
+    name = ts.get("dns") or next(iter(sorted(ts.get("names") or [], key=len, reverse=True)), "") or ts.get("ip") or ""
+    return f"http://{f'[{name}]' if ':' in name else name}:{port}" if name else ""
+
+
+def phone_base(port: int) -> str:
+    """The web app's address on the user's tailnet, for their phone (the web app's review,
+    2026-11-26: the phone needed a terminal trip, a host edited by hand and a 40-character token
+    carried over): its https name when `tailscale serve` serves this chat's ``port`` (served_site),
+    else http://<this machine's tailnet name>:<port>; "" while reach isn't `tailnet` or Tailscale
+    isn't up. No token: the page adds its own (Settings' reach row)."""
+    return (_served_base(port) or _tailnet_http(port)) if _on_tailnet() else ""
+
+
 _tailnet = {"at": float("-inf"), "name": ""}
 _tailnet_lock = threading.Lock()
 
@@ -436,6 +470,16 @@ def tailnet_name() -> str:
         if time.monotonic() - _tailnet["at"] >= REPLAN_EVERY:
             _tailnet.update(at=time.monotonic(), name=tailscale(windows=True).get("dns") or "")
         return _tailnet["name"]
+
+
+def phone_url(port: int) -> str:
+    """The link a phone on the tailnet opens, the token in its fragment (#1552, 2026-11-26): at
+    `tailscale serve`'s https name when it serves ``port`` (served_site, whatever the reach: serve
+    proxies to localhost), else phone_base's (reach `tailnet`, this machine's tailnet name over
+    http); "" for neither (reach local, a bind of the user's own, Tailscale down). The second line
+    `wb chat url` prints, the QR code it draws at a terminal and GET /api/phone-qr.svg serves."""
+    base = _served_base(port) or (_tailnet_http(port) if _on_tailnet() else "")
+    return f"{base}/#token={token()}" if base else ""
 
 
 # ---- the thread ----
@@ -1048,7 +1092,8 @@ def snapshot() -> dict:
 def open_tasks() -> list[dict]:
     """The open tasks for the page's strip over the thread (#1016): while away, the chat is all
     the user sees, and it named no model (robustness minor 8). From task.json and status.json:
-    `{name, phase, model, via, provider_name}`; a bench replay is no one's task, and a parked one
+    `{name, phase, model, label, via, provider_name, updated_at}` (`updated_at`, its status's last
+    write: the page's mark to fetch an open task's Log again, #1559); a bench replay is no one's task, and a parked one
     (`wb stop --all`) is left out as `wb status` leaves it: the quit's tasks filled the strip for
     good (#1097, 2026-11-23)."""
     out = []
@@ -1057,8 +1102,21 @@ def open_tasks() -> list[dict]:
         if not sp.get("name") or sp.get("bench") or phase in store.CLOSED or store.parked(t.status):
             continue
         out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
-                    "via": sp.get("via") or "gpu", "provider_name": sp.get("provider_name") or ""})
+                    "label": model_label(sp), "via": sp.get("via") or "gpu",
+                    "provider_name": sp.get("provider_name") or "", "updated_at": t.status.get("updated_at")})
     return out
+
+
+def model_label(sp: dict) -> str:
+    """The web app's one name for a task's model (#1339, 2026-11-26): a GPU model's label, the
+    one Stats and wb top give it (task.json `model_label`), an API model's catalog name
+    (models.catalog_title, hosted.json as it is); "" when there is none, and the page shows the
+    id. The raw ids were most of what pushed the phone's strip to three lines. wb's own lines
+    keep `model_label`'s id-first form: Claude reads those."""
+    if (sp.get("via") or "gpu") == "api":
+        from . import models
+        return models.catalog_title(str(sp.get("model") or ""))
+    return str(sp.get("model_label") or "")
 
 
 RUN_FIELDS = ("run", "flow", "phase", "why", "stages", "spent_usd", "budget_usd", "budget_min", "gpu_min")
@@ -1109,23 +1167,100 @@ def _cut_lines(text: str, most: int) -> tuple[str, int]:
     return "\n".join(out), n
 
 
+def in_tree(t: store.Task, text: str) -> str:
+    """``text`` with the task's worktree written away: `read src/f0.py`, not the 70 characters of
+    `~/.local/state/workbench/tasks/<t>/worktree/` before it, which wrapped each Log row to two
+    lines on a phone and named a path the phone can't open (#1339, 2026-11-26); the worktree
+    itself is `.`. Both spellings, as given and resolved: an agent's tools see either."""
+    roots = {str(t.worktree)}
+    try:
+        roots.add(os.path.realpath(t.worktree))
+    except (OSError, ValueError):
+        pass
+    for root in sorted(roots, key=len, reverse=True):
+        text = re.sub(re.escape(root) + r"(?:/|(?![\w.-]))", lambda m: "" if m.group(0).endswith("/") else ".", text)
+    return text
+
+
+LEAD_CAUSE_CHARS = 160  # the cause in the task sheet's "what happened" line, cut past this
+
+
+def report_lead(t: store.Task, report: str, has_report: bool) -> dict:
+    """What the task sheet leads with (#1339, 2026-11-26), read from the report runner.summary_text
+    writes: the agent's summary (`agent_summary`), the files it changed (`changed`, the status
+    lines' paths; None with no report) and the tests' line (`tests`, `tests: PASS (…)`), and for a
+    failed or stuck task one plain line of what happened (`happened`: `The agent stopped before
+    writing anything (OpenCode exited).`; with no report, `The task stopped before the agent ran (…).`
+    only for a stop before the agent with a clean worktree). The sheet showed only `opencode exited 1 (see
+    <path>/runner.log)`, a path the phone can't open, with Reply below the fold. Never
+    runner.log's tail: OpenCode's raw stderr, which Claude reads when asked."""
+    lines = report.split("\n")
+    out: dict = {"happened": "", "agent_summary": None, "changed": None, "tests": ""}
+    if has_report:
+        if "agent's summary:" in lines:
+            at = len(lines) - 1 - lines[::-1].index("agent's summary:")
+            end = lines.index("files changed:", at) if "files changed:" in lines[at:] else len(lines)
+            out["agent_summary"] = "\n".join(lines[at + 1:end]).strip()
+            files = []
+            for line in lines[end + 1:]:
+                if not line or line.startswith(("NOTE:", "not in the spec:")) or re.match(r"\d+ files? changed", line.strip()):
+                    break
+                if line != "(none)":
+                    files.append(line[3:] if re.match(r"^[ MADRCU?!]{2} ", line) else line)
+            out["changed"] = files
+        out["tests"] = next((x for x in lines if re.match(r"tests: (PASS|FAIL)\b", x)), "")
+    phase = t.status.get("phase")
+    if phase in ("failed", "stuck"):
+        stopped = next((x.removeprefix("STOPPED: ") for x in lines if x.startswith("STOPPED: ")), "")
+        cause = stopped or ("OpenCode exited" if any(x.startswith("opencode exited ") for x in lines)
+                            else str(t.status.get("last") or ""))
+        cause = cause.strip().rstrip(".")
+        cause = cause if len(cause) <= LEAD_CAUSE_CHARS else cause[:LEAD_CAUSE_CHARS - 1] + "…"
+        why = f" ({cause})" if cause else ""
+        if not has_report:
+            # No report for this round is not "the agent never ran": a runner reaped mid-round
+            # (cli.reap's restart or dead runner) or a round failing after an earlier one's work
+            # leaves none either, and the sheet's 'Discard it' then threw away the agent's
+            # edits on the word of the phone (#1339's review, 2026-11-26). Only the machine's
+            # own stops before the agent (status infra setup, repo, model, which each runner
+            # start clears) with a clean worktree say it never ran.
+            from . import gitops
+            try:
+                edits = bool(gitops.changed(t.worktree))
+            except (OSError, gitops.GitError):
+                edits = False
+            if edits:
+                out["happened"] = f"The task stopped partway{why}: what the agent changed so far is in the worktree."
+            elif t.status.get("infra") in ("setup", "repo", "model"):
+                out["happened"] = f"The task stopped before the agent ran{why}."
+            else:
+                out["happened"] = f"The task stopped{why}."
+        else:
+            did = "partway: what it changed so far is in the worktree" if out["changed"] else "before writing anything"
+            out["happened"] = f"The agent {'was stopped' if phase == 'stuck' else 'stopped'} {did}{why}."
+    return out
+
+
 def task_summary(t: store.Task) -> dict:
     """`wb status <t>`'s row and `wb report <t>`'s text: phase, round, step, last, when it began
     and last changed (the page counts age and idle from `now`), its model, the newest round's
-    report (cut at TASK_REPORT_CHARS) and the regression check's lines."""
+    report (cut at TASK_REPORT_CHARS) and the regression check's lines, the worktree's paths
+    relative to it (in_tree), and what the sheet leads with (report_lead)."""
     from . import gitops, transcript, verify
     st, sp = t.status, t.spec
     n = st.get("round", 1)
-    report = transcript.plain(t.report(n))
+    report = in_tree(t, transcript.plain(t.report(n)))
+    lead = report_lead(t, report, (t.round_dir(n) / "summary.md").is_file())
     try:
-        checks = [transcript.plain(x) for x in verify.report_lines(t)]
+        checks = [in_tree(t, transcript.plain(x)) for x in verify.report_lines(t)]
     except (OSError, ValueError, KeyError, gitops.GitError):
         checks = []
     return {"phase": st.get("phase") or "queued", "round": n, "step": st.get("steps", 1),
-            "last": transcript.plain(str(st.get("last") or "")), "created_at": sp.get("created_at"),
-            "updated_at": st.get("updated_at"), "model": sp.get("model") or "", "via": sp.get("via") or "gpu",
+            "last": in_tree(t, transcript.plain(str(st.get("last") or ""))), "created_at": sp.get("created_at"),
+            "updated_at": st.get("updated_at"), "model": sp.get("model") or "", "label": model_label(sp),
+            "via": sp.get("via") or "gpu",
             "provider_name": sp.get("provider_name") or "", "report": report[:TASK_REPORT_CHARS],
-            "report_cut": len(report) > TASK_REPORT_CHARS, "verify": checks}
+            "report_cut": len(report) > TASK_REPORT_CHARS, "verify": checks, **lead}
 
 
 def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dict | None:
@@ -1166,14 +1301,15 @@ def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dic
 
 def task_log(t: store.Task, n: int = TASK_LOG_ROWS) -> dict:
     """`wb log <t> -v -n <n>`: its last ``n`` rows (from the last TASK_LOG_BYTES of events.jsonl),
-    each `{ts, round, kind, text}` with wb log's words (transcript.log_body) cut at
-    transcript.JSON_LINE_CHARS, `ok` for a tool call; `more` when older ones were left out."""
+    each `{ts, round, kind, text}` with wb log's words (transcript.log_body), the worktree's paths
+    relative to it (in_tree), cut at transcript.JSON_LINE_CHARS, `ok` for a tool call; `more` when
+    older ones were left out."""
     from . import transcript
     rows = [r for r in store.read_jsonl_tail(t.dir / "events.jsonl", TASK_LOG_BYTES)
             if isinstance(r, dict) and r.get("kind") in transcript.LOG_KINDS]
     out = []
     for r in rows[-n:]:
-        text = transcript.plain(transcript.log_body(r, verbose=True) or "")
+        text = in_tree(t, transcript.plain(transcript.log_body(r, verbose=True) or ""))
         cut = text if len(text) <= transcript.JSON_LINE_CHARS else text[:transcript.JSON_LINE_CHARS - 1] + "…"
         out.append({"ts": r.get("ts"), "round": r.get("round"), "kind": r.get("kind"), "text": cut,
                     **({"ok": bool(r.get("ok"))} if r.get("kind") == "tool" else {})})
@@ -2069,6 +2205,13 @@ def writer_driver() -> dict | None:
 
 
 IDLE_BUMP_S = 60  # without inotify, nothing changed: the streams wake this often all the same (#841)
+# A task's own news (#1559, 2026-11-26): the hub watches tasks/ and each task's directory (never
+# below it: its worktree, tree, rounds, its agent's OpenCode home), and wakes the streams only for
+# these two files, its status (written on each phase and each tool call's `last`) and its spec;
+# events.jsonl, written on every step, would rebuild every open stream's snapshot. Without it the
+# strip and the open sheet heard of a task's phase up to IDLE_BUMP_S late
+TASK_NEWS = ("status.json", "task.json")
+TASK_SKIP = ("*/*",)  # Watcher skips, below tasks/: every directory inside a task's
 
 
 def _answers(pid) -> bool:
@@ -2083,8 +2226,9 @@ def _answers(pid) -> bool:
 
 
 class Hub:
-    """One watcher for every open stream: it wakes them the moment a chat file changes or the
-    listening session's process ends (a pidfd), so nothing polls."""
+    """One watcher for every open stream: it wakes them the moment a chat file changes, a task's
+    status or spec does (TASK_NEWS), or the listening session's process ends (a pidfd), so
+    nothing polls."""
 
     def __init__(self):
         self.cond = threading.Condition()
@@ -2093,6 +2237,9 @@ class Hub:
         # the directory it started with: resolved again on each restart, a hub outliving its
         # server (a test's) made the next WB_HOME's chat/ before that test's setUp did (#134)
         self.dir = chat_dir()
+        # tasks/ made here, beside chat/ and for the same reason, never by the watching thread
+        self.tasks = store.home() / "tasks"
+        self.tasks.mkdir(parents=True, exist_ok=True)
         self.closed = threading.Event()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -2119,8 +2266,17 @@ class Hub:
                 time.sleep(1)
             self.bump()
 
+    def _news(self, changed: list) -> bool:
+        """Whether a task's changes are news for the page: its status or spec (TASK_NEWS), or a
+        task's directory made or gone."""
+        return any(p.name in TASK_NEWS or p.parent == self.tasks for p in changed)
+
     def _watch(self) -> None:
         w = Watcher(self.dir)
+        # a closed task's directory is left out, as wb events leaves it: a thousand of them were
+        # a thousand watches for nothing (the 2026-11-16 audit)
+        closed = tuple(t.name for t in store.all_tasks() if t.status.get("phase") in store.CLOSED)
+        tw = Watcher(self.tasks, recursive=True, skip=TASK_SKIP + closed)
         pid, pidfd = None, None
         last, said_gone = time.monotonic(), None
         try:
@@ -2134,28 +2290,37 @@ class Hub:
                         pidfd = os.pidfd_open(int(pid)) if pid else None
                     except (OSError, ValueError, AttributeError):
                         pidfd = None
-                if not w.native or w.polled:  # no inotify, or chat/ fell back to looking
+                if not w.native or w.polled or tw.polled:  # no inotify, or a directory fell back to looking
                     # a wake only for a change, the listener's process ending (`kill 0`, no `ps`)
                     # or IDLE_BUMP_S, as the native select's timeout: every open stream rebuilt
                     # its whole snapshot each second, a `ps` fork each on macOS, with nothing new
                     # (#841)
-                    changed, gone = w.wait(1), False
+                    changed, news, gone = w.wait(1), self._news(tw.wait(0)), False
                     if pid and pid != said_gone and not _answers(pid):
                         gone, said_gone = True, pid
-                    if not changed and not gone and time.monotonic() - last < IDLE_BUMP_S:
+                    if not changed and not news and not gone and time.monotonic() - last < IDLE_BUMP_S:
                         continue
                 else:
-                    ready, _, _ = select.select([w.fd] + ([pidfd] if pidfd is not None else []), [], [], 60)
+                    # the idle bump counted from the last wake: a task's steps (no news) wake the
+                    # select often, and a timeout restarted at each would never come
+                    wait = max(0.0, IDLE_BUMP_S - (time.monotonic() - last))
+                    ready, _, _ = select.select([w.fd, tw.fd] + ([pidfd] if pidfd is not None else []), [], [], wait)
                     w.read()
-                    if pidfd is not None and pidfd in ready:  # the listener is gone
+                    tasks = tw.read()
+                    gone = pidfd is not None and pidfd in ready
+                    if gone:  # the listener is gone
                         os.close(pidfd)
                         pidfd = None
                     time.sleep(0.02)  # gather a burst of writes into one wake
                     w.read()
+                    tasks += tw.read()
+                    if ready and w.fd not in ready and not gone and not self._news(tasks):
+                        continue  # a task's step, its events or its worktree: nothing the page shows
                 last = time.monotonic()
                 self.bump()
         finally:
             w.close()
+            tw.close()
             if pidfd is not None:
                 os.close(pidfd)
 
@@ -2613,7 +2778,7 @@ API_V1 = "/api/v1/"  # every /api/<x> is also /api/v1/<x>, the same handler (#11
 # it (an agent's token on any path outside AGENT_MAY is 403, as it was)
 ROUTES = {"GET": ("/api/health", "/api/state", "/api/stream", "/api/wait", "/api/upload/", "/api/file/",
                   "/api/latest", "/api/shot", "/api/audio", "/api/task", "/api/settings", "/api/stats",
-                  "/api/top"),
+                  "/api/top", "/api/phone-qr.svg"),
           "PUT": ("/api/upload/",),
           "POST": ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings", "/api/transcribe/")}
 
@@ -2655,8 +2820,8 @@ def settings_rev() -> dict | None:
 
 
 def admin_set(key, value) -> tuple[int, dict]:
-    """POST /api/settings: (status, body). 200 {ok, said, rows, changes, help?, detail?}; 400 for no such row
-    or a value it doesn't take (nothing runs); 409 {ok: false, error, rows} when wb refused. A
+    """POST /api/settings: (status, body). 200 {ok, said, rows, changes, help?, detail?, page?}; 400 for no such row
+    or a value it doesn't take (its reason, nothing runs); 409 {ok: false, error, page?, rows} when wb refused. A
     change that went through is {ts, key, label, from, to, said, help?, by: "web"} in CHANGES, which
     the row's wb child logs (cli.main, settings.logged: one writer for every caller, #1355)."""
     from . import settings as admin
@@ -2668,14 +2833,15 @@ def admin_set(key, value) -> tuple[int, dict]:
         done = admin.apply(key, value)
     except KeyError:
         return 400, {"error": "no such setting"}
-    except ValueError:
-        return 400, {"error": "not one of its choices"}
+    except ValueError as e:  # its reason: a number box was told "not one of its choices" (the web app's review, 2026-11-26)
+        return 400, {"error": str(e) or "not one of its choices"}
     rows = admin.rows()
-    if not done["ok"]:
-        return 409, {"ok": False, "error": done["said"], "rows": rows}
+    if not done["ok"]:  # `page`: the refusal in the page's words (settings.page_line, #1558)
+        return 409, {"ok": False, "error": done["said"], "rows": rows, **({"page": done["page"]} if done.get("page") else {})}
     helps = {"help": done["help"]} if done.get("help") else {}
     detail = {"detail": done["detail"]} if done.get("detail") else {}  # a run's Summary (#1278's S12)
-    return 200, {"ok": True, "said": done["said"], "rows": rows, "changes": admin.changes(), **helps, **detail}
+    page = {"page": done["page"]} if done.get("page") else {}  # a note the page adds to its own words
+    return 200, {"ok": True, "said": done["said"], "rows": rows, "changes": admin.changes(), **helps, **detail, **page}
 
 
 class TopFeed:
@@ -3104,6 +3270,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"feed": stats.feed(), **admin.reads()})
         if path == "/api/top":  # the Stats view's live part: wb top --json's ticks (TopFeed)
             return self._top()
+        if path == "/api/phone-qr.svg":  # the phone link as a QR code, for Settings' phone line (#1552)
+            from . import qr
+            link = phone_url(self.server.server_address[1])
+            if not link:
+                return self._json(404, {"error": "no phone link: the web app opens on this machine only "
+                                                 "(wb chat reach tailnet)"})
+            # the token is in it: _security_headers' no-store keeps it out of every cache
+            return self._send(200, qr.svg(link).encode(), "image/svg+xml")
         name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
         f = STATIC / name
         if "/" in name or f.suffix not in TYPES or not f.is_file():

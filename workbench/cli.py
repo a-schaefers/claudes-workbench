@@ -35,6 +35,7 @@ from . import runner
 from . import keyhole
 from . import meter
 from . import privacy
+from . import qr
 from . import schedule
 from .runner import PKG_ROOT
 
@@ -3909,7 +3910,7 @@ def cmd_splash(a):
 # to explain the options and, on the user's clear ask and yes in the conversation, change one
 # through the same writer the web app uses (the owner, 2026-11-24: "claude is an interactive
 # assistant to the web panel, in case a user gets confused about the options"; "We trust Claude")
-SETTINGS_GROUPS = {"shared": "Shared", "web": "Web app", "gpu": "GPU", "api": "API", "terminal": "Terminal",
+SETTINGS_GROUPS = {**routes.LABELS, "shared": "Shared", "web": "Web app", "gpu": "GPU", "api": "API", "terminal": "Terminal",
                    "experimental": "Experimental"}
 SETTINGS_SET = "wb settings set <key> <value> changes one, on the user's clear ask and yes"
 
@@ -3965,6 +3966,10 @@ def cmd_settings(a):
         else:
             for r in got["offers"] + got["notes"]:
                 print(r["text"])
+        return
+    if a.action == "help":  # an old web offer still true? (#1557's review: the mod asks before it offers)
+        note = settings.help_now(a.key)
+        print(json.dumps({"key": a.key, "help": note}) if a.json else note or "", end="\n" if a.json or note else "")
         return
     if a.action is None:
         rows = settings.rows(fresh=True)
@@ -7596,6 +7601,11 @@ def cmd_chat(a):
             die(f"wb chat url: {got['why']}")
         else:
             print(got["url"])  # the token is the key: keep it private
+            # and the phone's, once there is one: localhost alone left the user to edit the host by
+            # hand (the web app's review, 2026-11-26); at a person's terminal its QR code under it,
+            # never in the mod's read or a script's (#1552)
+            if got["url"]:
+                chat_phone(a.port, got["url"], sys.stdout.isatty())
     elif a.action == "on":  # the switch, kept: the link shows and a session listens
         # a failure puts the switch back as it was: turned on and left on when this died, the
         # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an
@@ -7745,6 +7755,20 @@ def still_served(port: int) -> tuple[str, str] | None:
             f"{exe} serve --https={https} off")
 
 
+def still_serves_line(still: tuple[str, str], drops: str = "") -> str:
+    """`wb chat reach local`'s line while `tailscale serve` still serves the tailnet (``still``,
+    still_served's), with REACH_LOCAL_HELP's cue `still serves`: settings.help_now says it too."""
+    return (f"web app reach: local{drops}, but `tailscale serve` still serves it to your tailnet at {still[0]}: "
+            f"`{still[1]}` stops that")
+
+
+def not_served_line(port: int) -> str:
+    """`wb chat reach tailnet`'s line with no https there, REACH_HELP's cue `not served`:
+    settings.help_now says it too."""
+    return (f"https: not served: notifications and the home-screen app need it; `tailscale serve --bg {port}` "
+            "serves it on your tailnet only")
+
+
 def chat_reach(to: str | None, port: int) -> None:
     """`wb chat reach [local|tailnet]` (#1355): who opens the web app. No value: which it is. A
     change writes chat.json's `bind` (chat.set_reach), which the running server rebinds to within
@@ -7769,8 +7793,7 @@ def chat_reach(to: str | None, port: int) -> None:
     if to == "local":
         drops = "" if got["from"] == "local" else f"; the server drops the tailnet within {chat.REPLAN_EVERY} s"
         if (still := still_served(port)):  # settings.REACH_LOCAL_HELP's cue: `still serves`
-            print(f"web app reach: local{drops}, but `tailscale serve` still serves it to your tailnet at {still[0]}: "
-                  f"`{still[1]}` stops that")
+            print(still_serves_line(still, drops))
         else:
             print(f"web app reach: local (this machine only){drops}")
         return
@@ -7782,8 +7805,21 @@ def chat_reach(to: str | None, port: int) -> None:
     if served:
         print(f"https: served at https://{ts.get('dns') or name}/ (notifications and the home-screen app work there)")
     else:  # settings.REACH_HELP's cue: `not served`
-        print(f"https: not served: notifications and the home-screen app need it; `tailscale serve --bg {port}` "
-              "serves it on your tailnet only")
+        print(not_served_line(port))
+
+
+def chat_phone(port: int, shown: str, qr_code: bool) -> None:
+    """`wb chat url`'s phone link (chat.phone_url), `on your phone: <link>` under the link when it
+    isn't the one already printed, and with ``qr_code`` (a terminal) its QR code, so a phone's
+    camera opens it instead of a 40-character token typed by hand (#1552, 2026-11-26). Nothing
+    while there is none."""
+    link = chat.phone_url(port)
+    if not link:
+        return
+    if link != shown:
+        print(f"on your phone: {link}")
+    if qr_code:
+        print(qr.half_blocks(link))
 
 
 def chat_token(what: str | None, name: str | None) -> None:
@@ -9967,12 +10003,16 @@ def parser() -> argparse.ArgumentParser:
                        "`set` one on the user's clear ask and yes")
     s.add_argument("--json", action="store_true", help="the rows as JSON (the web app's)")
     s.set_defaults(f=cmd_settings, action=None, dry_run=False)
-    sp = s.add_subparsers(dest="action", metavar="set|offers")
+    sp = s.add_subparsers(dest="action", metavar="set|offers|help")
     x = sp.add_parser("offers", help="the web app's changes due a word to the driver: a turn "
                       "offering help for each with help, a note for the rest (the OpenCode plugin's)")
     x.add_argument("--if-due", action="store_true", help="record them as said, so none is said twice "
                    "(settings-offered.json)")
     x.add_argument("--json", action="store_true", help='{"offers": [...], "notes": [...]}')
+    x = sp.add_parser("help", help="the note a setting needs its driver's help with now (probe on "
+                      "but not set up, the tailnet without https), or nothing (the mod's check of an old offer)")
+    x.add_argument("key", metavar="KEY", help="a row's key, as wb settings lists it")
+    x.add_argument("--json", action="store_true", help='{"key": KEY, "help": the note or null}')
     x = sp.add_parser("set", help="change one row, on the user's clear ask and yes")
     x.add_argument("key", metavar="KEY", help="a row's key, as wb settings lists it")
     x.add_argument("value", metavar="VALUE", help="one of its choices; a number or off for a number "

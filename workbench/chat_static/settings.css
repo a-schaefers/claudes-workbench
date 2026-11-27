@@ -32,9 +32,53 @@
 .view-in .set-card > h3, .view-in .set-changes > h3 { margin-bottom: 2px; font: 600 16px/1.3 var(--serif); letter-spacing: .01em; }
 
 /* who changed a row, and the newest changes (#1355) */
-.view-in .set-changed { margin: 4px 0 0; color: var(--faint); }
+.view-in .set-changed { margin: 4px 0 0; color: var(--dim); }
 .view-in .set-change-list { margin: 0; padding-left: 18px; }
 .view-in .set-change-list li { margin: 2px 0; overflow-wrap: anywhere; }
 /* an action's answer under its row: a run's Summary (#1278's S12), wrapped, scrolled past a screen */
 .set-row pre.set-detail { margin: 8px 0 0; padding: 8px 10px; max-height: 50vh; overflow: auto; white-space: pre-wrap;
   overflow-wrap: anywhere; font: 12px var(--mono); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+
+/* a role's card (#1553): its GPU|API on top, its GPU model, API model and thinking under More */
+.set-more { margin-top: 6px; border-top: 1px solid var(--line); }
+.set-more > summary { min-height: 44px; display: flex; align-items: center; gap: 6px; cursor: pointer;
+  color: var(--dim); font: 600 14px/1.3 var(--sans); list-style: none; }
+.set-more > summary::-webkit-details-marker { display: none; }
+.set-more > summary::before { content: '\25B8'; transition: transform .15s ease-out; }
+.set-more[open] > summary::before { transform: rotate(90deg); }
+.set-more > summary:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; border-radius: 8px; }
+.set-more > .set-row:first-of-type { border-top: 0; padding-top: 0; }
+
+/* a row's Ask <driver>: its problem handed to the chat's box (the web app's review, 2026-11-26); a
+   link's look with a button's 44 px target */
+.view-in .set-ask { display: inline-flex; align-items: center; min-height: 44px; margin: 0; padding: 0; border: 0;
+  background: none; color: var(--fg); font: 600 13.5px/1.3 var(--sans); cursor: pointer; text-decoration: underline;
+  text-underline-offset: 2px; }
+.view-in .set-ask:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; border-radius: 6px; }
+/* a role's API model list opened under its GPU|API by the API choice (#1558) */
+.set-pick { margin: 2px 0 6px; padding-left: 10px; border-left: 2px solid var(--line); }
+/* a refusal kept under its row until its next change goes through (#1563) */
+.view-in .card p.set-refused { margin: 4px 0 0; color: var(--fg); overflow-wrap: anywhere; }
+.view-in .card p.set-refused::before { content: '\26A0\FE0E  '; color: var(--warn); }
+
+/* the power groups folded (the web app's review, 2026-11-26): a <details> card, its name and a line
+   of its state in the summary, closed on a phone and open on a wider screen until folded */
+#settings-rows details.set-fold { display: block; }
+.set-fold > summary { display: flex; align-items: baseline; gap: 8px; min-height: 28px; cursor: pointer; list-style: none; }
+.set-fold > summary::-webkit-details-marker { display: none; }
+.set-fold > summary::after { content: '\25B8'; margin-left: auto; color: var(--dim); transition: transform .15s ease-out; }
+.set-fold[open] > summary::after { transform: rotate(90deg); }
+.set-fold > summary:focus-visible { outline: 2px solid var(--fg); outline-offset: 4px; border-radius: 8px; }
+.view-in .set-fold > summary > h3 { flex: none; margin: 0; font: 600 16px/1.3 var(--serif); letter-spacing: .01em; }
+.set-fold > summary .set-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-fold[open] > summary { margin-bottom: 2px; }
+.set-fold[open] > summary .set-sum { display: none; }
+.set-fold > summary + .set-row { padding-top: 4px; }
+
+/* Open on your phone: the tailnet link with its token, Copy, Share, its QR code (the web app's review, 2026-11-26) */
+.set-phone { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
+.set-phone .set-label { margin-bottom: 4px; }
+.view-in code.set-phone-link { display: block; overflow-wrap: anywhere; font-size: 12.5px; user-select: all; }
+.set-phone .set-actions { margin-top: 8px; }
+.set-phone-qr { display: block; margin-top: 10px; background: #fff; border-radius: 8px; }
+.set-phone-qr[hidden] { display: none; }
