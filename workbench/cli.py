@@ -3356,7 +3356,7 @@ def _stop_runner(task):
 LIVE = ("queued", "running", "testing", "asking")
 
 
-def _stop_aside(task, how: str) -> str:
+def _stop_aside(task, how: str, committed: bool = False) -> str:
     """_stop_runner, and for a runner stopped mid self-review off its green tree runner.set_aside's
     one rule: its files kept as review tree `<n>s`, the green tree put back (status `tests`
     stays the green round's: the tests aren't rerun, Claude's Bash stops at 2 minutes) and the
@@ -3367,13 +3367,14 @@ def _stop_aside(task, how: str) -> str:
     own set_aside, so a stuck or failed self-review is an outside stop. Gated on liveness, a
     runner already dead (wb update --stop, a logout's SIGTERM: stuck, the runner gone) left the
     unfinished tree to wb takeover and the hand-back under tests:ok, which wb accept committed
-    (#1582, 2026-11-26)."""
+    (#1582, 2026-11-26). ``committed``: wb accept --force's, set_aside's line for a tree it
+    commits next (#1596)."""
     live = task.status.get("phase") != "review" or runner_alive(task)
     _stop_runner(task)
     if not live or not task.worktree.is_dir():
         return ""
     return runner.set_aside(task, int(task.status.get("round") or 1), None,
-                            f"stopped mid-check ({how})", None) or ""
+                            f"stopped mid-check ({how})", None, committed) or ""
 
 
 def _open_tasks():
@@ -5203,7 +5204,15 @@ def cmd_accept(a):
     if (not close and was_live and st.get("steps", 1) == 1 and task.worktree.is_dir()
             and not gitops.changed(task.worktree, gitops.run_caches(task.worktree))):  # #1580
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
-    _stop_runner(task)  # under --force it may still be running, and would set its phase back
+    # under --force it may still be running, and would set its phase back; stopped mid self-review
+    # off its green tree, set_aside's one rule puts that tree back first, so the tree its tests
+    # passed on is what's committed: _stop_runner alone committed the unfinished one, a check
+    # still broken, without a word (#1596, bar loop #1030 round 5, M2, 2026-11-27). At review the
+    # runner ended the round itself (a self-review's own finish, its tests passing, stands)
+    if st.get("phase") == "review":
+        _stop_runner(task)
+    else:
+        _say(_stop_aside(task, "wb accept --force", committed=True))
     checked = None if close else verify.note(task)  # before the commit: what Claude accepts it on (#97)
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "

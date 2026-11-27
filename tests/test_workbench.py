@@ -8370,6 +8370,29 @@ class Context(Base):
         self.assertNotIn("set aside", run_wb("takeover", "t-srf"))  # no live round: its finish stands
         self.assertEqual(store.Task("t-srf").worktree.joinpath("answer.txt").read_text(), "43\n")
 
+    def test_a_self_review_that_leaves_its_mutation_in_a_file_the_repo_ignores_is_set_aside_as_a_tracked_one_is(self):
+        # #1596 (bar loop #1030 round 5, M2, 2026-11-27): the green fingerprint (gitops.mark) left
+        # ignored files out, so "43" in an ignored answer.txt read as the green tree: a guard's
+        # stop settled as its finish under tests: PASS, and its own finish with its tests failing
+        # took an auto-fix round (a paid one on an API role), no 2s kept
+        (self.repo / ".gitignore").write_text("answer.txt\n")
+        for a in (("add", ".gitignore"), ("commit", "-qm", "ignore")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True)
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="3", FAKE_SELF_DONE="1")
+        self.start("t-sri", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-sri", {"review", "stuck", "failed"}, timeout=60)
+        self.assert_set_aside("t-sri", st, "finished on its own")
+        self.assertFalse([e for e in store.read_jsonl(store.Task("t-sri").dir / "events.jsonl")[0]
+                          if e.get("kind") == "autofix"])
+        del os.environ["FAKE_SELF_DONE"]
+        os.environ.update(FAKE_SELF_RERUN="1", FAKE_READS="45")
+        self.start("t-srig", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srig", {"review", "stuck", "failed"}, timeout=60)
+        settled = [e["text"] for e in store.read_jsonl(store.Task("t-srig").dir / "events.jsonl")[0]
+                   if e.get("kind") == "settled"]
+        self.assertTrue(settled and all("on a tree it changed" in x for x in settled), settled)
+        self.assert_set_aside("t-srig", st, "stopped mid-check (the same call 4 times in a row")
+
     def mid_check(self, name):
         """A self-review stalled mid-check, "41" on disk (FAKE_SELF_STALL, no nudge)."""
         os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
@@ -8407,6 +8430,21 @@ class Context(Base):
         out = run_wb("stop", "t-sst")
         self.assertEqual(t.status["phase"], "stuck")
         self.assert_green_back(t, out, "wb stop")
+
+    def test_accept_force_mid_self_review_commits_the_green_tree_not_the_unfinished_one(self):
+        # #1596 (bar loop #1030 round 5, M2, 2026-11-27): wb accept --force (the way its own
+        # refusal names) stopped the runner with no set-aside, and committed "41", a check the
+        # self-review had broken, under the green round's tests:ok
+        t = self.mid_check("t-sacc")
+        out = run_wb("accept", "t-sacc", "-m", "Write answer", "--force")
+        self.assertIn("self-review stopped mid-check (wb accept --force); its edits set aside as 2s "
+                      "(the tests weren't run on them, git tree ", out)
+        self.assertIn("), not committed: the tree its tests passed on is what's committed", out)
+        self.assertLess(out.index("set aside as 2s"), out.index("accepted t-sacc"), out)
+        self.assertEqual(t.status["phase"], "accepted")
+        shown = subprocess.run(["git", "-C", str(self.repo), "show", f"{t.spec['branch']}:answer.txt"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, "42\n")
 
     def test_a_takeover_of_a_self_review_an_update_stopped_mid_check_puts_the_green_tree_back(self):
         # #1582 (2026-11-26): _stop_aside set aside only a live runner's round, so wb update

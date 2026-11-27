@@ -1215,11 +1215,13 @@ def record_case_renames(worktree: Path, env=None) -> None:
         _run(worktree, ["add", "--", *(spec(n) for _, n in pairs)], env)
 
 
-def mark(worktree: Path) -> str:
+def mark(worktree: Path, also=()) -> str:
     """A fingerprint of the working tree's uncommitted state, new files' contents included: it
     changes when, and only when, the agent changes a file (a new file past MARK_READ_MAX counts
     by its size and time, a symlink by its target). The index is left alone. Raw bytes: a decoded
-    diff would hide an edit from one non-UTF-8 byte to another."""
+    diff would hide an edit from one non-UTF-8 byte to another. ``also``: ignored files (relative
+    paths) that count too, as a new file does: the self-review's green tree (runner.green_mark,
+    #1596); none, and the fingerprint is the same as before them."""
     h = hashlib.sha1()
     git_hash(worktree, h, "diff", "--no-ext-diff", "--no-color", "HEAD")
     for f in git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
@@ -1227,6 +1229,8 @@ def mark(worktree: Path) -> str:
             h.update(f + b"\0" + _untracked(Path(worktree) / os.fsdecode(f)))
     for old, new in case_renames(worktree):  # invisible to both above where case folds (#656)
         h.update(b"R" + old + b"\0" + new + b"\0")
+    for f in sorted(also):
+        h.update(b"I" + os.fsencode(f) + b"\0" + _untracked(Path(worktree) / f))
     return h.hexdigest()
 
 

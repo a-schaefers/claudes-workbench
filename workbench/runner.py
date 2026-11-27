@@ -1846,6 +1846,18 @@ def green_tree(task: store.Task, began: str) -> str | None:
     return carried_tree(task)
 
 
+def green_mark(task: store.Task) -> str:
+    """The fingerprint a self-review's green tree is held to (status `self_review_tree`, and
+    settle's and set_aside's test of the tree it ends on): gitops.mark with the ignored files
+    keep_green keeps (ignored_to_commit) counted too. gitops.mark alone left them out, so a
+    self-review's mutation left in an ignored file (lib/ under Python.gitignore, #1179) read as
+    the green tree: settled as its finish under `tests: PASS`, or, its tests failing there, an
+    auto-fix round, a paid one on an API role, and no `<n>s` kept (#1596, bar loop #1030 round
+    5, M2, 2026-11-27). The explore guard keeps gitops.mark: an edit it misses there is the
+    agent's own work in progress, never a green tree's."""
+    return gitops.mark(task.worktree, ignored_to_commit(task))
+
+
 def images_dir(task: store.Task) -> Path:
     """Where --image's copies are (#1199): the task's directory, which the lane reads, never the
     worktree, so they stay out of the review diff."""
@@ -1971,7 +1983,7 @@ def settle(task: store.Task, n: int, out: dict, began: str | None, why: str | No
     green = green_tree(task, began)
     if not why or green is None:
         return False
-    if gitops.mark(task.worktree) == green:
+    if green_mark(task) == green:
         text = f"self-review: {why}, the tree its tests passed on: stopped as its finish"
     elif stopped:
         text = f"self-review: {why}, on a tree it changed: stopped, the tests run on it"
@@ -1984,7 +1996,7 @@ def settle(task: store.Task, n: int, out: dict, began: str | None, why: str | No
 
 def keep_green(task: store.Task, n: int, green: str) -> None:
     """Round ``n``'s tree, whose tests passed, kept as a review tree (status `review_trees`, not
-    reviewed, `green` its gitops.mark, pinned at REVIEW_REF) as the self-review begins: a
+    reviewed, `green` its green_mark, pinned at REVIEW_REF) as the self-review begins: a
     fingerprint alone left nothing to go back to when the self-review stopped mid-check with a
     check broken (#1572, 2026-11-26)."""
     steps = task.status.get("steps", 1)
@@ -2000,7 +2012,8 @@ def keep_green(task: store.Task, n: int, green: str) -> None:
     task.set_status(review_trees=trees)
 
 
-def set_aside(task: store.Task, n: int, began: str | None, how: str, passed: bool | None) -> str | None:
+def set_aside(task: store.Task, n: int, began: str | None, how: str, passed: bool | None,
+              committed: bool = False) -> str | None:
     """The one rule for a self-review that ends on a tree other than its green one (status
     `self_review_tree`, green_tree), save its own finish with the tests passing: its files kept
     as review tree `<n>s` (not reviewed), the green tree keep_green kept put back
@@ -2012,9 +2025,12 @@ def set_aside(task: store.Task, n: int, began: str | None, how: str, passed: boo
     tests then failed, so a guard's stop with them passing, a takeover or wb stop mid-check, and
     its own finish with them failing handed Claude the unfinished tree under a notice that read
     as a clean result, or spent an auto-fix round on it (#1582, bar loop #1030 round 3,
-    2026-11-26)."""
+    2026-11-26). ``committed``: wb accept --force's, which commits the green tree next and drops
+    the review trees, so the line names the set-aside tree's git id and no rewind: its
+    _stop_runner committed the unfinished tree, a check broken mid-check, without a word (#1596,
+    bar loop #1030 round 5, M2, 2026-11-27)."""
     green = green_tree(task, began)
-    if green is None or gitops.mark(task.worktree) == green:
+    if green is None or green_mark(task) == green:
         return None
     steps = task.status.get("steps", 1)
     trees = {k: v for k, v in (task.status.get("review_trees") or {}).items() if v.get("step") == steps}
@@ -2032,7 +2048,10 @@ def set_aside(task: store.Task, n: int, began: str | None, how: str, passed: boo
     except (gitops.GitError, OSError):
         return None
     said = "weren't run" if passed is None else "pass" if passed else "fail"
-    line = (f"self-review {how}; its edits set aside (the tests {said} on them), the tree its "
+    line = (f"self-review {how}; its edits set aside as {key} (the tests {said} on them, git tree "
+            f"{now[:12]}), not committed: the tree its tests passed on is what's committed"
+            if committed else
+            f"self-review {how}; its edits set aside (the tests {said} on them), the tree its "
             f"tests passed on put back: wb rewind {task.name} {key} brings them back")
     task.event({"ts": store.now(), "round": n, "kind": "set_aside", "text": line})
     return line
@@ -6820,7 +6839,7 @@ def _leased(task: store.Task, m: models.Model, say):
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     SELF_REVIEW.format(cmd=task.spec["test_cmd"], aside=self_review_aside(task)))
-                green = gitops.mark(task.worktree)
+                green = green_mark(task)  # its ignored files too (#1596)
                 task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review",
                                 self_review_tree=green)  # #1188: the green tree
                 keep_green(task, n, green)  # and its files, to put back (#1572)
