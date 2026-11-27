@@ -2502,9 +2502,9 @@
         return p;
     };
     // the port this chat runs on: both lines show only over plain http, where the page's own port is
-    // the server's; the cards said 1337 whatever it was, and `--bg 1337` served nothing, or another
+    // the server's; the cards said the default port whatever it was, and `--bg <default>` served nothing, or another
     // account's chat (#1562, 2026-11-26)
-    const servePort = () => location.port || '1337';
+    const servePort = () => location.port || '8090';
     // the way to https names no product: any tunnel or proxy the user trusts, pointed at localhost,
     // its name in chat.json's hosts, as the server answers no other (#1616, 2026-11-27)
     const TUNNEL = () => `point an https tunnel or proxy you trust at \`localhost:${servePort()}\` on the computer ` +

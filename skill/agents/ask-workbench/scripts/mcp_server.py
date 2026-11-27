@@ -9,7 +9,7 @@ Tools: ask_workbench(text) sends one request and returns its id at once; get_rep
 the driver's replies to it, which driver answered, and where it stands (done, still working,
 waiting on the user's yes, queued, expired); list_requests() lists this agent's requests.
 
-Environment, as ask_workbench.py: WORKBENCH_URL (the chat's address, e.g. http://localhost:1337)
+Environment, as ask_workbench.py: WORKBENCH_URL (the chat's address, e.g. http://localhost:8090)
 and WORKBENCH_TOKEN (this agent's token, from `wb chat token add <name>`); CLAUDE_WB_URL and
 CLAUDE_WB_TOKEN, their names before 2.2, still work. Local only, by design: the
 URL must name this machine (localhost, 127.*, ::1), or every tool refuses
@@ -121,7 +121,7 @@ def config() -> None:
     """Refusal unless both variables are set and the URL is this machine's."""
     url, token = client.env(client.URL_VARS), client.env(client.TOKEN_VARS)
     if not url or not token:
-        raise Refusal("set WORKBENCH_URL (the chat's address, e.g. http://localhost:1337) and "
+        raise Refusal("set WORKBENCH_URL (the chat's address, e.g. http://localhost:8090) and "
                       "WORKBENCH_TOKEN (the user makes it: `wb chat token add <name>`) in this MCP "
                       "server's environment")
     if not this_machine(url):

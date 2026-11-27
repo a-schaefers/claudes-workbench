@@ -22,7 +22,7 @@ function world(files: Record<string, string> = {}) {
   const calls: Call[] = []
   const prompts: Record<string, unknown>[] = []
   const answers: Record<string, { ok: boolean; out: string }> = {
-    'chat url --json': { ok: true, out: '{"state": "up", "url": "http://localhost:1337/#t"}' },
+    'chat url --json': { ok: true, out: '{"state": "up", "url": "http://localhost:8090/#t"}' },
     'chat away': { ok: true, out: 'here' },
   }
   const sessions: Record<string, { id: string; parentID?: string; revert?: unknown }> = {

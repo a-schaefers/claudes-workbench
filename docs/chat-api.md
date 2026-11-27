@@ -56,10 +56,10 @@ runs the new scripts.
 
 ## Base URL and auth
 
-- **Base URL:** `http://localhost:1337` by default (the port is `wb chat serve --port`; `wb chat
+- **Base URL:** `http://localhost:8090` by default (another is `wb chat on <port>`'s; `wb chat
   url` prints the page's link, whose host and port are the base). The server listens on
   `127.0.0.1` only. To reach it from another device, point a tunnel or proxy of your own at
-  `localhost:1337` and add the name it passes as the Host to `~/.config/workbench/chat.json`'s
+  `localhost:8090` and add the name it passes as the Host to `~/.config/workbench/chat.json`'s
   `hosts` (`*` for any; read again when the file changes, no restart); the token still applies.
 - **Paths:** every `/api/<x>` below is also served at `/api/v1/<x>`, by the same handler with the
   same rules (an agent's denials too). New clients use `/api/v1/` (workbench 2.1 and later);
@@ -172,7 +172,7 @@ landed. Send it again with the same key and the driver is never asked twice:
 ## The agent flow, end to end
 
 ```sh
-export WORKBENCH_URL=http://localhost:1337 WORKBENCH_TOKEN=wba-…   # from wb chat token add my-agent
+export WORKBENCH_URL=http://localhost:8090 WORKBENCH_TOKEN=wba-…   # from wb chat token add my-agent
 auth=(-H "Authorization: Bearer $WORKBENCH_TOKEN")
 
 # 1. Is a driver (Claude Code or OpenCode in workbench mode) listening? If not: do it yourself, or try later.
@@ -271,13 +271,13 @@ The config, one line. For OpenCode (`opencode.json`; `codemode: false` offers th
 themselves, not behind `execute`):
 
 ```json
-"mcp": {"servers": {"ask-workbench": {"type": "local", "command": ["python3", "/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "environment": {"WORKBENCH_URL": "http://localhost:1337", "WORKBENCH_TOKEN": "wba-…"}, "codemode": false}}}
+"mcp": {"servers": {"ask-workbench": {"type": "local", "command": ["python3", "/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "environment": {"WORKBENCH_URL": "http://localhost:8090", "WORKBENCH_TOKEN": "wba-…"}, "codemode": false}}}
 ```
 
 For clients that read an `mcpServers` map (Cursor's `mcp.json`, Gemini CLI's `settings.json`):
 
 ```json
-"mcpServers": {"ask-workbench": {"command": "python3", "args": ["/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "env": {"WORKBENCH_URL": "http://localhost:1337", "WORKBENCH_TOKEN": "wba-…"}}}
+"mcpServers": {"ask-workbench": {"command": "python3", "args": ["/path/to/workbench/skill/agents/ask-workbench/scripts/mcp_server.py"], "env": {"WORKBENCH_URL": "http://localhost:8090", "WORKBENCH_TOKEN": "wba-…"}}}
 ```
 
 The token is the agent's own (`wb chat token add <name>`), with an agent's view and limits.

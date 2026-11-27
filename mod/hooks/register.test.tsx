@@ -10,7 +10,7 @@ import type { WbTask } from '../types'
 // the no-break space the pane holds a unit whole with (`GPU 2+3`, `per M`, `61 tok/s`; #1048's review)
 const NB = '\u00a0'
 // the web app's link as `wb chat url --json` gives it: 72 characters (chat.url, a 43-character token)
-const LINK = 'http://localhost:1337/#token=' + 'Tk0'.repeat(14) + 'x'
+const LINK = 'http://localhost:8090/#token=' + 'Tk0'.repeat(14) + 'x'
 
 const PANE = {
   plugin: 'workbench',
@@ -6278,7 +6278,7 @@ test('#1283: the pane is the Tasks view alone, with no tab to press and no 1, 2 
 
 test('#1283: the modeline reads the web app\'s state, at 140, 90 and 60 columns', () => {
   const name = "[•_•] Claude's Workbench"
-  const why = 'another program answers on port 1337: wb chat on --port <free port>'
+  const why = 'another program answers on port 8090: wb chat on <free port> moves the web app there'
   for (const state of ['up', 'started'] as const) {
     expect(modeline({ state, url: LINK }, 140)).toEqual({ bar: `${name} - ${LINK}`, rows: [] })
     expect(modeline({ state, url: LINK }, 90)).toEqual({ bar: `[•_•] ${LINK}`, rows: [] })        // the name gives way first
@@ -6328,7 +6328,7 @@ test('#1283: the modeline follows wb chat url --json: a start, a recheck 3 s on,
   await clock.advance(27_000)                                   // 61 s
   expect(asked()).toBe(3)
   // a url without its token, or anything that isn't one, is no link
-  link = { state: 'up', url: 'http://localhost:1337/' }
+  link = { state: 'up', url: 'http://localhost:8090/' }
   await clock.advance(60_000)                                   // 121 s
   ui = await pane()
   expect(await modelineOf(ui)).toEqual(["[•_•] Claude's Workbench"])

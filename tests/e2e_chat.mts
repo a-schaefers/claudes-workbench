@@ -199,7 +199,7 @@ async function run(engine: string, device?: string) {
   })
   await check("Claude's reply copies over plain http at a LAN address, where navigator.clipboard is missing", async () => {
     // #745 (the 2026-11-21 audit, finding 104): navigator.clipboard exists only in a secure
-    // context, so over http://100.x.y.z:1337 every tap said "copy failed"
+    // context, so over http://100.x.y.z:<port> every tap said "copy failed"
     const p = await ctx.newPage()
     await p.addInitScript(() => {
       Object.defineProperty(Navigator.prototype, 'clipboard', { get: () => undefined, configurable: true })
@@ -565,7 +565,7 @@ async function run(engine: string, device?: string) {
     await until(() => page.evaluate(async () => (await (await caches.open('wb-chat')).match('/key')) !== undefined))
     if (!(await page.textContent('#app')).includes('installs from the https address')) throw new Error('install offered over http')
     // its command as code, never its backticks as text (#1323), on the port this chat runs on: this
-    // test's 13371, where the card said 1337 whatever the port (#1562)
+    // test's 13371, where the card said the default port whatever the port (#1562)
     const cmd = await page.$$eval('#app code', (c: Element[]) => c.map(x => x.textContent))
     if (JSON.stringify(cmd) !== JSON.stringify([`localhost:${PORT}`]) || (await page.textContent('#app')).includes('`'))
       throw new Error('the install card: ' + await page.textContent('#app'))

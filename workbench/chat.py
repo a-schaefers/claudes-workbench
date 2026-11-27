@@ -41,7 +41,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from . import savings, store, story, webpush
 from .watch import Watcher
 
-PORT = 1337
+PORT = 8090  # the default (#1616, 2026-11-27: 1337 looked unprofessional, and 8080 is llama.cpp's,
+             # llama-swap's, LocalAI's and MLX's own); `wb chat on <port>` keeps another (chosen_port)
 BIND = "127.0.0.1"      # the one address it listens on (#1616, 2026-11-27)
 LOCAL_NAMES = ("localhost", "127.0.0.1", "::1")  # Host names always answered
 # Headers a proxy adds to what it forwards: behind one (a tunnel, Caddy, nginx) every peer is
@@ -1468,7 +1469,9 @@ def is_on() -> bool:
 
 
 def set_on(on: bool) -> None:
-    store.write_json(chat_dir() / "switch.json", {"on": bool(on), "v": SWITCH_V})
+    doc = store.read_json(chat_dir() / "switch.json", None)
+    kept = {"port": doc["port"]} if isinstance(doc, dict) and _valid_port(doc.get("port")) else {}
+    store.write_json(chat_dir() / "switch.json", {"on": bool(on), "v": SWITCH_V, **kept})
     if not on:  # nobody listens now: the page would say a live session does
         (chat_dir() / "listener.json").unlink(missing_ok=True)
 
@@ -1596,15 +1599,15 @@ def _unit_keeps_it() -> bool:
 def blocked_why(port: int) -> str:
     """Why the chat can't come up on ``port``: something not this account's chat answers there."""
     return (f"another account's chat (or another program, or a server still on a replaced token) "
-            f"answers on port {port}: wb chat on --port <free port> (and the same --port in "
-            "chat.json's service, if any)")
+            f"answers on port {port}: wb chat on <free port> moves the web app there")
 
 
-def _start_unit() -> None:
+def _start_unit(restart: bool = False) -> None:
     """Have systemd or launchd start the chat it keeps (_unit_keeps_it): a stopped unit stays
-    stopped until something starts it, and a second server beside it would take its port."""
-    argv = (["launchctl", "kickstart", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"] if _macos()
-            else ["systemctl", "--user", "start", "wb-chat"])
+    stopped until something starts it, and a second server beside it would take its port.
+    ``restart``: stop it first, so it serves a port the user just chose (move)."""
+    argv = (["launchctl", "kickstart", *(["-k"] if restart else []), f"gui/{os.getuid()}/{LAUNCHD_LABEL}"]
+            if _macos() else ["systemctl", "--user", "restart" if restart else "start", "wb-chat"])
     try:
         subprocess.run(argv, capture_output=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
@@ -1625,7 +1628,7 @@ def ensure(port: int) -> dict:
     "blocked": something else answers there (why: blocked_why). Otherwise it starts the unit that
     keeps it (_unit_keeps_it), else a detached server (start), unless the one serve.pid names is
     still starting, and waits START_WAIT: "started", or "failed" (why: serve.log's last line). The
-    unit only for PORT, the one it serves; a unit that doesn't answer then is followed by a
+    unit only for chosen_port, the one it serves; a unit that doesn't answer then is followed by a
     detached server once (#1343): "started" with why naming the unit, or "failed".
     `wb chat url` runs it, which the mod does at session start and every minute: a reboot, a
     crash, WSL without systemd, an install where setup never ran. One at a time (chat/ensure.lock):
@@ -1648,7 +1651,7 @@ def ensure(port: int) -> dict:
             unit = False
             if not (pid and rec.get("port") == port and _alive(pid, rec.get("start"))
                     and models.runs(int(pid), "chat", "serve")):  # else still starting: wait for it
-                if unit := port == PORT and _unit_keeps_it():  # the unit serves PORT alone
+                if unit := port == chosen_port() and _unit_keeps_it():  # the unit serves the user's alone
                     _start_unit()
                     pid = None
                 else:
@@ -1669,12 +1672,22 @@ def ensure(port: int) -> dict:
         return {**out, "state": "failed", "why": str(e)}
 
 
+def move(port: int) -> None:
+    """`wb chat on <port>`: keep ``port`` as the user's and take the running chat there. The
+    server wb started stops (ensure starts one on the new port); the unit that keeps the chat
+    restarts, as it serves chosen_port (#1616, 2026-11-27)."""
+    set_port(port)
+    stop_started()
+    if _unit_keeps_it():
+        _start_unit(restart=True)
+
+
 def stop_started() -> bool:
     """Stop the server `start` made, if it still runs; never one wb didn't start (systemd's)."""
     from . import models  # only here: chat is imported by the server, which needs none of it
     pid = (st := store.read_json(chat_dir() / "serve.pid", None) or {}).get("pid")
     # the port stays, the pid goes: with serve.pid gone, port() fell back to PORT once the server
-    # had exited, so `wb chat url` and the next `wb chat on` named 1337, not the user's port
+    # had exited, so `wb chat url` and the next `wb chat on` named the default, not the user's port
     # (macOS nightly, 2026-11-25; Linux passed only while the killed server was a zombie)
     if isinstance(st, dict) and isinstance(st.get("port"), int):
         store.write_json(chat_dir() / "serve.pid", {"port": st["port"]})
@@ -3477,7 +3490,7 @@ def make_servers(port: int) -> tuple[list[ThreadingHTTPServer], dict]:
             for s in servers:
                 s.server_close()
             why = (f"the port is taken: another wb chat serve ({service_hint('status')}) or another "
-                   "program; --port picks another" if e.errno == errno.EADDRINUSE else e.strerror or str(e))
+                   "program; wb chat on <port> picks another" if e.errno == errno.EADDRINUSE else e.strerror or str(e))
             raise RuntimeError(f"can't listen on {addr}:{port}: {why}") from None
         srv.daemon_threads = True
         servers.append(srv)
@@ -3576,14 +3589,36 @@ def watch_code(restart, every: float = RELOAD_EVERY, move=None, root: Path | Non
         prev = now
 
 
+def _valid_port(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 65535
+
+
+def chosen_port() -> int:
+    """The user's port: the one `wb chat on <port>` kept in chat/switch.json `port`, else PORT. The
+    server (`wb chat serve` with no --port, as the service runs it) and the link take it (#1616)."""
+    doc = store.read_json(chat_dir() / "switch.json", None)
+    v = doc.get("port") if isinstance(doc, dict) else None
+    return v if _valid_port(v) else PORT
+
+
+def set_port(port: int) -> None:
+    """Keep ``port`` as the user's (chosen_port), beside the switch."""
+    doc = store.read_json(chat_dir() / "switch.json", None)
+    doc = doc if isinstance(doc, dict) else {"on": True, "v": SWITCH_V}
+    store.write_json(chat_dir() / "switch.json", {**doc, "port": int(port)})
+
+
 def port() -> int:
-    """The port the running server recorded (chat/port.json), else the one `wb chat on` last
-    started a server on (chat/serve.pid: gone after a reboot or a crash, it comes back there,
-    #449), else PORT: so a command or the pane that names no port finds a server started on
-    another (#349, the audit of 1.4)."""
+    """The port the running server recorded (chat/port.json), else the user's (chosen_port) once
+    they chose one, else the one `wb chat on` last started a server on (chat/serve.pid: gone after
+    a reboot or a crash, it comes back there, #449), else PORT: so a command or the pane that names
+    no port finds a server started on another (#349, the audit of 1.4)."""
     st = store.read_json(chat_dir() / "port.json", None) or {}
     if isinstance(st.get("port"), int) and st.get("pid") and _alive(st["pid"], st.get("start")):
         return st["port"]
+    doc = store.read_json(chat_dir() / "switch.json", None)
+    if isinstance(doc, dict) and _valid_port(doc.get("port")):
+        return doc["port"]
     started = (store.read_json(chat_dir() / "serve.pid", None) or {}).get("port")
     return started if isinstance(started, int) else PORT
 

@@ -90,7 +90,7 @@ rest of this section: a skip is recorded with its reason, never a gate.
 | A repo with Git LFS files | | | | | | |
 | `wb bench run` with `wb events` running, on a kernel with an 8,192-watch limit (`fs.inotify.max_user_watches`) | | | | | | |
 | A `--test` suite using Docker, under Landlock ABI 9 or newer | | | | | | |
-| The web chat behind a real https tunnel or proxy to `localhost:1337`, on its https address, its name in chat.json's `hosts` (#448, #1616) | | | | | | |
+| The web chat behind a real https tunnel or proxy to `localhost:8090` (or the port `wb chat on <port>` kept), on its https address, its name in chat.json's `hosts` (#448, #1616) | | | | | | |
 | The web chat on an IPv6-only host | | | | | | |
 | The web chat on real phones: a request backgrounded, the server interrupted between writes, an old prompt answered, reconnecting | | | | | | |
 | A clean install on Debian or Ubuntu with Python 3.11 | | | | | | |

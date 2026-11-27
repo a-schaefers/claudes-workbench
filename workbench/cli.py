@@ -7855,8 +7855,16 @@ def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.more and a.action not in ("listen", "ended"):
         die(f"wb chat {a.action}: too many arguments")
-    if a.port is None:  # named: that port; else the running server's, else the default (#349)
-        a.port = chat.PORT if a.action == "serve" else chat.port()
+    asked = a.port
+    if a.action == "on" and a.id is not None:  # wb chat on <port>: the user's from now on (#1616)
+        try:
+            asked = int(a.id)
+        except ValueError:
+            die(f"wb chat on {a.id}: a port number, as `wb chat on 8090`")
+    if asked is not None and not 1 <= asked <= 65535:
+        die(f"port {asked}: a number from 1 to 65535")
+    if a.port is None:  # named: that port; else the running server's, else the user's (#349, #1616)
+        a.port = chat.chosen_port() if a.action == "serve" else chat.port()
     if a.action == "serve":
         try:
             chat.serve(a.port, say=lambda m: print(m, flush=True))
@@ -7874,6 +7882,12 @@ def cmd_chat(a):
         # a failure puts the switch back as it was: turned on and left on when this died, the
         # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an
         # on-by-default chat (#1281) stayed off after a port taken once
+        if asked is not None and (asked != chat.port() or asked != chat.chosen_port()):
+            # a port taken by something else changes nothing: the web app stays where it answers
+            if chat.who_answers(asked) == "other":
+                die(f"web chat not moved to port {asked}: {chat.blocked_why(asked)}")
+            chat.move(asked)
+            a.port = asked
         was = chat.is_on()
         chat.set_on(True)
         got = chat.ensure(a.port)
@@ -8200,7 +8214,7 @@ def _came_up(stop: list[str]) -> str | None:
     service stopped with ``stop`` and wb's own server started (chat.ensure): enable --now and
     bootstrap succeed when the server exits at once (exit 78: a Python 3.11+ not on the unit's
     PATH), and setup said `ok  kept up` over a web app left down for good (#1343)."""
-    if chat.wait_up(chat.PORT, None):
+    if chat.wait_up(chat.chosen_port(), None):
         return None
     _service_run(stop)
     got = chat.ensure(chat.port())
@@ -10342,7 +10356,7 @@ def parser() -> argparse.ArgumentParser:
                    default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; listen: the clips (wb "
                    "audio's takes, up to 8); token: add, list or revoke; ended: the messages the "
-                   "turn took")
+                   f"turn took; on: the port to keep (default {chat.PORT})")
     s.add_argument("verdict", nargs="?", help="token: the agent's name")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
     s.add_argument("--tool", help="notice: the tool asking")
@@ -10354,8 +10368,8 @@ def parser() -> argparse.ArgumentParser:
                    "terminal (no push for it; the page's line clears)")
     s.add_argument("--json", action="store_true", help="url: {url, state: "
                    "up|started|off|blocked|failed, why} (the mod's)")
-    s.add_argument("--port", type=int, help=f"default: the running server's (chat/port.json), "
-                   f"else {chat.PORT}")
+    s.add_argument("--port", type=int, help=f"on: the port to keep, as `wb chat on <port>`; default: "
+                   f"the running server's (chat/port.json), else the one kept, else {chat.PORT}")
     s.add_argument("--text", help="reply, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--to", action="append", metavar="ID", help="reply: the message it answers (again "
                    "for more; `user`: the user's thread; default: those this turn took, the user's alone if any)")

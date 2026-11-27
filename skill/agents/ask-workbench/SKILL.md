@@ -16,7 +16,7 @@ the workbench repository, and `docs/chat-api.yaml` beside it is the same as Open
   token: `wb chat token add <your name>`, which prints it once.
 - You get two environment variables:
   - `WORKBENCH_URL`: the chat's address, the one `wb chat url` prints, for instance
-    `http://localhost:1337`.
+    `http://localhost:8090`.
   - `WORKBENCH_TOKEN`: your token (it starts `wba-`). Keep it secret; it is revoked with `wb chat
     token revoke <your name>`.
 
@@ -76,13 +76,13 @@ answer says it was not sent again. It works only with a chat on this machine (`l
 OpenCode's `opencode.json`:
 
 ```json
-"mcp": {"servers": {"ask-workbench": {"type": "local", "command": ["python3", "/path/to/scripts/mcp_server.py"], "environment": {"WORKBENCH_URL": "http://localhost:1337", "WORKBENCH_TOKEN": "wba-…"}, "codemode": false}}}
+"mcp": {"servers": {"ask-workbench": {"type": "local", "command": ["python3", "/path/to/scripts/mcp_server.py"], "environment": {"WORKBENCH_URL": "http://localhost:8090", "WORKBENCH_TOKEN": "wba-…"}, "codemode": false}}}
 ```
 
 For a client that reads an `mcpServers` map (Cursor, Gemini CLI):
 
 ```json
-"mcpServers": {"ask-workbench": {"command": "python3", "args": ["/path/to/scripts/mcp_server.py"], "env": {"WORKBENCH_URL": "http://localhost:1337", "WORKBENCH_TOKEN": "wba-…"}}}
+"mcpServers": {"ask-workbench": {"command": "python3", "args": ["/path/to/scripts/mcp_server.py"], "env": {"WORKBENCH_URL": "http://localhost:8090", "WORKBENCH_TOKEN": "wba-…"}}}
 ```
 
 Without the script, with curl: `POST /api/v1/send` `{"text": "…"}` with an `Idempotency-Key:

@@ -32,7 +32,7 @@ work, and OpenCode subagents via API or GPU write the code.
                          └──────────────┬──────────────┘
                                         ▼
  ┌──────────────────────────────────────────────────────────┐        ┌────────────────────┐
- │                     ORCHESTRATOR                         │◄──────►│   WEB APP  :1337   │
+ │                     ORCHESTRATOR                         │◄──────►│   WEB APP  :8090   │
  │  first time? ─► setup questions                          │        │  tasks · stats ·   │
  │  plans · splits into steps · writes a test for each      │        │  settings · chat   │
  │  reviews each result · merges on your word               │        │  from any device   │
@@ -111,7 +111,7 @@ Open Claude Code in your project, choose the strongest Claude model for the orch
 
 After `/workbench`, you get work done in two places. Talk to the orchestrator agent as you normally
 would; the first time, it asks a few questions to set things up. Or open the web app at
-`http://localhost:1337/#token=…`, linked from the Workbench panel, to chat with the orchestrator
+`http://localhost:8090/#token=…`, linked from the Workbench panel, to chat with the orchestrator
 agent, follow the subagents' tasks, see your stats and change settings.
 
 <p align="center"><img src="docs/web-tour.gif" alt="A tour of the web app: the chat with a task under review, the task's summary and diff, Settings with each kind of work's model, and Stats" width="960"></p>

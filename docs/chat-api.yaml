@@ -25,7 +25,7 @@ info:
   license:
     name: MIT
 servers:
-  - url: http://localhost:1337
+  - url: http://localhost:8090
     description: the default (`wb chat serve --port`; `wb chat url` prints the page's link)
 security:
   - bearer: []

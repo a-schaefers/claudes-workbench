@@ -73,8 +73,8 @@ While workbench mode is on in a session, the web chat is up: it is on by default
 turns it off (`wb chat off`; change it only when they ask). Its link is on the pane's modeline, and
 nothing else carries it. The terminal stays primary; the chat is a second lane, for while they're
 away, beside the web app's Settings and Stats (settings: SKILL.md, *Settings are the user's*). They can reach you from their phone
-(a server on port 1337 that listens on localhost only; from another device, through a tunnel or
-proxy of their own pointed at `localhost:1337`, the link's token still the key; set one up for them
+(a server on port 8090 (`wb chat on <port>` moves it) that listens on localhost only; from another device, through a tunnel or
+proxy of their own pointed at `localhost:<port>`, the link's token still the key; set one up for them
 only when they ask, and add the name it passes to `~/.config/workbench/chat.json`'s `hosts`, or
 it is refused as `unknown_host`; no restart). Their message arrives as a prompt that is
 just `[web chat] <their words>` (or, while you're mid-turn, delivered into the turn by the mod,

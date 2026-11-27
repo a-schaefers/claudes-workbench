@@ -5,7 +5,7 @@ on the web chat) through the chat's API, and print the driver's replies.
     ask_workbench.py "<request>" [--file F]... [--timeout S] [--key K]
     ask_workbench.py --after <message or reply id> [--timeout S]     # wait for a later report
 
-Environment: WORKBENCH_URL (the chat's address, e.g. http://localhost:1337) and WORKBENCH_TOKEN
+Environment: WORKBENCH_URL (the chat's address, e.g. http://localhost:8090) and WORKBENCH_TOKEN
 (this agent's token, from `wb chat token add <name>`); CLAUDE_WB_URL and CLAUDE_WB_TOKEN, their
 names before 2.2, still work. Standard library only.
 
