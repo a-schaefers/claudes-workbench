@@ -7497,7 +7497,10 @@ shown and hidden on each switch and on `visibilitychange`, and the view shown is
 `reshowView`, when the network comes back (`online`) or the stream does after a failure, #1412; a
 second registration is ignored),
 `toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
-`current()`. Each view's files are its own, so the two are built apart.
+`current()`. Beside it, a window event: `wb:open-task` with `detail: {task}` (#1339; `types.d.ts`'s
+`WindowEventMap`) shows the Chat view with the task sheet open on that task (`openTask`, as a tap on the
+strip and its row; focus on `#ts-back`), which Stats' Running rows dispatch. Each view's files are its own,
+so the two are built apart.
 
 **The Stats view** (#1285; `stats.ts`, `stats.css`; it took over the pane's Stats tab, *Seeing
 what the agent does*). `WB.view('stats', …)`: `mount` puts two sections in `#stats-body`, Now
@@ -7546,7 +7549,8 @@ refetch unless the reader scrolled up, #1339). Nothing polls: a change in the st
 for an open task, its own row's alone, `sheetKey`) re-fetches only the open view, quietly, and Refresh
 asks again; the stream wakes on a task's own status write (`TASK_NEWS`, #1559), so the strip and the
 open sheet follow a task as it moves, and a running task's Log its steps; the focus stays where the user is
-(#1561): opening a row focuses `#ts-back`, Back the row of the task just left (`focusOn`), a quiet
+(#1561): the Summary, Diff and Log tabs are one Tab stop (`tabIndex` 0 on the shown one), the arrows,
+Home and End moving between them and showing each (#1339, as Settings' radio groups); opening a row focuses `#ts-back`, Back the row of the task just left (`focusOn`), a quiet
 redraw of the list the row that had it (`dataset.task`), a redraw inside `#ts-body` the button of the
 same words or its first, and Escape from inside the sheet `#tasks` (it fell to `<body>`, and a screen
 reader said nothing); a task gone says it is no longer

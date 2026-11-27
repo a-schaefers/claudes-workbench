@@ -521,7 +521,27 @@
       input.value = text; save(K.draft, text); grow(); armSend(); input.focus()
     })))
   }
-  for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.onclick = () => { tsPart = b.dataset.part as string; tsDiff = null; loadPart() }
+  const tsTabs = [...document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')]
+  for (const b of tsTabs) b.onclick = () => { tsPart = b.dataset.part as string; tsDiff = null; loadPart() }
+  // the tabs one Tab stop, the arrows (and Home, End) moving between them and showing each, as a
+  // tablist does (#1339, 2026-11-26; Settings' radio groups do the same)
+  $('ts-tabs').addEventListener('keydown', e => {
+    const at = tsTabs.findIndex(b => b.dataset.part === tsPart)
+    const to = e.key === 'ArrowRight' ? (at + 1) % tsTabs.length : e.key === 'ArrowLeft' ? (at + tsTabs.length - 1) % tsTabs.length
+      : e.key === 'Home' ? 0 : e.key === 'End' ? tsTabs.length - 1 : -1
+    if (to < 0) return
+    e.preventDefault()
+    tsTabs[to]!.click(); tsTabs[to]!.focus()
+  })
+  // Another view opens a task's sheet (#1339: Stats' Running rows, stats.ts): a window event
+  // `wb:open-task` {task}, the Chat view shown and the sheet open on that task, as a tap on the
+  // strip and then its row would leave it; a task no longer open says so there
+  function openTask(name: string) {
+    go('chat'); setView('chat')
+    showTaskSheet(true)
+    tsTask = name; tsPart = 'summary'; tsDiff = null; drawTaskSheet(); $('ts-back').focus()
+  }
+  addEventListener('wb:open-task', e => { const name = e.detail && e.detail.task; if (typeof name === 'string' && name) openTask(name) })
   async function loadPart({ quiet = false } = {}) {  // quiet: the view stays until the new one comes
     const asked = ++tsAsked, name = tsTask
     // a ts-link or ts-file pressed: the new view's first button takes the focus; a quiet redraw
@@ -529,7 +549,7 @@
     const focused = tsBody.contains(document.activeElement) ? document.activeElement!.textContent : null
     $('ts-name').textContent = name
     drawNext()
-    for (const b of document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')) b.setAttribute('aria-selected', String(b.dataset.part === tsPart))
+    for (const b of tsTabs) { b.setAttribute('aria-selected', String(b.dataset.part === tsPart)); b.tabIndex = b.dataset.part === tsPart ? 0 : -1 }
     if (!quiet || !tsBody.childElementCount) tsBody.replaceChildren(mk('span', 'ts-note', 'Loading…'))
     const extra = tsPart === 'diff' && tsDiff ? '&full=1' + (tsDiff.path ? '&path=' + encodeURIComponent(tsDiff.path) : '') : ''
     let r: Response | null, j!: TaskPart

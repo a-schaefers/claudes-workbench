@@ -763,6 +763,14 @@ async function run(engine: string, device?: string) {
         sheet: document.getElementById('task-sheet')!.getBoundingClientRect().bottom, h: innerHeight,
         next: [...document.querySelectorAll('#ts-next .chip')].map(c => c.textContent) }))
       if (foot.reply > Math.min(foot.sheet, foot.h) + 1 || foot.next.join() !== 'Review it') throw new Error('the foot: ' + JSON.stringify(foot))
+      // the tabs are one Tab stop, the arrows moving between them and showing each (#1339)
+      const tabs = () => page.evaluate(() => ({ at: (document.activeElement as HTMLElement).dataset.part,
+        stops: [...document.querySelectorAll<HTMLElement>('#ts-tabs [data-part]')].map(b => b.tabIndex).join() }))
+      await page.focus('#ts-tabs [data-part="summary"]'); await page.keyboard.press('ArrowRight')
+      await until(async () => { const t = await tabs(); return t.at === 'diff' && t.stops === '-1,0,-1' && (await page.textContent('#ts-body')).includes('README.md | ') })
+        .catch(async () => { throw new Error(JSON.stringify(await tabs())) })
+      await page.keyboard.press('Home')
+      await until(async () => { const t = await tabs(); return t.at === 'summary' && t.stops === '0,-1,-1' && (await page.textContent('#ts-body')).includes('Full report') })
       await page.click('#ts-reply')
       await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-sheet')
       if (await page.locator('#task-sheet').isVisible()) throw new Error('the sheet stayed open')
@@ -785,6 +793,13 @@ async function run(engine: string, device?: string) {
       await until(async () => (await page.inputValue('#input')) === 'Why did it fail?' && (await page.textContent('#about-text')) === 'Replying about fix-sheet')
       if (await page.locator('#task-sheet').isVisible()) throw new Error('the sheet stayed open')
       await page.click('#about-x'); await page.fill('#input', '')
+      // another view opens a task's sheet by the window event `wb:open-task` (#1339: Stats' Running rows)
+      await goTo('stats')
+      await page.evaluate(() => dispatchEvent(new CustomEvent('wb:open-task', { detail: { task: 'fix-sheet' } })))
+      await until(async () => (await page.evaluate(() => document.body.dataset.view)) === 'chat' && await page.locator('#task-sheet').isVisible()
+        && (await page.textContent('#ts-name')) === 'fix-sheet' && (await page.textContent('#ts-body')).includes('The agent stopped'))
+      await page.keyboard.press('Escape')
+      await until(async () => await page.locator('#task-sheet').isHidden())
     } finally {
       rmSync(t, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true })
     }
