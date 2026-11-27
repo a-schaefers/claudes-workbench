@@ -70,6 +70,14 @@ edit, and says what to do:
 Too few tasks is no evidence. The weekly check retires what no longer earns its place
 (`wb skill retire <name> -m why`; `restore` brings one back).
 
+**The user's own setup, once.** When the user asks to bring their skills, agents or commands in,
+`wb skill import --sweep` lists the ones in Claude Code's and OpenCode's places, with any twin
+already here. Read each one the user wants kept, then rewrite it in our format: a skill as a
+library skill (`wb skill import <path>`, then `wb skill add`), an agent as a role card in
+`~/.config/workbench/roles/`, a command as a flow (`wb flow import <file>`). Ask before adding
+each. A global OpenCode skill reaches every agent until the user turns it off (`wb skill opencode
+<name> off`, or Settings' What your agents get).
+
 **From outside.** A public skill (anthropics/skills, Hermes Agent's, a project's) can seed one
 you'd otherwise write: `wb skill import <url|owner/repo|path> [--path <dir>]` lists a repo's
 skills, then shows one's license, hash and security scan. A dangerous one is refused. Read all of

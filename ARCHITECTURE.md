@@ -2256,8 +2256,9 @@ of the request OpenCode sent (RealOpenCode's
 `test_what_agent_setup_says_reaches_is_what_the_model_receives`, which checks both ways: each
 canary in the request is listed as reaching, each listed one is in it). `setup_said` puts it in
 words for `wb doctor` (`cli.setup_lines`) and the web app's Settings group *What your agents get*
-(`settings.setup_rows`). It only shows: the user's plugin tools stay allowed (the issue's decision,
-2026-11-24), a skill or file is turned off where it is set.
+(`settings.setup_rows`). It shows, and a global OpenCode skill turns off there too (`wb skill
+opencode <name> off`, #1463 P4); the user's plugin tools stay allowed (the issue's decision,
+2026-11-24), a file is turned off where it is set.
 
 **Denied tools** (`DENIED_TOOLS`), which also leave the prompt (about 9K to 3.5K tokens, read on
 every request): `question` (nobody answers headless), `execute` and `opencode_*` (they move the
@@ -7981,7 +7982,8 @@ ask before an offer over an hour old (#1557's review): a key added to `HELP` nee
   library's line), `setup-plugins` (each plugin and its tools: allowed, the user's own),
   `setup-runs` (formatter, lsp, MCP servers), `setup-kept` (what is dropped or denied), each only
   when it has something but the first two, then `setup-size` (the prompt's tokens); a read that
-  fails is one `setup-why` note.
+  fails is one `setup-why` note. Then `ocskill-<name>`, a `choice` per global OpenCode skill (#1463 P4),
+  `on` (the default) or `off` → `wb skill opencode <name> on|off`.
 - *workflows* (#1278's S12): `workflows` → `wb workflows on|off`; `run-<run>`, an action per run not closed
   (`runs.snapshot`), its text `settings.run_text` (flow, phase, `(no driver)` when open with none, each stage's
   counts, spend of the budget, GPU minutes, why when not running), its choices `stop` (`RUN_STOP`, only while
@@ -10542,6 +10544,8 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (never `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |
 | `wb skill import <url\|owner/repo\|path>` | `--path DIR`, `--as NAME` | Into `imports/`, scanned; never adds. |
+| `wb skill import --sweep` | `--json` | #1463 P4 (`cli.skill_sweep`): the user's own skills (`~/.claude/skills`, `~/.agents/skills`, OpenCode's `skill(s)/`), agents (`~/.claude/agents`, the repo's `.claude/agents`, OpenCode's `agent(s)/`) and commands (`~/.claude/commands`, OpenCode's `command(s)/`), each with its frontmatter's description (else its first line) and `twin` (a library skill, role card or flow of its name); reads nothing past that, copies nothing. Claude brings the ones worth keeping in, each rewritten, scanned and on the user's yes (SKILL.md). |
+| `wb skill opencode [<name> on\|off]` | | #1463 P4: each global OpenCode skill (`context.opencode_skills`: OpenCode's config directories' `skill(s)/`, by the name its skill tool takes) on or off for agents, all on by default; off is commands.json `denied_skills` (`context.set_opencode_skill`), copied to task.json `deny_skills` at `wb start` and denied by name in the layer (a `skill` rule), so tasks started after it; the user's own OpenCode keeps it. Settings' `ocskill-<name>` rows. |
 | `wb skill retire <n> -m "…"` / `restore <n>` | | To and from `retired/`. |
 | `wb skill hand\|take <task> <n…>` | | From the task's next run. |
 | `wb lessons` / `wb lessons close <id…> -m "…"` | `--task`, `--all` | Open lessons, recurring first (12 unless `--all`). |
@@ -10770,6 +10774,7 @@ $WB_HOME (~/.local/state/workbench)
   commands.json ($WB_COMMANDS)   {"allow": [patterns], "paths": [dirs], "env": [names]} (lists of strings, or refused: context.commands_conf),
                                  "ports": [N] (TCP ports every lane lets connect, wb allow --port --always; port numbers or refused, #1197),
                                  "mcp": [server names] (the user's OpenCode MCP servers every agent gets; the user's line only, #1202),
+                                 "denied_skills": [skill names] (the global OpenCode skills turned off for agents, wb skill opencode <name> off, #1463 P4),
                                  "repos": {"<repo path>": {"setup", "setup_timeout", "copy", "siblings", "merge": "merge|ff|squash",
                                  "local_only": true|false (API models never get it, nor its repo's other tasks, #1255, its superproject's or its submodules', #1267, nor a lane that reads it, #1268; a bool or refused, #1021),
                                  "mcp": [server names] (that repo's agents too; names [A-Za-z0-9-]+, never workbench's, or refused),

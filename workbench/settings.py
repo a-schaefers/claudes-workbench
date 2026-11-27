@@ -194,6 +194,8 @@ def label_of(key: str) -> str:
         return f"{rest} tasks"
     if head == "media":
         return next((lab for kind, lab, _ in MEDIA if kind == rest), key)
+    if head == "ocskill":
+        return f"Skill {rest}"
     return key
 
 
@@ -717,6 +719,16 @@ def setup_rows() -> list[dict]:
     out.append({**_info("setup-size", "setup", "Size", f"About {said['tokens'] / 1000:.1f}K tokens, with "
                         "OpenCode's own prompt and tools, before a task's project files and spec."),
                 "brief": f"about {said['tokens'] / 1000:.1f}K tokens"})
+    # each global OpenCode skill, on or off for agents (#1463 P4): on by default
+    try:
+        off = set(context.users_denied_skills())
+    except RuntimeError:
+        off = set()
+    for name in context.opencode_skills():
+        out.append(_choice(f"ocskill-{name}", "setup", f"Skill {name}", [
+            ("on", "On (default)", f"Every agent's OpenCode lists {name}, one of your global OpenCode skills."),
+            ("off", "Off", f"Agents don't get {name}; your own OpenCode still does. For tasks started after this.")],
+            "off" if name in off else "on"))
     return out
 
 
@@ -830,6 +842,8 @@ def _argv(row: dict, value) -> list[str]:
         return ["model", "sizes", rest, *([] if value == "all" else [value])]
     if head == "media":
         return [next(cmd for kind, _, cmd in MEDIA if kind == rest), "--default", value]
+    if head == "ocskill":
+        return ["skill", "opencode", rest, value]
     raise KeyError(key)  # a row this table makes but writes nothing for: never shipped
 
 
@@ -951,7 +965,7 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
 # own command lines count: a combined one (`wb route significant api --api x`) logs nothing.
 ROUTE_FLAGS = {"--gpu": "gpu", "--api": "api", "--thinking": "think", "--thinking-review": "review"}
 LOGGED = ("route", "coding", "workflows", "progress", "splash", "experiment", "optimize", "model", "image",
-          "audio", "chat")  # the commands key_for reads: cli.main imports this module only for them
+          "audio", "chat", "skill")  # the commands key_for reads: cli.main imports this module only for them
 
 
 def key_for(argv: list[str]) -> tuple[str, str] | None:
@@ -989,6 +1003,8 @@ def key_for(argv: list[str]) -> tuple[str, str] | None:
     if cmd == "model" and len(rest) >= 2 and rest[0] == "sizes" and not any(x.startswith("-") for x in rest):
         sizes = sorted(set(rest[2:]))
         return f"size-{rest[1]}", sizes[0] if len(sizes) == 1 else "all"
+    if cmd == "skill" and len(rest) == 3 and rest[0] == "opencode" and rest[2] in ("on", "off"):
+        return f"ocskill-{rest[1]}", rest[2]
     if cmd in ("image", "audio") and len(rest) == 2 and rest[0] == "--default":
         kind = "image" if cmd == "image" else _audio_kind(rest[1])
         return (f"media-{kind}", rest[1]) if kind else None
@@ -1042,6 +1058,8 @@ def current(key: str):
             from . import models
             sizes = (models._overrides().get(rest) or {}).get("sizes") or []
             return sizes[0] if len(sizes) == 1 else "all"
+        if head == "ocskill":
+            return "off" if rest in context.users_denied_skills() else "on"
         if head == "media":
             from . import audio, images
             kinds = {"image": images.choices()} if rest == "image" else audio.choices()

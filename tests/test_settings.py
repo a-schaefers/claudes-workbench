@@ -32,7 +32,8 @@ def expected(key: str, value) -> list[str]:
             "api": ["route", rest, "--api", value], "think": ["route", rest, "--thinking", value],
             "review": ["route", rest, "--thinking-review", value],  # #1059
             "size": ["model", "sizes", rest, *([] if value == "all" else [value])],
-            "media": ["image" if rest == "image" else "audio", "--default", value]}[head]
+            "media": ["image" if rest == "image" else "audio", "--default", value],
+            "ocskill": ["skill", "opencode", rest, value]}[head]  # #1463 P4
 
 
 class Rows(tw.Base):
@@ -268,7 +269,20 @@ class Settings(Rows):
         settings.drop()
         rows = [r for r in settings.rows() if r["group"] == "setup"]
         by = {r["key"]: r for r in rows}
-        self.assertEqual({r["kind"] for r in rows}, {"info"})
+        self.assertEqual({r["kind"] for r in rows if not r["key"].startswith("ocskill-")}, {"info"})
+        # each global OpenCode skill has its toggle, on by default (#1463 P4)
+        self.assertEqual((by["ocskill-team"]["kind"], by["ocskill-team"]["value"], by["ocskill-team"]["label"]),
+                         ("choice", "on", "Skill team"))
+        self.assertNotIn("ocskill-mine", by)                       # Claude's are denied already
+        self.assertEqual(settings._argv(by["ocskill-team"], "off"), ["skill", "opencode", "team", "off"])
+        self.assertEqual(settings.key_for(["skill", "opencode", "team", "off"]), ("ocskill-team", "off"))
+        self.assertTrue(settings.apply("ocskill-team", "off")["ok"])
+        self.assertEqual(settings.current("ocskill-team"), "off")
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["denied_skills"], ["team"])
+        self.assertTrue(settings.apply("ocskill-team", "on")["ok"])
+        settings.drop()
+        rows = [r for r in settings.rows() if r["group"] == "setup"]
+        by = {r["key"]: r for r in rows}
         self.assertTrue(by["setup-instructions"]["text"].startswith("Instructions: the handbook "))
         self.assertIn("team 0.", by["setup-skills"]["text"])
         self.assertIn("and what Claude hands a task from the skill library (0)", by["setup-skills"]["text"])
