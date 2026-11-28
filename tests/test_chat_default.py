@@ -166,8 +166,9 @@ class ChatDefault(Base):
         port = other.server_address[1]
         got = chat.ensure(port)
         self.assertEqual((got["state"], got["why"]), ("blocked", chat.blocked_why(port)))
-        self.assertIn(f"another account's chat (or another program, or a server still on a replaced "
-                      f"token) answers on port {port}: wb chat on <free port> moves the web app there", got["why"])
+        # named, when this account's (2026-11-28): here the test itself holds it
+        self.assertIn(f"another program holds port {port} (pid {os.getpid()}: ", got["why"])
+        self.assertTrue(got["why"].endswith(": stop it, or wb chat on <free port> moves the web app there"))
         self.assertFalse((chat.chat_dir() / "serve.pid").exists())        # nothing started
         store.write_json(chat.chat_dir() / "serve.pid", {"pid": 1, "port": port})  # chat.port()'s
         self.assertEqual(cli.chat_line(), (False, f"web app down: {chat.blocked_why(port)} (wb chat on)"))
@@ -175,9 +176,21 @@ class ChatDefault(Base):
         with redirect_stderr(err), self.assertRaises(SystemExit):
             run_wb("chat", "on", "--port", str(port))
         # a port something else answers isn't kept, and the switch is put back (#1616, #690)
-        self.assertIn("web chat not up: another account's chat", err.getvalue())
+        self.assertIn(f"web chat not up: another program holds port {port}", err.getvalue())
         self.assertEqual(chat.chosen_port(), chat.PORT)
         self.assertTrue(chat.is_on())
+        # the user's own port held: their "on" is kept, and it comes up once the port is free
+        # (2026-11-28: a stray test server held 8090, `wb chat on 8090` put the switch back to
+        # off, and a second `wb chat on` was needed once it was gone)
+        chat.set_on(False)
+        chat.set_port(port)
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("chat", "on", str(port))
+        self.assertIn(f"web chat on, not up yet: another program holds port {port}", err.getvalue())
+        self.assertIn("it comes up by itself once the port is free", err.getvalue())
+        self.assertTrue(chat.is_on())
+        self.assertEqual(chat.ensure(port)["state"], "blocked")             # no link meanwhile (#690)
 
     def test_ensure_starts_the_unit_that_keeps_the_chat_and_says_when_it_doesnt_answer(self):
         port, servers = free_port(), []

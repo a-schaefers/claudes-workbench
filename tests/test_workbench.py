@@ -32248,10 +32248,10 @@ class WebChat(Base):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
             run_wb("chat", "on", "--port", str(port))
-        self.assertIn(f"another account's chat", err.getvalue())
+        self.assertIn(f"holds port {port}", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
         # on by default (#1281): a failed `wb chat on` puts the switch back as it was, on
-        self.assertIn("web chat not up: another account's chat", err.getvalue())
+        self.assertIn(f"web chat not up: another program holds port {port}", err.getvalue())
         self.assertTrue(self.chat.is_on())
         self.chat.set_on(False)
         err = io.StringIO()
