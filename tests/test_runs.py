@@ -1998,8 +1998,12 @@ class Runs(Base):
         run_wb("run", "start", "sks", "--plan", self.plan({**AUDIT, "name": "sks"}), "--param", "areas=a",
                "--repo", str(self.repo))
         self.wait_item("sks-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
-        self.assertIn("amended sks: skip find; stopped 1 running item(s): sks-find-1",
-                      run_wb("run", "amend", "sks", "--skip", "find"))
+        # the driver's tick stopping the item first is still this amend's stop (CI, 2026-11-28: the
+        # line said "none of its items running")
+        real = runs._stop_skipped
+        with mock.patch.object(runs, "_stop_skipped", lambda run: (real(run), real(run))[1]):
+            said = run_wb("run", "amend", "sks", "--skip", "find")
+        self.assertIn("amended sks: skip find; stopped 1 running item(s): sks-find-1", said)
         st = store.Task("sks-find-1").status
         self.assertEqual((st["phase"], st["last"]), ("stuck", runs.STOPPED_BY_CLAUDE))
         run = runs.Run("sks")

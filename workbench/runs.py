@@ -3065,13 +3065,17 @@ def cmd_amend(a) -> None:
         said.append(f"skip {', '.join(a.skip)}")
     if not fields:
         _die("nothing to amend: --budget-usd, --budget-min, --overnight or --skip")
+    mark = len(run.journal())  # what the driver's tick stops after the amend is this amend's too
     run.amend(**fields)
     run.set_status(budget_usd=run.spec.get("budget_usd"), budget_min=run.spec.get("budget_min"))
     run.log(kind="amend", **fields)
     if a.skip:
         # the skipped stage's items at work stop: they ran on, paid, their results dropped and
         # their notices Claude's once the run ended under them (#1577, 2026-11-26)
-        gone = _stop_skipped(run)
+        # the driver's tick reads the skip as soon as it is written and may stop an item first:
+        # this pass then found none, and the line said none was running (CI, 2026-11-28)
+        gone = list(dict.fromkeys([*_stop_skipped(run), *(r["task"] for r in run.journal()[mark:]
+                                                           if r.get("kind") == "stopped" and r.get("skip"))]))
         said[-1] += (f"; stopped {len(gone)} running item(s): {', '.join(gone)}" if gone
                      else "; none of its items running")
     print(f"amended {run.name}: {'; '.join(said)}"

@@ -231,14 +231,18 @@ def _rows(model: str, window) -> list[dict]:
 
 
 def work(row: dict) -> str | None:
-    """The kind of work a results row records: writing for a writing task, else its `size` (its
-    `role` for a row with none). router.of_role ranks on it, record's speed baseline groups by it
+    """The kind of work a results row records: writing for a writing task, a role of the user's own
+    for its tasks (#1652), else its `size` (its `role` for a row with none). router.of_role ranks on it, record's speed baseline groups by it
     (#1025). A coding task is routed and sliced at its size (router.record_role), so it is filed
     there too: `--role trivial --size significant` ran on the significant pick and moved only its
     trivial record (#1398, 2026-11-25)."""
-    if "writing" in (row.get("role"), row.get("like")):  # a custom role working as writing too (#1625)
+    from . import routes  # routes imports router, which imports this module
+    role = row.get("role")
+    if role and role not in routes.ROLES:  # a role of the user's own: its own record (#1652), whatever its like
+        return role
+    if role == "writing":
         return "writing"
-    return row.get("size") or row.get("role")
+    return row.get("size") or role
 
 
 def record(name: str, model: str, window, ceiling=None) -> dict:

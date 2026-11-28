@@ -3545,9 +3545,9 @@ guides, release notes, stories, copy) runs under its own rules, not the coding o
   build, a spell or style lint) it runs as any task's test: base check, auto-fix, in the lane. A
   checker that needs the network fails there. wb looks for none: Claude picks it (SKILL.md doesn't say so yet).
 - **The record apart**: results rows carry `role`; `router.score`, `rank`, `choose` and
-  `expected` count a model's rows of the task's role (`router.of_role`: writing's, else the row's `size`, #1398), so
-  prose results never move a coding rank or the other way round. Only a writing task asks by its
-  role (`router.record_role`, in `router.choose` from the role `routes.resolve` passes, `progress`, `wb watch`'s clock and the check-in's ETA, #1113): #1016 writes a
+  `expected` count a model's rows of the task's role (`router.of_role`: writing's, a role of the user's own its own
+  (#1652), else the row's `size`, #1398), so prose results never move a coding rank or the other way round. Only a
+  writing task or one of a user's role asks by its role (`router.record_role`, in `router.choose` from the role `routes.resolve` passes, `progress`, `wb watch`'s clock and the check-in's ETA, #1113): #1016 writes a
   role for every task, and a coding one is ranked and timed on its size's record, as before roles. With none yet, every model starts
   from the prior. `tuning.record` sets each row's speed against its own kind's median (`tuning.work`,
 the key `of_role` uses), so quick prose steps never mark coding steps slow; writing rows still
@@ -3766,7 +3766,7 @@ ceilings)` picks once per task (`status.tuned`, `status.explored`, `status.tuned
 far, or one time in five (`EXPLORE`) its neighbour. `reward`, per step: 1 if accepted
 (`agent_landed`; a takeover scores 0, #647), divided by one plus agent-caused review rounds a step,
 less `COMPACT_PENALTY` 0.25 if OpenCode compacted, ± up to `SPEED_WEIGHT` 0.15 against the model's
-median active minutes a step of the same kind of work (`tuning.work`: the row's `role`, else its size; #543, #721, #1025). Discards score 0; a `--spec-gap`
+median active minutes a step of the same kind of work (`tuning.work`: writing's, a role of the user's own its own (#1652), else its size; #543, #721, #1025). Discards score 0; a `--spec-gap`
 discard counts nowhere (`judged`), nor one after a stop that wasn't the step's with no step kept
 (`tuning.stopped_outside`: the row's `infra`, #1245), nor a compare attempt that lost (the row's `not_chosen`, #1473: another attempt at its item accepted, the run's chooser naming another, or before a chooser answered another at review; one discarded before the pick was accepted is marked by that accept, #1568). `Knob.fills` (`fresh_at`) counts a task only if a session
 reached the smallest allowed value (`tuning.acted`, row `peak_share`; older rows count; #721: most
@@ -4994,8 +4994,8 @@ one lease. A media engine joins `gpu` when on this GPU (`media.on_gpu`, `media.s
 pool otherwise (`media.boxes`), or none (`"gpu": false`).
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` kept by `tuning.judged`, for the
-model, its `lineage` and the role (`router.of_role`: writing, else a row's `size`, its `role` with none; with no role
-asked, the size's; *The writing role*). `judged` drops `--spec-gap` discards, rows whose agent never
+model, its `lineage` and the role (`router.of_role`: writing, a role of the user's own (its name, #1652), else a
+row's `size`, its `role` with none; with no role asked, the size's; *The writing role*). `judged` drops `--spec-gap` discards, rows whose agent never
 ran (`ran` false, `failed_before`; older: not accepted, `tok_out` 0; #581), and discards after a stop
 that wasn't the step's (`tuning.stopped_outside`: the row's `infra`, unless steps were kept; #1245).
 `router.same_weights`/`weights_now` drop rows on other weights (`weights_id`, `models.identity`:
@@ -5384,8 +5384,11 @@ role**, a `form` row in Agents and roles) adds one to routes.json: `custom: true
 agent picks it by, required (`routes.used_for_why`; `--about` is the flag's old name). **Works as** is gone
 from the form and from new writes (#1652: "works as is load bearing something that i think maybe it shouldnt
 be in the UI"): `--like trivial|significant|writing` is still taken and a role from #1625 keeps its `like`
-(`routes.kind_of`: its prompt and handbook, its slice size from `role_and_size` and the GPU router's record,
-`router.record_role`); without one a role works as significant coding's defaults. One from before #1652 with no
+(`routes.kind_of`: its prompt and handbook and its slice size from `role_and_size`); without one a role works as
+significant coding's defaults. **Each role learns on its own record** (#1652): a user's role is ranked by the GPU
+router (`router.record_role`, its name) and filed in tuning (`tuning.work`) under its own name, never its like's or
+a built-in's; with no results yet every model starts from the prior, as for a new built-in (#1625's like had a
+sound-effects role ranked on prose, and its rows moved writing's rank). One from before #1652 with no
 `about` is kept and runs; the roles' summary says `no Used for yet: don't pick it until the user gives one`, and
 Settings' Used for row says so. A name is 2 to 24 lowercase
 letters, digits or dashes from a letter, never a built-in's or one of `wb route`'s words (`RESERVED`), up to
@@ -5399,8 +5402,7 @@ every role (the built-ins, then the user's in the file's order), `all_roles()` t
 its name on screen: every loop over the roles reads them (wb route's lines and JSON, wb models, wb doctor,
 wb scout, wb schedule's money checks, the driver's models, the summary and the mod's `routesSummary`,
 `routesValid`). `wb start --role <name>` takes any of them (exit 2 for none), and task.json keeps `like`
-for a custom one that has it, which results.jsonl copies (`tuning.work` files a writing-like role's rows as writing's;
-a coding one's go by `size` as before). Flows and role cards may name one for a stage or an escalation
+for a custom one that has it, which results.jsonl copies (its rows are the role's own all the same, #1652). Flows and role cards may name one for a stage or an escalation
 (`cards.load`, `runs.validate`).
 
 **Every role's Used for and Skills** (#1652). The built-ins' Used for is `routes.USED_FOR` until the user
@@ -10555,7 +10557,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb run status [<run>]` | `--all`, `--json`, `--all-sessions` (and, suppressed, `--repo DIR`, `--session ID`) | Reaps a dead driver (`runs.reap`: `stopped`, one `run_stopped`); a line per run in the caller's scope (`runs.status_line`). |
 | `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, results (each done item of a stage no later one reads, with its trail: best-of's reviews, #1504), filtered, superseded, null, not_run, pending, code (each code item's task that exists: one refused at its start is `not_run` alone, and the `run_done` notice's `change(s) at review` counts none, #1531; an escalated item's tries with `item`, `tries`, `keep`, one change, *Escalation*, #1597), spend; every item accounted for. |
 | `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`); from the web app (`WB_ACTOR=web`, no model's variables) its why is `runs.WEB_STOP` and a `run_stopped` notice tells the run's session. Resume (refused closed or at `review`, `runs._ended`; refused, naming `wb run feed`, while a `claude` stage's inputs are in, its checkpoint raised (its journalled `notice` row) and it isn't fed, `runs.awaiting_feed`: the resume acked the checkpoint tick raises once and left the run running with nothing due, #1546; one not yet raised, under an item's checkpoint, is resumed, so tick raises it, #1510): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
-| `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items not started are `not_run` (`skipped`), and its items at work are stopped (`wb stop`, journalled `stopped` with `skip`, never resumed: `runs._stop_skipped`, each tick too, for one a pass started after the skip), `not_run` (`stopped mid-run`), the line saying `stopped N running item(s): <names>` (#1577). |
+| `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items not started are `not_run` (`skipped`), and its items at work are stopped (`wb stop`, journalled `stopped` with `skip`, never resumed: `runs._stop_skipped`, each tick too, for one a pass started after the skip), `not_run` (`stopped mid-run`), the line saying `stopped N running item(s): <names>` (#1577), those the driver's tick stopped since the amend included: it reads the skip at once and may get there first, and the line said none was running (2.4.1). |
 | `wb run feed <run> <stage> --file <json\|->` | | A `claude` checkpoint's merge: a JSON list, `inbox/<stage>-feed`; the run goes on. Refused on a closed run or one at `review`, before the inbox is written. |
 | `wb run close <run>` | | Refused while a code item (a task not started as a report) is open (accept or discard it; an escalated item's open tries named as one change, which to accept said, #1597); stops the driver, discards report items never taken, writes `result.json`, phase `closed`. |
 | `wb run flows` | `--repo DIR`, `--json` (`runs.flow_rows`: `{name, where, description, mark, command, params}`, the hosts' read for the flows' slash commands) | Every flow: yours (`$WB_FLOWS`; `shadows shipped`, `; shipped changed since` when the shipped file's blob is no longer the copy's `from`: `cards.shadow_mark`), shipped (`agent/flows/`), a repo's `.workbench/flows/` (read it first, then `--plan`), each `/<command>` it has (never a repo's). |

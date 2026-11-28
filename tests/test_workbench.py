@@ -49535,6 +49535,24 @@ class Writing(Base):
         self.assertEqual(router.score(m, "trivial").tries, 1)
         self.assertEqual(router.score(m, "significant", role="writing").tries, 1)
 
+    def test_a_role_of_the_users_own_learns_on_its_own_record_never_a_built_ins_1652(self):
+        # #1652 (the owner, 2026-11-28): roles learn per role. A user's role borrowed its like's
+        # record (#1625): a sound-effects role "working as" writing was ranked on prose results,
+        # and its own moved writing's rank
+        from workbench import router, tuning
+        m = cli.models.resolve("mimo")
+        for role, like in (("writing", None), ("writing", None), ("sfx", "writing"), ("music", None)):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": m.id, "role": role, **({"like": like} if like else {}), "size": "significant",
+                "outcome": "accepted", "ran": True, "active_minutes": 10})
+        self.assertEqual([tuning.work(r) for r in store.results()], ["writing", "writing", "sfx", "music"])
+        self.assertEqual(router.record_role("sfx"), "sfx")
+        self.assertIsNone(router.record_role("trivial"))                 # a coding role: its size's, as before
+        self.assertEqual(router.score(m, "significant", role=router.record_role("sfx")).tries, 1)
+        self.assertEqual(router.score(m, "significant", role="writing").tries, 2)
+        self.assertEqual(router.score(m, "significant").tries, 0)        # none filed as coding
+        self.assertEqual(router.score(m, "significant", role=router.record_role("films")).tries, 0)  # none yet: the prior
+
     def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
         # the review of #1025: tuning.record set each row's speed against the median step of its
         # size, and a writing task is significant: four 4-minute prose steps made 30-minute coding
@@ -50280,7 +50298,8 @@ class RoleResolution(Base):
         self.assertEqual(cli.protocol_for(sp), cli.WRITING_PROTOCOL)
         self.assertEqual(context.handbook_for(store.Task("t-fr")), context.WRITING)
         from workbench import tuning
-        self.assertEqual(tuning.work({"role": "docs-fr", "like": "writing", "size": "significant"}), "writing")
+        # its results its own record, never writing's (#1652)
+        self.assertEqual(tuning.work({"role": "docs-fr", "like": "writing", "size": "significant"}), "docs-fr")
         self.assertEqual(self.begin("t-no", "--role", "nope")[0], 2)
         # removed whole; a built-in never
         code, out, err = self.wb("route", "remove", "docs-fr")
