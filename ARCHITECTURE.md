@@ -1654,7 +1654,8 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   least of `KEEP_WARM_S`, silence and the think budget, `runner.agent_commands(task, run)` looks
   for the round's processes (its `WB_RUN`) whose `SHELL` the shell shim gave back (OpenCode, its MCP
   and language servers keep the shim's), the outermost of each (`_procs`: /proc, else ps and
-  `KERN_PROCARGS2`); what still ran when the last shell call came back is a job left in the
+  `KERN_PROCARGS2`); what still ran when the last shell call came back (every process of the round, `every=True`: one
+  still in the shim then, before its `exec` of the shell, was read as a new command, 2026-11-28) is a job left in the
   background (a dev server), never a wait, so a model thinking beside it is still nudged. The
   silence stop then says ", waiting on a command the agent runs". Once the turn is over (last
   `step_finish` reason `stop`) and `BG_GRACE` (120 s, or less with a shorter silence timeout)
@@ -5195,7 +5196,9 @@ environment alone): `OLLAMA_KEYS` and `SET_ONLY` (`VISIBLE`'s masks and `CUDA_DE
 first source that answers is the whole answer: a readable `ollama serve`'s `/proc/<pid>/environ`
 (`PROC`; macOS `_ps_ollama`, #804), lowest pid first; a running systemd `ollama` unit, system then
 `--user` (`Environment` and each `EnvironmentFile=`, `_environment_files`; an unreadable one is
-`UNREAD` in the source, #804); a running `ollama` container in docker/podman (`Config.Env`, and
+`UNREAD` in the source, #804); a running `ollama` container in docker, or podman where it keeps something for this user (`_container_tools`:
+`~/.local/share/containers`, root's `/var/lib/containers`; elsewhere a first `podman ps` builds its storage, seconds
+on a fresh CI runner, 2026-11-28) (`Config.Env`, and
 `container_mask` from `HostConfig` devices, #463; the container's own masks indexed into its grant,
 `hardware._within`, #651, unchecked on a real two-card machine); macOS's brew plist
 (`_launchd_ollama`), else `launchctl getenv`; a stopped unit. Another mount namespace or a container
@@ -6483,7 +6486,8 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   `.claude/`; a shell change is named in the round report (`runner.claude_files_changed`).
 - **The agent never commits.** `wb diff` shows its work against the base, or the last `wb next` step
   (`--all`: the branch), new files through intent-to-add in a scratch index copied from the
-  worktree's (`gitops.with_new_files`: its index and locks untouched, skip-worktree entries not
+  worktree's, its mtime kept (`shutil.copy2`: git's racy-clean check still hashes a same-size file rewritten in the
+  index's tick, 2026-11-28) (`gitops.with_new_files`: its index and locks untouched, skip-worktree entries not
   deletions), and the ignored files `--include` commits through `add -f` (`force=`, #1259). `gitops.add_all` reruns `add -A` with `--sparse` only after a sparse refusal (an older
   git has neither, #493). A git error in the diffstat costs only that line (`(no diffstat: …)`).
 - **Nested repositories** (`gitops.nested_repos`) are left out of the diff, noted (`NOTE: <dir>: a
@@ -11404,7 +11408,9 @@ on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: macOS failed u
 `opencode.yml`: the suite daily on the newest OpenCode (the highest release, not GitHub's "Latest"), then the kernel's Bun goldens on it. Sharding:
 `tests/__init__.py`'s `load_tests` deals the i-th test of discovery's sorted order to shard i mod N, once, by the
 outermost `load_tests` (nested, it sharded twice); `python3 -m unittest tests` is sharded too, named modules, classes or
-tests run as named; no test has class or module fixtures.
+tests run as named; no test has class or module fixtures. It sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` unless set: the
+OpenCode plugin's weekly `wb update --check --if-due` in a real-OpenCode test fetched the clone the suite runs from
+and outlived it under `opencode.yml`, which didn't set it (2026-11-28); the update check's tests unset it.
 The macOS shards run `python3 -X faulthandler -m unittest -v`, each test named in the log as it runs (unnamed, a
 cancelled hour reported nothing, #950). `opencode.yml`'s suite runs as the nightly's Linux one, three shards of four processes (in one process it outgrew its 60 minutes: five runs cancelled, 2026-11-26 to 27), the Bun goldens on shard 1. Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
 WSL; `check.yml`'s 300: its slowest test takes under 30 s, and a hang held a pull request 10 minutes past its other shards): `SIGALRM` around each test dumps every thread's stack and fails it with `tests.Hung: <test id> hung past

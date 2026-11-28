@@ -707,10 +707,21 @@ def ollama_matched(root: str | None) -> dict | None:
     return None
 
 
+def _container_tools() -> tuple[str, ...]:
+    """Whom to ask for an ollama container: docker (its daemon answers at once, or nothing does),
+    and podman only where it has kept something for this user, rootless storage or macOS's podman
+    machine (`~/.local/share/containers`, `$XDG_DATA_HOME`'s), or root's `/var/lib/containers`.
+    Elsewhere it has no container to list, and a first `podman ps` builds its storage: seconds on a
+    fresh CI runner, where a runner stopped meanwhile left it running past the test (2026-11-28)."""
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    own = data / "containers" if os.geteuid() else Path("/var/lib/containers")
+    return ("docker", "podman") if own.is_dir() else ("docker",)
+
+
 def _ollama_container() -> tuple[dict, str] | None:
     """A running container of an ollama image (`ollama/ollama`, any tag or registry), asked of
     docker or podman when it answers: its Config.Env, the knobs only."""
-    for tool in ("docker", "podman"):
+    for tool in _container_tools():
         for line in _run(tool, "ps", "--format", "{{.ID}} {{.Image}} {{.Names}}").splitlines():
             cid, image, name = (line.split() + ["", "", ""])[:3]
             if image.split("@")[0].rsplit("/", 1)[-1].split(":")[0] != "ollama":

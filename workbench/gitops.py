@@ -1265,7 +1265,11 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
     try:
         try:
             real = git(worktree, "rev-parse", "--git-path", "index").strip()
-            shutil.copyfile(Path(worktree) / real, index)  # a relative path is the worktree's
+            # a relative path is the worktree's; copy2 keeps the index's mtime, which git's racy-clean
+            # check reads: a file rewritten, same size, in the tick the index was written is hashed
+            # again, not trusted by its stat (a copy dated now trusts it: a shot's candidate kept
+            # the old page, CI 2026-11-28)
+            shutil.copy2(Path(worktree) / real, index)
         except (GitError, OSError):
             git(worktree, "read-tree", "HEAD", env=env)
         record_case_renames(worktree, env)

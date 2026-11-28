@@ -1093,15 +1093,20 @@ def _procs():
             yield pid, int(words[1]), _mac_environ(buf[:size.value])
 
 
-def agent_commands(task: store.Task, run: str) -> set[int]:
+def agent_commands(task: store.Task, run: str, every: bool = False) -> set[int]:
     """The agent's shell commands running now in the round ``run``, the outermost process of
     each: its WB_RUN, and a SHELL the shell shim gave back (OpenCode, its MCP and language
     servers keep the shim's). OpenCode prints a shell call only once it ends, so this is how
-    the runner knows a silent round is waiting on one (#1386)."""
+    the runner knows a silent round is waiting on one (#1386). ``every``: each process of the
+    round, the shim's too, as what a shell call left running: a command still in the shim (its
+    SHELL the shim's until it execs the shell, the same pid) was missed there, then counted as a
+    new command in the foreground, and the think guard never came (the WSL nightly, 2026-11-28)."""
     shim = os.fsencode(f"SHELL={context.rules_dir(task) / SHELL_SHIM_DIR}/")
     mark = os.fsencode(f"WB_RUN={run}")
-    ours = {pid: ppid for pid, ppid, env in _procs()
-            if mark in env and not any(e.startswith(shim) for e in env)}
+    marked = [(pid, ppid, env) for pid, ppid, env in _procs() if mark in env]
+    if every:
+        return {pid for pid, _, _ in marked}
+    ours = {pid: ppid for pid, ppid, env in marked if not any(e.startswith(shim) for e in env)}
     return {pid for pid, ppid in ours.items() if ppid not in ours}
 
 
@@ -2280,7 +2285,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 if not row["ok"]:
                     out["errors"].append(f"{row['tool']}: {row.get('error', '')}")
                 if row["tool"] in ("shell", "bash"):
-                    left_running = agent_commands(task, run)
+                    left_running = agent_commands(task, run, every=True)
                 st = task.status
                 used = context.experiment_use(task, row)
                 task.set_status(last=f"{row['tool']} {row['brief']}".strip(),
