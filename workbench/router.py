@@ -205,16 +205,20 @@ def weights_changed(m: models.Model) -> bool:
 
 def record_role(role: str | None) -> str | None:
     """The role whose record ranks and times a task, given task.json's or wb start's `role`:
-    writing's own (#1025), else None, its size's, as before roles. #1016 writes a role for every
-    task, and a coding one read as its role timed a `--size` other than its role's on the wrong
-    record (wave 2's merge)."""
+    writing's own (#1025), a role of the user's own its own (#1652), else None, its size's, as
+    before roles. #1016 writes a role for every task, and a coding one read as its role timed a
+    `--size` other than its role's on the wrong record (wave 2's merge). A user's role borrowed
+    its like's record (#1625): a sound-effects role ranked models by their coding, and its rows
+    moved coding's rank; with none of its own yet, every model starts from the prior."""
     from . import routes  # routes imports this module's callers
-    return "writing" if routes.kind_of(role) == "writing" else None  # a custom role's like too (#1625)
+    if role and role not in routes.ROLES:
+        return role
+    return "writing" if role == "writing" else None
 
 
 def of_role(row: dict, role: str) -> bool:
-    """Whether a results row is a record of ``role``'s work (tuning.work: writing's own, else the
-    row's `size`). Writing slices like significant work (decision 1 of #1008), but a
+    """Whether a results row is a record of ``role``'s work (tuning.work: writing's own, a user's
+    role's own, else the row's `size`). Writing slices like significant work (decision 1 of #1008), but a
     model's prose results moved its coding rank and the other way round: each counts apart (#1025)."""
     return tuning.work(row) == role
 

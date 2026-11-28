@@ -194,7 +194,7 @@ def agents_models(doc: dict | None = None) -> dict[str, list[str]]:
         elif row["gpu"] != routes.AUTO:
             mid = row["gpu"]
         else:
-            top, _ = router.choose(routes.role_and_size(r, None)[1], role=routes.kind_of(r, doc))
+            top, _ = router.choose(routes.role_and_size(r, None)[1], role=r)  # its own record (#1652)
             mid = top.model.id if top else None
         if mid:
             out.setdefault(mid, []).append(r)
