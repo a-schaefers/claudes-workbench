@@ -15319,7 +15319,7 @@ class Lane(Base):
         self.assertNotIn(str(home / "pnpmhome"), w)                    # its global bin stays out
         with mock.patch.object(sys, "platform", "darwin"):
             self.assertEqual(context.pnpm_store(task), home / "Library/pnpm/store")
-        (home / "Library/pnpm/store").mkdir(parents=True)
+        (home / "Library/pnpm/store").mkdir(parents=True, exist_ok=True)  # made above on macOS
         self.assertIn(str(home / "Library/pnpm/store"), context.writable(task))
         # a store-dir the user set stands: their environment, their .npmrc, the repo's
         with mock.patch.dict(os.environ, {"npm_config_store_dir": "/srv/pnpm-store"}):

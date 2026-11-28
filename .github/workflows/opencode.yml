@@ -28,8 +28,15 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # the whole suite in one job: 28 to 32 minutes at d80b924 (#950)
+    # in three shards of four processes, as the nightly's: in one process the suite outgrew its 60
+    # minutes (28 to 32 at d80b924, #950) and five runs in a row were cancelled (2026-11-26 to 27)
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
+      WB_TEST_SHARD: ${{ matrix.shard }}/3
       WB_TEST_HANG_SECS: '600'  # a hung test fails, named (tests/__init__.py, #950)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,6 +55,7 @@ jobs:
       - name: Landlock
         run: |
           python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
-      - run: python3 -m unittest
+      - run: exec scripts/suite.sh "$WB_TEST_SHARD" 4
       # The kernel's goldens under this OpenCode's Bun (#1356): check.yml runs them on the pinned one
-      - run: BUN_BE_BUN=1 opencode test opencode-plugin/test
+      - if: matrix.shard == 1
+        run: BUN_BE_BUN=1 opencode test opencode-plugin/test

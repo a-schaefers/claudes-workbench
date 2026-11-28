@@ -213,6 +213,16 @@ class ReleaseGates(unittest.TestCase):
                     self.assertIn(want, got)
         self.assertIn('run: exec scripts/suite.sh "$WB_TEST_SHARD" 4\n', job("nightly.yml", "check"))
         self.assertNotIn("python3 -m unittest", job("nightly.yml", "check"))
+
+    def test_the_newest_opencode_suite_runs_in_shards_and_its_goldens_on_one(self):
+        # in one process it outgrew its 60 minutes: five runs in a row cancelled (2026-11-26 to 27)
+        oc = job("opencode.yml", "check")
+        for want in ("shard: [1, 2, 3]", "fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/3",
+                     'run: exec scripts/suite.sh "$WB_TEST_SHARD" 4\n'):
+            self.assertIn(want, oc)
+        self.assertNotIn("python3 -m unittest", oc)
+        gold = oc.find("BUN_BE_BUN=1 opencode test")
+        self.assertIn("if: matrix.shard == 1", oc[oc.rfind("\n      - ", 0, gold):gold])
         # the mod's test once, not once a shard
         self.assertEqual(job("nightly.yml", "check").count("if: matrix.shard == 1\n"), 3)
         self.assertIn("claude plugin validate mod && claude plugin test mod", job("nightly.yml", "check"))
