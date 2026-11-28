@@ -244,6 +244,9 @@ test('Posting to GitHub\'s daily form: Send all writes the yes for exactly those
       wb: async (args, session) => { calls.push([session, ...args]); return { code: 0, out: args[1] === 'ask' ? JSON.stringify({ items }) : 'sent' } },
       approve: async (session, ids) => { approved.push([session, ids]) },
       asker: { ask: async (_s, q) => { t.asked.push(q.question); expect([q.yes, q.no]).toEqual([UPSTREAM_ASK.yes, UPSTREAM_ASK.no]); return 'yes' } } })
+    await up.daily('ses_1')                                            // upstream.json's ask: not daily, wb not run
+    expect(calls).toEqual([])
+    writeFileSync(t.mode, JSON.stringify({ mode: 'daily' }))
     await up.daily('ses_1')                                            // nothing waits: nothing asked
     expect(t.asked).toEqual([])
     items = [{ id: 'aaaa0001', line: 'aaaa0001  issue on x/y: T' }]

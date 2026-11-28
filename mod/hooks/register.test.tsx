@@ -4435,15 +4435,24 @@ test('Posting to GitHub: only the user writes upstream.json and the daily yes, n
 test('Posting to GitHub asks once a day, at the user\'s typed turn: Send all writes the yes for exactly those posts', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
+  const outbox: string[] = []                                     // fakeTasks lists these for any directory
+  fakeTasks(on, files, outbox)
   const w = upstreamWorld(on, files)
+  files[UPSTREAM_JSON] = JSON.stringify({ mode: 'daily' })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   const settle = async () => { for (let i = 0; i < 50; i++) await new Promise(r => setTimeout(r, 1)) }
-  await $.prompt.submit({ text: 'morning' } as any)                // nothing waits: nothing asked
+  await $.prompt.submit({ text: 'morning' } as any)                // nothing waits: wb isn't even run
   await settle()
   expect(w.asked).toEqual([])
-  expect(w.ups).toEqual([['upstream', 'ask', '--json']])
+  expect(w.ups).toEqual([])
+  outbox.push('aaaa0001.json', 'aaaa0001.md', 'aaaa0002.json', 'aaaa0002.md')
+  files[UPSTREAM_JSON] = JSON.stringify({ mode: 'auto' })          // not daily: nothing to ask
+  await $.prompt.submit({ text: 'later' } as any)
+  await settle()
+  expect(w.ups).toEqual([])
+  files[UPSTREAM_JSON] = JSON.stringify({ mode: 'daily' })
   w.askOut = JSON.stringify({ mode: 'daily', items: [{ id: 'aaaa0001', line: 'aaaa0001  issue on x/y: T' },
     { id: 'aaaa0002', line: 'aaaa0002  comment on #5 on x/y' }] })
   w.answer = 'Not today'

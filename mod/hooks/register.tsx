@@ -947,6 +947,11 @@ async function dailyUpstream($: any): Promise<void> {
   if (mem.askingUpstream) return
   mem.askingUpstream = true
   try {
+    // wb only when it could have something to ask: daily, and a post in the outbox (a typed turn
+    // is no reason to spawn wb otherwise)
+    if ((await upstreamMode($)) !== 'daily') return
+    const waiting = (await $.fs.list(`${mem.root}/outbox`).catch(() => [])) ?? []
+    if (!waiting.some((x: Row) => String(x.name ?? '').endsWith('.json'))) return
     const r = await $.process.run([mem.wb, 'upstream', 'ask', '--json'], { timeoutMs: 30_000 })
     if (r.exitCode !== 0) return
     const doc = JSON.parse(String(r.stdout ?? ''))

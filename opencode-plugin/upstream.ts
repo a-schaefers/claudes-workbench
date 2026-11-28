@@ -114,7 +114,7 @@ export class Upstream {
   // The daily form (upstream.ask; the mod's dailyUpstream): at the user's typed prompt, once a day,
   // the posts the outbox holds, Send all or Not today; wb marks the day asked before it answers
   async daily(session: string): Promise<void> {
-    if (this.asking || !this.d.wb) return
+    if (this.asking || !this.d.wb || this.mode(this.d.env()) !== 'daily') return  // wb only when it could ask
     this.asking = true
     try {
       const r = await this.d.wb(['upstream', 'ask', '--json'], session)

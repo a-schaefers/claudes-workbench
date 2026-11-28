@@ -11341,7 +11341,7 @@ request, and never a dialog mid-work. The user's mode, `upstream.json` beside ro
 post in the outbox (`$WB_HOME/outbox/`), and at the user's first typed turn of each day the host asks once, `Send all`
 or `Not today` (the mod's `dailyUpstream` on `prompt.submit`, never a `[web chat]`, `[agent` or `[workbench]` prompt;
 the OpenCode plugin's `Upstream.daily` on the session's `prompt` hook, a typed TUI prompt only: deep.ts's `usersWords`
-and no metadata); `wb upstream ask --json` marks the day asked before it answers, under a lock, so both hosts never
+and no metadata; each runs wb only in `daily`, the mod only with a post in `outbox/` too); `wb upstream ask --json` marks the day asked before it answers, under a lock, so both hosts never
 both ask, and a dismissed dialog is a `Not today`. `Send all` writes `upstream-ok.json` (OpenCode: the session's own
 file) with those ids, then runs `wb upstream send <ids>`; `upstream.may_send` takes it only for exactly those ids. `never`
 keeps the fix a local patch (`wb patch send` refuses, under a model) and a post a draft. `ask`, no Settings stop, is the
