@@ -2449,7 +2449,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         if not out["stuck"] and (why := provider.stop(now)):  # before silence: never "no output"
             out["guard"], out["stuck"] = why
         if not out["stuck"] and clock.ran(mono) > wall:
-            out["stuck"], out["guard"] = f"the round ran past its {int(wall // 60)}-minute limit", "round"
+            # under a minute in seconds: a 40 s --round-timeout said "its 0-minute limit" (CI, 2026-11-28)
+            past = f"{int(wall // 60)}-minute" if wall >= 60 else f"{int(wall)}-second"
+            out["stuck"], out["guard"] = f"the round ran past its {past} limit", "round"
         if not out["stuck"] and not asking and quiet > hush:
             out["guard"] = "silence"
             out["stuck"] = (f"no output for {int(hush // 60)} minutes" if heard else

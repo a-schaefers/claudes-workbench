@@ -1895,6 +1895,9 @@ def cmd_start(a):
     if a.role is not None and a.role not in (roles := routes.all_roles()):  # argparse's choices once (#1625)
         die(f"no role {a.role!r}: the roles are {', '.join(roles)} (wb route shows them)", 2)
     role, size = routes.role_and_size(a.role, a.size)
+    if gen := routes.generator_of(role):  # #1652: an engine, no agent, so no task of OpenCode's
+        die(f"{role} makes {'images' if gen[0] == 'image' else 'audio'} with {gen[1]}, not code: wb {gen[0]} "
+            f"--role {role} \"<the brief>\" makes its candidates; check them, then keep one in the repo", 2)
     # the role's Skills (#1652): Mine is the user's list and nothing else, so a --skill is refused
     # (the orchestrator's pick would override the user's), and the library's suggestions aren't said
     mine = (sk := routes.skills_of(role))[0] == "mine"
@@ -4444,7 +4447,10 @@ def _route_show(as_json: bool) -> None:
         row = doc["roles"][r]
         gone = row.get("api") and models.lookup(row["api"]) is None
         gone = gone and f" ({models.unlisted_why(row['api'])})"  # a missing key says so (#1529)
-        if row["via"] == "api":
+        if gen := routes.generator_of(r, doc):  # #1652: an engine in place of a chat model
+            why = _generator_why(f"{gen[0]}:{gen[1]}")
+            bits = [f"generator: {gen[0]} engine {gen[1]} (wb {gen[0]} --role {r})" + (f" ({why})" if why else "")]
+        elif row["via"] == "api":
             bits = [f"API {row['api']} ({_who(row['api'])})" + (gone or ""),
                     routes.thinking_said(row), *([f"backends {', '.join(row['order'])}"] if row.get("order") else [])]
         else:
@@ -4623,7 +4629,8 @@ def cmd_route(a):
     if what in ("add", "remove"):  # the user's own roles (#1625)
         return _route_custom(a)
     roles = routes.all_roles()
-    if what in roles and (a.about is not None or a.skills is not None or a.skill_from is not None):
+    if what in roles and (a.about is not None or a.skills is not None or a.skill_from is not None
+                          or a.generator is not None):
         return _route_describe(a)  # a role's Used for and Skills (#1652)
     if what in roles and target == "fallback":
         return _route_fallback(a)
@@ -4731,6 +4738,27 @@ def _route_custom(a) -> None:
     _route_apply(a, argv, changed)
 
 
+def _generator_why(gen: str) -> str:
+    """Why ``gen`` ("image:<engine>", "audio:<engine>") can't be a role's generator, or "": an
+    engine of images.json or audio.json (not audio's listener) that can run (#1652)."""
+    if not routes.GENERATOR_RE.match(gen):
+        return f"--generator is image:<engine>, audio:<engine> or none, not {gen!r}"
+    kind, _, name = gen.partition(":")
+    mod = images if kind == "image" else audio
+    try:
+        have = mod.engines()
+    except (RuntimeError, OSError, ValueError) as e:
+        return f"{mod.config_path()} can't be read: {e}"
+    if name not in have:
+        return (f"no {kind} engine {name!r} in {mod.config_path()}"
+                + (f" (have: {', '.join(have)})" if have else "") + f": wb {kind} --list shows them")
+    if kind == "audio" and audio.kind_of(have[name]) == "listen":
+        return f"{name} is the listener (it checks speech), not an engine that makes audio"
+    if why := mod.ready(have[name]):
+        return f"{kind} engine {name} can't run: {why}"
+    return ""
+
+
 def _route_describe(a) -> None:
     """`wb route <role> --used-for TEXT`, `--skills auto|mine|NAME[,NAME]` and `--skill-from PATH`
     (#1652): a role's Used for, which the orchestrator agent picks it by, and its Skills: auto (the
@@ -4741,8 +4769,8 @@ def _route_describe(a) -> None:
     role = a.what
     if a.target is not None or a.more or a.gpu or a.api or a.thinking or a.thinking_review \
             or a.order is not None or a.day_usd is not None or a.label or a.like:
-        die(f"wb route {role} --used-for TEXT | --skills auto|mine|NAME[,NAME] | --skill-from PATH: in a wb route "
-            "of its own")
+        die(f"wb route {role} --used-for TEXT | --skills auto|mine|NAME[,NAME] | --skill-from PATH | --generator "
+            "image:<engine>|audio:<engine>|none: in a wb route of its own")
     mode, names = None, None
     if a.skills is not None:
         if a.skills in routes.SKILLS_MODES:
@@ -4772,12 +4800,16 @@ def _route_describe(a) -> None:
             die(f"not added: {_skill_failure(e)}")
         print(f"{verb} {name}" + "".join(f"\nwarning: {w}" for w in warns))
         names = list(dict.fromkeys([*routes.skills_of(role)[1], name]))
+    if a.generator is not None and a.generator != routes.GENERATOR_NONE:
+        if why := _generator_why(a.generator):
+            die(why, 3)
     argv = ["route", role, *(["--used-for", a.about] if a.about is not None else []),
-            *(["--skills", ",".join(names) if names is not None else mode] if names is not None or mode else [])]
+            *(["--skills", ",".join(names) if names is not None else mode] if names is not None or mode else []),
+            *(["--generator", a.generator] if a.generator is not None else [])]
 
     def changed(doc) -> routes.Change:
         try:
-            return routes.describe_change(doc, role, about=a.about, mode=mode, names=names)
+            return routes.describe_change(doc, role, about=a.about, mode=mode, names=names, generator=a.generator)
         except routes.RoutesError as e:
             die(str(e), 3)
 
@@ -7434,6 +7466,7 @@ def cmd_image(a):
         w, h = (int(x) for x in a.size.lower().split("x"))
     except ValueError:
         die(f"--size {a.size!r}: WIDTHxHEIGHT, e.g. 1024x1024")
+    a.engine = _role_engine(a, "image")
     out = Path(a.out) if a.out else store.home() / "images" / time.strftime("%Y%m%d-%H%M%S")
     try:
         # a kill at Claude's Bash limit ends it as an error would: the engine's group killed, the
@@ -7461,6 +7494,7 @@ def cmd_audio(a):
             lyrics = sys.stdin.read() if a.lyrics == "-" else Path(a.lyrics).read_text()
         except OSError as e:
             die(f"--lyrics {a.lyrics}: {e.strerror or e}")
+    a.engine = _role_engine(a, "audio")
     out = Path(a.out) if a.out else store.home() / "audio" / time.strftime("%Y%m%d-%H%M%S")
     try:
         with _ends_cleanly():  # as wb image: the engine, the lease, the unload, the temp (#589)
@@ -7471,6 +7505,25 @@ def cmd_audio(a):
         die(str(e).strip("'\""))
     print(f"{len(made)} clip(s) in {out}: you can't hear them, so read each check line and look at "
           "each spectrogram; for music or a voice's character, ask the user to listen")
+
+
+def _role_engine(a, kind: str) -> str | None:
+    """wb image|audio's engine: --engine, or with --role the role's generator (#1652), which must
+    be a ``kind`` engine; both given is refused, as two engines."""
+    role = getattr(a, "role", None)
+    if role is None:
+        return a.engine
+    if role not in routes.all_roles():
+        die(f"no role {role!r}: the roles are {', '.join(routes.all_roles())} (wb route shows them)", 2)
+    gen = routes.generator_of(role)
+    if gen is None:
+        die(f"{role} has no generator: its model is a chat model (wb start --role {role}); wb route {role} "
+            f"--generator {kind}:<engine> gives it one", 2)
+    if gen[0] != kind:
+        die(f"{role} makes {gen[0]}s with {gen[1]}: wb {gen[0]} --role {role}", 2)
+    if a.engine is not None and a.engine != gen[1]:
+        die(f"two engines: --engine {a.engine} and {role}'s {gen[1]}", 2)
+    return gen[1]
 
 
 def _media_default(mod, name: str, prompt: str | None) -> None:
@@ -10242,6 +10295,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int)
     s.add_argument("--out", help="directory (default: a new one under $WB_HOME/images)")
     s.add_argument("--engine", help="an engine from images.json (default: its \"default\", else the first)")
+    s.add_argument("--role", help="a role whose model is an image engine (wb route <role> --generator image:<engine>, #1652)")
     s.add_argument("--ref", action="append", help="a reference image (repeatable), for engines "
                    "that take them")
     s.add_argument("--list", action="store_true", help="the configured engines")
@@ -10263,6 +10317,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--lyrics", metavar="FILE", help="lyrics for a song (- reads stdin)")
     s.add_argument("--seed", type=int)
     s.add_argument("--engine", help="an engine from audio.json")
+    s.add_argument("--role", help="a role whose model is an audio engine (wb route <role> --generator audio:<engine>, #1652)")
     s.add_argument("--out", help="directory (default: a new one under $WB_HOME/audio)")
     s.add_argument("--no-check", action="store_true", help="skip the listener and the spectrograms")
     s.add_argument("--list", action="store_true", help="the configured engines")
@@ -10536,6 +10591,8 @@ def parser() -> argparse.ArgumentParser:
                    "hands library skills per task), mine (only the role's own list), or the list itself (#1652)")
     s.add_argument("--skill-from", metavar="PATH", help="a role: add this SKILL.md (or a directory holding one) "
                    "to the skill library and to the role's own list, Skills mine (#1652)")
+    s.add_argument("--generator", metavar="image:ENGINE|audio:ENGINE|none", help="a role: its model is an engine of "
+                   "images.json or audio.json, called by wb image|audio --role (none: its chat model again, #1652)")
     s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars ($"
                    f"{routes.DAY_USD_SUGGEST:g} when the first role goes to API, unless set)")
     s.add_argument("--json", action="store_true", help="show: the roles as JSON, each API model's "

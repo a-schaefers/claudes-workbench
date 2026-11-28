@@ -265,7 +265,9 @@ A flow you write (`--plan FILE`) and the role cards: `reference/deep.md`.
 
 Every role has a *used for* (the built-ins' above, until the user rewrites one) and Skills: Auto
 (you hand skills as below) or the user's own (`skills: only …`, or `none`): pass such a role no
-`--skill` (wb refuses it), as its skills are the user's choice.
+`--skill` (wb refuses it), as its skills are the user's choice. A role `wb route` lists as `generator: image
+…` or `audio …` makes files, not code: call it with `wb image --role <r>` or `wb audio --role <r>` and
+art-direct its candidates as below.
 
 Pick `--role` as you would `--size` (`--size trivial|significant` alone still works: its role is
 the size's name; both given, the role picks the model and the size the slice). The role runs

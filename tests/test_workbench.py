@@ -2769,8 +2769,10 @@ class Lifecycle(Base):
         # #1584 (the bar loop, 2026-11-26): read, edit 41 -> 43, test, read, edit 43 -> 41, test:
         # each edit reset the explore count and no block repeated in CYCLE, so every round ran to
         # its 40-minute wall. The runner judges an edit by the tree it leaves
-        self.start("t-flip", "flip", "--round-timeout", "40")
-        st = wait_phase("t-flip", {"stuck"}, timeout=90)
+        # the wall well past the guard: at 40 s a slow runner's 40-odd calls reached it first (CI,
+        # 2026-11-28: WSL and the newest-OpenCode run stopped it as "ran past its 0-minute limit")
+        self.start("t-flip", "flip", "--round-timeout", "900")
+        st = wait_phase("t-flip", {"stuck"}, timeout=600)
         self.assertEqual((st["last"], st["nudges"]),
                          ("40 tool calls without changing a file in the task, even after a nudge", 1))
 
@@ -2839,7 +2841,8 @@ class Lifecycle(Base):
         # #1386's fix waits on a command in the foreground only: one a shell call left running
         # (a dev server) is no wait, and the model thinking beside it is nudged, then stopped
         self.start("t-bgthink", "bgthink", "--think-timeout", "2", "--silence-timeout", "120")
-        st = wait_phase("t-bgthink", {"stuck"}, timeout=40)
+        # 120 s: a loaded runner was still in round 2, on its way to the stop, at 40 (2026-11-28)
+        st = wait_phase("t-bgthink", {"stuck"}, timeout=120)
         self.assertIn("even after a nudge", st["last"])
         self.assertEqual((st["nudges"], st["round"]), (1, 2))
 
@@ -5774,14 +5777,20 @@ class Lifecycle(Base):
         wait_phase("t-l1", {"review"})
         fd = os.open(self.repo / ".git" / gitops.MERGE_LOCK, os.O_RDONLY | os.O_CREAT)
         fcntl.flock(fd, fcntl.LOCK_EX)  # another accept's merge, under way
-        done = threading.Timer(1.5, os.close, (fd,))  # it finishes
+        err = io.StringIO()
+
+        def finish():  # it finishes once this accept waits on it: a 1.5 s timer let go before
+            deadline = time.time() + 120  # a slow macOS runner's accept got there (2026-11-28)
+            while "waiting for another merge into" not in err.getvalue() and time.time() < deadline:
+                time.sleep(0.05)
+            os.close(fd)
+        done = threading.Thread(target=finish)
         try:
             with mock.patch.object(gitops, "MERGE_WAIT", 1), \
                     self.assertRaisesRegex(gitops.GitError, "another merge into .* held it for 1s"):
                 with gitops.merge_lock(self.repo):
                     pass
             done.start()
-            err = io.StringIO()
             with redirect_stderr(err):
                 out = run_wb("accept", "t-l1", "-m", "feat: answer", "--merge")
         finally:
@@ -8744,10 +8753,10 @@ class Context(Base):
         self.assert_settled("t-sqs", st, rows, "no output for 0 minutes")
 
     def test_a_self_review_past_the_rounds_wall_on_the_green_tree_goes_to_review(self):
-        # #1261: the round's wall, the same
+        # #1261: the round's wall, the same; under a minute it says seconds (it said "0-minute", 2026-11-28)
         st, rows = self.quiet_self_review("t-sqw", "--round-timeout", "6", "--silence-timeout", "120",
                                           "--think-timeout", "120")
-        self.assert_settled("t-sqw", st, rows, "the round ran past its 0-minute limit")
+        self.assert_settled("t-sqw", st, rows, "the round ran past its 6-second limit")
 
     def test_a_self_review_nudged_mid_check_then_quiet_again_on_the_green_tree_goes_to_review(self):
         # #1261: the nudge's round, stalled again, was the think guard's "even after a nudge"
@@ -10033,7 +10042,12 @@ class Steering(Base):
         for name in ("t-s2", "t-s1"):                       # the shutdown signals them all
             os.kill(store.Task(name).status["pid"], signal.SIGTERM)
         for name in ("t-s1", "t-s2"):
-            self.assertEqual(wait_phase(name, {"stuck"}, timeout=40)["last"], runner.SIGNAL_STOP)
+            try:
+                st = wait_phase(name, {"stuck"}, timeout=40)
+            except AssertionError as e:  # once on CI (2026-11-28), t-s2 ran on: its log says why next time
+                log = store.Task(name).dir / "runner.log"
+                raise AssertionError(f"{e}\nrunner.log:\n{log.read_text()[-3000:] if log.exists() else '(none)'}") from None
+            self.assertEqual(st["last"], runner.SIGNAL_STOP)
         rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
         self.assertEqual([(r["task"], r["kind"]) for r in rows], [("t-s1", "stuck")])
         self.assertIn("2 tasks' runners were stopped by a signal", rows[0]["text"])
@@ -15355,7 +15369,7 @@ class Lane(Base):
             env = runner.agent_env(task)
             self.assertEqual(env["pnpm_config_store_dir"], "/srv/pnpm-store")
             self.assertNotIn("npm_config_store_dir", env)
-        self.assertEqual(given()[0], str(home / ".local/share/pnpm/store"))
+        self.assertEqual(given()[0], str(home / default))  # macOS's own there too (the nightly, 2026-11-28)
 
     @home_outside_the_lane
     def test_the_homes_of_the_tools_the_wider_allowlist_added_are_in_the_lane_not_their_settings(self):
@@ -50391,6 +50405,52 @@ class RoleResolution(Base):
         with self.assertRaises(routes.RoutesError) as e:
             routes.read()
         self.assertIn("trivial's skills are skill names", str(e.exception))
+
+    def test_a_roles_model_can_be_an_image_or_audio_engine_called_by_wb_image_or_audio_role_1652(self):
+        # #1652 (the owner, 2026-11-28): roles such as an image generator, a sound effects or music
+        # generator, "each on an API or local model", their model an engine and no agent
+        os.environ["WB_IMAGES"] = str(Path(self.tmp.name) / "images.json")
+        os.environ["WB_AUDIO"] = str(Path(self.tmp.name) / "audio.json")
+        Path(os.environ["WB_IMAGES"]).write_text(json.dumps({"sketch": {"command": f"{sys.executable} -c pass {{out}}"}}))
+        Path(os.environ["WB_AUDIO"]).write_text(json.dumps({"ears": {"command": f"{sys.executable} -c pass {{out}}",
+                                                                    "kind": "listen"}}))
+        self.set_role("add", "icons", "--label", "Icons", "--used-for", "app icons")
+        for gen, said in (("image:nope", "no image engine 'nope'"), ("audio:ears", "ears is the listener"),
+                          ("video:x", "image:<engine>, audio:<engine> or none")):
+            code, _, err = self.wb("route", "icons", "--generator", gen)
+            self.assertEqual(code, 3, gen)
+            self.assertIn(said, err)
+        self.assertIsNone(routes.generator_of("icons"))
+        self.set_role("icons", "--generator", "image:sketch")
+        self.assertEqual(routes.generator_of("icons"), ("image", "sketch"))
+        self.assertIn('icons (the user\'s own, "Icons", used for: app icons) generator image sketch (wb image --role icons)',
+                      routes.summary(routes.read()))
+        self.assertIn("icons        generator: image engine sketch (wb image --role icons)", self.wb("route")[1])
+        # wb start points at wb image; wb image --role runs the role's engine
+        code, _, err = self.begin("t-icon", "--role", "icons")
+        self.assertEqual(code, 2)
+        self.assertIn('icons makes images with sketch, not code: wb image --role icons "<the brief>"', err)
+        self.assertFalse(store.Task("t-icon").dir.exists())
+        from workbench import images
+        ran = []
+        with mock.patch.object(images, "generate", lambda prompt, out, **kw: ran.append(kw["name"]) or []):
+            code, _, err = self.wb("image", "--role", "icons", "a red apple icon")
+        self.assertEqual((code, ran), (0, ["sketch"]), err)
+        for argv, said in ((("audio", "--role", "icons", "x"), "icons makes images with sketch: wb image --role icons"),
+                           (("image", "--role", "trivial", "x"), "trivial has no generator"),
+                           (("image", "--role", "icons", "--engine", "other", "x"), "two engines")):
+            code, _, err = self.wb(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn(said, err)
+        # none: the chat model again, its side as it was
+        self.set_role("icons", "--generator", "none")
+        self.assertIsNone(routes.generator_of("icons"))
+        self.assertEqual(self.begin("t-icon2", "--role", "icons")[0], 0)
+        # a hand edit's bad generator is refused by name
+        self.routes.write_text(json.dumps({"roles": {"trivial": {"via": "gpu", "generator": "video:x"}}}))
+        with self.assertRaises(routes.RoutesError) as e:
+            routes.read()
+        self.assertIn("trivial's generator is image:<engine> or audio:<engine>", str(e.exception))
 
     def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):
         # #1237 (2026-11-24): an Anthropic adaptive model with no `none` runs on its bare id,
