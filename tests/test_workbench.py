@@ -2769,8 +2769,10 @@ class Lifecycle(Base):
         # #1584 (the bar loop, 2026-11-26): read, edit 41 -> 43, test, read, edit 43 -> 41, test:
         # each edit reset the explore count and no block repeated in CYCLE, so every round ran to
         # its 40-minute wall. The runner judges an edit by the tree it leaves
-        self.start("t-flip", "flip", "--round-timeout", "40")
-        st = wait_phase("t-flip", {"stuck"}, timeout=90)
+        # the wall well past the guard: at 40 s a slow runner's 40-odd calls reached it first (CI,
+        # 2026-11-28: WSL and the newest-OpenCode run stopped it as "ran past its 0-minute limit")
+        self.start("t-flip", "flip", "--round-timeout", "900")
+        st = wait_phase("t-flip", {"stuck"}, timeout=600)
         self.assertEqual((st["last"], st["nudges"]),
                          ("40 tool calls without changing a file in the task, even after a nudge", 1))
 
@@ -5774,14 +5776,20 @@ class Lifecycle(Base):
         wait_phase("t-l1", {"review"})
         fd = os.open(self.repo / ".git" / gitops.MERGE_LOCK, os.O_RDONLY | os.O_CREAT)
         fcntl.flock(fd, fcntl.LOCK_EX)  # another accept's merge, under way
-        done = threading.Timer(1.5, os.close, (fd,))  # it finishes
+        err = io.StringIO()
+
+        def finish():  # it finishes once this accept waits on it: a 1.5 s timer let go before
+            deadline = time.time() + 120  # a slow macOS runner's accept got there (2026-11-28)
+            while "waiting for another merge into" not in err.getvalue() and time.time() < deadline:
+                time.sleep(0.05)
+            os.close(fd)
+        done = threading.Thread(target=finish)
         try:
             with mock.patch.object(gitops, "MERGE_WAIT", 1), \
                     self.assertRaisesRegex(gitops.GitError, "another merge into .* held it for 1s"):
                 with gitops.merge_lock(self.repo):
                     pass
             done.start()
-            err = io.StringIO()
             with redirect_stderr(err):
                 out = run_wb("accept", "t-l1", "-m", "feat: answer", "--merge")
         finally:
@@ -8744,10 +8752,10 @@ class Context(Base):
         self.assert_settled("t-sqs", st, rows, "no output for 0 minutes")
 
     def test_a_self_review_past_the_rounds_wall_on_the_green_tree_goes_to_review(self):
-        # #1261: the round's wall, the same
+        # #1261: the round's wall, the same; under a minute it says seconds (it said "0-minute", 2026-11-28)
         st, rows = self.quiet_self_review("t-sqw", "--round-timeout", "6", "--silence-timeout", "120",
                                           "--think-timeout", "120")
-        self.assert_settled("t-sqw", st, rows, "the round ran past its 0-minute limit")
+        self.assert_settled("t-sqw", st, rows, "the round ran past its 6-second limit")
 
     def test_a_self_review_nudged_mid_check_then_quiet_again_on_the_green_tree_goes_to_review(self):
         # #1261: the nudge's round, stalled again, was the think guard's "even after a nudge"
@@ -10033,7 +10041,12 @@ class Steering(Base):
         for name in ("t-s2", "t-s1"):                       # the shutdown signals them all
             os.kill(store.Task(name).status["pid"], signal.SIGTERM)
         for name in ("t-s1", "t-s2"):
-            self.assertEqual(wait_phase(name, {"stuck"}, timeout=40)["last"], runner.SIGNAL_STOP)
+            try:
+                st = wait_phase(name, {"stuck"}, timeout=40)
+            except AssertionError as e:  # once on CI (2026-11-28), t-s2 ran on: its log says why next time
+                log = store.Task(name).dir / "runner.log"
+                raise AssertionError(f"{e}\nrunner.log:\n{log.read_text()[-3000:] if log.exists() else '(none)'}") from None
+            self.assertEqual(st["last"], runner.SIGNAL_STOP)
         rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
         self.assertEqual([(r["task"], r["kind"]) for r in rows], [("t-s1", "stuck")])
         self.assertIn("2 tasks' runners were stopped by a signal", rows[0]["text"])
@@ -15355,7 +15368,7 @@ class Lane(Base):
             env = runner.agent_env(task)
             self.assertEqual(env["pnpm_config_store_dir"], "/srv/pnpm-store")
             self.assertNotIn("npm_config_store_dir", env)
-        self.assertEqual(given()[0], str(home / ".local/share/pnpm/store"))
+        self.assertEqual(given()[0], str(home / default))  # macOS's own there too (the nightly, 2026-11-28)
 
     @home_outside_the_lane
     def test_the_homes_of_the_tools_the_wider_allowlist_added_are_in_the_lane_not_their_settings(self):
