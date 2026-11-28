@@ -1004,8 +1004,9 @@ const ROUTES_EDIT = 'workbench: not edited: the roles change only through wb rou
 const ROUTE_TEXT = new RegExp(String.raw`(?:\bwb|-m${W}workbench[\w.]*)${W}(?:route\b|settings${W}set\b|start\b[^\n]*[\s'",]--m)`, 'i')
 // Said with the roles. Roles are settings, and Claude never changes one unasked (the owner's locked
 // rule, 2026-11-24): #1322 tried "Run it when it is the right call", and it went back
-const ROUTES_RULE = 'Never pass --model for an API model or change a role without the user\'s yes (the mod ' +
-  'asks them in a dialog); recommend only.'
+const ROUTES_RULE = 'Pick each task\'s role (--role) by what it is used for; a role marked [skills: …] gets the ' +
+  'user\'s own skills, so pass it no --skill (#1652). Never pass --model for an API model or change a role without ' +
+  'the user\'s yes (the mod asks them in a dialog); recommend only.'
 
 // Each wb route and each wb start with a --model (any abbreviation: --m…) in a command line, as
 // the arguments `wb route --dry-run --json` takes for it: a route's own, or `--start` and the
@@ -1136,8 +1137,11 @@ export function routesSummary(doc: Row): string {
   const names = [...ROLES, ...Object.keys(rows).filter(r => !(ROLES as readonly string[]).includes(r) && rows[r]?.custom === true)]
   const roles = names.map(r => {
     const row = rows[r] ?? {}
-    // a role of the user's own: its label, its like and what it is for (routes.summary's `own`)
-    const own = row.custom === true ? ` (the user's own, "${row.label}", works as ${row.like}${row.about ? `: ${row.about}` : ''})` : ''
+    // a role of the user's own: its label and its Used for, a built-in's Used for once rewritten,
+    // either's Skills when Mine (routes.summary's `own`, #1652)
+    let own = row.custom === true ? ` (the user's own, "${row.label}", ${row.about ? `used for: ${row.about}`
+      : 'no Used for yet: don\'t pick it until the user gives one'})` : row.about ? ` (used for: ${row.about})` : ''
+    if (row.skills_mode === 'mine') own += Array.isArray(row.skills) && row.skills.length ? ` [skills: only ${row.skills.join(', ')}]` : ' [skills: none]'
     const gpu = typeof row.gpu === 'string' && row.gpu ? row.gpu : 'auto'
     const thinking = row.thinking === 'on' ? 'on' : 'off'
     // an OpenRouter role's backends (routes.json `order`): where its code goes, so a change of them
@@ -1170,11 +1174,16 @@ function routesValid(doc: unknown): doc is Row {
   if (![undefined, 'wait', 'api'].includes(d.busy)) return false
   if (d.roles === undefined) return true
   if (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles)) return false
-  // a role of the user's own (#1625): `custom`, its name and label and like as routes.custom_why reads them
+  // a role of the user's own (#1625): `custom`, its name and label, and a like if any (#1652: no
+  // longer asked), as routes.custom_why reads them
   const own = (r: string, row: any) => row?.custom === true && /^[a-z][a-z0-9-]{1,23}$/.test(r) &&
-    typeof row.label === 'string' && !!row.label.trim() && (ROLES as readonly string[]).includes(row.like)
+    typeof row.label === 'string' && !!row.label.trim() && (row.like == null || (ROLES as readonly string[]).includes(row.like))
+  // every role's Used for and Skills (#1652): routes.normalize's checks
+  const described = (row: any) => (row.about == null || typeof row.about === 'string') &&
+    (row.skills == null || (Array.isArray(row.skills) && row.skills.every((n: unknown) => typeof n === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(n)))) &&
+    [undefined, 'auto', 'mine'].includes(row.skills_mode)
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => ((ROLES as readonly string[]).includes(r) || own(r, row)) &&
-    row && typeof row === 'object' && [undefined, 'gpu', 'api'].includes(row.via) &&
+    row && typeof row === 'object' && described(row) && [undefined, 'gpu', 'api'].includes(row.via) &&
     [undefined, 'off', 'on'].includes(row.thinking) && [undefined, 'off', 'on'].includes(row.thinking_review) &&
     (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)) &&
     (row.order == null || (Array.isArray(row.order) && row.order.every((b: unknown) => typeof b === 'string' && !!b.trim()))) &&
@@ -1188,7 +1197,9 @@ function routesValid(doc: unknown): doc is Row {
 // `web`: the newest change a role records was the web app's (`by`/`gpu_by` "web", #1283); `stamp`:
 // that change's time (s), so a later change that stamps no role (the day cap, Agents, busy) isn't
 // credited to it
-type Routes = { said: string; api: boolean; cap: number | null; web?: boolean; stamp?: number }
+// `picks`: a role the orchestrator picks by its Used for or Skills (a user's own, a rewritten Used
+// for, Skills Mine: #1652), so the session's first context says the roles with no API model too
+type Routes = { said: string; api: boolean; cap: number | null; web?: boolean; stamp?: number; picks?: boolean }
 async function readRoutes($: any): Promise<Routes> {
   const text: string | undefined = await $.fs.read(await routesPath($)).catch(() => undefined)
   if (text === undefined) return { said: '', api: false, cap: null }
@@ -1202,7 +1213,8 @@ async function readRoutes($: any): Promise<Routes> {
   const rows = Object.values((doc.roles ?? {}) as Record<string, Row>)
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
   const plain = cap === null && (doc.use ?? 'both') === 'both' && (doc.busy ?? 'wait') === 'wait' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
-    !r.api && (r.thinking ?? 'off') === 'off' && (r.thinking_review ?? 'off') === 'off' && !r.fallback)
+    !r.api && (r.thinking ?? 'off') === 'off' && (r.thinking_review ?? 'off') === 'off' && !r.fallback &&
+    !(r.custom !== true && r.about) && r.skills_mode !== 'mine')
   let newest = -Infinity, by = ''
   for (const r of rows) {
     for (const [ts, who] of [[r.ts, r.by], [r.gpu_ts, r.gpu_by]]) {
@@ -1210,7 +1222,8 @@ async function readRoutes($: any): Promise<Routes> {
     }
   }
   return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap,
-    web: by === 'web', stamp: newest > -Infinity ? newest : undefined }
+    web: by === 'web', stamp: newest > -Infinity ? newest : undefined,
+    picks: rows.some(r => r.custom === true || !!r.about || r.skills_mode === 'mine') }
 }
 const DEFAULT_ROUTES = routesSummary({})
 const ROUTES_FRESH_S = 120 // a role stamp this new, with none told this load, is this change's
@@ -3719,8 +3732,8 @@ export const register: Register = (on, options) => {
         mem.awayNoted = true
       } else if (say === 'wakeOff') blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
       else if (say === 'routes') { // read while delegating or with a task open, as `wanted` does
-        const routes = await readRoutes($) // once any role has an API model (#1014)
-        if (routes.api) blocks.push({ name: 'workbench-routes', text: ROUTES_NOTE(routes) })
+        const routes = await readRoutes($) // once any role has an API model (#1014), or one to pick by its Used for (#1652)
+        if (routes.api || routes.picks) blocks.push({ name: 'workbench-routes', text: ROUTES_NOTE(routes) })
       }
     }
     const { ok, out: status, aborted } = await runWb($, ['status', ...(await scope($))])

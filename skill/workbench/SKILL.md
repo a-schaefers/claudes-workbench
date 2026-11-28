@@ -261,7 +261,11 @@ A flow you write (`--plan FILE`) and the role cards: `reference/deep.md`.
 | `--role significant` | new feature, multi-file change, refactor, non-obvious bug, design judgment, >~50 lines |
 | `--role trivial` | rename, string/config tweak, a test for existing code, small single-function change, boilerplate |
 | `--role writing` | prose: docs, a README, release notes, messages (it slices like significant) |
-| `--role <the user's own>` | a role the user added (`wb route` lists it with what it is for): use it when the request names it or fits what it is for |
+| `--role <the user's own>` | a role the user added: `wb route` lists each role's *used for*; use it when the request names it or fits that (never one with no used for yet) |
+
+Every role has a *used for* (the built-ins' above, until the user rewrites one) and Skills: Auto
+(you hand skills as below) or the user's own (`skills: only …`, or `none`): pass such a role no
+`--skill` (wb refuses it), as its skills are the user's choice.
 
 Pick `--role` as you would `--size` (`--size trivial|significant` alone still works: its role is
 the size's name; both given, the role picks the model and the size the slice). The role runs
@@ -430,7 +434,7 @@ in ~30 minutes as three, every hidden check passing.)
   yourself rather than describing it again.
 
 **Skills for the agents** are yours to write, hand out (`wb start … --skill <name>`, 0–2 that fit
-the task) and keep honest. `reference/skills.md` has how: read it before you write, patch, import
+the task; never to a role with the user's own skills) and keep honest. `reference/skills.md` has how: read it before you write, patch, import
 or retire one, or triage lessons. **Images** (a sprite, an icon): a local engine draws them, you
 art-direct (`wb image --list`); read `reference/images.md` first. **Audio** (a voice line, a sound,
 music): the same with `wb audio --list`, but you can't hear: read `reference/audio.md` first.

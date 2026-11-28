@@ -86,7 +86,8 @@ export const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb
   'you pick, and the GPU lease, the provider slots and the day cap decide what runs together. Review each result ' +
   'on its own merits; merge logic first, then tests, then UI or docs.'
 export const ROUTES_NOTE = (routes: string) => `Roles (the user's, \`wb route\`):\n${routes}\n` +
-  'Never pass --model for an API model or change a role without the user\'s yes (wb refuses it without ' +
+  'Pick each task\'s role (--role) by its "used for"; a role with "skills: only …" or "skills: none" gets the user\'s ' +
+  'own skills, so pass it no --skill (#1652). Never pass --model for an API model or change a role without the user\'s yes (wb refuses it without ' +
   'their yes); recommend only.'
 // The mod's AWAY_NOTE and WAKE_OFF_NOTE in OpenCode's words: the web chat's tool, the plugin's
 // `wake` option (notices.ts), the TUI's toasts

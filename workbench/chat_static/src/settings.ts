@@ -358,8 +358,8 @@
     if (row.says) box.append(para('small set-says', row.says))
   }
 
-  // Add a role (#1625): its fields, sent as one JSON string by Add; a field left wrong says why
-  // under the form, nothing sent
+  // Add a role (#1625), a role's Used for and skill upload (#1652): its fields, sent as one JSON
+  // string by its button; a field left wrong says why under the form, nothing sent
   function form(row: SettingRow, box: HTMLElement) {
     if (row.text) box.append(para('small set-says', row.text))
     const got: Record<string, () => string> = {}
@@ -373,12 +373,27 @@
         sel.dataset.field = f.name
         lab.append(sel)
         got[f.name] = () => sel.value
+      } else if (f.kind === 'file') {
+        // a SKILL.md (#1652): its text, read when chosen; one past `max` is said, never sent
+        const input = el('input', 'set-file')
+        input.type = 'file'
+        input.accept = '.md,text/markdown,text/plain'
+        input.dataset.field = f.name
+        let text = ''
+        input.addEventListener('change', async () => {
+          const file = input.files?.[0]
+          text = file ? await file.text() : ''
+          if (f.max && text.length > f.max) { text = ''; WB.toast(`${f.label}: up to ${f.max.toLocaleString()} characters`, { error: true }) }
+        })
+        lab.append(input)
+        got[f.name] = () => text
       } else {
         const input = el('input', 'set-text')
         input.type = 'text'
         input.dataset.field = f.name
         if (f.max) input.maxLength = f.max
         if (f.hint) input.placeholder = f.hint
+        if (f.value) input.value = f.value  // a role's Used for as it is (#1652)
         lab.append(input)
         got[f.name] = () => input.value.trim()
       }

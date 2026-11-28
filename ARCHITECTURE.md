@@ -5378,11 +5378,16 @@ Three built-in roles (`routes.ROLES`, #1014): `significant` (complex coding), `t
 (`routes.LABELS`); files and commands keep the role names.
 
 **The user's own roles** (#1625, the owner, 2026-11-27: "unable to create my own new roles, locked to
-only having the three default ones"): `wb route add <name> --label TEXT --like trivial|significant|writing
-[--about TEXT]` (Settings' **Add a role**, a `form` row in Agents and roles) adds one to routes.json:
-`custom: true`, its `label`, `like` (the built-in it works as: `routes.kind_of`, its prompt and handbook,
-its slice size from `role_and_size` and the GPU router's record, `router.record_role`) and `about` (what it is
-for, which the orchestrator agent picks it by; the roles' summary says it). A name is 2 to 24 lowercase
+only having the three default ones"): `wb route add <name> --label TEXT --used-for TEXT` (Settings' **Add a
+role**, a `form` row in Agents and roles) adds one to routes.json: `custom: true`, its `label` and `about`, its
+**Used for** (#1652, the owner, 2026-11-28: "used for should not be optional either"): what the orchestrator
+agent picks it by, required (`routes.used_for_why`; `--about` is the flag's old name). **Works as** is gone
+from the form and from new writes (#1652: "works as is load bearing something that i think maybe it shouldnt
+be in the UI"): `--like trivial|significant|writing` is still taken and a role from #1625 keeps its `like`
+(`routes.kind_of`: its prompt and handbook, its slice size from `role_and_size` and the GPU router's record,
+`router.record_role`); without one a role works as significant coding's defaults. One from before #1652 with no
+`about` is kept and runs; the roles' summary says `no Used for yet: don't pick it until the user gives one`, and
+Settings' Used for row says so. A name is 2 to 24 lowercase
 letters, digits or dashes from a letter, never a built-in's or one of `wb route`'s words (`RESERVED`), up to
 `CUSTOM_MAX` 12 (`routes.custom_why`, which `normalize` reads too: any other unknown role is still a hand
 edit's typo, refused by name). It starts on the GPU, the router picking, thinking off, so the add sends
@@ -5394,9 +5399,25 @@ every role (the built-ins, then the user's in the file's order), `all_roles()` t
 its name on screen: every loop over the roles reads them (wb route's lines and JSON, wb models, wb doctor,
 wb scout, wb schedule's money checks, the driver's models, the summary and the mod's `routesSummary`,
 `routesValid`). `wb start --role <name>` takes any of them (exit 2 for none), and task.json keeps `like`
-for a custom one, which results.jsonl copies (`tuning.work` files a writing-like role's rows as writing's;
+for a custom one that has it, which results.jsonl copies (`tuning.work` files a writing-like role's rows as writing's;
 a coding one's go by `size` as before). Flows and role cards may name one for a stage or an escalation
-(`cards.load`, `runs.validate`). Each role stores both sides and the
+(`cards.load`, `runs.validate`).
+
+**Every role's Used for and Skills** (#1652). The built-ins' Used for is `routes.USED_FOR` until the user
+rewrites it (`about` on the built-in's row; set back to the default text, it is dropped); `routes.used_for(role)`
+reads either. `wb route <role> --used-for TEXT` sets it, `--skills auto|mine|NAME[,NAME]` the role's Skills
+(`describe_change`; no yes, nothing spends): `auto` (the default) is the orchestrator's per-task skills as ever
+(`--skill`, `skills.suggest`); `mine` (`skills_mode: "mine"`) is the role's own list, `skills` (up to
+`SKILLS_MAX` 10 library names, kept while the role is on auto so Mine comes back as it was), and nothing else:
+`wb start` hands exactly those (a name gone from the library is said and left out), says no library suggestions,
+and refuses a `--skill` (exit 2), as `wb skill hand` and `wb next --skill` refuse one for a task of that role
+(`cli._not_mine`, the role as routes.json has it now). `--skill-from PATH` adds a SKILL.md (or a directory
+holding one) to the library under its frontmatter's name, linted and scanned as `wb skill add` is, and puts
+it on the role's list, Mine: Settings' upload. `wb route` prints a `used for:` line under each role (`· skills:
+only …` or `· skills: none` for Mine), which is the OpenCode plugin's roles note; `--json` gives each role's
+`used_for`, `skills_mode` and `skills`. `routes.summary` and the mod's `routesSummary` say a user's role as
+`(the user's own, "<label>", used for: <text>)`, a built-in's rewritten one as `(used for: <text>)`, and Mine as
+`[skills: only a, b]` or `[skills: none]` (Couplings). Each role stores both sides and the
 selector between them, so flipping never loses the other side's model: `via` (`gpu` or `api`), `gpu`
 (a GPU model's id, or `auto`: the router picks, the default), `api` (an API model's exact OpenCode
 id, kept while the role is on the GPU), `thinking` (`off`, the default, or `on`) and `thinking_review`
@@ -7945,11 +7966,19 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
 ask before an offer over an hour old (#1557's review): a key added to `HELP` needs its case there.
 
 **The rows** (the pane's choices and sentences, moved; each `→` its wb call):
-- *Add a role* (`add-role`, in *shared*, #1625) → `wb route add <name> --label … --like … [--about …]`
-  (`settings._add_role_row`, `ADD_ROLE_LIKE`), checked by `routes.custom_why` before anything runs; each role of
-  the user's own gets a card of its own after the built-ins' (`card`, its `about` as the role row's `text`) and
-  `remove-<role>` under its More → `wb route remove <role>`; `settings.current` reads `add-role` as the user's
-  roles' names and `remove-<role>` as kept or removed, so both are logged.
+- *Add a role* (`add-role`, in *shared*, #1625) → `wb route add <name> --label … --used-for …`
+  (`settings._add_role_row`: Name, Label, Used for, all required; no Works as since #1652), checked by
+  `routes.custom_why` and `used_for_why` before anything runs; each role of the user's own gets a card of its own
+  after the built-ins' (`card`) and `remove-<role>` under its More → `wb route remove <role>`; `settings.current`
+  reads `add-role` as the user's roles' names and `remove-<role>` as kept or removed, so both are logged.
+- *a role's Used for, Skills and skill upload* (every role's card, #1652, `settings._describe_rows`):
+  `usedfor-<role>`, a `form` of one text field holding it now (a field's `value`) → `wb route <role> --used-for
+  TEXT`; `skills-<role>`, Auto or Mine (`SKILLS_STOPS`) → `wb route <role> --skills auto|mine`, its `says` the
+  list while Mine; `skillup-<role>` (under More while Auto), a `form` with a `file` field: the page reads the
+  chosen SKILL.md as text (up to `SKILL_UPLOAD_MAX` 64,000 characters) and the server writes it to
+  `$WB_HOME/uploads/<role>-<hash>/SKILL.md` (`settings._uploaded`) → `wb route <role> --skill-from <that>`.
+  `key_for` reads the three flags back (`DESCRIBE_FLAGS`), `current` reads them through `routes.used_for` and
+  `skills_of`.
 - *a role's card* (`significant`, `trivial`, `writing`, #1553: one role's settings were spread over three cards,
   its API model 2,000 px below the choice that needed it): `role-<role>` → `wb route <role> gpu|api` (a role on
   API whose `api_status` says it can't run says `<Label> can't run on <id>: <why>.`, #1529; with no API model its
@@ -8733,9 +8762,12 @@ the default and no cap is set (nothing to tell), `routes.json can't be read (wb 
 dialog's, the web app's, a terminal's or a hand edit, reaches the conversation as one row; when the newest stamp a role
 records (`by`/`ts`, `gpu_by`/`gpu_ts`) is `web`, the summary ends `(the user, on the web app)` (`readRoutes`' `web`,
 #1283). `prompt.context` adds the
-`workbench-routes` block (delegating, or a task open, as `wanted` reads) once any role has an API model (a GPU pin alone
-adds none): `Roles (the user's, wb route): <summary>. Day cap $5. Never pass --model for an API model or change a role
-without the user's yes (the mod asks them in a dialog); recommend only.` (`ROUTES_RULE`; `No day cap yet.` without one).
+`workbench-routes` block (delegating, or a task open, as `wanted` reads) once any role has an API model, or one the
+orchestrator picks by its Used for or Skills (`readRoutes`' `picks`: a user's own role, a rewritten Used for, Skills
+Mine, #1652; a GPU pin alone adds none): `Roles (the user's, wb route): <summary>. Day cap $5. Pick each task's role
+(--role) by what it is used for; a role marked [skills: …] gets the user's own skills, so pass it no --skill (#1652).
+Never pass --model for an API model or change a role without the user's yes (the mod asks them in a dialog); recommend
+only.` (`ROUTES_RULE`; `No day cap yet.` without one).
 Roles are settings, and Claude never changes one unasked (the owner's locked rule, 2026-11-24): #1322 tried `Run it when
 it is the right call`, and it went back. The `/workbench` skill's text carries it the same way (`unsaid`).
 
@@ -10571,7 +10603,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
 | `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures are plain, no `≈`, from the model's next task; `--clear` the catalog's again. Needs `--input` and `--output`; a cache price left out is the catalog's ratio to input, printed (`models.own_cache`, #1155); refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
-| `wb route add <name> --label TEXT --like trivial\|significant\|writing [--about TEXT]` / `wb route remove <name>` (the user's own roles, #1625: *Roles*) / `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) / `wb route <role> fallback <provider/model>\|gpu\|none` (#1196) / `wb route driver <provider/model>[#variant]\|session` (the OpenCode driver's pin, #1316: *The driver*; alone, it shows the pin, `--json` `{driver, runs?, why?}`, #1530; an API id from a model's call takes the dialog's yes; one OpenCode can't route exits 3) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--thinking-review on\|off` (the self-review alone thinks on API, #1059), `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`, #1021; without them the dialog says `via OpenRouter to its choice of backend`, #1322), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, an API fallback with no cap or one `routes._fallback_check` refuses, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin, a `gpu` fallback and `none` need no dialog. |
+| `wb route add <name> --label TEXT --used-for TEXT [--like trivial\|significant\|writing]` / `wb route remove <name>` (the user's own roles, #1625: *Roles*; Used for required, `--like` no longer asked, #1652) / `wb route <role> --used-for TEXT \| --skills auto\|mine\|NAME[,NAME] \| --skill-from PATH` (a role's Used for and Skills, #1652: *Roles*) / `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) / `wb route <role> fallback <provider/model>\|gpu\|none` (#1196) / `wb route driver <provider/model>[#variant]\|session` (the OpenCode driver's pin, #1316: *The driver*; alone, it shows the pin, `--json` `{driver, runs?, why?}`, #1530; an API id from a model's call takes the dialog's yes; one OpenCode can't route exits 3) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--thinking-review on\|off` (the self-review alone thinks on API, #1059), `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`, #1021; without them the dialog says `via OpenRouter to its choice of backend`, #1322), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, an API fallback with no cap or one `routes._fallback_check` refuses, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin, a `gpu` fallback and `none` need no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--if-due` (#1334: when `cli.scout_offer_due`, `done_at` 7 days old and no `offered_at` since it fell due, prints `cli.SCOUT_OFFER` and writes `offered_at`, under `locks/scout.lock`; else `not due`, exit 1), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill's history, the scan. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (never `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
@@ -10718,6 +10750,7 @@ $WB_HOME (~/.local/state/workbench)
                                  Each writer changes only its own keys, read-modify-write under patches.json.lock (_noting)
   send-ok.json                   {slug, title, body_file (absolute), body (its text), draft, anyway, at}: the mod's "Send it" to one wb patch send; patches._approved consumes it (renamed away, then read), fresh for SEND_OK_SECS 120
   route-ok.json                  {argv (the canonical wb route command) | start {task, model}, change (the line), at, by?}: the mod's "Allow" to one role change or API start; routes.approved consumes it (store.take_approval), fresh for ROUTE_OK_SECS 120
+  uploads/<role>-<sha256[:12]>/SKILL.md   a SKILL.md uploaded in Settings for a role (#1652, settings._uploaded), the same text the same directory; wb route <role> --skill-from reads it into the library
   route-ok.<session>.json,       the same, the OpenCode plugin's form's yes for one OpenCode session (consent.ts writeApproval): only that session's call
   send-ok.<session>.json         takes it (store.approval_name, #1363), never Claude Code's, which takes route-ok.json and send-ok.json
   upstream-ok[.<session>].json   {ids, at}: the daily dialog's (or form's) Send all to exactly those outbox posts; upstream.may_send consumes it
@@ -10839,14 +10872,15 @@ $WB_HOME (~/.local/state/workbench)
   roles/*.md ($WB_ROLES)         the user's role cards, before the shipped agent/roles/; roles/schemas/*.json, before agent/schemas/ (#1278); wb card
                                  copy [--schema] writes one with `from` (a card's frontmatter key, a schema's top-level key, dropped by schema.load), reset moves it to .bak (.bak.2, … when taken)
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
-                                 "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "no_cap": true (the user turned the cap off, `wb route cap off`, #1624: API tasks spend with no daily limit; missing with day_usd null: none set yet, an API task spends nothing), "roles": {"significant"|"trivial"|"writing"|<the user's own, #1625: "custom": true, "label", "like": a built-in, "about"?>:
+                                 "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "no_cap": true (the user turned the cap off, `wb route cap off`, #1624: API tasks spend with no daily limit; missing with day_usd null: none set yet, an API task spends nothing), "roles": {"significant"|"trivial"|"writing"|<the user's own, #1625: "custom": true, "label", "about" (its Used for: required of a new one, #1652), "like"?: a built-in (#1625's, no longer written)>:
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
                                  "thinking_review": "on" (missing: off; the self-review alone thinks, #1059),
                                  "said": the gated change's line, "by": "dialog"|"pane"|"terminal"|"web", "ts", "gpu_by": "terminal"|"web"|"claude"|"opencode"|"agent", "gpu_ts"
                                  (a change that needed no yes: routes.stamp), "order": [backend…] (an OpenRouter role's, wb route --order,
                                  #1021), "thinks": {"api": "<id>", "off": "<line>", "on": "<line>"} (what that API model does with each
                                  thinking setting, routes.with_thinks on every change; said only while "api" is that id, #1263), "fallback": "<exact API id>"|"gpu"
-                                 (wb route <role> fallback, #1196; missing: none)}}, "driver": "<provider/model>[#variant]" (the OpenCode
+                                 (wb route <role> fallback, #1196; missing: none), "about": a built-in's rewritten Used for (missing: routes.USED_FOR's, #1652),
+                                 "skills_mode": "mine" (missing: auto, #1652), "skills": [library skill name…] (the role's own, Mine's)}}, "driver": "<provider/model>[#variant]" (the OpenCode
                                  driver's standing pin, wb route driver, #1316; missing or "session": each session's own)}; a missing role is the GPU's
                                  default; wb route writes it (store.edit_config), the mod reads it (readRoutes); its "day_usd" is the API day
                                  cap the meter keeps (*Spend*, #1019)
@@ -12305,7 +12339,9 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126); a role's
   **`thinking_review`** (#1059) → `routes.role_thinks` (`REVIEW_ONLY`), the mod's `thinkingSaid`
-  (`REVIEW_ONLY`), `routesSummary`, `routesValid` and `readRoutes`' all-default check.
+  (`REVIEW_ONLY`), `routesSummary`, `routesValid` and `readRoutes`' all-default check; a role's **`about`**,
+  **`skills_mode`** and **`skills`** (#1652) → `routes.summary`, `routesSummary` (`used for: …`, `[skills: …]`),
+  `routesValid` (`described`), `readRoutes`' all-default check and `picks`, and wire.d.ts's `RouteJson`.
 - **A `$.state` atom's type** → its tag (`tasks-12`, `live-1`, `chat-5`, `sessions-1`, `pane-2`, `said-3`,
   `splash-1`).
 - **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → wire.d.ts's `ChatLink` (the mod's `WbChat.link`), `LINK_STATES`, `linkOf`,
