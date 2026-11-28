@@ -2841,7 +2841,8 @@ class Lifecycle(Base):
         # #1386's fix waits on a command in the foreground only: one a shell call left running
         # (a dev server) is no wait, and the model thinking beside it is nudged, then stopped
         self.start("t-bgthink", "bgthink", "--think-timeout", "2", "--silence-timeout", "120")
-        st = wait_phase("t-bgthink", {"stuck"}, timeout=40)
+        # 120 s: a loaded runner was still in round 2, on its way to the stop, at 40 (2026-11-28)
+        st = wait_phase("t-bgthink", {"stuck"}, timeout=120)
         self.assertIn("even after a nudge", st["last"])
         self.assertEqual((st["nudges"], st["round"]), (1, 2))
 
