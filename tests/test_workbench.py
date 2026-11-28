@@ -32219,8 +32219,7 @@ class WebChat(Base):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
             run_wb("chat", "on", "--port", str(port))
-        self.assertIn(f"or another program, or a server still on a replaced token) answers on port {port}",
-                      err.getvalue())
+        self.assertIn(f"another program holds port {port} (pid {os.getpid()}: ", err.getvalue())  # named (2026-11-28)
         dead = subprocess.Popen([sys.executable, "-c", "raise SystemExit(1)"])  # a server that dies
         with socket.socket() as sk:
             sk.bind(("127.0.0.1", 0))
@@ -32248,10 +32247,10 @@ class WebChat(Base):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
             run_wb("chat", "on", "--port", str(port))
-        self.assertIn(f"another account's chat", err.getvalue())
+        self.assertIn(f"holds port {port}", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
         # on by default (#1281): a failed `wb chat on` puts the switch back as it was, on
-        self.assertIn("web chat not up: another account's chat", err.getvalue())
+        self.assertIn(f"web chat not up: another program holds port {port}", err.getvalue())
         self.assertTrue(self.chat.is_on())
         self.chat.set_on(False)
         err = io.StringIO()

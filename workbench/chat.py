@@ -1627,10 +1627,57 @@ def _unit_keeps_it() -> bool:
         return False
 
 
+def port_holder(port: int) -> tuple[int, str] | None:
+    """The process of this account's listening on 127.0.0.1 (or every address) at ``port``, as
+    (pid, its command line), when this system can say: /proc's sockets on Linux, lsof on macOS.
+    None for another account's, or when nothing can say."""
+    if Path("/proc/net/tcp").exists():
+        inodes = set()
+        for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                rows = Path(table).read_text().splitlines()[1:]
+            except OSError:
+                continue
+            for row in rows:
+                f = row.split()
+                if len(f) > 9 and f[3] == "0A" and int(f[1].rpartition(":")[2], 16) == port:
+                    inodes.add(f"socket:[{f[9]}]")
+        for d in Path("/proc").iterdir() if inodes else ():
+            if not d.name.isdigit():
+                continue
+            try:
+                if any(os.readlink(fd) in inodes for fd in (d / "fd").iterdir()):
+                    argv = (d / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+                    return int(d.name), argv
+            except OSError:  # gone, or another account's
+                continue
+        return None
+    if not shutil.which("lsof"):
+        return None
+    try:
+        r = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], capture_output=True,
+                           text=True, timeout=5)
+        pid = int(r.stdout.split()[0])
+        argv = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return None
+    return pid, argv
+
+
 def blocked_why(port: int) -> str:
-    """Why the chat can't come up on ``port``: something not this account's chat answers there."""
-    return (f"another account's chat (or another program, or a server still on a replaced token) "
-            f"answers on port {port}: wb chat on <free port> moves the web app there")
+    """Why the chat can't come up on ``port``: something not this account's chat answers there,
+    named when it is this account's. "another account's chat (or another program, ...)" sent the
+    owner looking elsewhere for a test's `wb chat serve` of their own, with another state directory
+    (2026-11-28)."""
+    end = "stop it, or wb chat on <free port> moves the web app there"
+    held = port_holder(port)
+    if held is None:
+        return (f"another account's program (or a chat on a replaced token) answers on port {port}: {end}")
+    pid, argv = held[0], " ".join(held[1].split())
+    what = ("a workbench web app with another state directory or token" if "chat serve" in argv
+            else "another program")
+    return f"{what} holds port {port} (pid {pid}: {argv[:120]}): {end}"
 
 
 def _start_unit(restart: bool = False) -> None:

@@ -7025,14 +7025,21 @@ and nothing else (the phone link and its QR code went with #1616).
   and removed once, #1405). `on` turns it on and runs `chat.ensure`; when that
   ends neither `up` nor `started` the switch goes back as it was (`web chat left off: …` from off,
   `web chat not up: …` from on: left on when it died, the pane read On and pinned a dead link,
-  #690). `chat.start` runs `bin/wb chat serve --port <port>` detached (`chat/serve.log`,
+  #690), but for `blocked` on the user's own port (`chosen_port`): the switch stays on, `web chat on, not up yet:
+  <why>; it comes up by itself once the port is free`, exit 1, as the hosts' `wb chat url` starts it then and shows a
+  link only once it answers (a stray test server held 8090, and a second `wb chat on` was needed once it went,
+  2026-11-28). `chat.start` runs `bin/wb chat serve --port <port>` detached (`chat/serve.log`,
   `chat/serve.pid` `{pid, port, start}`) in an environment without `chat.CLAUDE_VARS`
   (`CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`, and an OpenCode driver's `OPENCODE_SESSION_ID`, #1309):
   started from a Claude session (the mod's `wb chat url`) or an OpenCode driver's tool or shell, the server must never
   run wb as the model (#1281). `chat.wait_up` waits `START_WAIT` 10 s (an exit fails
   at once with serve.log's last line, #200). `chat.who_answers` asks `127.0.0.1` (`chat.BIND`): a response whose
   `X-Workbench-Chat` (`chat.MARK`, on every response) equals `chat.identity(token)` (HMAC-SHA256 of
-  a fixed string keyed by the token) is ours; anything else is "other" (`chat.blocked_why`, #554).
+  a fixed string keyed by the token) is ours; anything else is "other" (`chat.blocked_why`, #554), named when
+  this account's (`chat.port_holder`: the listening socket's inode in `/proc/net/tcp`/`tcp6`, then the process
+  holding it; macOS `lsof -t`, `ps`): `a workbench web app with another state directory or token holds port <p>
+  (pid <n>: <argv>)` or `another program holds …`, else `another account's program (or a chat on a replaced token)
+  answers on port <p>`, each ending `: stop it, or wb chat on <free port> moves the web app there`.
   `chat.running` is `who_answers == "workbench"`. Off: nobody listens or relays, no link, away ends,
   `listener.json` removed; a running server stays up; `off` stops only the process wb started
   (`chat.stop_started`, by pid and command line). While off, `chat.listener()` is None whatever

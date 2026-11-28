@@ -8073,6 +8073,12 @@ def cmd_chat(a):
         was = chat.is_on()
         chat.set_on(True)
         got = chat.ensure(a.port)
+        if got["state"] == "blocked" and a.port == chat.chosen_port():
+            # the user's "on" is kept: something holds their port now, and the next `wb chat url`
+            # (the hosts' check, every minute) starts it once that is gone; the hosts show a link
+            # only once it answers (#690). Put back, a port taken once (a test's stray server)
+            # left it off after the port came free, and a second `wb chat on` was needed (2026-11-28)
+            die(f"web chat on, not up yet: {got['why']}; it comes up by itself once the port is free")
         if got["state"] not in ("up", "started"):
             chat.set_on(was)
             said, why = "left off" if not was else "not up", got["why"]
