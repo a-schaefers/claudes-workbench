@@ -7058,7 +7058,8 @@ and nothing else (the phone link and its QR code went with #1616).
   `X-Workbench-Chat` (`chat.MARK`, on every response) equals `chat.identity(token)` (HMAC-SHA256 of
   a fixed string keyed by the token) is ours; anything else is "other" (`chat.blocked_why`, #554), named when
   this account's (`chat.port_holder`: the listening socket's inode in `/proc/net/tcp`/`tcp6`, then the process
-  holding it; macOS `lsof -t`, `ps`): `a workbench web app with another state directory or token holds port <p>
+  holding it, a descriptor closed since its process's listing skipped alone (`_fd_links`: it skipped the whole
+  process, a holder of this account's read as another's, 2.4); macOS `lsof -t`, `ps`): `a workbench web app with another state directory or token holds port <p>
   (pid <n>: <argv>)` or `another program holds …`, else `another account's program (or a chat on a replaced token)
   answers on port <p>`, each ending `: stop it, or wb chat on <free port> moves the web app there`.
   `chat.running` is `who_answers == "workbench"`. Off: nobody listens or relays, no link, away ends,

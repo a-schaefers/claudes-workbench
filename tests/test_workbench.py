@@ -32249,6 +32249,19 @@ class WebChat(Base):
             run_wb("chat", "on", "--port", str(port))
         self.assertIn(f"holds port {port}", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
+        # a descriptor closed between /proc's listing and its readlink skips that one alone: it
+        # skipped the whole process, so this one read as another account's (CI, 2026-11-28)
+        real, gone = os.readlink, set()
+
+        def closing(fd):
+            if fd.parent.parent.name == str(os.getpid()) and fd.parent.parent not in gone:
+                gone.add(fd.parent.parent)
+                raise FileNotFoundError(fd)
+            return real(fd)
+        with mock.patch.object(self.chat.os, "readlink", closing):
+            if Path("/proc/net/tcp").exists():
+                self.assertEqual(self.chat.port_holder(port)[0], os.getpid())
+                self.assertEqual(gone, {Path(f"/proc/{os.getpid()}")})
         # on by default (#1281): a failed `wb chat on` puts the switch back as it was, on
         self.assertIn(f"web chat not up: another program holds port {port}", err.getvalue())
         self.assertTrue(self.chat.is_on())
@@ -41747,9 +41760,11 @@ class Routes(Base):
                           for r in routes.ROLES}, {r: ("gpu", "auto", "off") for r in routes.ROLES})
         self.assertIsNone(doc["day_usd"])
         code, out, _ = self.route()
+        # each role's Used for under it (#1652)
         self.assertEqual((code, out.splitlines()), (0, [
-            "significant  GPU (the router picks)", "trivial      GPU (the router picks)",
-            "writing      GPU (the router picks)"]))
+            "significant  GPU (the router picks)", f"             used for: {routes.USED_FOR['significant']}",
+            "trivial      GPU (the router picks)", f"             used for: {routes.USED_FOR['trivial']}",
+            "writing      GPU (the router picks)", f"             used for: {routes.USED_FOR['writing']}"]))
         self.assertFalse(self.path.exists())                      # showing writes nothing
         shown = json.loads(self.route("--json")[1])
         self.assertEqual(shown["roles"]["writing"]["label"], "English writing")

@@ -1645,12 +1645,12 @@ def port_holder(port: int) -> tuple[int, str] | None:
         for d in Path("/proc").iterdir() if inodes else ():
             if not d.name.isdigit():
                 continue
-            try:
-                if any(os.readlink(fd) in inodes for fd in (d / "fd").iterdir()):
+            if any(link in inodes for link in _fd_links(d)):
+                try:
                     argv = (d / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
-                    return int(d.name), argv
-            except OSError:  # gone, or another account's
-                continue
+                except OSError:  # gone since
+                    continue
+                return int(d.name), argv
         return None
     if not shutil.which("lsof"):
         return None
@@ -1663,6 +1663,21 @@ def port_holder(port: int) -> tuple[int, str] | None:
     except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
         return None
     return pid, argv
+
+
+def _fd_links(proc: Path):
+    """Where each of a /proc/<pid>'s descriptors points, skipping one closed since it was listed:
+    one closed (a thread's socket, a file read) between the listing and its readlink skipped the
+    whole process, so a holder of this account's read as another account's (CI, 2026-11-28)."""
+    try:
+        fds = list((proc / "fd").iterdir())
+    except OSError:  # gone, or another account's
+        return
+    for fd in fds:
+        try:
+            yield os.readlink(fd)
+        except OSError:
+            continue
 
 
 def blocked_why(port: int) -> str:
