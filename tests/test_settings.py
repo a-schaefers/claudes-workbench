@@ -204,13 +204,17 @@ class Settings(Rows):
             mine = [r for r in rows if r["group"] == name]
             self.assertEqual(mine[0]["key"], f"role-{name}")
             self.assertFalse(mine[0].get("more"))
-            self.assertEqual({r["key"].partition("-")[0] for r in mine[1:]} - {"gpu", "api", "think", "review"}, set())
-            self.assertEqual([r["key"] for r in mine[1:] if not r.get("more")], [f"gpu-{name}"])
+            # its Used for, Skills and skill upload (#1652) after the side, then its models and thinking
+            self.assertEqual([r["key"] for r in mine[1:4]], [f"usedfor-{name}", f"skills-{name}", f"skillup-{name}"])
+            self.assertEqual({r["key"].partition("-")[0] for r in mine[4:]} - {"gpu", "api", "think", "review"}, set())
+            self.assertEqual([r["key"] for r in mine[1:] if not r.get("more")],
+                             [f"usedfor-{name}", f"skills-{name}", f"gpu-{name}"])   # the upload under More on Auto
         doc = json.loads(self.routes.read_text())
         doc["roles"]["trivial"]["via"] = "api"
         self.routes.write_text(json.dumps(doc))
         mine = [r for r in settings.rows(fresh=True) if r["group"] == "trivial"]
-        self.assertEqual([r["key"] for r in mine if not r.get("more")], ["role-trivial", "api-trivial"])
+        self.assertEqual([r["key"] for r in mine if not r.get("more")],
+                         ["role-trivial", "usedfor-trivial", "skills-trivial", "api-trivial"])
         self.assertTrue(next(r for r in mine if r["key"] == "gpu-trivial").get("more"))
         self.routes.write_text(json.dumps({**doc, "roles": {**doc["roles"], "trivial": {**doc["roles"]["trivial"], "via": "gpu"}}}))
         rows = settings.rows(fresh=True)
