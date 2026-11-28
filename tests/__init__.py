@@ -18,6 +18,12 @@ import faulthandler
 import os
 import signal
 import sys
+
+# The suite never reaches the network on wb's own account: the update check's `git fetch` of the
+# clone the tests run from, started by the OpenCode plugin's weekly check in a real-OpenCode test,
+# outlived the test (`index-pack` of 16,508 objects) where the workflow didn't set this
+# (opencode.yml; check.yml did: 2026-11-28). wb's tests of the check unset it themselves.
+os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
 import threading
 import unittest
 

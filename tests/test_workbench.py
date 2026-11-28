@@ -2817,6 +2817,24 @@ class Lifecycle(Base):
         self.assertIn("limit", st["last"])
         self.assertEqual(st.get("guards"), {"round": 1})
 
+    def test_a_command_still_in_the_shell_shim_when_its_call_returned_counts_as_left_running(self):
+        # the WSL nightly (2026-11-28): the call's snapshot ran while its job was still the shim
+        # (SHELL the shim's, before `exec` of the shell, the same pid), so it was skipped there,
+        # then read as a new foreground command, and the think guard never came
+        run_wb("start", "t-shim", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo",
+               "--queue")
+        task = store.Task("t-shim")
+        shim = f"SHELL={context.rules_dir(task) / runner.SHELL_SHIM_DIR}/sh".encode()
+        mark = b"WB_RUN=r1"
+        stage = {"shell": shim}
+        procs = lambda: iter([(4242, 4000, {mark, stage["shell"]})])  # noqa: E731
+        with mock.patch.object(runner, "_procs", procs):
+            left = runner.agent_commands(task, "r1", every=True)         # at the call's return
+            self.assertEqual(runner.agent_commands(task, "r1"), set())   # the shim: no command yet
+            stage["shell"] = b"SHELL=/bin/bash"                          # exec'd its shell
+            self.assertEqual(runner.agent_commands(task, "r1"), {4242})
+            self.assertEqual(runner.agent_commands(task, "r1") - left, set())  # left running, not new
+
     def test_a_job_left_in_the_background_spares_a_thinking_model_no_nudge(self):
         # #1386's fix waits on a command in the foreground only: one a shell call left running
         # (a dev server) is no wait, and the model thinking beside it is nudged, then stopped
@@ -24981,7 +24999,9 @@ class Shot(Base):
         m = json.loads((task.dir / "shots" / "1" / "shots.json").read_text())
         self.assertEqual((m["base"]["ok"], m["candidate"]["ok"]), (True, True))
         self.assertIn(b"old page", Path(m["base"]["image"]).read_bytes())
-        self.assertIn(b"new page", Path(m["candidate"]["image"]).read_bytes())
+        page = task.workdir / "page.txt"  # a miss says which: the worktree rewritten, or the snapshot stale
+        self.assertIn(b"new page", Path(m["candidate"]["image"]).read_bytes(),
+                      f"worktree page.txt: {page.read_bytes()!r}, mtime {page.stat().st_mtime_ns}")
 
 
 class Stats(Base):
@@ -35278,6 +35298,7 @@ class Hardware(unittest.TestCase):
                               ("workbench.hardware._run", run), ("workbench.hardware._read", read),
                               ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob),
                               ("workbench.hardware.powershell", lambda: "powershell.exe"),  # the runs' key
+                              ("workbench.hardware._container_tools", lambda: ("docker", "podman")),
                               ("workbench.hardware.PROC", Path("/fake/proc"))):  # no ollama runs
             patcher = mock.patch(target, value)
             patcher.start()
@@ -35513,6 +35534,16 @@ class Hardware(unittest.TestCase):
             hw = self.fake("Linux", runs={("systemctl",): "LoadState=not-found"})
             env, source = hw.ollama_settings()       # nothing says: wb's own environment, a guess
             self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["ROCR_VISIBLE_DEVICES"], source), ("0", "2", ""))
+
+    def test_podman_is_asked_only_where_it_keeps_something_for_this_user(self):
+        # 2026-11-28: a first `podman ps` builds its storage, seconds on a fresh CI runner, and a
+        # runner stopped meanwhile left it running past the test; with no storage it has no container
+        from workbench import hardware
+        with tempfile.TemporaryDirectory() as data, mock.patch.dict(os.environ, {"XDG_DATA_HOME": data}), \
+                mock.patch("os.geteuid", return_value=1000):
+            self.assertEqual(hardware._container_tools(), ("docker",))
+            (Path(data) / "containers").mkdir()
+            self.assertEqual(hardware._container_tools(), ("docker", "podman"))
 
     def test_an_ollama_container_given_some_gpus_is_budgeted_only_those(self):
         # #463 (the audit of 1.8): --gpus device=1, compose device_ids or --device
