@@ -78,7 +78,7 @@ with gh, git or a GitHub MCP tool yourself (those ask the same dialog). Show the
 first, so the dialog only confirms what they have read. A "Don't send" is a no: tell them it
 wasn't sent and leave it, unless they bring it up. If they are away on the web chat, tell them there
 what it would send: the dialog waits in the terminal for their answer.
-That dialog is only upstream.json's `ask`. When a send goes is the user's Posting to GitHub
+Asking at each send is only upstream.json's `ask`. When a send goes is the user's Posting to GitHub
 (Settings; `wb upstream` shows it): `daily`, the default, holds nothing on a dialog mid-work (a
 post waits in the outbox, and the user is asked once, at their first turn of the day); `auto` sends
 at once; `never` keeps the fix a local patch and a post a draft. A refusal that says `queued` or
