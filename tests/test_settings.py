@@ -32,6 +32,7 @@ def expected(key: str, value) -> list[str]:
     return {"role": ["route", rest, value], "gpu": ["route", rest, "--gpu", value],
             "api": ["route", rest, "--api", value], "think": ["route", rest, "--thinking", value],
             "review": ["route", rest, "--thinking-review", value],  # #1059
+            "skills": ["route", rest, "--skills", value],  # a role's Skills, Auto or Mine (#1652)
             "size": ["model", "sizes", rest, *([] if value == "all" else [value])],
             "media": ["image" if rest == "image" else "audio", "--default", value],
             "ocskill": ["skill", "opencode", rest, value]}[head]  # #1463 P4
