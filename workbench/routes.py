@@ -45,11 +45,28 @@ OPENROUTER_ANY = "via OpenRouter to its choice of backend"
 ROLES = ("significant", "trivial", "writing")
 # how the pane names them (#1023); files and commands keep the role names
 LABELS = {"significant": "Complex coding", "trivial": "Trivial coding", "writing": "English writing"}
+# Every role's Used for (#1652, the owner, 2026-11-28): what the orchestrator agent reads to decide
+# which role a piece of work goes to. A user's role must have one (required: it is all the
+# orchestrator has to pick it by); the built-ins have these until the user rewrites theirs
+# (routes.json `about`, the key #1625 gave a custom role's "what it's for")
+USED_FOR = {"significant": "Code changes that need care: features, fixes across files, refactors, anything with tests to get right",
+            "trivial": "Small mechanical code changes: a rename, a one-line fix, a value or a comment",
+            "writing": "English prose: docs, a README section, release notes, a message"}
+# A role's Skills (#1652): `auto` (the default), the orchestrator hands library skills per task
+# as ever (wb start --skill, skills.suggest); `mine`, the role's own list (`skills`, the user's,
+# uploaded in Settings or named from the library) and nothing else: wb start hands exactly those
+# and refuses a --skill. The list is kept while the mode is auto, so Mine comes back as it was.
+SKILLS_MODES = ("auto", "mine")
+SKILLS_MAX = 10
+SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")  # skills.NAME
 # The user's own roles (#1625, the owner, 2026-11-27: "unable to create my own new roles, locked to
 # only having the three default ones"): routes.json `roles.<name>` with `custom: true`, a `label`,
-# `like` (the built-in it works as: its prompt, slice size and the GPU router's record, as a
-# `--size` would) and an optional `about` (what it is for: the orchestrator agent picks it by
-# that). Each has a side, its models, thinking and a fallback as a built-in's, and the day cap,
+# and `about`, its Used for (#1652: required of a new role; one from before then without it is
+# kept and runs, said as having none, and the orchestrator doesn't pick it). `like` (the built-in
+# it works as: its prompt, slice size and the GPU router's record) is no longer asked (#1652:
+# "works as is load bearing something that i think maybe it shouldnt be in the UI"): a role
+# without one works as significant coding's defaults, and one that has it from #1625 keeps it.
+# Each has a side, its models, thinking and a fallback as a built-in's, and the day cap,
 # local_only and the keyhole apply alike. The built-ins can't be removed; a custom one is added
 # on the GPU (nothing spends) and removed whole. ROLES stays the built-ins: roles_of(doc) is all.
 CUSTOM_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
@@ -149,19 +166,59 @@ def default_role() -> dict:
     return {"via": "gpu", "gpu": AUTO, "thinking": "off"}
 
 
-def custom_why(name: str, label, like, about=None) -> str:
-    """Why a custom role can't be ``name`` with these, or "" (wb route add and normalize alike)."""
+def custom_why(name: str, label, like=None, about=None) -> str:
+    """Why a custom role can't be ``name`` with these, or "" (wb route add and normalize alike).
+    ``like`` may be None (#1652); wb route add requires ``about`` itself (used_for_why)."""
     if not isinstance(name, str) or not CUSTOM_RE.match(name):
         return f"a role's name is 2 to 24 lowercase letters, digits or dashes, starting with a letter, not {name!r}"
     if name in ROLES or name in RESERVED:
         return f"{name} is taken: a built-in role or a word of wb route's"
     if not isinstance(label, str) or not label.strip() or len(label.strip()) > LABEL_MAX:
         return f"{name}'s label is 1 to {LABEL_MAX} characters, not {label!r}"
-    if like not in ROLES:
+    if like is not None and like not in ROLES:
         return f"{name}'s like is one of {', '.join(ROLES)}, not {like!r}"
     if about is not None and (not isinstance(about, str) or len(about) > ABOUT_MAX):
-        return f"{name}'s about is up to {ABOUT_MAX} characters"
+        return f"{name}'s Used for is up to {ABOUT_MAX} characters"
     return ""
+
+
+def used_for_why(role: str, text) -> str:
+    """Why ``text`` can't be ``role``'s Used for, or "": it is required (#1652, the owner: "used
+    for should not be optional either") and at most ABOUT_MAX characters."""
+    if not isinstance(text, str) or not text.strip():
+        return f"{role} needs a Used for: what the orchestrator agent calls it for (--used-for TEXT)"
+    if len(text.strip()) > ABOUT_MAX:
+        return f"{role}'s Used for is up to {ABOUT_MAX} characters, not {len(text.strip())}"
+    return ""
+
+
+def skills_why(role: str, names) -> str:
+    """Why ``names`` can't be ``role``'s skills, or "": library skill names, at most SKILLS_MAX."""
+    if not isinstance(names, list) or not all(isinstance(n, str) and SKILL_NAME_RE.match(n) for n in names):
+        return f"{role}'s skills are skill names, not {names!r}"
+    if len(names) > SKILLS_MAX:
+        return f"{role} has {len(names)} skills, past {SKILLS_MAX}"
+    return ""
+
+
+def used_for(role: str, doc: dict | None = None) -> str:
+    """``role``'s Used for: its `about`, else a built-in's USED_FOR, else "" (a role of the user's
+    own from before #1652 that has none: the orchestrator doesn't pick it)."""
+    try:
+        row = ((doc if doc is not None else read()).get("roles") or {}).get(role) or {}
+    except RoutesError:
+        row = {}
+    return str(row.get("about") or "").strip() or USED_FOR.get(role, "")
+
+
+def skills_of(role: str, doc: dict | None = None) -> tuple[str, list[str]]:
+    """``role``'s Skills: (mode, names), ("auto", []) by default (#1652)."""
+    try:
+        row = ((doc if doc is not None else read()).get("roles") or {}).get(role) or {}
+    except RoutesError:
+        row = {}
+    names = [n for n in row.get("skills") or [] if isinstance(n, str)]
+    return ("mine" if row.get("skills_mode") == "mine" else "auto"), names
 
 
 def roles_of(doc: dict) -> tuple:
@@ -223,7 +280,7 @@ def normalize(doc) -> dict:
         e = roles[r]
         if not isinstance(e, dict) or e.get("custom") is not True:
             raise RoutesError(f"unknown role {r!r} (the roles: {', '.join(ROLES)}, or one wb route add made)")
-        if why := custom_why(r, e.get("label"), e.get("like"), e.get("about")):
+        if why := custom_why(r, e.get("label"), e.get("like"), e.get("about") or None):
             raise RoutesError(why)
     if len(custom) > CUSTOM_MAX:
         raise RoutesError(f"{len(custom)} roles of the user's own, past {CUSTOM_MAX}")
@@ -234,8 +291,24 @@ def normalize(doc) -> dict:
             raise RoutesError(f"{r} is not an object")
         row = default_role()
         if r not in ROLES:
-            row.update(custom=True, label=e["label"].strip(), like=e["like"],
-                       **({"about": e["about"].strip()} if e.get("about") else {}))
+            row.update(custom=True, label=e["label"].strip(), **({"like": e["like"]} if e.get("like") else {}))
+        # every role's Used for and Skills (#1652): a built-in's about overrides its USED_FOR
+        if e.get("about") is not None:
+            if why := (custom_why(r, "x", None, e["about"]) if r not in ROLES else
+                       ("" if isinstance(e["about"], str) and len(e["about"]) <= ABOUT_MAX
+                        else f"{r}'s Used for is up to {ABOUT_MAX} characters")):
+                raise RoutesError(why)
+            if e["about"].strip():
+                row["about"] = e["about"].strip()
+        if e.get("skills") is not None:
+            if why := skills_why(r, e["skills"]):
+                raise RoutesError(why)
+            row["skills"] = list(dict.fromkeys(e["skills"]))
+        if e.get("skills_mode") is not None:
+            if e["skills_mode"] not in SKILLS_MODES:
+                raise RoutesError(f"{r}'s skills_mode is {e['skills_mode']!r}, not auto or mine")
+            if e["skills_mode"] == "mine":
+                row["skills_mode"] = "mine"
         for key, allowed in (("via", VIAS), ("thinking", THINKING), ("thinking_review", THINKING)):
             if key in e:
                 if e[key] not in allowed:
@@ -856,22 +929,58 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
     return _change(doc, day_usd=DAY_USD_SUGGEST, **args)
 
 
-def add_change(doc: dict, name: str, label: str, like: str, about: str | None = None) -> Change:
-    """`wb route add <name> --label … --like …` (#1625): a role of the user's own, on the GPU with
-    the router picking and thinking off, so nothing spends and no yes is taken; its side and models
-    are then set as a built-in's. RoutesError for a name taken, one past CUSTOM_MAX, or a bad
-    label, like or about."""
+def add_change(doc: dict, name: str, label: str, about: str | None, like: str | None = None) -> Change:
+    """`wb route add <name> --label … --used-for …` (#1625, #1652): a role of the user's own, on the
+    GPU with the router picking, thinking off and Skills auto, so nothing spends and no yes is
+    taken; its side, models and skills are then set as a built-in's. RoutesError for a name taken,
+    one past CUSTOM_MAX, a bad label or like, or a Used for missing or too long."""
     if name in doc["roles"]:
         raise RoutesError(f"{name} is a role already (wb route shows them)")
-    if why := custom_why(name, label, like, about):
+    if why := custom_why(name, label, like, about) or used_for_why(name, about):
         raise RoutesError(why)
     if len(roles_of(doc)) - len(ROLES) >= CUSTOM_MAX:
         raise RoutesError(f"{CUSTOM_MAX} roles of your own at most: wb route remove <name> one first")
     new = copy.deepcopy(doc)
-    new["roles"][name] = {**default_role(), "custom": True, "label": label.strip(), "like": like,
-                          **({"about": about.strip()} if about and about.strip() else {})}
-    return Change(new, f"{name}: added, {label.strip()}, working as {like}, on the GPU (the router picks)",
+    new["roles"][name] = {**default_role(), "custom": True, "label": label.strip(), "about": about.strip(),
+                          **({"like": like} if like else {})}
+    return Change(new, f"{name}: added, {label.strip()}, used for {about.strip()}, on the GPU (the router picks)",
                   False, [name])
+
+
+def describe_change(doc: dict, role: str, about: str | None = None, mode: str | None = None,
+                    names: list[str] | None = None) -> Change:
+    """A role's Used for, Skills mode or skill list (#1652): `wb route <role> --used-for TEXT`,
+    `--skills auto|mine|NAME[,NAME]`, `--skill-from PATH` (names given: the list, Mine). Nothing
+    spends, so no yes is taken."""
+    if role not in doc["roles"]:
+        raise RoutesError(f"no role {role!r}: the roles are {', '.join(roles_of(doc))}")
+    new = copy.deepcopy(doc)
+    row, said = new["roles"][role], []
+    if about is not None:
+        if why := used_for_why(role, about):
+            raise RoutesError(why)
+        if role in ROLES and about.strip() == USED_FOR[role]:
+            row.pop("about", None)
+        else:
+            row["about"] = about.strip()
+        said.append(f"used for {about.strip()}")
+    if names is not None:
+        if why := skills_why(role, names):
+            raise RoutesError(why)
+        row["skills"], mode = list(dict.fromkeys(names)), mode or "mine"
+    if mode is not None:
+        if mode not in SKILLS_MODES:
+            raise RoutesError(f"skills are auto or mine, not {mode!r}")
+        if mode == "mine":
+            row["skills_mode"] = "mine"
+        else:
+            row.pop("skills_mode", None)
+        have = row.get("skills") or []
+        said.append("skills: the orchestrator's (auto)" if mode == "auto" else
+                    f"skills: only {', '.join(have)}" if have else "skills: none (mine, the list empty)")
+    if not said:
+        raise RoutesError("nothing to change: --used-for TEXT or --skills auto|mine|NAME[,NAME]")
+    return Change(new, f"{role}: " + "; ".join(said), False, [role])
 
 
 def remove_change(doc: dict, name: str) -> Change:
@@ -1099,10 +1208,14 @@ def summary(doc: dict) -> str:
     out = []
     for r in roles_of(doc):
         row = doc["roles"][r]
-        # a role of the user's own (#1625): its label, the built-in it works as and what it is for,
-        # which the orchestrator agent picks it by (`wb start --role <name>`)
-        own = (f" (the user's own, \"{row['label']}\", works as {row['like']}"
-               + (f": {row['about']}" if row.get("about") else "") + ")") if row.get("custom") else ""
+        # a role of the user's own (#1625): its label and its Used for, which the orchestrator agent
+        # picks it by (`wb start --role <name>`); none (a role from before #1652): not to be picked.
+        # A built-in's Used for only when the user rewrote it, and either's Skills when Mine (#1652)
+        own = (f" (the user's own, \"{row['label']}\", " + (f"used for: {row['about']}" if row.get("about")
+               else "no Used for yet: don't pick it until the user gives one") + ")") if row.get("custom") \
+            else f" (used for: {row['about']})" if row.get("about") else ""
+        if row.get("skills_mode") == "mine":
+            own += f" [skills: only {', '.join(row['skills'])}]" if row.get("skills") else " [skills: none]"
         # an OpenRouter role's backends (`order`, #1021) are where its code goes: left out, a
         # change of them alone reached the conversation as nothing (#1126, 2026-11-23)
         backends = f", backends {', '.join(row['order'])}" if row.get("api") and row.get("order") else ""

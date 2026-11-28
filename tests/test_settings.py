@@ -32,6 +32,7 @@ def expected(key: str, value) -> list[str]:
     return {"role": ["route", rest, value], "gpu": ["route", rest, "--gpu", value],
             "api": ["route", rest, "--api", value], "think": ["route", rest, "--thinking", value],
             "review": ["route", rest, "--thinking-review", value],  # #1059
+            "skills": ["route", rest, "--skills", value],  # a role's Skills, Auto or Mine (#1652)
             "size": ["model", "sizes", rest, *([] if value == "all" else [value])],
             "media": ["image" if rest == "image" else "audio", "--default", value],
             "ocskill": ["skill", "opencode", rest, value]}[head]  # #1463 P4
@@ -121,8 +122,9 @@ class Settings(Rows):
         rows = settings.rows(fresh=True)
         mine = [r for r in rows if r["group"] == "docs-fr"]
         self.assertEqual(mine[0]["key"], "role-docs-fr")
-        self.assertEqual((mine[0]["card"], mine[0]["label"], mine[0]["text"]),
-                         ("French docs", "French docs", "French translations"))
+        self.assertEqual((mine[0]["card"], mine[0]["label"]), ("French docs", "French docs"))
+        used = next(r for r in mine if r["key"] == "usedfor-docs-fr")   # its Used for, a row of its own (#1652)
+        self.assertEqual(used["fields"][0]["value"], "French translations")
         self.assertIn("gpu-docs-fr", [r["key"] for r in mine])
         self.assertEqual(settings.label_of("gpu-docs-fr"), "French docs GPU model")
         rm = next(r for r in mine if r["key"] == "remove-docs-fr")
@@ -132,19 +134,56 @@ class Settings(Rows):
         self.assertEqual(groups.index("docs-fr"), groups.index("writing") + 1)   # after the built-ins' cards
         add = next(r for r in rows if r["key"] == "add-role")
         self.assertEqual((add["group"], add["kind"]), ("shared", "form"))
-        self.assertEqual(settings._argv(add, json.dumps({"name": "tests", "label": "Tests", "like": "trivial"})),
-                         ["route", "add", "tests", "--label", "Tests", "--like", "trivial"])
-        with self.assertRaises(ValueError):
-            settings._argv(add, json.dumps({"name": "Bad Name", "label": "x", "like": "trivial"}))
-        self.assertEqual(settings.key_for(["route", "add", "tests", "--label", "Tests", "--like", "trivial"]),
+        self.assertEqual([f["name"] for f in add["fields"]], ["name", "label", "about"])   # no Works as (#1652)
+        self.assertEqual(settings._argv(add, json.dumps({"name": "tests", "label": "Tests", "about": "the tests"})),
+                         ["route", "add", "tests", "--label", "Tests", "--used-for", "the tests"])
+        for bad in ({"name": "Bad Name", "label": "x", "about": "x"}, {"name": "tests", "label": "Tests", "about": " "}):
+            with self.assertRaises(ValueError):
+                settings._argv(add, json.dumps(bad))
+        self.assertEqual(settings.key_for(["route", "add", "tests", "--label", "Tests", "--used-for", "the tests"]),
                          ("add-role", "tests"))
         self.assertEqual(settings.key_for(["route", "remove", "docs-fr"]), ("remove-docs-fr", "remove"))
         self.assertEqual(settings.key_for(["route", "docs-fr", "api"]), ("role-docs-fr", "api"))
-        got = settings.apply("add-role", json.dumps({"name": "tests", "label": "Tests", "like": "trivial"}))
+        got = settings.apply("add-role", json.dumps({"name": "tests", "label": "Tests", "about": "the tests"}))
         self.assertTrue(got["ok"], got)
         self.assertEqual(json.loads(self.routes.read_text())["roles"]["tests"]["label"], "Tests")
         self.assertTrue(any(ln.startswith("  add-role: Add a role: wb route add <name> --label TEXT")
                             for ln in cli.settings_lines(settings.rows(fresh=True))))
+
+    def test_each_role_card_sets_its_used_for_its_skills_and_takes_an_uploaded_skill_1652(self):
+        # #1652 (the owner, 2026-11-28): a role's "used for" the orchestrator calls it by, and "select if
+        # they receive skills from the orchestrator automatically or use a skill i upload myself"
+        by = {r["key"]: r for r in settings.rows(fresh=True)}
+        used, mode, up = by["usedfor-trivial"], by["skills-trivial"], by["skillup-trivial"]
+        self.assertEqual((used["group"], used["kind"], used["fields"][0]["value"]),
+                         ("trivial", "form", routes.USED_FOR["trivial"]))
+        self.assertEqual((mode["value"], [c["value"] for c in mode["choices"]]), ("auto", ["auto", "mine"]))
+        self.assertTrue(up["more"])                                     # under More while on Auto
+        self.assertEqual(up["fields"][0]["kind"], "file")
+        self.assertEqual(settings._argv(used, json.dumps({"used_for": "renames"})),
+                         ["route", "trivial", "--used-for", "renames"])
+        with self.assertRaises(ValueError):
+            settings._argv(used, json.dumps({"used_for": ""}))           # required, as at the add
+        self.assertTrue(settings.apply("usedfor-trivial", json.dumps({"used_for": "renames"}))["ok"])
+        self.assertEqual(routes.used_for("trivial"), "renames")
+        self.assertEqual(settings.current("usedfor-trivial"), "renames")
+        # the upload: a SKILL.md's text, into the library and onto the role's list, Mine
+        text = "---\nname: house-style\ndescription: Use when renaming anything.\n---\nKeep names short.\n"
+        got = settings.apply("skillup-trivial", json.dumps({"skill": text}))
+        self.assertTrue(got["ok"], got)
+        self.assertEqual(routes.skills_of("trivial"), ("mine", ["house-style"]))
+        by = {r["key"]: r for r in settings.rows(fresh=True)}
+        self.assertEqual((by["skills-trivial"]["value"], by["skills-trivial"]["says"]),
+                         ("mine", "This role's skills: house-style."))
+        self.assertFalse(by["skillup-trivial"]["more"])
+        for bad in ("", "no frontmatter at all", "x" * (settings.SKILL_UPLOAD_MAX + 1)):
+            with self.assertRaises(ValueError):
+                settings._argv(up, json.dumps({"skill": bad}))
+        self.assertEqual(settings.key_for(["route", "trivial", "--skills", "auto"]), ("skills-trivial", "auto"))
+        self.assertEqual(settings.key_for(["route", "trivial", "--skills", "a,b"]), ("skills-trivial", "mine"))
+        self.assertEqual(settings.key_for(["route", "trivial", "--used-for", "x"]), ("usedfor-trivial", "x"))
+        self.assertTrue(settings.apply("skills-trivial", "auto")["ok"])
+        self.assertEqual(routes.skills_of("trivial"), ("auto", ["house-style"]))
 
     def test_deep_workflows_side_is_a_row_of_the_workflows_card_and_its_command_is_logged_1627(self):
         by = {r["key"]: r for r in settings.rows(fresh=True)}
@@ -165,13 +204,17 @@ class Settings(Rows):
             mine = [r for r in rows if r["group"] == name]
             self.assertEqual(mine[0]["key"], f"role-{name}")
             self.assertFalse(mine[0].get("more"))
-            self.assertEqual({r["key"].partition("-")[0] for r in mine[1:]} - {"gpu", "api", "think", "review"}, set())
-            self.assertEqual([r["key"] for r in mine[1:] if not r.get("more")], [f"gpu-{name}"])
+            # its Used for, Skills and skill upload (#1652) after the side, then its models and thinking
+            self.assertEqual([r["key"] for r in mine[1:4]], [f"usedfor-{name}", f"skills-{name}", f"skillup-{name}"])
+            self.assertEqual({r["key"].partition("-")[0] for r in mine[4:]} - {"gpu", "api", "think", "review"}, set())
+            self.assertEqual([r["key"] for r in mine[1:] if not r.get("more")],
+                             [f"usedfor-{name}", f"skills-{name}", f"gpu-{name}"])   # the upload under More on Auto
         doc = json.loads(self.routes.read_text())
         doc["roles"]["trivial"]["via"] = "api"
         self.routes.write_text(json.dumps(doc))
         mine = [r for r in settings.rows(fresh=True) if r["group"] == "trivial"]
-        self.assertEqual([r["key"] for r in mine if not r.get("more")], ["role-trivial", "api-trivial"])
+        self.assertEqual([r["key"] for r in mine if not r.get("more")],
+                         ["role-trivial", "usedfor-trivial", "skills-trivial", "api-trivial"])
         self.assertTrue(next(r for r in mine if r["key"] == "gpu-trivial").get("more"))
         self.routes.write_text(json.dumps({**doc, "roles": {**doc["roles"], "trivial": {**doc["roles"]["trivial"], "via": "gpu"}}}))
         rows = settings.rows(fresh=True)

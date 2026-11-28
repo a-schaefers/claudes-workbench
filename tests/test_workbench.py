@@ -32249,6 +32249,19 @@ class WebChat(Base):
             run_wb("chat", "on", "--port", str(port))
         self.assertIn(f"holds port {port}", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
+        # a descriptor closed between /proc's listing and its readlink skips that one alone: it
+        # skipped the whole process, so this one read as another account's (CI, 2026-11-28)
+        real, gone = os.readlink, set()
+
+        def closing(fd):
+            if fd.parent.parent.name == str(os.getpid()) and fd.parent.parent not in gone:
+                gone.add(fd.parent.parent)
+                raise FileNotFoundError(fd)
+            return real(fd)
+        with mock.patch.object(self.chat.os, "readlink", closing):
+            if Path("/proc/net/tcp").exists():
+                self.assertEqual(self.chat.port_holder(port)[0], os.getpid())
+                self.assertEqual(gone, {Path(f"/proc/{os.getpid()}")})
         # on by default (#1281): a failed `wb chat on` puts the switch back as it was, on
         self.assertIn(f"web chat not up: another program holds port {port}", err.getvalue())
         self.assertTrue(self.chat.is_on())
@@ -41747,9 +41760,11 @@ class Routes(Base):
                           for r in routes.ROLES}, {r: ("gpu", "auto", "off") for r in routes.ROLES})
         self.assertIsNone(doc["day_usd"])
         code, out, _ = self.route()
+        # each role's Used for under it (#1652)
         self.assertEqual((code, out.splitlines()), (0, [
-            "significant  GPU (the router picks)", "trivial      GPU (the router picks)",
-            "writing      GPU (the router picks)"]))
+            "significant  GPU (the router picks)", f"             used for: {routes.USED_FOR['significant']}",
+            "trivial      GPU (the router picks)", f"             used for: {routes.USED_FOR['trivial']}",
+            "writing      GPU (the router picks)", f"             used for: {routes.USED_FOR['writing']}"]))
         self.assertFalse(self.path.exists())                      # showing writes nothing
         shown = json.loads(self.route("--json")[1])
         self.assertEqual(shown["roles"]["writing"]["label"], "English writing")
@@ -50239,19 +50254,19 @@ class RoleResolution(Base):
         code, out, err = self.wb("route", "add", "docs-fr", "--label", "French docs", "--like", "writing",
                                  "--about", "French translations of the docs")
         self.assertEqual(code, 0, err)
-        self.assertIn("docs-fr: added, French docs, working as writing, on the GPU", out)
+        self.assertIn("docs-fr: added, French docs, used for French translations of the docs, on the GPU", out)
         row = routes.read()["roles"]["docs-fr"]
         self.assertEqual({k: row[k] for k in ("custom", "label", "like", "about", "via", "gpu")},
                          {"custom": True, "label": "French docs", "like": "writing",
                           "about": "French translations of the docs", "via": "gpu", "gpu": routes.AUTO})
         self.assertEqual(routes.roles_of(routes.read()), (*routes.ROLES, "docs-fr"))
-        self.assertIn('docs-fr (the user\'s own, "French docs", works as writing: French translations of the docs) GPU',
+        self.assertIn('docs-fr (the user\'s own, "French docs", used for: French translations of the docs) GPU',
                       routes.summary(routes.read()))
-        # taken names, reserved words and a bad like are refused, nothing written
-        for argv, said in ((("docs-fr", "--label", "x", "--like", "trivial"), "is a role already"),
-                           (("trivial", "--label", "x", "--like", "trivial"), "is a role already"),
-                           (("busy", "--label", "x", "--like", "trivial"), "is taken"),
-                           (("Bad_Name", "--label", "x", "--like", "trivial"), "lowercase letters")):
+        # taken names and reserved words are refused, nothing written
+        for argv, said in ((("docs-fr", "--label", "x", "--used-for", "x"), "is a role already"),
+                           (("trivial", "--label", "x", "--used-for", "x"), "is a role already"),
+                           (("busy", "--label", "x", "--used-for", "x"), "is taken"),
+                           (("Bad_Name", "--label", "x", "--used-for", "x"), "lowercase letters")):
             code, _, err = self.wb("route", "add", *argv)
             self.assertEqual(code, 3, argv)
             self.assertIn(said, err)
@@ -50279,6 +50294,84 @@ class RoleResolution(Base):
         with self.assertRaises(routes.RoutesError) as e:
             routes.read()
         self.assertIn("unknown role 'trivail'", str(e.exception))
+
+    def test_a_new_role_needs_a_used_for_and_no_longer_a_works_as_1652(self):
+        # #1652 (the owner, 2026-11-28): "used for should not be optional either", and Works as "is
+        # load bearing something that i think maybe it shouldnt be in the UI"
+        code, _, err = self.wb("route", "add", "sfx", "--label", "Sound effects")
+        self.assertEqual(code, 1)
+        self.assertIn("--used-for", err)
+        self.assertNotIn("sfx", routes.read()["roles"])
+        code, _, err = self.wb("route", "add", "sfx", "--label", "Sound effects", "--used-for", "  ")
+        self.assertEqual(code, 3)
+        self.assertIn("sfx needs a Used for", err)
+        code, out, err = self.wb("route", "add", "sfx", "--label", "Sound effects", "--used-for", "game sound effects")
+        self.assertEqual(code, 0, err)
+        row = routes.read()["roles"]["sfx"]
+        self.assertNotIn("like", row)                       # never written now
+        self.assertEqual((row["about"], routes.used_for("sfx")), ("game sound effects", "game sound effects"))
+        self.assertEqual(routes.kind_of("sfx"), "significant")   # no like: significant coding's defaults
+        code, out, err = self.begin("t-sfx", "--role", "sfx")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-sfx").spec["role"], "sfx")
+        # a built-in's Used for is its default until rewritten; set back to it, it is dropped
+        self.assertEqual(routes.used_for("trivial"), routes.USED_FOR["trivial"])
+        self.set_role("trivial", "--used-for", "renames only")
+        self.assertIn("trivial (used for: renames only) GPU", routes.summary(routes.read()))
+        self.set_role("trivial", "--used-for", routes.USED_FOR["trivial"])
+        self.assertNotIn("about", routes.read()["roles"]["trivial"])
+        # a role from #1625 with a like and no about is kept and runs, and said as not to be picked
+        self.routes.write_text(json.dumps({"roles": {"old": {"via": "gpu", "custom": True, "label": "Old",
+                                                              "like": "writing"}}}))
+        self.assertEqual(routes.kind_of("old"), "writing")
+        self.assertIn("no Used for yet: don't pick it", routes.summary(routes.read()))
+        code, out, _ = self.wb("route")
+        self.assertIn("used for: nothing yet", out)
+
+    def test_a_role_with_the_users_own_skills_gets_exactly_those_and_no_handed_skill_1652(self):
+        # #1652: "select if they receive skills from the orchestrator automatically or use a skill i
+        # upload myself to the role instead"
+        from workbench import skills
+        for name in ("house-style", "other-skill"):
+            skills.add(write_skill(Path(self.tmp.name) / "drafts" / name, name, "Use when writing anything."),
+                       name, "for the test")
+        self.set_role("add", "sfx", "--label", "Sound effects", "--used-for", "game sound effects")
+        code, _, err = self.wb("route", "sfx", "--skills", "not-in-library")
+        self.assertEqual(code, 1)
+        self.assertIn("not in the skill library: not-in-library", err)
+        self.set_role("sfx", "--skills", "house-style")
+        row = routes.read()["roles"]["sfx"]
+        self.assertEqual((row["skills_mode"], row["skills"]), ("mine", ["house-style"]))
+        self.assertIn("[skills: only house-style]", routes.summary(routes.read()))
+        # wb start hands exactly the role's own, and refuses one handed beside them
+        code, out, err = self.begin("t-own", "--role", "sfx")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-own").status["skills"], ["house-style"])
+        self.assertIn("skills handed: house-style (the sfx role's own)", out)
+        code, _, err = self.begin("t-more", "--role", "sfx", "--skill", "other-skill")
+        self.assertEqual(code, 2)
+        self.assertIn("sfx's skills are the user's own", err)
+        self.assertFalse(store.Task("t-more").dir.exists())
+        code, _, err = self.wb("skill", "hand", "t-own", "other-skill")
+        self.assertEqual(code, 2)
+        self.assertIn("has the user's own skills", err)
+        # a SKILL.md of the user's own goes into the library and onto the role's list
+        up = write_skill(Path(self.tmp.name) / "up" / "sfx-style", "sfx-style", "Use when making sound effects.")
+        code, out, err = self.wb("route", "sfx", "--skill-from", str(up / "SKILL.md"))
+        self.assertEqual(code, 0, err)
+        self.assertIn("sfx-style", skills.available())
+        self.assertEqual(routes.skills_of("sfx"), ("mine", ["house-style", "sfx-style"]))
+        # back to Auto: the list kept for Mine, the orchestrator's skills handed again
+        self.set_role("sfx", "--skills", "auto")
+        self.assertEqual(routes.skills_of("sfx"), ("auto", ["house-style", "sfx-style"]))
+        code, out, err = self.begin("t-auto", "--role", "sfx", "--skill", "other-skill")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-auto").status["skills"], ["other-skill"])
+        # a hand edit's bad skills are refused by name, as an unreadable routes.json is
+        self.routes.write_text(json.dumps({"roles": {"trivial": {"via": "gpu", "skills": ["Bad Name"]}}}))
+        with self.assertRaises(routes.RoutesError) as e:
+            routes.read()
+        self.assertIn("trivial's skills are skill names", str(e.exception))
 
     def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):
         # #1237 (2026-11-24): an Anthropic adaptive model with no `none` runs on its bare id,

@@ -1895,6 +1895,18 @@ def cmd_start(a):
     if a.role is not None and a.role not in (roles := routes.all_roles()):  # argparse's choices once (#1625)
         die(f"no role {a.role!r}: the roles are {', '.join(roles)} (wb route shows them)", 2)
     role, size = routes.role_and_size(a.role, a.size)
+    # the role's Skills (#1652): Mine is the user's list and nothing else, so a --skill is refused
+    # (the orchestrator's pick would override the user's), and the library's suggestions aren't said
+    mine = (sk := routes.skills_of(role))[0] == "mine"
+    if mine and handed:
+        die(f"{role}'s skills are the user's own (Skills: mine, {', '.join(sk[1]) or 'none'}): start it "
+            "without --skill, or the user sets the role's Skills to auto (Settings, wb route "
+            f"{role} --skills auto)", 2)
+    if mine:
+        lib = skills.available()
+        if gone := [n for n in sk[1] if n not in lib]:
+            print(f"note: {role}'s skills {', '.join(gone)}: not in the library (wb skill list), left out")
+        handed = [n for n in sk[1] if n in lib]
     _local_only_check(a, repo, role, _package(repo, Path(a.repo).resolve(), a.base))  # #1021
     # round 1's first request, input and all, for the day cap's look ahead: without its input a
     # start within that of the cap passed, then the room refused that request at once (#1173)
@@ -2194,7 +2206,9 @@ def cmd_start(a):
     print(f"slice: {router.slice(m).line()}")
     _say(_images_line(pictures, 1))
     if handed:
-        print("skills handed: " + ", ".join(handed))
+        print("skills handed: " + ", ".join(handed) + (f" (the {role} role's own)" if mine else ""))
+    elif mine:
+        print(f"skills: none (the {role} role's Skills are the user's own, its list empty)")
     elif fits := skills.suggest(spec_text):
         use = skills.usage()
         print(f"library skills that may fit: {', '.join(_elsewhere(n, use.get(n), repo, stack) for n in fits)}"
@@ -2586,6 +2600,8 @@ def cmd_next(a):
     if why := _accepting(task):  # (#878)
         die(why)
     handed = _skill_names(a.skill) if a.skill else None
+    if handed is not None:
+        _not_mine(task)
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
@@ -4050,9 +4066,12 @@ def settings_lines(rows: list[dict]) -> list[str]:
             group = r["group"]
             out.append(SETTINGS_GROUPS.get(group) or routes.label(group))  # a role of the user's own by its label
         kind = r["kind"]
-        if kind == "form":  # Add a role (#1625)
-            out.append(f"  {r['key']}: {r['label']}: wb route add <name> --label TEXT --like "
-                       "trivial|significant|writing [--about TEXT], on the user's ask")
+        if kind == "form":  # Add a role (#1625), a role's Used for and skill upload (#1652)
+            head, _, role = r["key"].partition("-")
+            how = {"usedfor": f"wb route {role} --used-for TEXT (now: {r.get('brief') or 'not set'})",
+                   "skillup": f"wb route {role} --skill-from <SKILL.md or its directory>"}.get(
+                       head, "wb route add <name> --label TEXT --used-for TEXT")
+            out.append(f"  {r['key']}: {r['label']}: {how}, on the user's ask")
             continue
         if kind == "note":
             out.append(f"  {r['text']}")
@@ -4410,7 +4429,9 @@ def _route_show(as_json: bool) -> None:
             api = None if not row.get("api") else \
                 {"available": False, "resident": False, "why": models.unlisted_why(row["api"])} \
                 if m is None else models.status(m)
+            mode, names = routes.skills_of(r, doc)  # #1652: what Settings' role card shows
             out["roles"][r] = {**row, "label": routes.label(r, doc), "api_status": api,
+                               "used_for": routes.used_for(r, doc), "skills_mode": mode, "skills": names,
                                "gpu_found": None if row["gpu"] == routes.AUTO else row["gpu"] in models.discover()}
         print(json.dumps(out, indent=2))
         return
@@ -4446,6 +4467,12 @@ def _route_show(as_json: bool) -> None:
                 f" ({_who(fb)})" if fb != routes.FALLBACK_GPU else "")
                 + (" (not used while Agents is API)" if routes.fallback_of(doc, r) is None else ""))
         print(f"{r:<{width}}" + " · ".join(bits))
+        # what the orchestrator agent picks the role by, and whose skills it gets (#1652): the
+        # OpenCode plugin's roles note is this output
+        mode, names = routes.skills_of(r, doc)
+        used = routes.used_for(r, doc) or "nothing yet (the user gives it one; until then, never pick it)"
+        print(f"{'':<{width}}used for: {used}"
+              + ("" if mode == "auto" else f" · skills: only {', '.join(names)}" if names else " · skills: none"))
     if doc["day_usd"] is not None:
         print(f"day cap {routes.money(doc['day_usd'])}")
     elif doc.get("no_cap"):  # the user's (#1624)
@@ -4596,6 +4623,8 @@ def cmd_route(a):
     if what in ("add", "remove"):  # the user's own roles (#1625)
         return _route_custom(a)
     roles = routes.all_roles()
+    if what in roles and (a.about is not None or a.skills is not None or a.skill_from is not None):
+        return _route_describe(a)  # a role's Used for and Skills (#1652)
     if what in roles and target == "fallback":
         return _route_fallback(a)
     if a.more:
@@ -4638,7 +4667,7 @@ def cmd_route(a):
             api, via = target, "api"
     else:
         die(f"no role {what!r}: the roles are {', '.join(roles)} (or all, cap, busy or driver; "
-            "wb route add <name> --label … --like trivial|significant|writing adds one)")
+            "wb route add <name> --label … --used-for … adds one)")
     if api is not None:
         api = _route_api(api, role).id
     if gpu is not None:
@@ -4673,27 +4702,82 @@ def cmd_route(a):
 
 
 def _route_custom(a) -> None:
-    """`wb route add <name> --label TEXT --like trivial|significant|writing [--about TEXT]` and
-    `wb route remove <name>` (#1625): a role of the user's own, through _route_apply as any change
-    (its dry run, the lock, the log); neither sends code anywhere, so neither takes the dialog."""
+    """`wb route add <name> --label TEXT --used-for TEXT` and `wb route remove <name>` (#1625):
+    a role of the user's own, through _route_apply as any change (its dry run, the lock, the log);
+    neither sends code anywhere, so neither takes the dialog. Used for is required (#1652); `--like`
+    (the built-in it works as) is still taken, no longer asked."""
     name = a.target
     if not name or a.more or a.gpu or a.api or a.thinking or a.thinking_review or a.order is not None \
-            or a.day_usd is not None:
-        die("wb route add <name> --label TEXT --like trivial|significant|writing [--about TEXT], or wb route "
-            "remove <name>: in a wb route of its own; then wb route <name> gpu|api|<provider/model> as any role")
+            or a.day_usd is not None or a.skills is not None or a.skill_from is not None:
+        die("wb route add <name> --label TEXT --used-for TEXT, or wb route remove <name>: in a wb route of its "
+            "own; then wb route <name> gpu|api|<provider/model> and --skills as any role")
     if a.what == "add":
-        if not a.label or not a.like:
-            die("wb route add <name> takes --label (its name in Settings) and --like (the built-in it works as)")
-        argv = ["route", "add", name, "--label", a.label, "--like", a.like, *(["--about", a.about] if a.about else [])]
+        if not a.label or a.about is None:
+            die("wb route add <name> takes --label (its name in Settings) and --used-for (what the orchestrator "
+                "agent calls it for)")
+        argv = ["route", "add", name, "--label", a.label, "--used-for", a.about, *(["--like", a.like] if a.like else [])]
     else:
-        if a.label or a.like or a.about:
+        if a.label or a.like or a.about is not None:
             die("wb route remove <name> takes the name alone")
         argv = ["route", "remove", name]
 
     def changed(doc) -> routes.Change:
         try:
-            return routes.add_change(doc, name, a.label, a.like, a.about) if a.what == "add" \
+            return routes.add_change(doc, name, a.label, a.about, a.like) if a.what == "add" \
                 else routes.remove_change(doc, name)
+        except routes.RoutesError as e:
+            die(str(e), 3)
+
+    _route_apply(a, argv, changed)
+
+
+def _route_describe(a) -> None:
+    """`wb route <role> --used-for TEXT`, `--skills auto|mine|NAME[,NAME]` and `--skill-from PATH`
+    (#1652): a role's Used for, which the orchestrator agent picks it by, and its Skills: auto (the
+    orchestrator's per task) or mine (the role's own list, exactly). `--skill-from` adds the
+    SKILL.md (or a directory holding one) to the library under its frontmatter's name, as wb skill
+    add does (linted and scanned), and puts it on the role's list, Mine: the web app's upload.
+    Nothing spends, so no dialog."""
+    role = a.what
+    if a.target is not None or a.more or a.gpu or a.api or a.thinking or a.thinking_review \
+            or a.order is not None or a.day_usd is not None or a.label or a.like:
+        die(f"wb route {role} --used-for TEXT | --skills auto|mine|NAME[,NAME] | --skill-from PATH: in a wb route "
+            "of its own")
+    mode, names = None, None
+    if a.skills is not None:
+        if a.skills in routes.SKILLS_MODES:
+            mode = a.skills
+        else:
+            names = [n.strip() for n in a.skills.split(",") if n.strip()]
+            lib = skills.available()
+            if gone := [n for n in names if n not in lib]:
+                die(f"not in the skill library: {', '.join(gone)} (wb skill list; a SKILL.md of your own: "
+                    f"wb route {role} --skill-from <path>)")
+    if a.skill_from is not None:
+        if a.dry_run:
+            die("--skill-from adds to the skill library: no dry run")
+        src = Path(a.skill_from).expanduser()
+        md = src / "SKILL.md" if src.is_dir() else src
+        try:
+            name = str(skills.parse(md).get("name") or "").strip()
+        except (OSError, ValueError) as e:
+            die(f"{a.skill_from}: {e}")
+        if not routes.SKILL_NAME_RE.match(name):
+            die(f"{a.skill_from}: its frontmatter names no skill (name: lowercase-words), so it can't be added")
+        if name in set(context.denied_skills()):
+            die(f"{name} is the name of one of the user's own skills; rename it in its frontmatter")
+        try:
+            verb, warns = skills.add(src, name, f"the user's own skill for the {role} role (#1652)", "")
+        except (ValueError, OSError, RuntimeError) as e:
+            die(f"not added: {_skill_failure(e)}")
+        print(f"{verb} {name}" + "".join(f"\nwarning: {w}" for w in warns))
+        names = list(dict.fromkeys([*routes.skills_of(role)[1], name]))
+    argv = ["route", role, *(["--used-for", a.about] if a.about is not None else []),
+            *(["--skills", ",".join(names) if names is not None else mode] if names is not None or mode else [])]
+
+    def changed(doc) -> routes.Change:
+        try:
+            return routes.describe_change(doc, role, about=a.about, mode=mode, names=names)
         except routes.RoutesError as e:
             die(str(e), 3)
 
@@ -7040,6 +7124,7 @@ def cmd_skill(a):
     st = task.status
     held = st.get("skills") or []
     if a.action == "hand":
+        _not_mine(task)
         held = _union(held, names)
         task.set_status(skills=held, skills_ever=_union(st.get("skills_ever"), names),
                         skills_rev={**(st.get("skills_rev") or {}), **skills.revs(names)})
@@ -7049,6 +7134,16 @@ def cmd_skill(a):
     when = "from its next run" + (" (`wb steer --now` starts that run now)" if runner_alive(task)
                                   else "")
     print(f"{task.name} holds: {', '.join(held) or 'no skills'}; the agent is told {when}")
+
+
+def _not_mine(task: store.Task) -> None:
+    """A skill handed to a task whose role's Skills are the user's own (Mine, #1652) is refused:
+    the orchestrator's pick never overrides the user's list. The role as it is now, routes.json."""
+    role = task.spec.get("role")
+    if role and (sk := routes.skills_of(role))[0] == "mine":
+        die(f"{task.name}'s role {role} has the user's own skills (Skills: mine, {', '.join(sk[1]) or 'none'}): "
+            f"no skill is handed to its tasks (the user sets Skills to auto: Settings, wb route {role} "
+            "--skills auto)", 2)
 
 
 def _skill_failure(e: Exception) -> str:
@@ -10433,10 +10528,14 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--order", metavar="NAME[,NAME]", help="an OpenRouter role's backends, which every "
                    "request goes to alone (the model's Providers tab on openrouter.ai): the user's choice")
     s.add_argument("--label", metavar="TEXT", help="add: the role's name as Settings shows it")
-    s.add_argument("--like", choices=routes.ROLES, help="add: the built-in the role works as: its prompt, "
-                   "slice size and the GPU router's record (trivial or significant coding, or writing)")
-    s.add_argument("--about", metavar="TEXT", help="add: what the role is for, which the orchestrator agent "
-                   "picks it by")
+    s.add_argument("--like", choices=routes.ROLES, help="add: optional, the built-in whose prompt, slice size "
+                   "and router record the role takes (#1625); without it a role works as significant coding's")
+    s.add_argument("--used-for", "--about", dest="about", metavar="TEXT", help="add (required) or a role: what "
+                   "the role is for, which the orchestrator agent picks it by (#1652)")
+    s.add_argument("--skills", metavar="auto|mine|NAME[,NAME]", help="a role's Skills: auto (the orchestrator "
+                   "hands library skills per task), mine (only the role's own list), or the list itself (#1652)")
+    s.add_argument("--skill-from", metavar="PATH", help="a role: add this SKILL.md (or a directory holding one) "
+                   "to the skill library and to the role's own list, Skills mine (#1652)")
     s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars ($"
                    f"{routes.DAY_USD_SUGGEST:g} when the first role goes to API, unless set)")
     s.add_argument("--json", action="store_true", help="show: the roles as JSON, each API model's "

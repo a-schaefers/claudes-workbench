@@ -39,6 +39,7 @@ that went through is a row of settings-changes.jsonl (record()), `by` who made i
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -189,6 +190,10 @@ LABELS = {"agents": "Agents", "busy": "When the GPU is busy", "driver": "Driver"
           "optimize": "Optimize", "upstream": "Posting to GitHub", "outbox": "Waiting to post"}
 ROLE_LABELS = {"role": "{}", "gpu": "{} GPU model", "api": "{} API model", "think": "{} thinking",
                "review": "{} self-review thinking"}
+# a role's Used for, Skills and skill upload rows (#1652): read and written apart from ROLE_LABELS'
+# (current() reads them through routes.used_for and skills_of, not the row's model keys)
+DESCRIBE_LABELS = {"usedfor": "{} used for", "skills": "{} skills", "skillup": "{} skill upload"}
+SKILL_UPLOAD_MAX = 64_000  # a SKILL.md's characters, the web app's upload: a skill is instructions, not data
 
 
 def label_of(key: str) -> str:
@@ -200,6 +205,8 @@ def label_of(key: str) -> str:
         return ROLE_LABELS[head].format(routes.LABELS[rest])
     if head in ROLE_LABELS and rest in routes.all_roles():  # the user's own, by its label (#1625)
         return ROLE_LABELS[head].format(routes.label(rest))
+    if head in DESCRIBE_LABELS and rest in routes.all_roles():
+        return DESCRIBE_LABELS[head].format(routes.label(rest))
     if head == "remove" and rest in routes.all_roles():
         return f"Remove {routes.label(rest)}"
     if head == "size":
@@ -509,25 +516,54 @@ def _optimize_row(m: dict) -> dict:
                          "says": "Measures this machine for its models (wb optimize start)."}]}
 
 
-ADD_ROLE_LIKE = [("significant", "Complex coding", "Prompts, slices and the router's record as complex coding's."),
-                 ("trivial", "Trivial coding", "Small slices, as trivial coding's."),
-                 ("writing", "English writing", "The writing role's prompt and handbook: prose, not code.")]
-
-
 def _add_role_row() -> dict:
-    """Agents and roles' Add a role (#1625): a form of a name, a label, the built-in it works as and
-    what it is for, posted as one JSON string, `wb route add`; the role then has a card of its own."""
+    """Agents and roles' Add a role (#1625, #1652): a form of a name, a label and its Used for
+    (required: the orchestrator agent picks it by that), posted as one JSON string, `wb route add`;
+    the role then has a card of its own. No Works as (#1652: the owner, "it shouldn't be in the UI")."""
     return {"key": "add-role", "group": "shared", "label": LABELS["add-role"], "kind": "form",
             "text": "A role of your own: tasks for it go to the model you give it, GPU or API. It starts on "
-                    "the GPU, and the orchestrator agent picks it by name or by what it is for.",
+                    "the GPU with Skills on Auto, and the orchestrator agent calls it for what you say it's used for.",
             "fields": [{"name": "name", "label": "Name", "kind": "text", "pattern": routes.CUSTOM_RE.pattern,
                         "hint": "lowercase, as tests or docs-fr"},
                        {"name": "label", "label": "Label", "kind": "text", "max": routes.LABEL_MAX},
-                       {"name": "like", "label": "Works as", "kind": "select",
-                        "choices": [{"value": v, "label": lab, "says": says} for v, lab, says in ADD_ROLE_LIKE]},
-                       {"name": "about", "label": "What it's for", "kind": "text", "max": routes.ABOUT_MAX,
-                        "optional": True}],
+                       {"name": "about", "label": "Used for", "kind": "text", "max": routes.ABOUT_MAX,
+                        "hint": "what the orchestrator calls it for"}],
             "choices": [{"value": "add", "label": "Add", "says": "Adds the role (wb route add)."}]}
+
+
+SKILLS_STOPS = [("auto", "Auto", "The orchestrator agent hands library skills to each task as it judges."),
+                ("mine", "Mine", "Only the skills you give this role, every task; the orchestrator adds none.")]
+
+
+def _describe_rows(name: str, label: str, row: dict) -> list[dict]:
+    """A role's Used for, Skills and skill upload (#1652), on its card: Used for a form of one
+    field holding it now; Skills Auto or Mine; the upload a SKILL.md, into the library and onto the
+    role's list (Mine), under More while the role is on Auto."""
+    used = str(row.get("used_for") or "").strip()
+    mode = "mine" if row.get("skills_mode") == "mine" else "auto"
+    names = [n for n in row.get("skills") or [] if isinstance(n, str)]
+    out = [{"key": f"usedfor-{name}", "group": name, "label": label_of(f"usedfor-{name}"), "kind": "form",
+            "text": "What the orchestrator agent calls this role for." if used else
+                    "No Used for yet: the orchestrator agent won't call this role until it has one.",
+            "fields": [{"name": "used_for", "label": "Used for", "kind": "text", "max": routes.ABOUT_MAX,
+                        "value": used}],
+            "choices": [{"value": "save", "label": "Save", "says": f"Sets it (wb route {name} --used-for)."}],
+            "brief": used or "not set"}]
+    c = _choice(f"skills-{name}", name, label_of(f"skills-{name}"),
+                SKILLS_STOPS, mode,
+                brief="Auto" if mode == "auto" else (", ".join(names) or "none"))
+    if mode == "mine":
+        c["says"] = f"This role's skills: {', '.join(names)}." if names else \
+            "No skills on this role yet: upload one (More), or its tasks get none."
+    out.append(c)
+    out.append({"key": f"skillup-{name}", "group": name, "label": label_of(f"skillup-{name}"), "kind": "form",
+                "more": mode == "auto",
+                "text": "A SKILL.md of your own: checked and added to the skill library, and given to every task "
+                        "of this role (its Skills become Mine).",
+                "fields": [{"name": "skill", "label": "SKILL.md", "kind": "file", "max": SKILL_UPLOAD_MAX,
+                            "hint": "a SKILL.md with a name and a description"}],
+                "choices": [{"value": "upload", "label": "Upload", "says": f"Adds it (wb route {name} --skill-from)."}]})
+    return out
 
 
 def _remove_row(name: str, label: str) -> dict:
@@ -653,10 +689,9 @@ def _build() -> dict:
                 # under another card (the web app's review, 2026-11-26; #1558)
                 c["choices"][1]["needs"] = f"api-{name}"
             if row.get("custom"):  # the user's own: its card is titled by its label, under the built-ins'
-                c["card"] = label
-                if row.get("about"):
-                    c["text"] = row["about"]
+                c["card"] = label  # (its Used for is the usedfor- row's, #1652)
             out.append(c)
+            out.extend(_describe_rows(name, label, row))
         out.append(_add_role_row())
     if r is not None:
         out.append(_driver_row(r, m))
@@ -841,19 +876,27 @@ def _argv(row: dict, value) -> list[str]:
     key, kind = row["key"], row["kind"]
     if kind in ("info", "note"):
         raise ValueError(f"{key} is read-only")
-    if kind == "form":  # Add a role (#1625): its fields as one JSON string
+    if kind == "form":  # Add a role (#1625), a role's Used for and skill upload (#1652): fields as one JSON string
         try:
             got = json.loads(value) if isinstance(value, str) else None
         except ValueError:
             got = None
-        if not isinstance(got, dict) or not all(isinstance(got.get(k), str) and got[k].strip()
-                                                for k in ("name", "label", "like")):
-            raise ValueError("a role needs a name, a label and what it works as")
-        if why := routes.custom_why(got["name"].strip(), got["label"], got["like"], got.get("about") or None):
+        if not isinstance(got, dict):
+            raise ValueError(f"{key} takes its fields as one JSON object")
+        head, _, role = key.partition("-")
+        if head == "usedfor":
+            if why := routes.used_for_why(role, got.get("used_for")):
+                raise ValueError(why)
+            return ["route", role, "--used-for", got["used_for"].strip()]
+        if head == "skillup":
+            return ["route", role, "--skill-from", str(_uploaded(role, got.get("skill")))]
+        if not all(isinstance(got.get(k), str) and got[k].strip() for k in ("name", "label")):
+            raise ValueError("a role needs a name, a label and what it's used for")
+        name = got["name"].strip()
+        if why := routes.custom_why(name, got["label"], None, got.get("about") or None) \
+                or routes.used_for_why(name, got.get("about")):
             raise ValueError(why)
-        about = str(got.get("about") or "").strip()
-        return ["route", "add", got["name"].strip(), "--label", got["label"].strip(), "--like", got["like"],
-                *(["--about", about] if about else [])]
+        return ["route", "add", name, "--label", got["label"].strip(), "--used-for", got["about"].strip()]
     if kind == "number":
         v = _number_value(value)
         amount = "off" if v is None else f"{v:g}"
@@ -891,6 +934,8 @@ def _argv(row: dict, value) -> list[str]:
         return [kind, "diff" if value == "diff" else "reset", name]
     if head == "remove":
         return ["route", "remove", rest]
+    if head == "skills":
+        return ["route", rest, "--skills", value]
     if head == "role":
         return ["route", rest, value]
     if head == "gpu":
@@ -920,6 +965,22 @@ def _row(key: str) -> dict:
     if row is None:
         raise KeyError(key)
     return row
+
+
+def _uploaded(role: str, text) -> Path:
+    """The web app's SKILL.md for ``role`` (#1652) written where `wb route --skill-from` reads it:
+    $WB_HOME/uploads/<role>-<hash>/SKILL.md, the same text the same directory. ValueError for no
+    text, too long, or none with a name in its frontmatter (wb's checks follow: lint and scan)."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("choose a SKILL.md to upload")
+    if len(text) > SKILL_UPLOAD_MAX:
+        raise ValueError(f"a SKILL.md is up to {SKILL_UPLOAD_MAX:,} characters, not {len(text):,}")
+    if not re.search(r"^---\n(?:.*\n)*?name:\s*\S", text, re.M):
+        raise ValueError("that file isn't a SKILL.md: its frontmatter (--- … ---) names no skill (name: …)")
+    at = store.home() / "uploads" / f"{role}-{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+    at.mkdir(parents=True, exist_ok=True)
+    (at / "SKILL.md").write_text(text)
+    return at / "SKILL.md"
 
 
 def apply(key: str, value, by: str = "web") -> dict:
@@ -1031,6 +1092,7 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
 # typed at a terminal changed the row with no stamp and no open page heard of it. Only the rows'
 # own command lines count: a combined one (`wb route significant api --api x`) logs nothing.
 ROUTE_FLAGS = {"--gpu": "gpu", "--api": "api", "--thinking": "think", "--thinking-review": "review"}
+DESCRIBE_FLAGS = {"--used-for": "usedfor", "--about": "usedfor", "--skills": "skills", "--skill-from": "skillup"}
 LOGGED = ("route", "coding", "workflows", "deepmode", "progress", "splash", "experiment", "optimize", "model",
           "image", "audio", "chat", "skill", "upstream")  # the commands key_for reads: cli.main imports this module only for them
 
@@ -1045,6 +1107,10 @@ def key_for(argv: list[str]) -> tuple[str, str] | None:
             break
     if a[:2] == ["route", "add"] and len(a) > 2 and "--dry-run" not in a and "--json" not in a:
         return "add-role", a[2]  # Add a role's form (#1625): its flags are its fields
+    # a role's Used for, Skills and upload (#1652): `wb route <role> --used-for|--skills|--skill-from X`
+    if len(a) == 4 and a[0] == "route" and a[1] in routes.all_roles() and a[2] in DESCRIBE_FLAGS:
+        head = DESCRIBE_FLAGS[a[2]]
+        return f"{head}-{a[1]}", ("mine" if head == "skills" and a[3] not in routes.SKILLS_MODES else a[3])
     if not a or any(x.startswith("-") and x not in (*ROUTE_FLAGS, "--default", "--port") for x in a):
         return None  # a dry run, --json, a flag no row's command takes
     cmd, rest = a[0], a[1:]
@@ -1106,6 +1172,11 @@ def current(key: str):
             return ", ".join(r for r in routes.all_roles() if r not in routes.ROLES) or "none"
         if head == "remove":
             return "kept" if rest in routes.all_roles() else "removed"
+        if head in DESCRIBE_LABELS and rest in routes.all_roles():  # #1652
+            if head == "usedfor":
+                return routes.used_for(rest) or None
+            mode, names = routes.skills_of(rest)
+            return mode if head == "skills" else (", ".join(names) or None)
         if key in ("agents", "busy", "cap", "driver") or (head in ROLE_LABELS and rest in routes.all_roles()):
             doc = routes.read()
             if key == "agents":

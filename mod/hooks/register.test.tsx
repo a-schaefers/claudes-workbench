@@ -5780,7 +5780,8 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
   // a fresh conversation's (a /clear's, a compaction's) first block says them
   const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench-routes')
   expect(block?.text).toBe('Roles (the user\'s, wb route): significant GPU (the router picks); trivial API deepseek/deepseek-flash, ' +
-    'thinking off; writing GPU (the router picks). Day cap $5. Never pass --model for an API model or change a role without ' +
+    'thinking off; writing GPU (the router picks). Day cap $5. ' +
+    'Pick each task\'s role (--role) by what it is used for; a role marked [skills: …] gets the user\'s own skills, so pass it no --skill (#1652). Never pass --model for an API model or change a role without ' +
     'the user\'s yes (the mod asks them in a dialog); recommend only.')
   await clock.advance(31_000)
   const before = rows.length
@@ -5789,7 +5790,8 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
   await clock.advance(31_000)
   const changed = rows.slice(before).filter(r => r.includes('The roles changed'))
   expect(changed).toEqual(['[workbench] The roles changed: significant GPU (the router picks); trivial GPU (the router picks), ' +
-    'API kept: deepseek/deepseek-flash; writing GPU (the router picks). Day cap $5. Never pass --model for an API model or ' +
+    'API kept: deepseek/deepseek-flash; writing GPU (the router picks). Day cap $5. ' +
+    'Pick each task\'s role (--role) by what it is used for; a role marked [skills: …] gets the user\'s own skills, so pass it no --skill (#1652). Never pass --model for an API model or ' +
     'change a role without the user\'s yes (the mod asks them in a dialog); recommend only.'])
   await clock.advance(31_000)
   expect(rows.slice(before).filter(r => r.includes('roles'))).toHaveLength(1)   // once per change
@@ -5799,17 +5801,24 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
   await clock.advance(31_000)
   await clock.advance(31_000)
   expect(rows.slice(capped).filter(r => r.includes('roles'))).toEqual([expect.stringContaining('writing GPU (the router ' +
-    'picks). Day cap $10. Never pass')])
+    'picks). Day cap $10. Pick each task')])
   files[at] = '{"roles": '                                       // broken: said, never read as all GPU
   await clock.advance(31_000)
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
   // JSON that wb's normalize refuses reads the same (routesValid), never as ordinary roles
   // a role of the user's own reads (#1625); one without wb route add's shape is a typo, refused
-  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { tests: { via: 'gpu', custom: true, label: 'Tests', like: 'trivial' } } })
+  // (#1652: a like from #1625 is still read, and said no more; its Used for is)
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { tests: { via: 'gpu', custom: true, label: 'Tests', like: 'trivial', about: 'the test suite' } } })
   await clock.advance(31_000)
-  expect(rows.at(-1)).toContain('tests (the user\'s own, "Tests", works as trivial) GPU (the router picks)')
+  expect(rows.at(-1)).toContain('tests (the user\'s own, "Tests", used for: the test suite) GPU (the router picks)')
+  // #1652: no role has an API model, yet a fresh conversation's first block says the roles, as the
+  // orchestrator picks this one by its Used for
+  const own = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench-routes')
+  expect(own?.text).toContain('used for: the test suite')
   for (const bad of [{ roles: { trivail: {} } }, { roles: { trivial: { via: 'api' } } }, { day_usd: -1 },
-    { roles: { tests: { custom: true, label: 'Tests', like: 'nope' } } }]) {
+    { roles: { tests: { custom: true, label: 'Tests', like: 'nope' } } },
+    { roles: { tests: { custom: true, label: 'Tests', about: 'x', skills: ['Not A Name'] } } },
+    { roles: { trivial: { skills_mode: 'some' } } }]) {
     files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: {} })
     await clock.advance(31_000)
     expect(rows.at(-1)).toContain('The roles changed: significant GPU (the router picks)')
@@ -5985,10 +5994,17 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
     writing: { via: 'gpu', gpu: 'ollama/x', api: 'anthropic/claude-haiku-5-5', thinking: 'on' } } }))
     .toBe('significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off; writing GPU ollama/x, ' +
       'API kept: anthropic/claude-haiku-5-5, thinking on')
-  // #1625: a role of the user's own, after the built-ins, by its label, like and what it is for
+  // #1625: a role of the user's own, after the built-ins, by its label and Used for (#1652: its like not said)
   expect(routesSummary({ roles: { 'docs-fr': { via: 'gpu', custom: true, label: 'French docs', like: 'writing', about: 'translations' } } }))
     .toBe('significant GPU (the router picks); trivial GPU (the router picks); writing GPU (the router picks); ' +
-      'docs-fr (the user\'s own, "French docs", works as writing: translations) GPU (the router picks)')
+      'docs-fr (the user\'s own, "French docs", used for: translations) GPU (the router picks)')
+  // #1652: one from before then with no Used for is said as not to be picked; a built-in's rewritten
+  // Used for is said, and a role's Skills when Mine
+  expect(routesSummary({ roles: { trivial: { about: 'renames', skills_mode: 'mine', skills: ['house-style'] },
+    sfx: { via: 'gpu', custom: true, label: 'Sound effects' } } }))
+    .toBe('significant GPU (the router picks); trivial (used for: renames) [skills: only house-style] GPU (the router picks); ' +
+      'writing GPU (the router picks); sfx (the user\'s own, "Sound effects", no Used for yet: don\'t pick it until the ' +
+      'user gives one) GPU (the router picks)')
 })
 
 test('#1059: a role whose self-review alone thinks reads "thinking: review only", as routes.summary says it', () => {
@@ -6784,7 +6800,8 @@ test('#1283: a role changed in the web app reaches the conversation once, saying
   await clock.advance(31_000)
   expect(rows.filter(r => r.includes('The roles changed'))).toEqual(['[workbench] The roles changed: significant GPU (the router picks); ' +
     'trivial GPU (the router picks), API kept: deepseek/deepseek-flash; writing API deepseek/deepseek-flash, thinking off. Day cap $5 ' +
-    '(the user, on the web app). Never pass --model for an API model or change a role without the user\'s yes (the mod asks them ' +
+    '(the user, on the web app). ' +
+    'Pick each task\'s role (--role) by what it is used for; a role marked [skills: …] gets the user\'s own skills, so pass it no --skill (#1652). Never pass --model for an API model or change a role without the user\'s yes (the mod asks them ' +
     'in a dialog); recommend only.'])
   // a day cap set in the terminal stamps no role: the web app's older stamp is not this change's
   // (review of #1283, 2026-11-25)
