@@ -11365,7 +11365,7 @@ on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: macOS failed u
 outermost `load_tests` (nested, it sharded twice); `python3 -m unittest tests` is sharded too, named modules, classes or
 tests run as named; no test has class or module fixtures.
 The macOS shards run `python3 -X faulthandler -m unittest -v`, each test named in the log as it runs (unnamed, a
-cancelled hour reported nothing, #950). `opencode.yml`'s suite stays one process (off the shipping path, and the plain run a developer makes). Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
+cancelled hour reported nothing, #950). `opencode.yml`'s suite runs as the nightly's Linux one, three shards of four processes (in one process it outgrew its 60 minutes: five runs cancelled, 2026-11-26 to 27), the Bun goldens on shard 1. Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
 WSL; `check.yml`'s 300: its slowest test takes under 30 s, and a hang held a pull request 10 minutes past its other shards): `SIGALRM` around each test dumps every thread's stack and fails it with `tests.Hung: <test id> hung past
 WB_TEST_HANG_SECS (N s)`, a `BaseException` (as a `TimeoutError` it was swallowed by `socket.getfqdn`'s `except
 OSError`, 2026-11-22). Job limits 60 min, `check.yml`'s shards 30. Linux jobs install `OPENCODE_VERSION` via
