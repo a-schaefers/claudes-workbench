@@ -468,6 +468,8 @@ class DocsFor20(unittest.TestCase):
         # code blocks aside: a command or a file there names what it names
         prose = re.sub(r"```.*?```", "", readme, flags=re.S)
         prose = " ".join(re.sub(r"\]\([^)]*\)|<[^>]*>", "", prose).split())
+        # a product's own name aside: Hermes Agent, which can hand the orchestrator agent work (the owner, 2026-11-28)
+        prose = prose.replace("Hermes Agent", "Hermes")
         bare = [m.group(0) for m in re.finditer(r"(?<!sub)(?<!orchestrator )\bagents?\b", prose, re.I)]
         self.assertEqual(bare, [])
         self.assertNotIn("orchestrator ", prose.replace("orchestrator agent", ""))
@@ -522,6 +524,15 @@ class DocsForTheWebApp(unittest.TestCase):
     """#1288: 2.0 moved the pane's Stats and Settings to the web app (#1279), and the owner locked in
     (2026-11-24) that the terminal stays primary, the web chat a second lane, the web app's Settings
     the settings' home, with Claude helping on a clear ask."""
+
+    def test_the_readme_says_another_ai_tool_can_hand_the_orchestrator_agent_work(self):
+        # the rewrite of 2026-11-27 dropped it; the owner, 2026-11-28: "i want concept reintroduced
+        # in the What else it does section"
+        readme = " ".join((ROOT / "README.md").read_text().split())
+        more = readme[readme.index("## What else it does"):readme.index("## Contributing")]
+        for fact in ("Hermes Agent", "(docs/chat-api.md)", "`wb chat token add <name>`",
+                     "(skill/agents/ask-workbench/SKILL.md)", "never count as your yes"):
+            self.assertIn(fact, more)
 
     def test_the_readme_names_the_web_apps_settings_and_stats_and_its_phone_chat(self):
         # #1288, and the rewrite of 2026-11-27: the web app's link and what it holds in *Using it*,

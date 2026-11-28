@@ -122,6 +122,10 @@ model's provider, unless that model is local.
   [trailer](ARCHITECTURE.md#git-commits-and-projects) naming the model that wrote the code.
 - To reach the web app and its [chat](ARCHITECTURE.md#the-web-chat) from another device, point a
   tunnel or proxy you trust at it, or ask the orchestrator agent.
+- Another AI tool, such as Hermes Agent, can give the orchestrator agent work through the web
+  app's [chat API](docs/chat-api.md) and wait for its report: give the tool a token of its own
+  (`wb chat token add <name>`) and the [ask-workbench skill](skill/agents/ask-workbench/SKILL.md).
+  Its requests never count as your yes: spending, pushing or deleting still waits for you.
 - When a review turns up a lesson, the orchestrator agent records it as a
   [skill](ARCHITECTURE.md#the-skill-library) and gives it to later subagents.
 - The orchestrator agent can also direct local [image](ARCHITECTURE.md#images) and
