@@ -239,7 +239,9 @@ export type RouteJson = {
   roles: Record<string, { via: 'gpu' | 'api'; gpu: string; api?: string;
     thinking: 'off' | 'on'; label: string; thinks?: { api: string; off: string; on: string }
     custom?: true; like?: 'significant' | 'trivial' | 'writing'; about?: string
-    used_for?: string; skills_mode?: 'auto' | 'mine'; skills?: string[] }>
+    used_for?: string; skills_mode?: 'auto' | 'mine'; skills?: string[]
+    /** an engine in place of a chat model (#1652): "image:<engine>" or "audio:<engine>" */
+    generator?: string }>
   /** `prices`: the dollars' basis (meter.basis, #1135): catalog (an estimate, ≈), yours (wb model price), provider */
   spend_today: { usd: number; prices?: 'catalog' | 'yours' | 'provider'; by_provider: Record<string, number> }
   // runs: a key in the environment the keyhole reads (#1189), which runs tasks as a stored one does;

@@ -3,6 +3,7 @@ each one makes, as a child that isn't Claude."""
 import io
 import json
 import os
+import sys
 import textwrap
 import time
 import unittest
@@ -33,6 +34,7 @@ def expected(key: str, value) -> list[str]:
             "api": ["route", rest, "--api", value], "think": ["route", rest, "--thinking", value],
             "review": ["route", rest, "--thinking-review", value],  # #1059
             "skills": ["route", rest, "--skills", value],  # a role's Skills, Auto or Mine (#1652)
+            "gen": ["route", rest, "--generator", value],  # a role's generator (#1652)
             "size": ["model", "sizes", rest, *([] if value == "all" else [value])],
             "media": ["image" if rest == "image" else "audio", "--default", value],
             "ocskill": ["skill", "opencode", rest, value]}[head]  # #1463 P4
@@ -185,6 +187,26 @@ class Settings(Rows):
         self.assertTrue(settings.apply("skills-trivial", "auto")["ok"])
         self.assertEqual(routes.skills_of("trivial"), ("auto", ["house-style"]))
 
+    def test_a_roles_generator_is_a_choice_on_its_card_once_an_engine_is_set_up_1652(self):
+        # #1652: a role's model an image or audio engine of the user's, chosen in Settings
+        with mock.patch.dict(os.environ, {"WB_IMAGES": str(Path(self.tmp.name) / "images.json"),
+                                          "WB_AUDIO": str(Path(self.tmp.name) / "audio.json")}):
+            self.assertNotIn("gen-trivial", {r["key"] for r in settings.rows(fresh=True)})   # no engine: no row
+            Path(os.environ["WB_IMAGES"]).write_text(json.dumps({"sketch": {"command": f"{sys.executable} -c pass {{out}}"}}))
+            Path(os.environ["WB_AUDIO"]).write_text(json.dumps({"boom": {"command": f"{sys.executable} -c pass {{out}}",
+                                                                         "kind": "sfx"}}))
+            by = {r["key"]: r for r in settings.rows(fresh=True)}
+            gen = by["gen-trivial"]
+            self.assertEqual((gen["group"], gen["value"], gen["more"]), ("trivial", "none", True))
+            self.assertEqual([c["value"] for c in gen["choices"]], ["none", "image:sketch", "audio:boom"])
+            self.assertEqual(settings._argv(gen, "audio:boom"), ["route", "trivial", "--generator", "audio:boom"])
+            self.assertTrue(settings.apply("gen-trivial", "audio:boom")["ok"])
+            by = {r["key"]: r for r in settings.rows(fresh=True)}
+            self.assertEqual((by["gen-trivial"]["value"], by["gen-trivial"]["more"]), ("audio:boom", False))
+            self.assertEqual(by["role-trivial"]["says"], "Trivial coding makes audio with boom (wb audio --role trivial).")
+            self.assertEqual(settings.current("gen-trivial"), "audio:boom")
+            self.assertEqual(settings.key_for(["route", "trivial", "--generator", "none"]), ("gen-trivial", "none"))
+
     def test_deep_workflows_side_is_a_row_of_the_workflows_card_and_its_command_is_logged_1627(self):
         by = {r["key"]: r for r in settings.rows(fresh=True)}
         row = by["deep-side"]
@@ -206,7 +228,7 @@ class Settings(Rows):
             self.assertFalse(mine[0].get("more"))
             # its Used for, Skills and skill upload (#1652) after the side, then its models and thinking
             self.assertEqual([r["key"] for r in mine[1:4]], [f"usedfor-{name}", f"skills-{name}", f"skillup-{name}"])
-            self.assertEqual({r["key"].partition("-")[0] for r in mine[4:]} - {"gpu", "api", "think", "review"}, set())
+            self.assertEqual({r["key"].partition("-")[0] for r in mine[4:]} - {"gpu", "api", "think", "review", "gen"}, set())
             self.assertEqual([r["key"] for r in mine[1:] if not r.get("more")],
                              [f"usedfor-{name}", f"skills-{name}", f"gpu-{name}"])   # the upload under More on Auto
         doc = json.loads(self.routes.read_text())

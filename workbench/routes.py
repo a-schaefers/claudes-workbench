@@ -59,6 +59,15 @@ USED_FOR = {"significant": "Code changes that need care: features, fixes across 
 SKILLS_MODES = ("auto", "mine")
 SKILLS_MAX = 10
 SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")  # skills.NAME
+# A role's generator (#1652): its model is an image or audio engine of the user's (images.json,
+# audio.json) in place of a chat model: `generator` "image:<engine>" or "audio:<engine>". Such a
+# role makes files from a brief (`wb image|audio --role <role>`), no agent loop; its GPU/API side
+# is kept, unused, so "none" brings the chat model back as it was. The engine is checked where it
+# is set and where it runs: an engine taken out of its file leaves the role saying so, never an
+# unreadable routes.json.
+GENERATOR_KINDS = ("image", "audio")
+GENERATOR_RE = re.compile(r"^(image|audio):[^\s:]+$")
+GENERATOR_NONE = "none"
 # The user's own roles (#1625, the owner, 2026-11-27: "unable to create my own new roles, locked to
 # only having the three default ones"): routes.json `roles.<name>` with `custom: true`, a `label`,
 # and `about`, its Used for (#1652: required of a new role; one from before then without it is
@@ -211,6 +220,19 @@ def used_for(role: str, doc: dict | None = None) -> str:
     return str(row.get("about") or "").strip() or USED_FOR.get(role, "")
 
 
+def generator_of(role: str, doc: dict | None = None) -> tuple[str, str] | None:
+    """``role``'s generator (#1652): (kind, engine), "image" or "audio", or None for a chat model."""
+    try:
+        row = ((doc if doc is not None else read()).get("roles") or {}).get(role) or {}
+    except RoutesError:
+        row = {}
+    g = row.get("generator")
+    if not isinstance(g, str) or not GENERATOR_RE.match(g):
+        return None
+    kind, _, engine = g.partition(":")
+    return kind, engine
+
+
 def skills_of(role: str, doc: dict | None = None) -> tuple[str, list[str]]:
     """``role``'s Skills: (mode, names), ("auto", []) by default (#1652)."""
     try:
@@ -304,6 +326,10 @@ def normalize(doc) -> dict:
             if why := skills_why(r, e["skills"]):
                 raise RoutesError(why)
             row["skills"] = list(dict.fromkeys(e["skills"]))
+        if e.get("generator") is not None:
+            if not isinstance(e["generator"], str) or not GENERATOR_RE.match(e["generator"]):
+                raise RoutesError(f"{r}'s generator is image:<engine> or audio:<engine>, not {e['generator']!r}")
+            row["generator"] = e["generator"]
         if e.get("skills_mode") is not None:
             if e["skills_mode"] not in SKILLS_MODES:
                 raise RoutesError(f"{r}'s skills_mode is {e['skills_mode']!r}, not auto or mine")
@@ -948,10 +974,12 @@ def add_change(doc: dict, name: str, label: str, about: str | None, like: str | 
 
 
 def describe_change(doc: dict, role: str, about: str | None = None, mode: str | None = None,
-                    names: list[str] | None = None) -> Change:
-    """A role's Used for, Skills mode or skill list (#1652): `wb route <role> --used-for TEXT`,
-    `--skills auto|mine|NAME[,NAME]`, `--skill-from PATH` (names given: the list, Mine). Nothing
-    spends, so no yes is taken."""
+                    names: list[str] | None = None, generator: str | None = None) -> Change:
+    """A role's Used for, Skills mode or skill list, or its generator (#1652): `wb route <role>
+    --used-for TEXT`, `--skills auto|mine|NAME[,NAME]`, `--skill-from PATH` (names given: the list,
+    Mine), `--generator image:<engine>|audio:<engine>|none` (the engine checked by the caller,
+    cli._route_describe). Nothing spends here, so no yes is taken: a generator is the user's own
+    engine, which wb image and wb audio run without one."""
     if role not in doc["roles"]:
         raise RoutesError(f"no role {role!r}: the roles are {', '.join(roles_of(doc))}")
     new = copy.deepcopy(doc)
@@ -978,8 +1006,19 @@ def describe_change(doc: dict, role: str, about: str | None = None, mode: str | 
         have = row.get("skills") or []
         said.append("skills: the orchestrator's (auto)" if mode == "auto" else
                     f"skills: only {', '.join(have)}" if have else "skills: none (mine, the list empty)")
+    if generator is not None:
+        if generator == GENERATOR_NONE:
+            row.pop("generator", None)
+            said.append("its chat model again (no generator)")
+        elif GENERATOR_RE.match(generator):
+            row["generator"] = generator
+            kind, _, engine = generator.partition(":")
+            said.append(f"makes {'images' if kind == 'image' else 'audio'} with {engine} (a generator, no agent)")
+        else:
+            raise RoutesError(f"a generator is image:<engine>, audio:<engine> or none, not {generator!r}")
     if not said:
-        raise RoutesError("nothing to change: --used-for TEXT or --skills auto|mine|NAME[,NAME]")
+        raise RoutesError("nothing to change: --used-for TEXT, --skills auto|mine|NAME[,NAME] or "
+                          "--generator image:<engine>|audio:<engine>|none")
     return Change(new, f"{role}: " + "; ".join(said), False, [role])
 
 
@@ -1216,6 +1255,10 @@ def summary(doc: dict) -> str:
             else f" (used for: {row['about']})" if row.get("about") else ""
         if row.get("skills_mode") == "mine":
             own += f" [skills: only {', '.join(row['skills'])}]" if row.get("skills") else " [skills: none]"
+        if gen := row.get("generator"):  # #1652: an engine in place of a chat model, called by wb image|audio --role
+            kind, _, engine = gen.partition(":")
+            out.append(f"{r}{own} generator {kind} {engine} (wb {kind} --role {r})")
+            continue
         # an OpenRouter role's backends (`order`, #1021) are where its code goes: left out, a
         # change of them alone reached the conversation as nothing (#1126, 2026-11-23)
         backends = f", backends {', '.join(row['order'])}" if row.get("api") and row.get("order") else ""

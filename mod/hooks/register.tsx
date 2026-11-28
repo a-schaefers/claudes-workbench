@@ -1142,6 +1142,11 @@ export function routesSummary(doc: Row): string {
     let own = row.custom === true ? ` (the user's own, "${row.label}", ${row.about ? `used for: ${row.about}`
       : 'no Used for yet: don\'t pick it until the user gives one'})` : row.about ? ` (used for: ${row.about})` : ''
     if (row.skills_mode === 'mine') own += Array.isArray(row.skills) && row.skills.length ? ` [skills: only ${row.skills.join(', ')}]` : ' [skills: none]'
+    // an engine in place of a chat model (routes.summary's, #1652)
+    if (typeof row.generator === 'string' && row.generator) {
+      const [kind, engine] = [row.generator.split(':')[0], row.generator.slice(row.generator.indexOf(':') + 1)]
+      return `${r}${own} generator ${kind} ${engine} (wb ${kind} --role ${r})`
+    }
     const gpu = typeof row.gpu === 'string' && row.gpu ? row.gpu : 'auto'
     const thinking = row.thinking === 'on' ? 'on' : 'off'
     // an OpenRouter role's backends (routes.json `order`): where its code goes, so a change of them
@@ -1181,7 +1186,8 @@ function routesValid(doc: unknown): doc is Row {
   // every role's Used for and Skills (#1652): routes.normalize's checks
   const described = (row: any) => (row.about == null || typeof row.about === 'string') &&
     (row.skills == null || (Array.isArray(row.skills) && row.skills.every((n: unknown) => typeof n === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(n)))) &&
-    [undefined, 'auto', 'mine'].includes(row.skills_mode)
+    [undefined, 'auto', 'mine'].includes(row.skills_mode) &&
+    (row.generator == null || (typeof row.generator === 'string' && /^(image|audio):[^\s:]+$/.test(row.generator)))
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => ((ROLES as readonly string[]).includes(r) || own(r, row)) &&
     row && typeof row === 'object' && described(row) && [undefined, 'gpu', 'api'].includes(row.via) &&
     [undefined, 'off', 'on'].includes(row.thinking) && [undefined, 'off', 'on'].includes(row.thinking_review) &&
@@ -1214,7 +1220,7 @@ async function readRoutes($: any): Promise<Routes> {
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
   const plain = cap === null && (doc.use ?? 'both') === 'both' && (doc.busy ?? 'wait') === 'wait' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
     !r.api && (r.thinking ?? 'off') === 'off' && (r.thinking_review ?? 'off') === 'off' && !r.fallback &&
-    !(r.custom !== true && r.about) && r.skills_mode !== 'mine')
+    !(r.custom !== true && r.about) && r.skills_mode !== 'mine' && !r.generator)
   let newest = -Infinity, by = ''
   for (const r of rows) {
     for (const [ts, who] of [[r.ts, r.by], [r.gpu_ts, r.gpu_by]]) {
@@ -1223,7 +1229,7 @@ async function readRoutes($: any): Promise<Routes> {
   }
   return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap,
     web: by === 'web', stamp: newest > -Infinity ? newest : undefined,
-    picks: rows.some(r => r.custom === true || !!r.about || r.skills_mode === 'mine') }
+    picks: rows.some(r => r.custom === true || !!r.about || r.skills_mode === 'mine' || !!r.generator) }
 }
 const DEFAULT_ROUTES = routesSummary({})
 const ROUTES_FRESH_S = 120 // a role stamp this new, with none told this load, is this change's

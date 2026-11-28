@@ -5818,7 +5818,7 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
   for (const bad of [{ roles: { trivail: {} } }, { roles: { trivial: { via: 'api' } } }, { day_usd: -1 },
     { roles: { tests: { custom: true, label: 'Tests', like: 'nope' } } },
     { roles: { tests: { custom: true, label: 'Tests', about: 'x', skills: ['Not A Name'] } } },
-    { roles: { trivial: { skills_mode: 'some' } } }]) {
+    { roles: { trivial: { skills_mode: 'some' } } }, { roles: { trivial: { generator: 'video:x' } } }]) {
     files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: {} })
     await clock.advance(31_000)
     expect(rows.at(-1)).toContain('The roles changed: significant GPU (the router picks)')
@@ -6005,6 +6005,10 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
     .toBe('significant GPU (the router picks); trivial (used for: renames) [skills: only house-style] GPU (the router picks); ' +
       'writing GPU (the router picks); sfx (the user\'s own, "Sound effects", no Used for yet: don\'t pick it until the ' +
       'user gives one) GPU (the router picks)')
+  // a role whose model is an engine says so, and how it is called (#1652)
+  expect(routesSummary({ roles: { icons: { via: 'gpu', custom: true, label: 'Icons', about: 'app icons', generator: 'image:sketch' } } }))
+    .toBe('significant GPU (the router picks); trivial GPU (the router picks); writing GPU (the router picks); ' +
+      'icons (the user\'s own, "Icons", used for: app icons) generator image sketch (wb image --role icons)')
 })
 
 test('#1059: a role whose self-review alone thinks reads "thinking: review only", as routes.summary says it', () => {

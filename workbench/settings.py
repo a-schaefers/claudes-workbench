@@ -192,7 +192,8 @@ ROLE_LABELS = {"role": "{}", "gpu": "{} GPU model", "api": "{} API model", "thin
                "review": "{} self-review thinking"}
 # a role's Used for, Skills and skill upload rows (#1652): read and written apart from ROLE_LABELS'
 # (current() reads them through routes.used_for and skills_of, not the row's model keys)
-DESCRIBE_LABELS = {"usedfor": "{} used for", "skills": "{} skills", "skillup": "{} skill upload"}
+DESCRIBE_LABELS = {"usedfor": "{} used for", "skills": "{} skills", "skillup": "{} skill upload",
+                   "gen": "{} generator"}
 SKILL_UPLOAD_MAX = 64_000  # a SKILL.md's characters, the web app's upload: a skill is instructions, not data
 
 
@@ -535,6 +536,24 @@ SKILLS_STOPS = [("auto", "Auto", "The orchestrator agent hands library skills to
                 ("mine", "Mine", "Only the skills you give this role, every task; the orchestrator adds none.")]
 
 
+def _gen_row(name: str, label: str, row: dict, m: dict | None) -> dict | None:
+    """A role's generator (#1652): its chat model, or an image or audio engine of the user's in its
+    place (`wb route <role> --generator`); None while there is no engine to pick (wb models --json's
+    `media`). On the card while set, under More while not."""
+    media = (m or {}).get("media") or {}
+    stops = [(routes.GENERATOR_NONE, "Chat model (GPU or API)", f"{label} runs as an agent on its GPU or API model.")]
+    stops += [(f"image:{e['name']}", f"{e['name']} (images)", f"{label} makes images with {e['name']} (wb image --role {name}).")
+              for e in (media.get("image") or {}).get("engines") or []]
+    stops += [(f"audio:{e['name']}", f"{e['name']} ({kind})", f"{label} makes {kind} with {e['name']} (wb audio --role {name}).")
+              for kind in ("speech", "sfx", "music") for e in (media.get(kind) or {}).get("engines") or []]
+    now = row.get("generator") or routes.GENERATOR_NONE
+    if len(stops) == 1 and now == routes.GENERATOR_NONE:
+        return None
+    if now not in {v for v, _, _ in stops}:  # an engine since taken out of its file: said, still choosable away
+        stops.append((now, f"{now.partition(':')[2]} (gone)", f"{now.partition(':')[2]} is no longer in its file."))
+    return _choice(f"gen-{name}", name, label_of(f"gen-{name}"), stops, now, more=now == routes.GENERATOR_NONE)
+
+
 def _describe_rows(name: str, label: str, row: dict) -> list[dict]:
     """A role's Used for, Skills and skill upload (#1652), on its card: Used for a form of one
     field holding it now; Skills Auto or Mine; the upload a SKILL.md, into the library and onto the
@@ -691,7 +710,11 @@ def _build() -> dict:
             if row.get("custom"):  # the user's own: its card is titled by its label, under the built-ins'
                 c["card"] = label  # (its Used for is the usedfor- row's, #1652)
             out.append(c)
+            if gen := routes.generator_of(name, {"roles": {name: row}}):  # #1652: the engine, not the side
+                c["says"] = f"{label} makes {'images' if gen[0] == 'image' else 'audio'} with {gen[1]} (wb {gen[0]} --role {name})."
             out.extend(_describe_rows(name, label, row))
+            if g := _gen_row(name, label, row, m):
+                out.append(g)
         out.append(_add_role_row())
     if r is not None:
         out.append(_driver_row(r, m))
@@ -936,6 +959,8 @@ def _argv(row: dict, value) -> list[str]:
         return ["route", "remove", rest]
     if head == "skills":
         return ["route", rest, "--skills", value]
+    if head == "gen":
+        return ["route", rest, "--generator", value]
     if head == "role":
         return ["route", rest, value]
     if head == "gpu":
@@ -1092,7 +1117,8 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
 # typed at a terminal changed the row with no stamp and no open page heard of it. Only the rows'
 # own command lines count: a combined one (`wb route significant api --api x`) logs nothing.
 ROUTE_FLAGS = {"--gpu": "gpu", "--api": "api", "--thinking": "think", "--thinking-review": "review"}
-DESCRIBE_FLAGS = {"--used-for": "usedfor", "--about": "usedfor", "--skills": "skills", "--skill-from": "skillup"}
+DESCRIBE_FLAGS = {"--used-for": "usedfor", "--about": "usedfor", "--skills": "skills", "--skill-from": "skillup",
+                  "--generator": "gen"}
 LOGGED = ("route", "coding", "workflows", "deepmode", "progress", "splash", "experiment", "optimize", "model",
           "image", "audio", "chat", "skill", "upstream")  # the commands key_for reads: cli.main imports this module only for them
 
@@ -1175,6 +1201,8 @@ def current(key: str):
         if head in DESCRIBE_LABELS and rest in routes.all_roles():  # #1652
             if head == "usedfor":
                 return routes.used_for(rest) or None
+            if head == "gen":
+                return ":".join(routes.generator_of(rest) or ()) or routes.GENERATOR_NONE
             mode, names = routes.skills_of(rest)
             return mode if head == "skills" else (", ".join(names) or None)
         if key in ("agents", "busy", "cap", "driver") or (head in ROLE_LABELS and rest in routes.all_roles()):

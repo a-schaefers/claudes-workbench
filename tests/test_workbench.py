@@ -50392,6 +50392,52 @@ class RoleResolution(Base):
             routes.read()
         self.assertIn("trivial's skills are skill names", str(e.exception))
 
+    def test_a_roles_model_can_be_an_image_or_audio_engine_called_by_wb_image_or_audio_role_1652(self):
+        # #1652 (the owner, 2026-11-28): roles such as an image generator, a sound effects or music
+        # generator, "each on an API or local model", their model an engine and no agent
+        os.environ["WB_IMAGES"] = str(Path(self.tmp.name) / "images.json")
+        os.environ["WB_AUDIO"] = str(Path(self.tmp.name) / "audio.json")
+        Path(os.environ["WB_IMAGES"]).write_text(json.dumps({"sketch": {"command": f"{sys.executable} -c pass {{out}}"}}))
+        Path(os.environ["WB_AUDIO"]).write_text(json.dumps({"ears": {"command": f"{sys.executable} -c pass {{out}}",
+                                                                    "kind": "listen"}}))
+        self.set_role("add", "icons", "--label", "Icons", "--used-for", "app icons")
+        for gen, said in (("image:nope", "no image engine 'nope'"), ("audio:ears", "ears is the listener"),
+                          ("video:x", "image:<engine>, audio:<engine> or none")):
+            code, _, err = self.wb("route", "icons", "--generator", gen)
+            self.assertEqual(code, 3, gen)
+            self.assertIn(said, err)
+        self.assertIsNone(routes.generator_of("icons"))
+        self.set_role("icons", "--generator", "image:sketch")
+        self.assertEqual(routes.generator_of("icons"), ("image", "sketch"))
+        self.assertIn('icons (the user\'s own, "Icons", used for: app icons) generator image sketch (wb image --role icons)',
+                      routes.summary(routes.read()))
+        self.assertIn("icons        generator: image engine sketch (wb image --role icons)", self.wb("route")[1])
+        # wb start points at wb image; wb image --role runs the role's engine
+        code, _, err = self.begin("t-icon", "--role", "icons")
+        self.assertEqual(code, 2)
+        self.assertIn('icons makes images with sketch, not code: wb image --role icons "<the brief>"', err)
+        self.assertFalse(store.Task("t-icon").dir.exists())
+        from workbench import images
+        ran = []
+        with mock.patch.object(images, "generate", lambda prompt, out, **kw: ran.append(kw["name"]) or []):
+            code, _, err = self.wb("image", "--role", "icons", "a red apple icon")
+        self.assertEqual((code, ran), (0, ["sketch"]), err)
+        for argv, said in ((("audio", "--role", "icons", "x"), "icons makes images with sketch: wb image --role icons"),
+                           (("image", "--role", "trivial", "x"), "trivial has no generator"),
+                           (("image", "--role", "icons", "--engine", "other", "x"), "two engines")):
+            code, _, err = self.wb(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn(said, err)
+        # none: the chat model again, its side as it was
+        self.set_role("icons", "--generator", "none")
+        self.assertIsNone(routes.generator_of("icons"))
+        self.assertEqual(self.begin("t-icon2", "--role", "icons")[0], 0)
+        # a hand edit's bad generator is refused by name
+        self.routes.write_text(json.dumps({"roles": {"trivial": {"via": "gpu", "generator": "video:x"}}}))
+        with self.assertRaises(routes.RoutesError) as e:
+            routes.read()
+        self.assertIn("trivial's generator is image:<engine> or audio:<engine>", str(e.exception))
+
     def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):
         # #1237 (2026-11-24): an Anthropic adaptive model with no `none` runs on its bare id,
         # thinking as its default, but the dialog, the start line, task.json's route and wb watch's
