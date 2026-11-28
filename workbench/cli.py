@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, cards, chat, context, driver, gitops, hardware, images, lane,
                lessons, media, models, ocplugin, optimize, patches, progress, results, router, routes, runs,
-               savings, scan, skills, stats, store, story, transcript, tuning, verify, webpush)
+               savings, scan, skills, stats, store, story, transcript, tuning, upstream, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from . import keyhole
@@ -9225,6 +9225,59 @@ def cmd_update(a):
             print(f"couldn't check the upstream branches (wb patch list): {e}")
 
 
+def _send_queued_pr(row: dict, body: str) -> str:
+    """A pull request the outbox held (upstream.py), sent as wb patch send, already approved."""
+    patches.send(PKG_ROOT, _install_kind(), row["slug"], row["title"], body, draft=bool(row.get("draft")),
+                 anyway=bool(row.get("anyway")), approved=True)
+    return "sent"
+
+
+def cmd_upstream(a):
+    """wb upstream: Posting to GitHub, the user's mode (auto, daily, never) and the outbox of
+    posts waiting for them (upstream.py; the owner, 2026-11-27)."""
+    try:
+        if a.action is None:
+            print("\n".join(upstream.summary()))
+        elif a.action == "mode":
+            if not a.args:
+                print(upstream.summary()[0])
+            elif len(a.args) == 1:
+                print(upstream.set_mode(a.args[0]))
+            else:
+                die("wb upstream mode auto|daily|never")
+        elif a.action == "post":
+            kind = a.args[0] if a.args else ""
+            if kind not in ("issue", "comment") or (kind == "comment") != (len(a.args) == 2):
+                die("wb upstream post issue --title T --body-file F, or post comment <number> --body-file F "
+                    "(a pull request: wb patch send)")
+            if kind == "comment" and not a.args[1].isdigit():
+                die(f"{a.args[1]!r}: a comment goes on an issue or pull request by its number")
+            if not a.body_file:
+                die("--body-file is needed")
+            row = upstream.add(kind, a.repo or upstream.default_repo(), a.body_file, title=a.title,
+                               number=int(a.args[1]) if kind == "comment" else None)
+            if store.under_model() and upstream.mode() != "auto":  # the outbox: never a dialog mid-work
+                print(upstream.queued_line(row))
+            else:
+                print("\n".join(upstream.send([row["id"]], _send_queued_pr)))
+        elif a.action == "send":
+            print("\n".join(upstream.send(a.args, _send_queued_pr)))
+        elif a.action == "drop":
+            gone = upstream.drop(a.args)
+            print(f"dropped {', '.join(gone)}" if gone else "nothing to drop")
+        elif a.action == "ask":  # the hosts' daily dialog (once a day: marks today asked)
+            rows = upstream.ask()
+            if a.json:
+                print(json.dumps({"mode": upstream.mode(), "repo": upstream.default_repo(),
+                                  "items": [{**r, "line": upstream.line(r)} for r in rows]}))
+            else:
+                print("\n".join(upstream.line(r) for r in rows) or "nothing to ask")
+    except upstream.UpstreamError as e:
+        die(str(e))
+    except patches.PatchError as e:
+        die(str(e))
+
+
 def cmd_patch(a):
     """wb patch: the user's own fixes to workbench, as commits on branch `local` of a clone they
     own, kept across wb update and offered upstream (#1005)."""
@@ -9868,7 +9921,7 @@ class _SettingWrite:
 def _setting_write(raw: list[str]) -> _SettingWrite | None:
     """The log of a Settings row's own command line (settings.key_for), or None for any other."""
     if not raw or raw[0] not in ("route", "coding", "workflows", "deepmode", "progress", "splash", "experiment",
-                                 "optimize", "model", "image", "audio", "chat", "skill"):  # settings.LOGGED: no import for the rest
+                                 "optimize", "model", "image", "audio", "chat", "skill", "upstream"):  # settings.LOGGED: no import for the rest
         return None
     from . import settings  # it imports this module
     hit = settings.key_for(raw)
@@ -10768,6 +10821,16 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("commit", nargs="*", help="branch local's patches (default: every one upstream lacks)")
     x.add_argument("--name", help="the zip's slug (default: the newest commit's short sha)")
     s.set_defaults(f=cmd_patch)
+    s = sub.add_parser("upstream", help="Posting to GitHub: its mode (auto, daily, never) and the outbox of "
+                       "posts waiting for the user", allow_abbrev=False)
+    s.add_argument("action", nargs="?", choices=["mode", "post", "send", "drop", "ask"])
+    s.add_argument("args", nargs="*", help="mode: auto|daily|never; post: issue, or comment <number>; "
+                   "send, drop: outbox ids (default: all)")
+    s.add_argument("--title", help="post issue: its title")
+    s.add_argument("--body-file", help="post: its body")
+    s.add_argument("--repo", help="post: owner/name (default: patches.json's upstream, else workbench's)")
+    s.add_argument("--json", action="store_true", help="ask: as JSON, for the hosts")
+    s.set_defaults(f=cmd_upstream)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
     return ap
 

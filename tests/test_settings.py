@@ -23,7 +23,8 @@ def expected(key: str, value) -> list[str]:
              "workflows": ["workflows", value], "deep-side": ["workflows", "side", value],  # #1627
              "progress": ["progress", value], "splash": ["splash", value],
              "probe": ["experiment", "probe", value], "optimize": ["optimize", "start"],
-             "cap": ["route", "cap", value], "driver": ["route", "driver", value]}
+             "cap": ["route", "cap", value], "driver": ["route", "driver", value],
+             "upstream": ["upstream", "mode", value], "outbox": ["upstream", value]}  # Posting to GitHub
     if head == "remove":  # a role of the user's own (#1625)
         return ["route", "remove", rest]
     if key in fixed:

@@ -32,6 +32,7 @@ export interface Places {
   readonly routes: string    // routes.json (routes.path: $WB_ROUTES)
   readonly commands: string  // commands.json (context.commands_path: $WB_COMMANDS)
   readonly user: string      // $HOME
+  readonly upstream?: string // upstream.json, beside routes.json (upstream.path): Posting to GitHub's mode
 }
 
 export function places(env: Env, cwd: string): Places {
@@ -45,14 +46,42 @@ export function places(env: Env, cwd: string): Places {
   }
 }
 
+// upstream.json: beside routes.json (upstream.path)
+export const upstreamFile = (p: Places): string => p.upstream ?? join(dirname(p.routes), 'upstream.json')
+
+// Posting to GitHub's mode (upstream.mode, the owner, 2026-11-27): auto, daily (the default:
+// missing or unreadable too, never auto), never; `ask`, the form per send as before, no Settings stop
+export function upstreamMode(text: string | undefined): string {
+  try {
+    const m = JSON.parse(text ?? '').mode
+    return ['auto', 'daily', 'never', 'ask'].includes(m) ? m : 'daily'
+  } catch {
+    return 'daily'
+  }
+}
+export const UPSTREAM_QUEUE = 'workbench: not sent: Posting to GitHub is once a day (the user\'s Settings), so ' +
+  'nothing waits on them mid-work. Put it in the outbox and keep working: wb upstream post issue --title "…" ' +
+  '--body-file <file>, or wb upstream post comment <number> --body-file <file> (a pull request: the ' +
+  'workbench_patch_send tool queues it). The user is asked once, at their first turn of the day.'
+export const UPSTREAM_NEVER = 'workbench: not sent: Posting to GitHub is Never (the user\'s Settings): nothing ' +
+  'goes to GitHub for them. Keep the fix a local patch (wb patch) and tell the user; a draft can wait in the ' +
+  'outbox (wb upstream post …).'
+export const UPSTREAM_OWN = 'workbench: not run: upstream.json and the daily yes (upstream-ok*.json) are the ' +
+  "user's (Settings › Posting to GitHub, wb upstream mode in their own terminal, the daily form); no command " +
+  'and no edit writes them.'
+
 // The host's one-shot yes in $WB_HOME: Claude Code's mod writes route-ok.json and send-ok.json, this
 // plugin `<stem>.<session>.json` (store.approval_name, #1363); none is any model's to write
-export const APPROVAL = /^(?:route|send)-ok(?:\.[\w-]{1,128})?\.json$/
+export const APPROVAL = /^(?:route|send|upstream)-ok(?:\.[\w-]{1,128})?\.json$/
 
 // Which protected file ``abs`` is, by its path or by real path (``real``: a link to one is it)
-export function guarded(abs: string, p: Places, real: (path: string) => string = x => x): '' | 'routes' | 'approval' {
+export function guarded(abs: string, p: Places, real: (path: string) => string = x => x): '' | 'routes' | 'approval' | 'upstream' {
+  const up = upstreamFile(p)
   for (const path of new Set([abs, real(abs)])) {
     if (path === p.routes || path === real(p.routes)) return 'routes'
+    if (path === up || path === real(up)) return 'upstream'
+    if (/^upstream-ok/.test(basename(path)) && APPROVAL.test(basename(path)) &&
+      (dirname(path) === p.home || dirname(path) === real(p.home))) return 'upstream'
     if (APPROVAL.test(basename(path)) && (dirname(path) === p.home || dirname(path) === real(p.home))) return 'approval'
   }
   return ''
@@ -155,7 +184,7 @@ function dropped(gap: string): string[] {
 // cd or pushd moves the next commands' directory, as the mod follows it (#1125), a bare one to
 // $HOME; after one only the shell can resolve (`cd "$X"`, `cd -`, a popd), a relative path is unknown.
 export async function shellRefusal(commands: ReadonlyArray<Command>, dir: string, p: Places, classify: Classify,
-                                   dry: Dry, real: (path: string) => string = x => x): Promise<string> {
+                                   dry: Dry, real: (path: string) => string = x => x, sendMode = 'ask'): Promise<string> {
   let here = dir
   for (const c of commands) {
     const g = classify(c.words, c.writes)
@@ -164,6 +193,7 @@ export async function shellRefusal(commands: ReadonlyArray<Command>, dir: string
       const kind = to ? guarded(to, p, real) : ''
       if (kind === 'approval') return APPROVAL_OWN(basename(to))
       if (kind === 'routes') return ROUTES_EDIT
+      if (kind === 'upstream') return UPSTREAM_OWN
     }
     if (g.gate === 'cd') {
       const to = g.args[0]
@@ -174,7 +204,8 @@ export async function shellRefusal(commands: ReadonlyArray<Command>, dir: string
       here = ''
       continue
     }
-    if (g.gate === 'send') return SEND_VIA_TOOL
+    // wb patch send decides by Posting to GitHub's mode itself (patches.send): only `ask` needs the tool's form
+    if (g.gate === 'send') { if (sendMode === 'ask') return SEND_VIA_TOOL; continue }
     if (g.gate !== 'route' && g.gate !== 'start' && g.gate !== 'settings') continue
     // a show (`wb route`, `--json`) and a dry run change nothing
     const live = !g.args.includes('--dry-run') && (g.args[0] === '--start' || g.args[0] === '--settings'

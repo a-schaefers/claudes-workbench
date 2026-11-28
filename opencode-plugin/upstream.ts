@@ -29,7 +29,8 @@ import {
   absolutePath, gatedWhere, githubAimsUpstream, inside, originIs, shownCommand, shownInput, upstreamAim, type Where,
 } from '../mod/hooks/shell.ts'
 import type { Asker, Before } from './consent.ts'
-import { NOT_SENT, SEND_ASK, SEND_VIA_TOOL, places, type Env } from './gates.ts'
+import { NOT_SENT, SEND_ASK, SEND_VIA_TOOL, UPSTREAM_NEVER, UPSTREAM_QUEUE, places, upstreamFile, upstreamMode,
+  type Env } from './gates.ts'
 
 export type Row = Record<string, unknown>
 
@@ -48,7 +49,13 @@ export interface UpstreamDeps {
   // whether the signed-in GitHub user can push to the slug (`gh api repos/<slug> --jq
   // .permissions.push`), false when gh can't say: none, no gate is lifted
   readonly canPush?: (slug: string) => Promise<boolean>
+  // wb as the session's own call (the daily form's `wb upstream ask --json` and `send`), and the
+  // daily form's yes written for that session (upstream-ok.<session>.json: upstream.may_send)
+  readonly wb?: (args: string[], session: string) => Promise<{ code: number; out: string }>
+  readonly approve?: (session: string, ids: string[]) => Promise<void>
 }
+
+export const UPSTREAM_ASK = { yes: 'Send all', no: 'Not today' }
 
 // A no, or gh's silence, is asked again only after this (a yes holds for the server's life), so a
 // user's gated calls don't each wait on gh (the mod's PUSH_RECHECK_MS)
@@ -75,6 +82,7 @@ export function packageCaches(env: Env): string[] {
 
 export class Upstream {
   private readonly pushable = new Map<string, { ok: boolean; at: number }>()
+  private asking = false
   constructor(private d: UpstreamDeps, private now: () => number = Date.now) {}
 
   // Upstream's maintainer or a collaborator (they can push to it): their own driver's writes there
@@ -96,6 +104,33 @@ export class Upstream {
     const ok = await this.d.canPush!(slug).catch(() => false)
     this.pushable.set(slug, { ok, at: now })
     return ok
+  }
+
+  // Posting to GitHub's mode (upstream.json beside routes.json): never a form mid-work but in `ask`
+  private mode(env: Env): string {
+    return upstreamMode(this.d.read(upstreamFile(places(env, process.cwd()))))
+  }
+
+  // The daily form (upstream.ask; the mod's dailyUpstream): at the user's typed prompt, once a day,
+  // the posts the outbox holds, Send all or Not today; wb marks the day asked before it answers
+  async daily(session: string): Promise<void> {
+    if (this.asking || !this.d.wb || this.mode(this.d.env()) !== 'daily') return  // wb only when it could ask
+    this.asking = true
+    try {
+      const r = await this.d.wb(['upstream', 'ask', '--json'], session)
+      if (r.code !== 0) return
+      const rows: Row[] = JSON.parse(r.out)?.items
+      if (!Array.isArray(rows) || !rows.length) return
+      const n = rows.length
+      const question = `Workbench has ${n} post${n === 1 ? '' : 's'} for GitHub waiting (Settings › Posting to GitHub ` +
+        `is once a day):\n${rows.map(x => `• ${String(x.line ?? x.id)}`).join('\n')}\n\nSend ${n === 1 ? 'it' : 'them'} now?`
+      if (await this.d.asker.ask(session, { title: 'Workbench', question, ...UPSTREAM_ASK }) !== 'yes') return
+      const ids = rows.map(x => String(x.id))
+      await this.d.approve?.(session, ids)
+      await this.d.wb(['upstream', 'send', ...ids], session)
+    } catch { /* no wb, or its answer unreadable: asked another day */ } finally {
+      this.asking = false
+    }
   }
 
   async before(e: UpstreamBefore): Promise<void> {
@@ -151,10 +186,13 @@ export class Upstream {
       }
     }
     if (!aim.why) return ''
-    if (aim.why === 'send') return SEND_VIA_TOOL
+    const mode = this.mode(env)
+    if (aim.why === 'send') return mode === 'ask' ? SEND_VIA_TOOL : '' // wb patch send decides by the mode itself
     if (aim.why === 'plugin' && !aim.named && !originIs(await this.d.origin(aim.at), g.slugs)) return ''
     if (aim.why === 'slug' && await this.developer(aim.at, g)) return ''
     if (await this.maintainer(g.slugs)) return ''
+    if (mode === 'auto') return ''
+    if (mode !== 'ask') return mode === 'never' ? UPSTREAM_NEVER : UPSTREAM_QUEUE
     return this.ask(session, `The driver wants to send this to GitHub (${g.slug}), publicly: ${shownCommand(command, aim)}`)
   }
 
@@ -165,6 +203,9 @@ export class Upstream {
     if (!githubAimsUpstream(name, input, g.slugs)) return ''
     if (await this.developer(cwd, g)) return ''
     if (await this.maintainer(g.slugs)) return ''
+    const mode = this.mode(env)
+    if (mode === 'auto') return ''
+    if (mode !== 'ask') return mode === 'never' ? UPSTREAM_NEVER : UPSTREAM_QUEUE
     return this.ask(session, `The driver wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shownInput(input)}`)
   }
 

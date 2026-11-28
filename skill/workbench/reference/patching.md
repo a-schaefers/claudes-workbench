@@ -78,12 +78,18 @@ with gh, git or a GitHub MCP tool yourself (those ask the same dialog). Show the
 first, so the dialog only confirms what they have read. A "Don't send" is a no: tell them it
 wasn't sent and leave it, unless they bring it up. If they are away on the web chat, tell them there
 what it would send: the dialog waits in the terminal for their answer.
+Asking at each send is only upstream.json's `ask`. When a send goes is the user's Posting to GitHub
+(Settings; `wb upstream` shows it): `daily`, the default, holds nothing on a dialog mid-work (a
+post waits in the outbox, and the user is asked once, at their first turn of the day); `auto` sends
+at once; `never` keeps the fix a local patch and a post a draft. A refusal that says `queued` or
+`Never` is the answer: tell the user in a line and keep working. Only the user changes the mode.
 1. Search the issues (`gh issue list --repo <origin's owner/repo> --state all --search "<the error's
    words>"`); on a match, comment there instead. Otherwise draft the issue from the matching form
    (`.github/ISSUE_TEMPLATE/`): real output pasted, the commit, `wb doctor`, `wb patch list`.
    Show it to the user before filing it, and tick "filed by an agent" only once they have read it.
-   Without a browser: `gh issue create --title … --label … --body-file <f>`, the form's fields in
-   its order under its labels as `### ` headings.
+   Without a browser: `wb upstream post issue --title "…" --body-file <f>` (on a match,
+   `wb upstream post comment <number> --body-file <f>`), the form's fields in its order under its
+   labels as `### ` headings: it goes when Posting to GitHub says (above), never through gh itself.
 2. A patch with no test gets one first (a commit on `local`, with the fix's): upstream asks for it,
    and `wb patch check` needs it. `wb patch upstream` says `it has no test: add one before
    sending` when it lacks one.

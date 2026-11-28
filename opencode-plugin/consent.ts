@@ -36,7 +36,8 @@ import { isAbsolute, join, resolve } from 'node:path'
 import type { ServerContext } from './host.d.ts'
 import {
   APPROVAL_OWN, NO_FORM, NOT_EDITED, NOT_SENT, ONLY, ROUTES_EDIT, SEND_ASK, allowances, codingMode, editedText, guarded, lineCommands,
-  localOnlyPatchRefusal, localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, wordPath, type Classify, type Coding, type Env, type Places,
+  localOnlyPatchRefusal, localOnlyRefusal, patchFiles, patchLines, places, shellRefusal, taskOfPath, UPSTREAM_OWN, upstreamFile, upstreamMode, wordPath,
+  type Classify, type Coding, type Env, type Places,
 } from './gates.ts'
 import { findWb, NAMESPACE_DESCRIPTION, wbEnv } from './wb.ts'
 import { dirOfSession, sessionRoots, START_INPUT, startCall } from './tools.ts'
@@ -251,7 +252,7 @@ export function runner(options: ServerContext['options'], base: Env = process.en
 
 // The approval wb takes for this session's call (store.approval_name: `<stem>.<session>.json`),
 // written whole (a temporary file renamed over it), `at` now
-export function writeApproval(home: string, name: 'route-ok.json' | 'send-ok.json', session: string,
+export function writeApproval(home: string, name: 'route-ok.json' | 'send-ok.json' | 'upstream-ok.json', session: string,
                               approval: Row, now = Date.now()): string {
   if (!SESSION_RE.test(session)) throw new Error(`workbench: not changed: ${session} is no session id wb takes`)
   const file = join(home, name.replace(/\.json$/, `.${session}.json`))
@@ -304,6 +305,7 @@ export interface Deps {
   readonly root?: (session: string) => Promise<string>
   readonly read: (path: string) => string | undefined
   readonly now?: () => number
+  readonly mode?: () => string // Posting to GitHub's (gates.ts upstreamMode)
 }
 
 // One gated wb call: its dry run, the form on a gated change, the approval, the call
@@ -413,6 +415,10 @@ async function send(d: Deps, session: string, input: Row, signal?: AbortSignal):
     ...(anyway ? ['--anyway'] : [])]
   const lines = body.split('\n')
   const shown = lines.slice(0, BODY_LINES).join('\n') + (lines.length > BODY_LINES ? '\n…' : '')
+  // Posting to GitHub (upstream.py): only `ask` asks per send; otherwise wb patch send queues it
+  // (daily), keeps it local (never) or sends it (auto) by itself, never a form mid-work
+  const owner0 = d.root ? await d.root(session) : session
+  if (d.mode && d.mode() !== 'ask') return answer(await d.run(real, { session: owner0, cwd, timeout: SEND_MS }))
   const upstream = upstreamOf(d.read(join(d.home(), 'patches.json')))
   const mine = /^[a-z0-9][a-z0-9-]*$/.test(slug) && await personal(d, join(d.home(), 'upstream', slug))
   const question = `The driver wants to send this to GitHub (${upstream}), publicly: wb ${line(real)}\n\n` +
@@ -504,7 +510,8 @@ export class Gates {
       const dir = call?.workdir ? wordPath(call.workdir, session, p) : session
       const commands = (call ? lineCommands(call.command, e.resources) : e.resources).map(r => simpleWords(r))
       return shellRefusal(commands, dir, p, this.d.classify,
-        (args, cwd) => this.d.dry(args, cwd || session, e.sessionID), this.d.real)
+        (args, cwd) => this.d.dry(args, cwd || session, e.sessionID), this.d.real,
+        upstreamMode(this.d.read(upstreamFile(p))))
     }
     if (e.action !== 'edit') return ''
     const dir = await this.d.dir(e.sessionID)
@@ -514,6 +521,7 @@ export class Gates {
       const kind = guarded(abs, p, this.d.real)
       if (kind === 'routes') return ROUTES_EDIT
       if (kind === 'approval') return APPROVAL_OWN(abs.slice(abs.lastIndexOf('/') + 1))
+      if (kind === 'upstream') return UPSTREAM_OWN
       const why = await this.coding(abs, p, e.sessionID)
       if (why) return why
     }
@@ -669,7 +677,8 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
     child.stdin?.end()
   })
   const root = sessionRoots({ session: sessions })
-  const d: Deps = { run, git, asker, home: () => place().home, dir, root, read: readText }
+  const d: Deps = { run, git, asker, home: () => place().home, dir, root, read: readText,
+    mode: () => upstreamMode(readText(upstreamFile(place()))) }
   await c.tool.transform(editor => {
     editor.namespace({ name: NAMESPACE, description: NAMESPACE_DESCRIPTION })
     for (const t of tools(d)) editor.add(t)
@@ -699,8 +708,23 @@ export async function consent(ctx: ServerContext): Promise<(() => Promise<void>)
         (e, stdout) => done(!e && String(stdout ?? '').trim() === 'true'))
       child.stdin?.end()
     })
-    const upstream = new up.Upstream({ env, dir, read: readText, real: realOf, origin, asker, canPush })
+    const wb = async (args: string[], session: string) => {
+      const r = await run(args, { session: await root(session), timeout: SEND_MS })
+      return { code: r.code, out: r.out }
+    }
+    const approve = async (session: string, ids: string[]) => { writeApproval(place().home, 'upstream-ok.json', await root(session), { ids }) }
+    const upstream = new up.Upstream({ env, dir, read: readText, real: realOf, origin, asker, canPush, wb, approve })
     await c.tool.hook('execute.before', e => upstream.before(e))
+    // Posting to GitHub's daily form, at the user's typed prompt in the TUI (never the web chat's,
+    // a subagent's or wb's own notices: deep.ts's usersWords)
+    const hook = (c as { session?: { hook?: (name: string, f: (e: unknown) => unknown) => Promise<unknown> } }).session?.hook
+    if (hook) {
+      const { usersWords } = await import('./deep.ts')
+      await hook('prompt', (e: any) => {
+        if (!e?.sessionID || usersWords(e) === null || (e.metadata && Object.keys(e.metadata).length)) return
+        void upstream.daily(e.sessionID)
+      }).catch(() => {})
+    }
   }
   return async () => {
     open = false

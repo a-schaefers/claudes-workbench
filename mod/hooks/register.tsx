@@ -864,6 +864,12 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
   if (aim.why === 'slug' && await developerClone($, aim.at, g.slugs, [...g.dirs, ...g.plugins])) return ''
   // the maintainer's own: never asked, but `wb patch send`, whose yes it checks (send-ok.json)
   if (aim.why !== 'send' && await canPushAll($, g.slugs)) return ''
+  // Posting to GitHub (the owner, 2026-11-27): never a dialog mid-work. wb patch send decides by
+  // the mode itself (it queues, refuses or sends); any other send is let through in auto, and
+  // otherwise refused with the way to the outbox (daily) or the local patch (never)
+  const mode = await upstreamMode($)
+  if (mode === 'auto' || (aim.why === 'send' && mode !== 'ask')) return ''
+  if (mode !== 'ask') return mode === 'never' ? UPSTREAM_NEVER : UPSTREAM_QUEUE
   const q = await sendQuestion($, command, g.slug, aim, g.home)
   if ('deny' in q) return q.deny
   const no = await askToSend($, q.question)
@@ -879,7 +885,89 @@ async function mcpRefusal($: any, tool: string, input: Row): Promise<string> {
   if (!mcpAimsUpstream(tool, input, g.slugs)) return ''
   if (await developerClone($, g.cwd, g.slugs, [...g.dirs, ...g.plugins])) return ''
   if (await canPushAll($, g.slugs)) return ''
+  const mode = await upstreamMode($)  // as upstreamRefusal: never a dialog mid-work
+  if (mode === 'auto') return ''
+  if (mode !== 'ask') return mode === 'never' ? UPSTREAM_NEVER : UPSTREAM_QUEUE
   return askToSend($, `Claude wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shownInput(input)} — Send it?`)
+}
+
+// Posting to GitHub (workbench/upstream.py; the owner, 2026-11-27: the send dialog held work for
+// hours while they were away): the user's mode in upstream.json beside routes.json, `auto`, `daily`
+// (the default) or `never`. Missing or unreadable is daily, never auto (fail closed). `ask`, the
+// dialog per send as before, is no Settings stop: only upstream.json written by hand keeps it
+const UPSTREAM_OK = 'upstream-ok.json' // the daily dialog's yes to one Send all (upstream.may_send)
+const upstreamPath = async ($: any) => `${(await routesPath($)).replace(/\/[^/]*$/, '')}/upstream.json`
+async function upstreamMode($: any): Promise<string> {
+  try {
+    const m = JSON.parse(await $.fs.read(await upstreamPath($)))?.mode
+    return ['auto', 'daily', 'never', 'ask'].includes(m) ? m : 'daily'
+  } catch {
+    return 'daily'
+  }
+}
+export const UPSTREAM_QUEUE = 'workbench: not sent: Posting to GitHub is once a day (the user\'s Settings), so ' +
+  'nothing waits on them mid-work. Put it in the outbox and keep working: wb upstream post issue --title "…" ' +
+  '--body-file <file>, or wb upstream post comment <number> --body-file <file> (a pull request: wb patch send ' +
+  'queues itself). The user is asked once, at their first turn of the day.'
+export const UPSTREAM_NEVER = 'workbench: not sent: Posting to GitHub is Never (the user\'s Settings): nothing ' +
+  'goes to GitHub for them. Keep the fix a local patch (wb patch) and tell the user; a draft can wait in the ' +
+  'outbox (wb upstream post …).'
+export const UPSTREAM_OWN = `workbench: not run: upstream.json and ${UPSTREAM_OK} are the user's (Settings › ` +
+  'Posting to GitHub, wb upstream mode in their own terminal, the daily dialog\'s yes); no command and no edit writes them.'
+
+// The deny for an edit of upstream.json or upstream-ok.json (the file tools' path), else ''
+async function upstreamFileRefusal($: any, path: string): Promise<string> {
+  const home = await routesHome($)
+  const cwd = (await $.session.cwd().catch(() => '')) || mem.cwd
+  const abs = absolutePath(path, home, cwd)
+  const gated = [await upstreamPath($), `${mem.root}/${UPSTREAM_OK}`]
+  if (gated.includes(abs)) return UPSTREAM_OWN
+  const real = await realPath($, abs)
+  return real !== abs && (await Promise.all(gated.map(g => realPath($, g)))).includes(real) ? UPSTREAM_OWN : ''
+}
+
+// The deny for a Bash or Monitor command that writes upstream.json or upstream-ok.json, else ''
+async function upstreamWriteRefusal($: any, e: Row): Promise<string> {
+  const tool = String(e.tool ?? '')
+  if ((tool !== 'Bash' && tool !== 'Monitor') || typeof e.command !== 'string') return ''
+  if (!/upstream(?:-ok)?\.json/.test(e.command)) return '' // most calls: no parse
+  const cwd = (await $.session.cwd().catch(() => '')) || mem.cwd
+  const home = await routesHome($)
+  for (const file of [await upstreamPath($), `${mem.root}/${UPSTREAM_OK}`])
+    if (writesTo(e.command, file, cwd, home, mem.root)) return UPSTREAM_OWN
+  return ''
+}
+
+// The daily dialog (upstream.ask): at the user's first typed turn of the day, once, the posts the
+// outbox holds, Send all or Not today; nothing else ever asks mid-work. wb marks the day asked
+// before it answers, so two hosts never both ask, and a dismissed dialog is a Not today
+export const UPSTREAM_SEND_ALL = 'Send all'
+export const UPSTREAM_NOT_TODAY = 'Not today'
+async function dailyUpstream($: any): Promise<void> {
+  if (mem.askingUpstream) return
+  mem.askingUpstream = true
+  try {
+    // wb only when it could have something to ask: daily, and a post in the outbox (a typed turn
+    // is no reason to spawn wb otherwise)
+    if ((await upstreamMode($)) !== 'daily') return
+    const waiting = (await $.fs.list(`${mem.root}/outbox`).catch(() => [])) ?? []
+    if (!waiting.some((x: Row) => String(x.name ?? '').endsWith('.json'))) return
+    const r = await $.process.run([mem.wb, 'upstream', 'ask', '--json'], { timeoutMs: 30_000 })
+    if (r.exitCode !== 0) return
+    const doc = JSON.parse(String(r.stdout ?? ''))
+    const rows: Row[] = Array.isArray(doc?.items) ? doc.items : []
+    if (!rows.length) return
+    const n = rows.length
+    const q = `Workbench has ${n} post${n === 1 ? '' : 's'} for GitHub waiting (Settings › Posting to GitHub ` +
+      `is once a day):\n${rows.map(x => `• ${String(x.line ?? x.id)}`).join('\n')}\nSend ${n === 1 ? 'it' : 'them'} now?`
+    if (!(await consent($, q, UPSTREAM_SEND_ALL, UPSTREAM_NOT_TODAY, 'nothing was sent; they wait in the outbox'))) return
+    const ids = rows.map(x => String(x.id))
+    await $.fs.write(`${mem.root}/${UPSTREAM_OK}`, JSON.stringify({ ids, at: (await $.clock.now()) / 1000 }))
+    const sent = await runWb($, ['upstream', 'send', ...ids], 600_000)
+    $.ui.toast(`workbench: ${brief(sent.out)}`)
+  } catch { /* no wb, or its answer unreadable: asked another day */ } finally {
+    mem.askingUpstream = false
+  }
 }
 
 // Any tool call: Bash's and Monitor's command (Monitor runs its script in the same shell), a GitHub MCP tool's input
@@ -1480,6 +1568,7 @@ async function sayRules($: any, delegating: boolean) {
 const mem = {
   flows: new Map<string, FlowCommand>(), // the flows' slash commands, registered at session.start (#1295)
   pushable: new Map<string, { ok: boolean; at: number }>(), // canPush's answers by slug
+  askingUpstream: false, // the daily Posting to GitHub dialog is up (dailyUpstream)
   wake: true,
   root: '',
   startedAt: 0,
@@ -3415,13 +3504,13 @@ export const register: Register = (on, options) => {
     const path = field ? (e as any)[field] : undefined
     if (typeof path === 'string') {
       const why = (await codingRefusal($, path)) || (await routesFileRefusal($, path))
-        || (await localOnlyRefusal($, e as Row, path))
+        || (await upstreamFileRefusal($, path)) || (await localOnlyRefusal($, e as Row, path))
       if (why) return { deny: why }
     }
     // Nothing goes to workbench upstream without the user's yes to that very command (#1005,
     // sendRefusal): Claude's, a subagent's or another plugin's call alike; Bash, Monitor and the
     // GitHub MCP tools
-    const sending = await sendRefusal($, e as Row)
+    const sending = (await upstreamWriteRefusal($, e as Row)) || (await sendRefusal($, e as Row))
     if (sending) return { deny: sending }
     // No role's API side changes, and no task starts on an API model, without the user's yes in
     // the dialog (#1014, routeRefusal): anyone's call alike
@@ -3526,6 +3615,7 @@ export const register: Register = (on, options) => {
     if (typed) {
       await back($)
       userOwedClear() // back at the terminal: an answer there reaches them (#767), never an agent (#1273)
+      void dailyUpstream($) // Posting to GitHub's once-a-day question, beside the turn, never before it
     }
     if (!typed || e.command) return next(e)
     const kw = keywords(e.text)

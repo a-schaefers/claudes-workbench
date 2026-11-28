@@ -1440,7 +1440,7 @@ def _fork_of(repo, login, said) -> str:
     return guess  # not listed yet: a new fork appears asynchronously, and the push waits for it
 
 
-def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
+def send(root, kind, slug, title, body_file, draft=False, anyway=False, approved=False) -> None:
     """The turnkey send of a branch wb patch upstream prepared: the refusals first, then gh's
     state, then a fork (unless the user owns upstream), the push and the pull request. It is
     the command the mod's consent gate asks the user about (under Claude Code it refuses what
@@ -1474,9 +1474,23 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
         raise PatchError(f"{pr} changes .github/workflows/, and GitHub refuses that push over https without "
                          "the token's workflow scope, so nothing was sent: "
                          + _user_runs("gh auth refresh -h github.com -s workflow", sep=" "))
+    # Posting to GitHub (upstream.py, the owner, 2026-11-27): a model's send in daily mode goes
+    # into the outbox, never a dialog mid-work; in never mode it stays a local patch; in auto it
+    # goes. ``approved``: the outbox's own send of it, on the user's yes (upstream.send)
+    if store.under_model() and not approved and store.caller_kind() != "agent":
+        from . import upstream
+        m = upstream.mode()
+        if m == "never":
+            raise PatchError(f"not sent: Posting to GitHub is Never (the user's Settings), so pr/{slug} stays "
+                             "a branch here; tell the user it is ready (wb patch list)")
+        if m == "daily":
+            row = upstream.add("pr", repo, body_file, title=title, slug=slug, draft=draft, anyway=anyway)
+            print(upstream.queued_line(row))
+            return
+        approved = m == "auto"  # auto: no one asked, by the user's own choice; ask: the dialog's yes
     # an OpenCode driver's shell too (#1309), and an agent's (#1310): store.under_model. Each
     # sent with no one asked
-    if store.under_model() and not _approved(slug, title, body_file, draft, anyway):
+    if store.under_model() and not approved and not _approved(slug, title, body_file, draft, anyway):
         again = " ".join(["wb patch send", slug, "--title", _quote(title), "--body-file",
                           shlex.quote(os.path.abspath(body_file)), *(["--draft"] if draft else []),
                           *(["--anyway"] if anyway else [])])

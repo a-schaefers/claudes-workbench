@@ -773,6 +773,14 @@ rather not), offer "want a .zip of the patch to email upstream yourself?"; on a 
 nothing), then tell them the path and the address it prints. Read `reference/patching.md` beside
 this file first; you write the patch yourself.
 
+When any of it reaches GitHub is the user's **Posting to GitHub** (Settings; `wb upstream` shows
+it), and nothing waits on them mid-work: `daily`, the default, keeps a post in an outbox and asks
+them once, at their first turn of the day; `auto` sends at once; `never` keeps the fix a local
+patch. An issue or a comment upstream is `wb upstream post issue --title "…" --body-file <f>` or
+`wb upstream post comment <number> --body-file <f>`, never gh; `wb patch send` follows the mode
+itself. A reply that says `queued` or `Never` is the answer: tell the user in a line and keep
+working. Never change the mode or send the outbox yourself: only the user does.
+
 ## Report to the user
 Short and honest: what was built, on which model (GPU, or API and its provider), the role and
 who set it (`model:` at start, `routed:` in `wb watch`), rounds (automatic and review), test result,
