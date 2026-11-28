@@ -50,7 +50,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savings, store
+from . import chat, cli, context, driver, ocplugin, progress, routes, runs, savings, store, upstream
 
 # display order. A card per role first (#1553, 2026-11-26): its
 # GPU or API, then its GPU model, API model and thinking under More (`more`), where one role's
@@ -108,7 +108,7 @@ RUN_DETAIL_CHARS = 16_000  # the Summary's text past this is cut: wb run report 
 # key prefixes whose action changes no setting (record): a run's Stop or Summary, and Optimize's
 # Measure now, a button logged "Optimize: off → start", from a value that never was (the web app's
 # review, 2026-11-26)
-NOT_RECORDED = ("run-", "mine-")
+NOT_RECORDED = ("run-", "mine-", "outbox")  # outbox: a Send or Drop, no setting
 # Customize (#1463 P6): a row per card and flow of the user's own, in the workflows group: its
 # mark (cards.shadow_mark), and for one that shadows a shipped one its Diff (wb card|flow diff,
 # drawn under the row as a run's Summary is) and Reset (yours moved aside to .bak, never lost).
@@ -186,7 +186,7 @@ LABELS = {"agents": "Agents", "busy": "When the GPU is busy", "driver": "Driver"
           "add-role": "Add a role",
           "workflows": "Dynamic workflows", "deep-side": "Deep workflows run on", "cap": "API day cap", "progress": "Progress checks",
           "splash": "Opening animation", "probe": "Agent code navigation",
-          "optimize": "Optimize"}
+          "optimize": "Optimize", "upstream": "Posting to GitHub", "outbox": "Waiting to post"}
 ROLE_LABELS = {"role": "{}", "gpu": "{} GPU model", "api": "{} API model", "think": "{} thinking",
                "review": "{} self-review thinking"}
 
@@ -481,6 +481,16 @@ def _media_rows(m: dict | None) -> list[dict]:
     return out
 
 
+def _outbox_row(waiting: list[dict]) -> dict:
+    """The posts waiting for the user (upstream.py), with Send all and Drop all."""
+    n = len(waiting)
+    return {"key": "outbox", "group": "shared", "label": LABELS["outbox"], "kind": "action",
+            "text": "\n".join([f"{n} post{'' if n == 1 else 's'} waiting for GitHub:", *(upstream.line(r) for r in waiting)]),
+            "brief": f"{n} waiting",
+            "choices": [{"value": "send", "label": "Send all", "says": "Posts them to GitHub now (wb upstream send)."},
+                        {"value": "drop", "label": "Drop all", "says": "Deletes them, unsent (wb upstream drop)."}]}
+
+
 def _optimize_row(m: dict) -> dict:
     o = m.get("optimize") or {}
     if o.get("running"):
@@ -661,6 +671,11 @@ def _build() -> dict:
     after = progress.user_after(prog) or 0
     out.append(_choice("progress", "shared", LABELS["progress"], _progress_stops(after),
                        "on" if prog.get("on") is True else "off"))
+    # Posting to GitHub (upstream.py, the owner, 2026-11-27): the user's click is their yes, as
+    # their terminal is (the child isn't Claude); Claude's `wb settings set` of it is refused
+    out.append(_choice("upstream", "shared", LABELS["upstream"], upstream.STOPS, upstream.mode()))
+    if waiting := upstream.items():
+        out.append(_outbox_row(waiting))
 
     # gpu
     if r is None:
@@ -863,6 +878,10 @@ def _argv(row: dict, value) -> list[str]:
         return ["experiment", "probe", value]
     if key == "optimize":
         return ["optimize", "start"]
+    if key == "upstream":
+        return ["upstream", "mode", value]
+    if key == "outbox":
+        return ["upstream", "send" if value == "send" else "drop"]
     if key == "driver":
         return ["route", "driver", value]
     if head == "run":
@@ -1013,7 +1032,7 @@ def record(before: dict, key: str, value, done: dict, by: str) -> dict | None:
 # own command lines count: a combined one (`wb route significant api --api x`) logs nothing.
 ROUTE_FLAGS = {"--gpu": "gpu", "--api": "api", "--thinking": "think", "--thinking-review": "review"}
 LOGGED = ("route", "coding", "workflows", "deepmode", "progress", "splash", "experiment", "optimize", "model",
-          "image", "audio", "chat", "skill")  # the commands key_for reads: cli.main imports this module only for them
+          "image", "audio", "chat", "skill", "upstream")  # the commands key_for reads: cli.main imports this module only for them
 
 
 def key_for(argv: list[str]) -> tuple[str, str] | None:
@@ -1050,6 +1069,10 @@ def key_for(argv: list[str]) -> tuple[str, str] | None:
         return "probe", rest[1]
     if a == ["optimize", "start"]:
         return "optimize", "start"
+    if cmd == "upstream" and len(rest) == 2 and rest[0] == "mode":
+        return "upstream", rest[1]
+    if cmd == "upstream" and rest in (["send"], ["drop"]):
+        return "outbox", rest[0]
     if cmd in ("card", "flow") and len(rest) == 2 and rest[0] in ("diff", "reset"):
         return f"mine-{cmd}-{rest[1]}", rest[0]
     if cmd == "model" and len(rest) >= 2 and rest[0] == "sizes" and not any(x.startswith("-") for x in rest):
@@ -1098,6 +1121,8 @@ def current(key: str):
                     "think": row.get("thinking") or "off", "review": row.get("thinking_review") or "off"}[head]
         if key == "coding":
             return cli.coding_mode()
+        if key == "upstream":
+            return upstream.mode()
         if key == "workflows":
             return cli.workflows_mode()
         if key == "deep-side":

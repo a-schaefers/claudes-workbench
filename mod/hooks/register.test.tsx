@@ -4333,6 +4333,7 @@ test('Claude\'s own calls in a task\'s worktree are kept for wb as they begin, e
 // The upstream gate's world (#1005): the patch clone, the user's project, a developer's own clone
 // of upstream, each with its origin; a dialog answered with `answer` (null: dismissed, or -p)
 const SLUG = 'a-schaefers/workbench'
+const UPSTREAM_JSON = '/home/u/.config/workbench/upstream.json'  // beside routes.json (upstream.path)
 const SOURCE = '/home/u/.local/share/workbench/source'
 const MARKET = '/home/u/.claude/plugins/marketplaces/workbench'
 const GIT_LOG = '/test/git-log'  // what upstreamWorld's `git -C <dir> log` prints
@@ -4341,8 +4342,12 @@ function upstreamWorld(on: any, files: Record<string, string>) {
   const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[],
     toasts: [] as string[], chats: [] as string[][],   // chats: wb chat's calls, the line for an away user
     push: '' as string, ghs: [] as string[][],         // what `gh api repos/<slug>` says of .permissions.push, and its calls
-    pushBy: {} as Record<string, string> }             // a slug's own answer, over push
+    pushBy: {} as Record<string, string>,              // a slug's own answer, over push
+    ups: [] as string[][], askOut: '' as string }      // wb upstream's calls; what `wb upstream ask --json` prints
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
+  // the dialog per send (upstream.json's `ask`, no Settings stop): these tests are of that gate;
+  // Posting to GitHub's own modes have theirs (#1005's, the owner's 2026-11-27 rule)
+  files[UPSTREAM_JSON] = JSON.stringify({ mode: 'ask' })
   const origins: Record<string, string> = {
     [SOURCE]: `https://github.com/${SLUG}.git`,
     '/home/u/project': 'git@github.com:u/project.git',
@@ -4362,6 +4367,11 @@ function upstreamWorld(on: any, files: Record<string, string>) {
       return { value: { exitCode: url ? 0 : 2, stdout: url ? `${url}\n` : '', stderr: url ? '' : 'error: No such remote' } }
     }
     if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
+    if (e.argv[1] === 'upstream') {
+      w.ups.push(e.argv.slice(1))
+      if (e.argv[2] === 'ask') return { value: { exitCode: 0, stdout: w.askOut || '{"items": []}', stderr: '' } }
+      return { value: { exitCode: 0, stdout: `sent ${e.argv.slice(3).join(', ')}`, stderr: '' } }
+    }
     if (e.argv[0] === 'gh' && e.argv[1] === 'api') {
       w.ghs.push(e.argv)
       const said = w.pushBy[String(e.argv[2]).replace(/^repos\//, '')] ?? w.push
@@ -4379,6 +4389,79 @@ function upstreamWorld(on: any, files: Record<string, string>) {
   })
   return w
 }
+
+test('Posting to GitHub never holds work on a dialog: daily queues, never keeps it local, auto sends', async ($, on) => {
+  // the owner, 2026-11-27: "i walk away from the computer, so i cannot approve your requests to
+  // post ... work stalls". A send waits for no one mid-work, whatever the mode
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  await $.session.start({ cwd: SOURCE, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const call = async (e: Record<string, unknown>) => ((await $.tool.call(e as any)) as any).deny as string | undefined
+  const issue = { tool: 'Bash', command: 'gh issue create --title t --body-file b.md' }
+  const mcp = { tool: 'mcp__github__create_issue', owner: 'a-schaefers', repo: 'workbench', title: 't' }
+  const send = { tool: 'Bash', command: 'wb patch send fix-push --title "Fix the push" --body-file /home/u/pr.md' }
+  for (const [mode, want] of [[undefined, 'Posting to GitHub is once a day'], ['daily', 'wb upstream post issue'],
+    ['never', 'Posting to GitHub is Never'], ['bogus', 'Posting to GitHub is once a day']] as const) {
+    if (mode === undefined) delete files[UPSTREAM_JSON]
+    else files[UPSTREAM_JSON] = JSON.stringify({ mode })
+    expect([mode, await call(issue)]).toEqual([mode, expect.stringContaining(want)])
+    expect([mode, await call(mcp)]).toEqual([mode, expect.stringContaining(want)])
+    expect([mode, await call(send)]).toEqual([mode, undefined])  // wb patch send queues or refuses itself
+  }
+  files[UPSTREAM_JSON] = JSON.stringify({ mode: 'auto' })
+  for (const e of [issue, mcp, send]) expect(await call(e)).toBeUndefined()
+  expect(w.asked).toEqual([])                                     // no dialog, in any mode
+  expect('/wb/send-ok.json' in files).toBe(false)
+})
+
+test('Posting to GitHub: only the user writes upstream.json and the daily yes, never a file tool or a command', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  upstreamWorld(on, files)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const call = async (e: Record<string, unknown>) => ((await $.tool.call(e as any)) as any).deny as string | undefined
+  for (const file of [UPSTREAM_JSON, '/wb/upstream-ok.json']) {
+    expect(await call({ tool: 'Write', file_path: file, content: '{"mode": "auto"}' })).toContain('are the user\'s')
+    expect(await call({ tool: 'Bash', command: `echo '{"mode": "auto"}' > ${file}` })).toContain('are the user\'s')
+  }
+  expect(await call({ tool: 'Bash', command: `cat ${UPSTREAM_JSON}` })).toBeUndefined()  // reading it is fine
+})
+
+test('Posting to GitHub asks once a day, at the user\'s typed turn: Send all writes the yes for exactly those posts', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const settle = async () => { for (let i = 0; i < 50; i++) await new Promise(r => setTimeout(r, 1)) }
+  await $.prompt.submit({ text: 'morning' } as any)                // nothing waits: nothing asked
+  await settle()
+  expect(w.asked).toEqual([])
+  expect(w.ups).toEqual([['upstream', 'ask', '--json']])
+  w.askOut = JSON.stringify({ mode: 'daily', items: [{ id: 'aaaa0001', line: 'aaaa0001  issue on x/y: T' },
+    { id: 'aaaa0002', line: 'aaaa0002  comment on #5 on x/y' }] })
+  w.answer = 'Not today'
+  await $.prompt.submit({ text: 'next day' } as any)
+  await settle()
+  expect(w.asked.at(-1)).toContain('aaaa0001  issue on x/y: T')
+  expect(w.options.at(-1)).toEqual(['Send all', 'Not today'])
+  expect('/wb/upstream-ok.json' in files).toBe(false)              // Not today: nothing sent
+  w.answer = 'Send all'
+  await $.prompt.submit({ text: 'and the next' } as any)
+  await settle()
+  expect(JSON.parse(files['/wb/upstream-ok.json']!).ids).toEqual(['aaaa0001', 'aaaa0002'])
+  expect(w.ups.at(-1)).toEqual(['upstream', 'send', 'aaaa0001', 'aaaa0002'])
+  const n = w.asked.length
+  await $.prompt.submit({ text: '[workbench] a task is ready' } as any)  // not the user's typing: no ask
+  await settle()
+  expect(w.asked.length).toBe(n)
+})
 
 test('#1005: every command that would send to workbench upstream waits for the user\'s yes to it, each time', async ($, on) => {
   // 2026-11-22, the owner's rule: a user's Claude never forks, pushes, opens or comments upstream

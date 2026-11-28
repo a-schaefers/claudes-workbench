@@ -99,6 +99,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   driver starting each item with `wb start` (its items' notices its own only while it lives), run notices, the keywords' reference (`keywords`, `tests/fixtures/
   keywords.json`). `cards.py`: role cards (`agent/roles/`, `$WB_ROLES`; `wb card`). `schema.py`: a report task's
   object, checked outside the lane (ARCHITECTURE.md, *Deep workflows*).
+- `upstream.py`: Posting to GitHub (`auto`, `daily` default, `never`; upstream.json beside routes.json) and the outbox, never a dialog mid-work.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
 - `spend.py`, `savings.py`: a task's cost to Claude, and `wb spend`'s sums: what was spent, never a saving (#1618; API dollars apart, `api_totals`). `meter.py`: an API

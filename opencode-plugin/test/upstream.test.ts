@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Answer } from '../consent.ts'
-import { NOT_SENT, SEND_VIA_TOOL } from '../gates.ts'
-import { NO_FORM_SENT, PUSH_RECHECK_MS, Upstream, githubTool, packageCaches, type UpstreamBefore } from '../upstream.ts'
+import { NOT_SENT, SEND_VIA_TOOL, UPSTREAM_NEVER, UPSTREAM_OWN, UPSTREAM_QUEUE, guarded, places, upstreamMode } from '../gates.ts'
+import { NO_FORM_SENT, PUSH_RECHECK_MS, UPSTREAM_ASK, Upstream, githubTool, packageCaches, type UpstreamBefore } from '../upstream.ts'
 
 // The upstream gate on OpenCode's path (#1296's parity row 14, 2026-11-26): a gh write, a git push
 // or a GitHub MCP write aimed at workbench upstream asks the user in the session's form, as the
@@ -18,6 +18,11 @@ function setup(answer: Answer) {
   const top = realpathSync(mkdtempSync(join(tmpdir(), 'wb-upstream-')))
   const home = join(top, 'home'), root = join(top, 'state'), work = join(top, 'work')
   for (const d of [home, join(root, 'upstream', 'fix'), work]) mkdirSync(d, { recursive: true })
+  // the form per send (upstream.json's `ask`, no Settings stop): these tests are of that gate;
+  // Posting to GitHub's own modes have theirs below (the owner, 2026-11-27)
+  const mode = join(home, '.config', 'workbench', 'upstream.json')
+  mkdirSync(join(home, '.config', 'workbench'), { recursive: true })
+  writeFileSync(mode, JSON.stringify({ mode: 'ask' }))
   const asked: string[] = []
   const at = { dir: work }  // the session's directory
   const up = new Upstream({
@@ -30,7 +35,7 @@ function setup(answer: Answer) {
   })
   const shell = (command: string, workdir = ''): UpstreamBefore =>
     ({ tool: 'shell', sessionID: 'ses_1', id: 'c1', input: { command, ...(workdir ? { workdir } : {}) } })
-  return { top, home, root, work, up, asked, shell, origins, at, done: () => rmSync(top, { recursive: true, force: true }) }
+  return { top, home, root, work, up, asked, shell, origins, at, mode, done: () => rmSync(top, { recursive: true, force: true }) }
 }
 
 test('a git push in a gated directory asks in the form: sent on the yes, refused on a no and with no TUI', async () => {
@@ -193,5 +198,58 @@ test('#1549: a user whose patches.json upstream is their own fork is still asked
       input: { owner: 'a-schaefers', repo: 'workbench', title: 't' } })).toBe(NOT_SENT)
     expect(t.asked.length).toBe(2)
     expect(ghs.includes('a-schaefers/workbench')).toBe(true)
+  } finally { t.done() }
+})
+
+test('Posting to GitHub never holds work on a form: daily queues, never keeps it local, auto sends', async () => {
+  // the owner, 2026-11-27: "i walk away from the computer, so i cannot approve your requests to
+  // post ... work stalls"
+  const t = setup('yes')
+  try {
+    const issue = t.shell('gh issue create --repo a-schaefers/workbench --title t --body-file b.md')
+    const mcp: UpstreamBefore = { tool: 'github_create_issue', sessionID: 'ses_1', id: 'c2',
+      input: { owner: 'a-schaefers', repo: 'workbench', title: 't' }, info: { name: 'create_issue', options: { namespace: 'github' } } }
+    const send = t.shell(`wb patch send fix --title T --body-file ${t.work}/b.md`)
+    for (const [mode, want] of [[undefined, UPSTREAM_QUEUE], ['daily', UPSTREAM_QUEUE], ['never', UPSTREAM_NEVER],
+      ['bogus', UPSTREAM_QUEUE], ['auto', '']] as const) {
+      if (mode === undefined) rmSync(t.mode, { recursive: true, force: true })
+      else writeFileSync(t.mode, JSON.stringify({ mode }))
+      expect([mode, await t.up.refusal(issue)]).toEqual([mode, want])
+      expect([mode, await t.up.refusal(mcp)]).toEqual([mode, want])
+      expect([mode, await t.up.refusal(send)]).toEqual([mode, ''])  // wb patch send decides itself
+    }
+    expect(t.asked).toEqual([])
+    expect(upstreamMode('{"mode": "auto"}')).toBe('auto')
+    expect(upstreamMode('not json')).toBe('daily')                   // fail closed: never auto
+  } finally { t.done() }
+})
+
+test('Posting to GitHub: upstream.json and the daily yes are the user\'s, guarded as routes.json is', () => {
+  const p = places({ HOME: '/u', WB_HOME: '/u/state' }, '/')
+  expect(guarded('/u/.config/workbench/upstream.json', p)).toBe('upstream')
+  expect(guarded('/u/state/upstream-ok.json', p)).toBe('upstream')
+  expect(guarded('/u/state/upstream-ok.ses_abc.json', p)).toBe('upstream')
+  expect(guarded('/u/state/send-ok.json', p)).toBe('approval')
+  expect(guarded('/u/notes/upstream.json', p)).toBe('')
+  has(UPSTREAM_OWN, 'no command and no edit writes them')
+})
+
+test('Posting to GitHub\'s daily form: Send all writes the yes for exactly those posts, then sends them', async () => {
+  const t = setup('yes')
+  try {
+    const calls: string[][] = []
+    const approved: [string, string[]][] = []
+    let items: unknown[] = []
+    const up = new Upstream({ ...(t.up as unknown as { d: ConstructorParameters<typeof Upstream>[0] }).d,
+      wb: async (args, session) => { calls.push([session, ...args]); return { code: 0, out: args[1] === 'ask' ? JSON.stringify({ items }) : 'sent' } },
+      approve: async (session, ids) => { approved.push([session, ids]) },
+      asker: { ask: async (_s, q) => { t.asked.push(q.question); expect([q.yes, q.no]).toEqual([UPSTREAM_ASK.yes, UPSTREAM_ASK.no]); return 'yes' } } })
+    await up.daily('ses_1')                                            // nothing waits: nothing asked
+    expect(t.asked).toEqual([])
+    items = [{ id: 'aaaa0001', line: 'aaaa0001  issue on x/y: T' }]
+    await up.daily('ses_1')
+    has(t.asked[0], 'aaaa0001  issue on x/y: T')
+    expect(approved).toEqual([['ses_1', ['aaaa0001']]])
+    expect(calls.at(-1)).toEqual(['ses_1', 'upstream', 'send', 'aaaa0001'])
   } finally { t.done() }
 })
