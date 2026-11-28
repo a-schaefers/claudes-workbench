@@ -44,7 +44,7 @@ class PostingToGitHub(Base):
             with self.assertRaises(SystemExit):
                 run_wb("upstream", "mode", "auto")
         self.assertEqual(upstream.mode(), "daily")
-        self.assertIn("Automatic", run_wb("upstream", "mode", "auto"))  # the user's own terminal
+        self.assertIn("without asking", run_wb("upstream", "mode", "auto"))  # the user's own terminal
         self.assertEqual(upstream.mode(), "auto")
 
     def test_in_daily_mode_claudes_post_waits_in_the_outbox_and_nothing_is_sent(self):

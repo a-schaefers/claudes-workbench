@@ -28212,6 +28212,13 @@ class LocalPatches(Base):
         self.to_fork()
         os.environ["CLAUDECODE"] = "1"
         ok = store.home() / "send-ok.json"
+        # Posting to GitHub's default (2026-11-27): queued for the user's daily yes, never a dialog
+        from workbench import upstream
+        self.assertIn("queued, not posted yet", self.send(body))
+        self.assertEqual([r["kind"] for r in upstream.items()], ["pr"])
+        self.assertEqual(self.gh_argv(), [])
+        upstream.drop([])
+        upstream.path().write_text(json.dumps({"mode": "ask"}))  # the dialog per send, this test's
         out = self.send(body)
         self.assertIn("goes only through the workbench mod's dialog", out)
         self.assertIn(f'outside Claude Code: wb patch send fix-thing --title "Fix it" --body-file {body}', out)
@@ -28238,6 +28245,8 @@ class LocalPatches(Base):
         self.to_fork()
         os.environ["OPENCODE_SESSION_ID"] = "ses_x"
         ok = store.home() / "send-ok.ses_x.json"            # its session's own (#1363)
+        from workbench import upstream
+        upstream.path().write_text(json.dumps({"mode": "ask"}))  # the form per send (Posting to GitHub's ask)
         out = self.send(body)
         self.assertIn("in OpenCode wb patch send goes only through the workbench plugin's form", out)
         self.assertIn("the plugin's workbench_patch_send tool asks them", out)
